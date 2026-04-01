@@ -1,0 +1,1405 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NogoChain Web Wallet (BIP39)</title>
+    <link rel="icon" type="image/x-icon" href="../explorer/favicon.ico">
+    
+    <!-- Web Crypto API 可用性检查 -->
+    <script>
+        // 检查 Web Crypto API 是否可用
+        if (!window.crypto || !window.crypto.subtle) {
+            document.write('<div style="background:#f85149;color:white;padding:20px;text-align:center;font-family:sans-serif;">');
+            document.write('<h1>❌ 浏览器不支持 Web Crypto API</h1>');
+            document.write('<p>您的浏览器不支持 Web Crypto API，无法使用此钱包。</p>');
+            document.write('<p>请使用以下现代浏览器：</p>');
+            document.write('<ul style="text-align:left;max-width:500px;margin:20px auto;">');
+            document.write('<li>Chrome 37+</li>');
+            document.write('<li>Firefox 34+</li>');
+            document.write('<li>Safari 10+</li>');
+            document.write('<li>Edge 12+</li>');
+            document.write('</ul>');
+            document.write('</div>');
+            throw new Error('Web Crypto API not available');
+        }
+        console.log('✓ Web Crypto API available');
+    </script>
+    
+    <!-- BIP39 实现 -->
+    <script>
+        // BIP39 词表（英文 - 前 100 个单词用于演示，完整版本应为 2048 个）
+        const BIP39_WORDLIST = [
+            'abandon','ability','able','about','above','absent','absorb','abstract','absurd','abuse',
+            'access','accident','account','accuse','achieve','acid','acoustic','acquire','across','act',
+            'action','actor','actress','actual','adapt','add','addict','address','adjust','admit',
+            'adult','advance','advice','aerobic','affair','afford','afraid','again','age','agent',
+            'agree','ahead','aim','air','airport','aisle','alarm','album','alcohol','alert',
+            'alien','all','alley','allow','almost','alone','alpha','already','alter','always',
+            'amateur','amazing','among','amount','amused','analyst','anchor','ancient','anger','angle',
+            'angry','animal','ankle','announce','annual','another','answer','antenna','antique','anxiety',
+            'any','apart','apology','appear','apple','approve','april','arch','arctic','area',
+            'arena','argue','arm','armed','armor','army','around','arrange','arrest','arrive',
+            'arrow','art','artefact','artist','artwork','ask','aspect','assault','asset','assist',
+            'assume','asthma','athlete','atom','attack','attend','attitude','attract','auction','audit',
+            'august','aunt','author','auto','autumn','average','avocado','avoid','awake','aware',
+            'away','awesome','awful','awkward','axis','baby','bachelor','bacon','badge','bag',
+            'balance','balcony','ball','bamboo','banana','banner','bar','barely','bargain','barrel',
+            'base','basic','basket','battle','beach','bean','beauty','because','become','beef',
+            'before','begin','behave','behind','believe','below','belt','bench','benefit','best',
+            'betray','better','between','beyond','bicycle','bid','bike','bind','biology','bird',
+            'birth','bitter','black','blade','blame','blanket','blast','bleak','bless','blind',
+            'blood','blossom','blouse','blue','blur','blush','board','boat','body','boil',
+            'bomb','bone','bonus','book','boost','border','boring','borrow','boss','bottom',
+            'bounce','box','boy','bracket','brain','brand','brass','brave','bread','breeze',
+            'brick','bridge','brief','bright','bring','brisk','broccoli','broken','bronze','broom',
+            'brother','brown','brush','bubble','buddy','budget','buffalo','build','bulb','bulk',
+            'bullet','bundle','bunker','burden','burger','burst','bus','business','busy','butter',
+            'buyer','buzz','cabbage','cabin','cable','cactus','cage','cake','call','calm',
+            'camera','camp','can','canal','cancel','candy','cannon','canoe','canvas','canyon',
+            'capable','capital','captain','car','carbon','card','cargo','carpet','carry','cart',
+            'case','cash','casino','castle','casual','cat','catalog','catch','category','cattle',
+            'caught','cause','caution','cave','ceiling','celery','cement','census','century','cereal',
+            'certain','chair','chalk','champion','change','chaos','chapter','charge','chase','chat',
+            'cheap','check','cheese','chef','cherry','chest','chicken','chief','child','chimney',
+            'choice','choose','chronic','chuckle','chunk','churn','cigar','cinnamon','circle','citizen',
+            'city','civil','claim','clap','clarify','claw','clay','clean','clerk','clever',
+            'click','client','cliff','climb','clinic','clip','clock','clog','close','cloth',
+            'cloud','clown','club','clump','cluster','clutch','coach','coast','coconut','code',
+            'coffee','coil','coin','collect','color','column','combine','come','comfort','comic',
+            'common','company','concert','conduct','confirm','congress','connect','consider','control','convince',
+            'cook','cool','copper','copy','coral','core','corn','correct','cost','cotton',
+            'couch','country','couple','course','cousin','cover','coyote','crack','cradle','craft',
+            'cram','crane','crash','crater','crawl','crazy','cream','credit','creek','crew',
+            'cricket','crime','crisp','critic','crop','cross','crouch','crowd','crucial','cruel',
+            'cruise','crumble','crunch','crush','cry','crystal','cube','culture','cup','cupboard',
+            'curious','current','curtain','curve','cushion','custom','cute','cycle','dad','damage',
+            'damp','dance','danger','daring','dash','daughter','dawn','day','deal','debate',
+            'debris','decade','december','decide','decline','decorate','decrease','deer','defense','define',
+            'defy','degree','delay','deliver','demand','demise','denial','dentist','deny','depart',
+            'depend','deposit','depth','deputy','derive','describe','desert','design','desk','despair',
+            'destroy','detail','detect','develop','device','devote','diagram','dial','diamond','diary',
+            'dice','diesel','diet','differ','digital','dignity','dilemma','dinner','dinosaur','direct',
+            'dirt','disagree','discover','disease','dish','dismiss','disorder','display','distance','divert',
+            'divide','divorce','dizzy','doctor','document','dog','doll','dolphin','domain','donate',
+            'donkey','donor','door','dose','double','dove','draft','dragon','drama','draw',
+            'dream','dress','drift','drill','drink','drip','drive','drop','drum','dry',
+            'duck','dumb','dune','during','dust','dutch','duty','dwarf','dynamic','eager',
+            'eagle','early','earn','earth','easily','east','easy','echo','ecology','economy',
+            'edge','edit','educate','effort','egg','eight','either','elbow','elder','electric',
+            'elegant','element','elephant','elevator','elite','else','embark','embody','embrace','emerge',
+            'emotion','employ','empower','empty','enable','enact','end','endless','endorse','enemy',
+            'energy','enforce','engage','engine','enhance','enjoy','enlist','enough','enrich','enroll',
+            'ensure','enter','entire','entry','envelope','episode','equal','equip','era','erase',
+            'erode','erosion','error','erupt','escape','essay','essence','estate','eternal','ethics',
+            'evidence','evil','evoke','evolve','exact','example','excess','exchange','excite','exclude',
+            'excuse','execute','exercise','exhaust','exhibit','exile','exist','exit','exotic','expand',
+            'expect','expire','explain','expose','express','extend','extra','eye','eyebrow','fabric',
+            'face','faculty','fade','faint','faith','fall','false','fame','family','famous',
+            'fan','fancy','fantasy','farm','fashion','fat','fatal','father','fatigue','fault',
+            'favorite','feature','february','federal','fee','feed','feel','female','fence','festival',
+            'fetch','fever','few','fiber','fiction','field','figure','file','film','filter',
+            'final','find','fine','finger','finish','fire','firm','first','fiscal','fish',
+            'fit','fitness','fix','flag','flame','flash','flat','flavor','flee','flight',
+            'flip','float','flock','floor','flower','fluid','flush','fly','foam','focus',
+            'fog','foil','fold','follow','food','foot','force','forest','forget','fork',
+            'fortune','forum','forward','fossil','foster','found','fox','fragile','frame','frequent',
+            'fresh','friend','fringe','frog','front','frost','frown','frozen','fruit','fuel',
+            'fun','funny','furnace','fury','future','gadget','gain','galaxy','gallery','game',
+            'gap','garage','garbage','garden','garlic','garment','gas','gasp','gate','gather',
+            'gauge','gaze','general','genius','genre','gentle','genuine','gesture','ghost','giant',
+            'gift','giggle','ginger','giraffe','girl','give','glad','glance','glare','glass',
+            'glide','glimpse','globe','gloom','glory','glove','glow','glue','goat','goddess',
+            'gold','good','goose','gorilla','gospel','gossip','govern','gown','grab','grace',
+            'grain','grant','grape','grass','gravity','great','green','grid','grief','grit',
+            'grocery','group','grow','grunt','guard','guess','guide','guilt','guitar','gun',
+            'gym','habit','hair','half','hammer','hamster','hand','happy','harbor','hard',
+            'harsh','harvest','hat','have','hawk','hazard','head','health','heart','heavy',
+            'hedgehog','height','hello','helmet','help','hen','hero','hidden','high','hill',
+            'hint','hip','hire','history','hobby','hockey','hold','hole','holiday','hollow',
+            'home','honey','hood','hope','horn','horror','horse','hospital','host','hotel',
+            'hour','hover','hub','huge','human','humble','humor','hundred','hungry','hunt',
+            'hurdle','hurry','hurt','husband','hybrid','ice','icon','idea','identify','idle',
+            'ignore','ill','illegal','illness','image','imitate','immense','immune','impact','impose',
+            'improve','impulse','inch','include','income','increase','index','indicate','indoor','industry',
+            'infant','inflict','inform','inhale','inherit','initial','inject','injury','inmate','inner',
+            'innocent','input','inquiry','insane','insect','inside','inspire','install','intact','interest',
+            'into','invest','invite','involve','iron','island','isolate','issue','item','ivory',
+            'jacket','jaguar','jar','jazz','jealous','jeans','jelly','jewel','job','join',
+            'joke','journey','joy','judge','juice','jump','jungle','junior','junk','just',
+            'kangaroo','keen','keep','ketchup','key','kick','kid','kidney','kind','kingdom',
+            'kiss','kit','kitchen','kite','kitten','kiwi','knee','knife','knock','know',
+            'lab','label','labor','ladder','lady','lake','lamp','language','laptop','large',
+            'later','latin','laugh','laundry','lava','law','lawn','lawsuit','layer','lazy',
+            'leader','leaf','learn','leave','lecture','left','leg','legal','legend','leisure',
+            'lemon','lend','length','lens','leopard','lesson','letter','level','liar','liberty',
+            'library','license','life','lift','light','like','limb','limit','link','lion',
+            'liquid','list','little','live','lizard','load','loan','lobster','local','lock',
+            'logic','lonely','long','loop','lottery','loud','lounge','love','loyal','lucky',
+            'luggage','lumber','lunar','lunch','luxury','lyrics','machine','mad','magic','magnet',
+            'maid','mail','main','major','make','mammal','man','manage','mandate','mango',
+            'mansion','manual','maple','marble','march','margin','marine','market','marriage','mask',
+            'mass','master','match','material','math','matrix','matter','maximum','maze','meadow',
+            'mean','measure','meat','mechanic','medal','media','melody','melt','member','memory',
+            'mention','menu','mercy','merge','merit','merry','mesh','message','metal','method',
+            'middle','midnight','milk','million','mimic','mind','minimum','minor','minute','miracle',
+            'mirror','misery','miss','mistake','mix','mixed','mixture','mobile','model','modify',
+            'mom','moment','monitor','monkey','monster','month','moon','moral','more','morning',
+            'mosquito','mother','motion','motor','mountain','mouse','move','movie','much','muffin',
+            'mule','multiply','muscle','museum','mushroom','music','must','mutual','myself','mystery',
+            'myth','naive','name','napkin','narrow','nasty','nation','nature','near','neck',
+            'need','negative','neglect','neither','nephew','nerve','nest','net','network','neutral',
+            'never','news','next','nice','night','noble','noise','nominee','noodle','normal',
+            'north','nose','notable','note','nothing','notice','novel','now','nuclear','number',
+            'nurse','nut','oak','obey','object','oblige','obscure','observe','obtain','obvious',
+            'occur','ocean','october','odor','off','offer','office','often','oil','okay',
+            'old','olive','olympic','omit','once','one','onion','online','only','open',
+            'opera','opinion','oppose','option','orange','orbit','orchard','order','ordinary','organ',
+            'orient','original','orphan','ostrich','other','outdoor','outer','output','outside','oval',
+            'oven','over','own','owner','oxygen','oyster','ozone','pact','paddle','page',
+            'pair','palace','palm','panda','panel','panic','panther','paper','parade','parent',
+            'park','parrot','party','pass','patch','path','patient','patrol','pattern','pause',
+            'pave','payment','peace','peanut','pear','peasant','pelican','pen','penalty','pencil',
+            'people','pepper','perfect','permit','person','pet','phone','photo','phrase','physical',
+            'piano','picnic','picture','piece','pig','pigeon','pilot','pine','pink','pipe',
+            'pistol','pitch','pizza','place','planet','plastic','plate','play','please','pledge',
+            'pluck','plug','plunge','poem','poet','point','polar','pole','police','pond',
+            'pony','pool','popular','portion','position','possible','post','potato','pottery','poverty',
+            'powder','power','practice','praise','predict','prefer','prepare','present','pretty','prevent',
+            'price','pride','primary','print','priority','prison','private','prize','problem','process',
+            'produce','profit','program','project','promote','proof','property','prosper','protect','proud',
+            'provide','public','pudding','pull','pulp','pulse','pumpkin','punch','pupil','puppy',
+            'purchase','purity','purpose','purse','push','put','puzzle','pyramid','quality','quantum',
+            'quarter','question','quick','quit','quiz','quote','rabbit','raccoon','race','rack',
+            'radar','radio','rail','rain','raise','rally','ramp','ranch','random','range',
+            'rapid','rare','rate','rather','raven','raw','razor','ready','real','reason',
+            'rebel','rebuild','recall','receive','recipe','record','recycle','reduce','reflect','reform',
+            'refuse','region','regret','regular','reject','relax','release','relief','rely','remain',
+            'remember','remind','remove','render','renew','rent','reopen','repair','repeat','replace',
+            'report','require','rescue','resemble','resist','resource','response','result','retire','retreat',
+            'return','reunion','reveal','review','reward','rhythm','rib','ribbon','rice','rich',
+            'ride','ridge','rifle','right','rigid','ring','riot','ripple','risk','ritual',
+            'rival','river','road','roast','robot','robust','rocket','romance','roof','rookie',
+            'room','rose','rotate','rough','round','route','royal','rubber','rude','rug',
+            'rule','run','runway','rural','sad','saddle','sadness','safe','sail','salad',
+            'salmon','salon','salt','salute','same','sample','sand','satisfy','satoshi','sauce',
+            'sausage','save','say','scale','scan','scare','scatter','scene','scheme','school',
+            'science','scissors','scorpion','scout','scrap','screen','script','scrub','sea','search',
+            'season','seat','second','secret','section','security','seed','seek','segment','select',
+            'sell','seminar','senior','sense','sentence','series','service','session','settle','setup',
+            'seven','shadow','shaft','shallow','share','shed','shell','sheriff','shield','shift',
+            'shine','ship','shiver','shock','shoe','shoot','shop','short','shoulder','shove',
+            'shrimp','shrug','shuffle','shy','sibling','sick','side','siege','sight','sign',
+            'silent','silk','silly','silver','similar','simple','since','sing','siren','sister',
+            'situate','six','size','skate','sketch','ski','skill','skin','skirt','skull',
+            'slab','slam','sleep','slender','slice','slide','slight','slim','slogan','slot',
+            'slow','slush','small','smart','smile','smoke','smooth','snack','snake','snap',
+            'sniff','snow','soap','soccer','social','sock','soda','soft','solar','soldier',
+            'solid','solution','solve','someone','song','soon','sorry','sort','soul','sound',
+            'soup','source','south','space','spare','spatial','spawn','speak','special','speed',
+            'spell','spend','sphere','spice','spider','spike','spin','spirit','split','spoil',
+            'sponsor','spoon','sport','spot','spray','spread','spring','spy','square','squeeze',
+            'squirrel','stable','stadium','staff','stage','stairs','stamp','stand','start','state',
+            'stay','steak','steel','stem','step','stereo','stick','still','sting','stock',
+            'stomach','stone','stool','story','stove','strategy','street','strike','strong','struggle',
+            'student','stuff','stumble','style','subject','submit','subway','success','such','sudden',
+            'suffer','sugar','suggest','suit','summer','sun','sunny','sunset','super','supply',
+            'supreme','sure','surface','surge','surprise','surround','survey','suspect','sustain','swallow',
+            'swamp','swap','swarm','swear','sweet','swift','swim','swing','switch','sword',
+            'symbol','symptom','syrup','system','table','tackle','tag','tail','talent','talk',
+            'tank','tape','target','task','taste','tattoo','taxi','teach','team','tell',
+            'ten','tenant','tennis','tent','term','test','text','thank','that','theme',
+            'then','theory','there','they','thing','this','thought','three','thrive','throw',
+            'thumb','thunder','ticket','tide','tiger','tilt','timber','time','tiny','tip',
+            'tired','tissue','title','toast','tobacco','today','toddler','toe','together','toilet',
+            'token','tomato','tomorrow','tone','tongue','tonight','tool','tooth','top','topic',
+            'topple','torch','tornado','tortoise','toss','total','tourist','toward','tower','town',
+            'toy','track','trade','traffic','tragic','train','transfer','trap','trash','travel',
+            'tray','treat','tree','trend','trial','tribe','trick','trigger','trim','trip',
+            'trophy','trouble','truck','true','truly','trumpet','trust','truth','try','tube',
+            'tuition','tumble','tuna','tunnel','turkey','turn','turtle','twelve','twenty','twice',
+            'twin','twist','two','type','typical','ugly','umbrella','unable','unaware','uncle',
+            'uncover','under','undo','unfair','unfold','unhappy','uniform','unique','unit','universe',
+            'unknown','unlock','until','unusual','unveil','update','upgrade','uphold','upon','upper',
+            'upset','urban','urge','usage','use','used','useful','useless','usual','utility',
+            'vacant','vacuum','vague','valid','valley','valve','van','vanish','vapor','various',
+            'vast','vault','vehicle','velvet','vendor','venture','venue','verb','verify','version',
+            'very','vessel','veteran','viable','vibrant','vicious','victory','video','view','village',
+            'vintage','violin','virtual','virus','visa','visit','visual','vital','vivid','vocal',
+            'voice','void','volcano','volume','vote','voyage','wage','wagon','wait','walk',
+            'wall','walnut','want','warfare','warm','warrior','wash','wasp','waste','water',
+            'wave','way','wealth','weapon','wear','weasel','weather','web','wedding','weekend',
+            'weird','welcome','west','wet','whale','what','wheat','wheel','when','where',
+            'whip','whisper','wide','width','wife','wild','will','win','window','wine',
+            'wing','wink','winner','winter','wire','wisdom','wise','wish','witness','wolf',
+            'woman','wonder','wood','wool','word','work','world','worry','worth','wrap',
+            'wreck','wrestle','wrist','write','wrong','yard','year','yellow','you','young',
+            'youth','zebra','zero','zone','zoo'
+        ];
+
+        // PBKDF2-HMAC-SHA512 实现（使用 Web Crypto API）
+        async function pbkdf2HmacSha512(password, salt, iterations) {
+            const enc = new TextEncoder();
+            const keyMaterial = await window.crypto.subtle.importKey(
+                'raw',
+                enc.encode(password),
+                { name: 'PBKDF2' },
+                false,
+                ['deriveBits']
+            );
+            
+            const derivedBits = await window.crypto.subtle.deriveBits(
+                {
+                    name: 'PBKDF2',
+                    hash: 'SHA-512',
+                    salt: enc.encode(salt),
+                    iterations: iterations
+                },
+                keyMaterial,
+                512
+            );
+            
+            return new Uint8Array(derivedBits);
+        }
+
+        // BIP39 实现
+        window.bip39 = {
+            generateMnemonic: function() {
+                const words = [];
+                const randomBytes = new Uint8Array(16);
+                window.crypto.getRandomValues(randomBytes);
+                
+                for (let i = 0; i < 12; i++) {
+                    const index = randomBytes[i] % 2048;
+                    words.push(BIP39_WORDLIST[index]);
+                }
+                
+                return words.join(' ');
+            },
+            
+            validateMnemonic: function(mnemonic) {
+                const words = mnemonic.toLowerCase().split(' ');
+                if (words.length < 12) return false;
+                return words.every(word => BIP39_WORDLIST.includes(word));
+            }
+        };
+
+        // 异步版本
+        window.bip39Async = {
+            mnemonicToSeed: async function(mnemonic) {
+                const salt = 'mnemonic' + mnemonic;
+                return await pbkdf2HmacSha512(mnemonic, salt, 2048);
+            }
+        };
+
+        console.log('✓ BIP39 实现已加载');
+    </script>
+    
+    <!-- 导入 @noble/ed25519 -->
+    <script type="module">
+        import { getPublicKey, sign } from 'https://cdn.jsdelivr.net/npm/@noble/ed25519@1.7.3/+esm';
+        window.nobleEd25519 = { getPublicKey, sign };
+        window.librariesLoaded = true;
+        console.log('✓ Ed25519 已加载');
+    </script>
+    
+    <!-- 等待库加载 -->
+    <script>
+        let bip39Ready = typeof window.bip39 !== 'undefined';
+        let bip39AsyncReady = typeof window.bip39Async !== 'undefined';
+        
+        function waitForLibraries(callback, maxAttempts = 50) {
+            let attempts = 0;
+            const check = () => {
+                const ready = bip39Ready && window.librariesLoaded;
+                if (ready) {
+                    callback();
+                } else if (attempts < maxAttempts) {
+                    attempts++;
+                    setTimeout(check, 100);
+                } else {
+                    console.error('库加载失败');
+                }
+            };
+            check();
+        }
+    </script>
+    
+    <style>
+/* ==================== 全局样式 ==================== */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #21262d;
+  --border-color: #30363d;
+  --text-primary: #c9d1d9;
+  --text-secondary: #8b949e;
+  --accent-blue: #58a6ff;
+  --accent-green: #3fb950;
+  --accent-purple: #bc8cff;
+  --accent-yellow: #d29922;
+  --accent-red: #f85149;
+}
+
+.text-green { color: var(--accent-green) !important; }
+.text-red { color: var(--accent-red) !important; }
+body { 
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; 
+  background: var(--bg-primary); 
+  color: var(--text-primary); 
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+/* ==================== Header ==================== */
+.header { 
+  background: var(--bg-secondary); 
+  border-bottom: 1px solid var(--border-color);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  backdrop-filter: blur(10px);
+}
+.header .container { 
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 15px 30px;
+  display: flex; 
+  align-items: center; 
+  justify-content: space-between;
+  gap: 30px;
+}
+.logo { 
+  font-size: 24px; 
+  font-weight: 700; 
+  color: var(--accent-blue);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.logo::before {
+  content: '🔐';
+  font-size: 28px;
+}
+.nav { 
+  display: flex; 
+  gap: 25px; 
+}
+.nav a { 
+  color: var(--text-secondary); 
+  text-decoration: none; 
+  font-size: 14px; 
+  font-weight: 500;
+  padding: 8px 12px;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+.nav a:hover { 
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+/* ==================== Main Container ==================== */
+.main-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 30px;
+}
+
+/* ==================== Welcome Section ==================== */
+.welcome-section {
+  text-align: center;
+  padding: 60px 20px;
+}
+.welcome-section h1 {
+  font-size: 36px;
+  margin-bottom: 15px;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.welcome-section p {
+  font-size: 16px;
+  color: var(--text-secondary);
+  margin-bottom: 40px;
+}
+.welcome-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 25px;
+  margin-top: 40px;
+}
+.welcome-card {
+  background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 30px;
+  transition: all 0.3s;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+.welcome-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+}
+.welcome-card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 10px 30px rgba(88, 166, 255, 0.15);
+  border-color: var(--accent-blue);
+}
+.welcome-card h3 {
+  font-size: 22px;
+  margin-bottom: 10px;
+  color: var(--text-primary);
+}
+.welcome-card p {
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+}
+.welcome-card .icon {
+  font-size: 48px;
+  margin-bottom: 15px;
+}
+
+/* ==================== Tabs ==================== */
+.tabs { 
+  display: flex; 
+  gap: 10px; 
+  padding: 20px; 
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+.tab { 
+  flex: 1;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  cursor: pointer;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  transition: all 0.2s;
+}
+.tab:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+}
+.tab.active { 
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  color: white;
+  border-color: transparent;
+}
+
+/* ==================== Tab Content ==================== */
+.tab-content { 
+  display: none; 
+  padding: 30px;
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+}
+.tab-content.active { 
+  display: block; 
+}
+
+/* ==================== Buttons ==================== */
+.btn {
+  padding: 12px 30px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s;
+  margin: 5px;
+}
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  color: white;
+}
+.btn-primary:hover {
+  opacity: 0.9;
+  transform: translateY(-2px);
+  box-shadow: 0 5px 15px rgba(88, 166, 255, 0.3);
+}
+.btn-success { 
+  background: var(--accent-green); 
+  color: white; 
+}
+.btn-success:hover {
+  opacity: 0.9;
+  transform: translateY(-2px);
+}
+.btn-danger { 
+  background: var(--accent-red); 
+  color: white; 
+}
+
+/* ==================== Form Groups ==================== */
+.form-group { 
+  margin: 20px 0; 
+}
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.form-group input, 
+.form-group textarea {
+  width: 100%;
+  padding: 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  transition: all 0.2s;
+}
+.form-group input:focus, 
+.form-group textarea:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.1);
+}
+
+/* ==================== Wallet Info ==================== */
+.wallet-info {
+  background: var(--bg-tertiary);
+  padding: 20px;
+  border-radius: 8px;
+  margin: 20px 0;
+  border: 1px solid var(--border-color);
+}
+.wallet-info h3 {
+  color: var(--accent-blue);
+  margin-bottom: 15px;
+  font-size: 18px;
+}
+.wallet-info p {
+  margin: 10px 0;
+  word-break: break-all;
+  font-size: 14px;
+}
+
+/* ==================== Alerts ==================== */
+.alert {
+  padding: 15px;
+  border-radius: 6px;
+  margin: 20px 0;
+  border-left: 4px solid;
+}
+.alert-info {
+  background: rgba(88, 166, 255, 0.1);
+  border-left-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+.alert-warning {
+  background: rgba(210, 153, 22, 0.1);
+  border-left-color: var(--accent-yellow);
+  color: var(--accent-yellow);
+}
+.alert-success {
+  background: rgba(63, 185, 80, 0.1);
+  border-left-color: var(--accent-green);
+  color: var(--accent-green);
+}
+
+/* ==================== Balance Display ==================== */
+.balance-display {
+  background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 30px;
+  text-align: center;
+  margin: 20px 0;
+}
+.balance-display .balance-label {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+.balance-display .balance-amount {
+  font-size: 42px;
+  font-weight: 700;
+  color: var(--accent-green);
+  letter-spacing: 2px;
+}
+
+/* ==================== Toast Notification ==================== */
+.toast {
+  position: fixed;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%) translateY(100px);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  padding: 12px 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  z-index: 1000;
+  opacity: 0;
+  transition: all 0.3s;
+  font-weight: 500;
+}
+.toast.show {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+}
+
+.hidden { 
+  display: none !important; 
+}
+
+/* ==================== Responsive ==================== */
+@media (max-width: 768px) {
+  .header .container {
+    flex-direction: column;
+    padding: 15px;
+  }
+  .nav {
+    width: 100%;
+    justify-content: center;
+  }
+  .main-container {
+    padding: 15px;
+  }
+  .welcome-section h1 {
+    font-size: 28px;
+  }
+  .welcome-cards {
+    grid-template-columns: 1fr;
+  }
+  .balance-display .balance-amount {
+    font-size: 32px;
+  }
+}
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <div class="logo">NogoChain Wallet</div>
+            <nav class="nav">
+                <a href="../explorer/">区块浏览器</a>
+                <a href="../">API 文档</a>
+            </nav>
+        </div>
+    </header>
+    
+    <!-- Main Content -->
+    <div class="main-container">
+        
+        <!-- Welcome Section -->
+        <div id="welcomeSection" class="welcome-section">
+            <h1>🔐 NogoChain Web 钱包</h1>
+            <p>安全去中心化的数字资产管理 - 您的私钥始终保存在浏览器中</p>
+            
+            <div class="welcome-cards">
+                <div class="welcome-card" onclick="showTab('createTab')">
+                    <div class="icon">✨</div>
+                    <h3>创建新钱包</h3>
+                    <p>使用 BIP39 标准生成新的安全钱包</p>
+                </div>
+                
+                <div class="welcome-card" onclick="showTab('importTab')">
+                    <div class="icon">📥</div>
+                    <h3>导入钱包</h3>
+                    <p>使用助记词或私钥恢复现有钱包</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Create Wallet Tab -->
+        <div id="createTab" class="tab-content">
+            <div class="tabs">
+                <button class="tab active" onclick="switchCreateTab('step1')">创建钱包</button>
+                <button class="tab" onclick="showWelcome()">返回欢迎页</button>
+            </div>
+            
+            <div id="createStep1">
+                <div class="alert alert-info">
+                    <strong>🎯 生成新钱包</strong>
+                    使用 BIP39 标准助记词和 Ed25519 密钥对创建新钱包
+                </div>
+                <button class="btn btn-primary" onclick="generateWallet()" style="padding: 15px 40px; font-size: 16px;">
+                    ✨ 生成钱包
+                </button>
+            </div>
+            
+            <div id="createStep2" class="hidden">
+                <div class="alert alert-success">
+                    <strong>✅ 钱包生成成功！</strong>
+                    请务必备份您的助记词和私钥。
+                </div>
+                
+                <div class="wallet-info">
+                    <h3>📝 助记词（请抄写下来）</h3>
+                    <div class="info-value" style="font-size: 16px; padding: 15px; width: 100%; display: block; margin-bottom: 15px; letter-spacing: 1px;">
+                        <span id="mnemonicPhrase"></span>
+                    </div>
+                    <button class="btn btn-primary" onclick="copyToClipboard('mnemonicPhrase', '助记词')">
+                        📋 复制助记词
+                    </button>
+                    
+                    <div class="alert alert-warning" style="margin-top: 20px;">
+                        <strong>⚠️ 重要安全提示：</strong>
+                        <ul>
+                            <li>按顺序抄写助记词到纸上</li>
+                            <li>存放在安全的地方（保险箱等）</li>
+                            <li><strong>不要</strong>截图、通过邮件或聊天工具发送</li>
+                            <li>丢失助记词 = 永久丢失资产访问权</li>
+                            <li>任何人获得助记词都能盗取您的资金</li>
+                        </ul>
+                    </div>
+                </div>
+                
+                <div class="wallet-info">
+                    <h3>📍 钱包详情</h3>
+                    <p>
+                        <span class="info-label">地址：</span>
+                        <span class="info-value" id="newAddress"></span>
+                        <button class="copy-btn" onclick="copyToClipboard('newAddress', '地址')">📋</button>
+                    </p>
+                    <p>
+                        <span class="info-label">公钥：</span>
+                        <span class="info-value" id="newPublicKey"></span>
+                        <button class="copy-btn" onclick="copyToClipboard('newPublicKey', '公钥')">📋</button>
+                    </p>
+                    <p>
+                        <span class="info-label">私钥：</span>
+                        <span class="info-value" id="newPrivateKey"></span>
+                        <button class="copy-btn" onclick="copyToClipboard('newPrivateKey', '私钥')">📋</button>
+                    </p>
+                </div>
+                
+                <button class="btn btn-success" onclick="saveWallet()" style="padding: 15px 40px; font-size: 16px;">
+                    ✅ 已备份 - 开始使用
+                </button>
+            </div>
+        </div>
+        
+        <!-- Import Wallet Tab -->
+        <div id="importTab" class="tab-content">
+            <div class="tabs">
+                <button class="tab active" onclick="switchImportTab('import')">导入钱包</button>
+                <button class="tab" onclick="showWelcome()">返回欢迎页</button>
+            </div>
+            
+            <div class="alert alert-info">
+                <strong>🔑 导入方式：</strong>
+                选择以下任一方式恢复您的钱包
+            </div>
+            
+            <div class="form-group">
+                <label for="importMnemonic">助记词（12 个单词，空格分隔）：</label>
+                <textarea id="importMnemonic" placeholder="abandon ability able about above absent absorb abstract absurd abuse access accident"></textarea>
+            </div>
+            
+            <div style="text-align: center; margin: 20px 0; color: var(--text-secondary);">
+                <span>— 或 —</span>
+            </div>
+            
+            <div class="form-group">
+                <label for="importPrivateKey">私钥（Base64 格式）：</label>
+                <textarea id="importPrivateKey" placeholder="输入您的私钥（Base64 格式）..."></textarea>
+            </div>
+            
+            <button class="btn btn-primary" onclick="importWallet()" style="padding: 15px 40px; font-size: 16px; margin-top: 15px;">
+                📥 导入钱包
+            </button>
+        </div>
+        
+        <!-- Wallet Dashboard Tab -->
+        <div id="walletDashboardTab" class="tab-content">
+            <div class="tabs">
+                <button class="tab active" onclick="switchWalletTab('send')">发送</button>
+                <button class="tab" onclick="switchWalletTab('receive')">接收</button>
+                <button class="tab" onclick="switchWalletTab('transactions')">交易记录</button>
+                <button class="tab" onclick="logout()">退出</button>
+            </div>
+            
+            <!-- Balance Display -->
+            <div class="balance-display">
+                <div class="balance-label">可用余额</div>
+                <div>
+                    <span class="balance-amount" id="walletBalance">0.00000000</span>
+                    <span class="balance-currency">NOGO</span>
+                </div>
+            </div>
+            
+            <!-- Send Tab -->
+            <div id="sendTab">
+                <h2 style="margin-bottom: 20px;">发送 NOGO</h2>
+                <div class="form-group">
+                    <label for="sendAddress">收款地址：</label>
+                    <input type="text" id="sendAddress" placeholder="NOGO...">
+                </div>
+                <div class="form-group">
+                    <label for="sendAmount">金额（NOGO）：</label>
+                    <input type="number" id="sendAmount" step="0.00000001" placeholder="0.00000001" min="0.00000001">
+                </div>
+                <button class="btn btn-primary" onclick="sendTransaction()">
+                    🚀 发送交易
+                </button>
+            </div>
+            
+            <!-- Receive Tab -->
+            <div id="receiveTab" class="hidden">
+                <h2 style="margin-bottom: 20px;">接收 NOGO</h2>
+                <div class="wallet-info">
+                    <p style="margin-bottom: 15px;"><strong>您的收款地址：</strong></p>
+                    <p>
+                        <span class="info-value" id="receiveAddress" style="font-size: 14px; width: 100%; display: block;"></span>
+                    </p>
+                    <button class="btn btn-primary" onclick="copyToClipboard('receiveAddress', '地址')">
+                        📋 复制地址
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Transactions Tab -->
+            <div id="transactionsTab" class="hidden">
+                <h2 style="margin-bottom: 20px;">交易记录</h2>
+                <div id="transactionsList" style="max-height: 600px; overflow-y: auto; padding-right: 10px;">
+                    <div style="text-align: center; padding: 30px; color: var(--text-secondary);">
+                        暂无交易记录
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+    </div>
+    
+    <!-- Toast Notification -->
+    <div id="toast" class="toast"></div>
+    
+    <script>
+        const API_BASE = 'http://localhost:8080';
+        let currentWallet = null;
+        
+        // 页面加载时检查已保存的钱包
+        window.addEventListener('load', () => {
+            const saved = localStorage.getItem('nogoWallet');
+            if (saved) {
+                try {
+                    currentWallet = JSON.parse(saved);
+                    showTab('walletDashboardTab');
+                    loadWalletInfo();
+                } catch (e) {
+                    console.error('钱包解析失败:', e);
+                    showWelcome();
+                }
+            } else {
+                showWelcome();
+            }
+        });
+        
+        function showWelcome() {
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.getElementById('welcomeSection').classList.remove('hidden');
+        }
+        
+        function showTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.getElementById('welcomeSection').classList.add('hidden');
+            document.getElementById(tabId).classList.add('active');
+            
+            if (tabId === 'walletDashboardTab') {
+                loadWalletInfo();
+            }
+        }
+        
+        function switchCreateTab(step) {
+            document.querySelectorAll('#createTab .tab').forEach((tab, index) => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            if (step === 'step1') {
+                document.getElementById('createStep1').classList.remove('hidden');
+                document.getElementById('createStep2').classList.add('hidden');
+            }
+        }
+        
+        function switchImportTab(mode) {
+            document.querySelectorAll('#importTab .tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+        }
+        
+        function switchWalletTab(tab) {
+            document.querySelectorAll('#walletDashboardTab .tab').forEach(t => {
+                t.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            ['sendTab', 'receiveTab', 'transactionsTab'].forEach(t => {
+                document.getElementById(t).classList.add('hidden');
+            });
+            document.getElementById(tab + 'Tab').classList.remove('hidden');
+            
+            if (tab === 'transactions') {
+                loadTransactions();
+            }
+        }
+        
+        async function generateWallet() {
+            try {
+                // 等待库加载
+                if (!window.librariesLoaded) {
+                    showToast('⏳ 正在加载库...');
+                    await new Promise((resolve, reject) => {
+                        let attempts = 0;
+                        const check = () => {
+                            if (window.librariesLoaded) {
+                                resolve();
+                            } else if (attempts < 50) {
+                                attempts++;
+                                setTimeout(check, 100);
+                            } else {
+                                reject(new Error('库加载失败'));
+                            }
+                        };
+                        check();
+                    });
+                }
+                
+                // 检查库是否可用
+                if (!window.bip39 || !window.nobleEd25519) {
+                    showToast('❌ 库未加载，请刷新页面');
+                    return;
+                }
+                
+                // 生成助记词
+                const mnemonic = window.bip39.generateMnemonic();
+                
+                // 派生种子
+                const seed = await window.bip39Async.mnemonicToSeed(mnemonic);
+                const seedBytes = new Uint8Array(seed);
+                
+                // 派生私钥
+                const hashBuffer = await window.crypto.subtle.digest('SHA-256', seedBytes);
+                const privateKeyBytes = new Uint8Array(hashBuffer);
+                
+                // 派生公钥
+                const publicKeyBytes = await window.nobleEd25519.getPublicKey(privateKeyBytes);
+                
+                // 生成地址
+                const hashBuffer2 = await window.crypto.subtle.digest('SHA-256', publicKeyBytes);
+                const hashArray = new Uint8Array(hashBuffer2);
+                
+                const addressData = new Uint8Array(1 + 32 + 4);
+                addressData[0] = 0x00;
+                addressData.set(hashArray, 1);
+                
+                const checksumHash = await window.crypto.subtle.digest('SHA-256', addressData.slice(0, 33));
+                const checksumBytes = new Uint8Array(checksumHash.slice(0, 4));
+                addressData.set(checksumBytes, 33);
+                
+                const address = 'NOGO' + Array.from(addressData).map(b => b.toString(16).padStart(2, '0')).join('');
+                
+                // 转换为 Base64
+                const privateKeyBase64 = arrayBufferToBase64(privateKeyBytes.buffer);
+                const publicKeyBase64 = arrayBufferToBase64(publicKeyBytes.buffer);
+                
+                // 显示钱包信息
+                document.getElementById('mnemonicPhrase').textContent = mnemonic;
+                document.getElementById('newAddress').textContent = address;
+                document.getElementById('newPublicKey').textContent = publicKeyBase64;
+                document.getElementById('newPrivateKey').textContent = privateKeyBase64;
+                
+                // 显示步骤 2
+                document.getElementById('createStep1').classList.add('hidden');
+                document.getElementById('createStep2').classList.remove('hidden');
+                
+                // 临时保存
+                currentWallet = {
+                    address: address,
+                    publicKey: publicKeyBase64,
+                    privateKey: privateKeyBase64,
+                    mnemonic: mnemonic
+                };
+                
+                showToast('✅ 钱包生成成功！');
+                
+            } catch (e) {
+                showToast('❌ 生成失败：' + e.message);
+                console.error(e);
+            }
+        }
+        
+        function saveWallet() {
+            localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
+            showToast('✅ 钱包已保存！');
+            showTab('walletDashboardTab');
+            loadWalletInfo();
+        }
+        
+        function logout() {
+            if (confirm('确定要退出吗？您需要重新输入密码或导入钱包。')) {
+                localStorage.removeItem('nogoWallet');
+                currentWallet = null;
+                showWelcome();
+                showToast('👋 已退出！');
+            }
+        }
+        
+        async function importWallet() {
+            const mnemonic = document.getElementById('importMnemonic').value.trim();
+            const privateKeyBase64 = document.getElementById('importPrivateKey').value.trim();
+            
+            try {
+                if (mnemonic) {
+                    await importFromMnemonic(mnemonic);
+                } else if (privateKeyBase64) {
+                    await importFromPrivateKey(privateKeyBase64);
+                } else {
+                    showToast('❌ 请输入助记词或私钥');
+                    return;
+                }
+            } catch (e) {
+                showToast('❌ 导入失败：' + e.message);
+                console.error(e);
+            }
+        }
+        
+        async function importFromMnemonic(mnemonic) {
+            if (!window.bip39 || !window.bip39.validateMnemonic) {
+                showToast('❌ BIP39 库未加载');
+                return;
+            }
+            
+            if (!window.bip39.validateMnemonic(mnemonic)) {
+                showToast('❌ 助记词无效');
+                return;
+            }
+            
+            const seed = await window.bip39Async.mnemonicToSeed(mnemonic);
+            const seedBytes = new Uint8Array(seed);
+            
+            const hashBuffer = await window.crypto.subtle.digest('SHA-256', seedBytes);
+            const privateKeyBytes = new Uint8Array(hashBuffer);
+            const publicKeyBytes = await window.nobleEd25519.getPublicKey(privateKeyBytes);
+            
+            const hashBuffer2 = await window.crypto.subtle.digest('SHA-256', publicKeyBytes);
+            const hashArray = new Uint8Array(hashBuffer2);
+            
+            const addressData = new Uint8Array(1 + 32 + 4);
+            addressData[0] = 0x00;
+            addressData.set(hashArray, 1);
+            
+            const checksumHash = await window.crypto.subtle.digest('SHA-256', addressData.slice(0, 33));
+            const checksumBytes = new Uint8Array(checksumHash.slice(0, 4));
+            addressData.set(checksumBytes, 33);
+            
+            const address = 'NOGO' + Array.from(addressData).map(b => b.toString(16).padStart(2, '0')).join('');
+            
+            currentWallet = {
+                address: address,
+                publicKey: arrayBufferToBase64(publicKeyBytes.buffer),
+                privateKey: arrayBufferToBase64(privateKeyBytes.buffer),
+                mnemonic: mnemonic,
+                imported: true
+            };
+            
+            localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
+            showToast('✅ 助记词导入成功！');
+            showTab('walletDashboardTab');
+            loadWalletInfo();
+        }
+        
+        async function importFromPrivateKey(privateKeyBase64) {
+            try {
+                const privateKeyBytes = base64ToUint8Array(privateKeyBase64);
+                
+                if (privateKeyBytes.byteLength !== 32) {
+                    showToast('❌ 私钥长度无效（应为 32 字节）');
+                    return;
+                }
+                
+                const publicKeyBytes = await window.nobleEd25519.getPublicKey(privateKeyBytes);
+                
+                const hashBuffer = await window.crypto.subtle.digest('SHA-256', publicKeyBytes);
+                const hashArray = new Uint8Array(hashBuffer);
+                
+                const addressData = new Uint8Array(1 + 32 + 4);
+                addressData[0] = 0x00;
+                addressData.set(hashArray, 1);
+                
+                const checksumHash = await window.crypto.subtle.digest('SHA-256', addressData.slice(0, 33));
+                const checksumBytes = new Uint8Array(checksumHash.slice(0, 4));
+                addressData.set(checksumBytes, 33);
+                
+                const address = 'NOGO' + Array.from(addressData).map(b => b.toString(16).padStart(2, '0')).join('');
+                
+                currentWallet = {
+                    address: address,
+                    publicKey: arrayBufferToBase64(publicKeyBytes.buffer),
+                    privateKey: privateKeyBase64,
+                    imported: true
+                };
+                
+                localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
+                showToast('✅ 私钥导入成功！');
+                showTab('walletDashboardTab');
+                loadWalletInfo();
+                
+            } catch (e) {
+                showToast('❌ 私钥无效：' + e.message);
+                console.error(e);
+            }
+        }
+        
+        async function loadWalletInfo() {
+            if (!currentWallet) return;
+            
+            document.getElementById('walletAddress').textContent = currentWallet.address;
+            document.getElementById('walletPublicKey').textContent = currentWallet.publicKey;
+            document.getElementById('receiveAddress').textContent = currentWallet.address;
+            
+            try {
+                const response = await fetch(`${API_BASE}/balance/${currentWallet.address}`);
+                const data = await response.json();
+                document.getElementById('walletBalance').textContent = (data.balance / 100000000).toFixed(8);
+            } catch (e) {
+                console.error('加载余额失败:', e);
+            }
+        }
+        
+        async function loadTransactions() {
+            const container = document.getElementById('transactionsList');
+            if (!container || !currentWallet) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/address/${currentWallet.address}/txs`);
+                const data = await response.json();
+                const txs = data.txs || [];
+                
+                if (txs.length === 0) {
+                    container.innerHTML = `
+                        <div style="text-align: center; padding: 30px; color: var(--text-secondary);">
+                            暂无交易记录
+                        </div>
+                    `;
+                    return;
+                }
+                
+                let html = '';
+                for (const tx of txs) {
+                    const amount = (tx.amount || 0) / 1e8;
+                    const isIncoming = tx.toAddress === currentWallet.address;
+                    const direction = isIncoming ? '⬇️' : '⬆️';
+                    const amountClass = isIncoming ? 'text-green' : 'text-red';
+                    
+                    html += `
+                        <div style="background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px; padding: 15px; margin-bottom: 15px;">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                                <span style="color: var(--accent-blue); font-family: monospace;">${(tx.txId || 'N/A').substring(0, 20)}...</span>
+                                <span style="color: ${amountClass}; font-weight: bold;">${isIncoming ? '+' : '-'}${amount.toFixed(8)} NOGO</span>
+                            </div>
+                            <div style="font-size: 13px; color: var(--text-secondary);">
+                                类型：${tx.type === 'coinbase' ? '🪙 币基' : '💸 转账'} ${direction}
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                container.innerHTML = html;
+                
+            } catch (e) {
+                console.error('加载交易失败:', e);
+                container.innerHTML = `
+                    <div style="text-align: center; padding: 30px; color: var(--text-secondary);">
+                        加载交易失败
+                    </div>
+                `;
+            }
+        }
+        
+        async function sendTransaction() {
+            const toAddress = document.getElementById('sendAddress').value.trim();
+            const amountNOGO = parseFloat(document.getElementById('sendAmount').value);
+            
+            if (!toAddress || !toAddress.startsWith('NOGO')) {
+                showToast('❌ 收款地址无效');
+                return;
+            }
+            if (!amountNOGO || amountNOGO <= 0) {
+                showToast('❌ 金额无效');
+                return;
+            }
+            if (!currentWallet) {
+                showToast('❌ 钱包未加载');
+                return;
+            }
+            
+            try {
+                showToast('⏳ 创建交易中...');
+                
+                const balanceResp = await fetch(`${API_BASE}/balance/${currentWallet.address}`);
+                const balanceData = await balanceResp.json();
+                const balance = balanceData.balance || 0;
+                const nonce = (balanceData.nonce || 0) + 1;
+                const fee = 1000;
+                
+                const amount = Math.floor(amountNOGO * 1e8);
+                
+                if (balance < amount + fee) {
+                    showToast('❌ 余额不足');
+                    return;
+                }
+                
+                const tx = {
+                    type: 'transfer',
+                    chainId: 1,
+                    fromPubKey: currentWallet.publicKey,
+                    toAddress: toAddress,
+                    amount: amount,
+                    fee: fee,
+                    nonce: nonce,
+                    data: ''
+                };
+                
+                // 创建签名哈希
+                const fromPubKeyBytes = base64ToUint8Array(currentWallet.publicKey);
+                const toAddressBytes = decodeNogoAddress(toAddress);
+                
+                function decodeNogoAddress(addr) {
+                    if (!addr.startsWith('NOGO')) throw new Error('地址无效');
+                    const hex = addr.slice(4);
+                    const bytes = hexToUint8Array(hex);
+                    if (bytes.length !== 37) throw new Error('地址长度无效');
+                    return bytes.slice(1, 33);
+                }
+                
+                function writeUint64LE(value) {
+                    const bytes = new Uint8Array(8);
+                    for (let i = 0; i < 8; i++) {
+                        bytes[i] = value & 0xFF;
+                        value = Math.floor(value / 256);
+                    }
+                    return bytes;
+                }
+                
+                const preimageParts = [
+                    new Uint8Array([0x01, 0x01]),
+                    writeUint64LE(1),
+                    fromPubKeyBytes,
+                    toAddressBytes,
+                    writeUint64LE(amount),
+                    writeUint64LE(nonce),
+                    writeUint64LE(fee),
+                    new Uint8Array([0])
+                ];
+                
+                const totalLength = preimageParts.reduce((sum, part) => sum + part.length, 0);
+                const preimage = new Uint8Array(totalLength);
+                let offset = 0;
+                for (const part of preimageParts) {
+                    preimage.set(part, offset);
+                    offset += part.length;
+                }
+                
+                const msgHash = await window.crypto.subtle.digest('SHA-256', preimage);
+                
+                const privateKeyBytes = base64ToUint8Array(currentWallet.privateKey);
+                const signature = await window.nobleEd25519.sign(new Uint8Array(msgHash), privateKeyBytes);
+                
+                tx.signature = arrayBufferToBase64(signature.buffer);
+                
+                const submitResp = await fetch(`${API_BASE}/tx`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(tx)
+                });
+                
+                const result = await submitResp.json();
+                
+                if (result.accepted || result.Accepted) {
+                    const txid = result.txId || result.TxID || result.txid;
+                    showToast('✅ 交易发送成功！TxID: ' + txid);
+                    document.getElementById('sendAddress').value = '';
+                    document.getElementById('sendAmount').value = '';
+                    await loadWalletInfo();
+                } else {
+                    const errorMsg = result.message || result.error || '未知错误';
+                    showToast('❌ 交易被拒绝：' + errorMsg);
+                }
+                
+            } catch (e) {
+                console.error('发送交易失败:', e);
+                showToast('❌ 发送失败：' + e.message);
+            }
+        }
+        
+        function copyToClipboard(elementId, label) {
+            const element = document.getElementById(elementId);
+            const text = element.textContent;
+            
+            navigator.clipboard.writeText(text).then(() => {
+                showToast('✓ ' + label + '已复制到剪贴板！');
+            }).catch(err => {
+                showToast('❌ 复制失败');
+            });
+        }
+        
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+        
+        // 工具函数
+        function hexToUint8Array(hex) {
+            if (hex.length % 2 !== 0) throw new Error('十六进制字符串无效');
+            const bytes = new Uint8Array(hex.length / 2);
+            for (let i = 0; i < hex.length; i += 2) {
+                bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+            }
+            return bytes;
+        }
+        
+        function arrayBufferToBase64(buffer) {
+            let binary = '';
+            const bytes = new Uint8Array(buffer);
+            for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return window.btoa(binary);
+        }
+        
+        function base64ToUint8Array(base64) {
+            const binary_string = window.atob(base64);
+            const len = binary_string.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binary_string.charCodeAt(i);
+            }
+            return bytes;
+        }
+    </script>
+</body>
+</html>

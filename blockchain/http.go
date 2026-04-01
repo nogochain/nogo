@@ -113,17 +113,17 @@ func (s *Server) routes() http.Handler {
 
 	// Explorer UI
 	mux.HandleFunc("/explorer/", mw.Wrap("explorer", false, 0, s.handleExplorer))
-	
+
 	// Favicon
 	mux.HandleFunc("/explorer/favicon.ico", mw.Wrap("favicon", false, 0, s.handleFavicon))
 	mux.HandleFunc("/favicon.ico", mw.Wrap("favicon", false, 0, s.handleFavicon))
 
 	// Web Wallet UI
 	mux.HandleFunc("/wallet/", mw.Wrap("wallet", false, 0, s.handleWallet))
-	
+
 	// BIP39 Wallet UI
 	mux.HandleFunc("/webwallet/", mw.Wrap("webwallet", false, 0, s.handleWalletBIP39))
-	
+
 	// Test Wallet UI
 	mux.HandleFunc("/test-wallet/", mw.Wrap("test_wallet", false, 0, s.handleTestWallet))
 
@@ -171,7 +171,6 @@ func (s *Server) handleChainInfo(w http.ResponseWriter, r *http.Request) {
 		"currentReward":                  currentReward,
 		"nextHalvingHeight":              nextHalving,
 		"difficultyBits":                 latest.DifficultyBits,
-		"nextDifficultyBits":             s.bc.NextDifficultyBits(),
 		"difficultyEnable":               s.bc.consensus.DifficultyEnable,
 		"difficultyTargetMs":             int64(s.bc.consensus.TargetBlockTime / time.Millisecond),
 		"difficultyWindow":               s.bc.consensus.DifficultyWindow,
@@ -1010,13 +1009,29 @@ func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Serve the explorer HTML file
-	explorerPath := "../api/http/public/explorer/index.html"
-	data, err := os.ReadFile(explorerPath)
+	// Try multiple possible paths to support different working directories
+	explorerPaths := []string{
+		"../api/http/public/explorer/index.html",
+		"../../nogo/api/http/public/explorer/index.html",
+		"api/http/public/explorer/index.html",
+		"nogo/api/http/public/explorer/index.html",
+	}
+
+	var data []byte
+	var err error
+	for _, explorerPath := range explorerPaths {
+		data, err = os.ReadFile(explorerPath)
+		if err == nil {
+			break
+		}
+	}
+
 	if err != nil {
 		http.Error(w, "explorer not found", http.StatusNotFound)
 		return
 	}
 
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
@@ -1030,11 +1045,11 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 
 	// Try multiple possible paths for favicon.ico
 	possiblePaths := []string{
-		"../api/http/public/explorer/favicon.ico",
+		"nogo/api/http/public/explorer/favicon.ico",
 		"api/http/public/explorer/favicon.ico",
 		"favicon.ico",
 	}
-	
+
 	var data []byte
 	var err error
 	for _, path := range possiblePaths {
@@ -1043,7 +1058,7 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	
+
 	if err != nil {
 		http.Error(w, "favicon not found", http.StatusNotFound)
 		return
@@ -1061,13 +1076,29 @@ func (s *Server) handleWallet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Serve the web wallet HTML file
-	walletPath := "web_wallet.html"
-	data, err := os.ReadFile(walletPath)
+	// Try multiple possible paths to support different working directories
+	walletPaths := []string{
+		"../api/http/public/webwallet/index.html",
+		"../../nogo/api/http/public/webwallet/index.html",
+		"api/http/public/webwallet/index.html",
+		"nogo/api/http/public/webwallet/index.html",
+	}
+
+	var data []byte
+	var err error
+	for _, walletPath := range walletPaths {
+		data, err = os.ReadFile(walletPath)
+		if err == nil {
+			break
+		}
+	}
+
 	if err != nil {
 		http.Error(w, "wallet not found", http.StatusNotFound)
 		return
 	}
 
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
@@ -1105,14 +1136,14 @@ func (s *Server) handleWalletBIP39(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Serve the BIP39 wallet HTML file
-	// Try multiple possible paths
+	// Try multiple possible paths to support different working directories
 	basePaths := []string{
-		"api/http/public/webwallet/",
 		"../api/http/public/webwallet/",
-		"webwallet/",
-		"../webwallet/",
+		"../../nogo/api/http/public/webwallet/",
+		"api/http/public/webwallet/",
+		"nogo/api/http/public/webwallet/",
 	}
-	
+
 	var data []byte
 	var err error
 	for _, basePath := range basePaths {
@@ -1122,12 +1153,13 @@ func (s *Server) handleWalletBIP39(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	
+
 	if err != nil {
 		http.Error(w, "File not found", http.StatusNotFound)
 		return
 	}
 
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	// Set content type based on file extension
 	contentType := "text/html; charset=utf-8"
 	if strings.HasSuffix(requestedFile, ".css") {
@@ -1135,7 +1167,7 @@ func (s *Server) handleWalletBIP39(w http.ResponseWriter, r *http.Request) {
 	} else if strings.HasSuffix(requestedFile, ".js") {
 		contentType = "application/javascript"
 	}
-	
+
 	w.Header().Set("Content-Type", contentType)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)

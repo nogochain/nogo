@@ -42,7 +42,7 @@ func main() {
 		}
 
 		miner := os.Getenv("MINER_ADDRESS")
-		autoMine := envBool("AUTO_MINE", true)
+		autoMine := envBool("AUTO_MINE", false)
 		if autoMine && strings.TrimSpace(miner) == "" {
 			log.Fatal("MINER_ADDRESS is required when AUTO_MINE=true")
 		}

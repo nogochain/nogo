@@ -626,7 +626,8 @@ body {
 </footer>
 
 <script>
-const API = window.location.protocol + '//' + window.location.hostname + ':' + (window.location.port || 8080);
+// Build API URL correctly: use current hostname and port from browser
+const API = window.location.protocol + '//' + window.location.host;
 
 async function api(path) {
   try {

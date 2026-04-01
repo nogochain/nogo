@@ -104,6 +104,27 @@ func (t *NogopowEngine) VerifyHeader(chain ChainHeaderReader, header *Header, se
 	return nil
 }
 
+// VerifySealOnly verifies only the PoW seal without chain context
+// This is used for standalone block validation where chain is not available
+func (t *NogopowEngine) VerifySealOnly(header *Header) error {
+	// If we're running in fake mode, skip verification
+	if t.config.PowMode == ModeFake {
+		return nil
+	}
+
+	// Genesis block is always valid
+	if header.Number.Uint64() == 0 {
+		return nil
+	}
+
+	// Verify PoW seal without chain context
+	if err := t.verifySeal(nil, header); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // VerifyHeaders verifies a batch of headers concurrently
 func (t *NogopowEngine) VerifyHeaders(chain ChainHeaderReader, headers []*Header, seals []bool) (chan<- struct{}, <-chan error) {
 	abort := make(chan struct{})
@@ -341,10 +362,17 @@ func (t *NogopowEngine) calcSeed(chain ChainHeaderReader, header *Header) Hash {
 		return Hash{}
 	}
 
+	// If chain is not available, use parent hash directly from header
+	// This is used for standalone validation
+	if chain == nil {
+		return header.ParentHash
+	}
+
 	// Get parent block
 	parent := chain.GetHeaderByHash(header.ParentHash)
 	if parent == nil {
-		return Hash{}
+		// Fallback: use parent hash directly
+		return header.ParentHash
 	}
 
 	// Seed is parent's hash

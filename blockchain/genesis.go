@@ -3,15 +3,19 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nogochain/nogo/blockchain/nogopow"
 )
 
 func validateGenesisMinerAddress(addr string) error {
@@ -446,13 +450,38 @@ func BuildGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, e
 		MinerAddress:   cfg.GenesisMinerAddress,
 		Transactions:   []Transaction{coinbase},
 	}
-	pow := NewProofOfWork(consensus, genesis)
-	nonce, hash, err := pow.Run()
-	if err != nil {
+
+	// Mine genesis block using NogoPow engine
+	engine := nogopow.New(nogopow.DefaultConfig())
+	defer engine.Close()
+
+	genesisHeader := &nogopow.Header{
+		ParentHash: nogopow.BytesToHash(genesis.PrevHash),
+		Coinbase:   stringToAddress(genesis.MinerAddress),
+		Number:     big.NewInt(int64(genesis.Height)),
+		Time:       uint64(genesis.TimestampUnix),
+		Difficulty: big.NewInt(int64(genesis.DifficultyBits)),
+	}
+
+	genesisBlock := nogopow.NewBlock(genesisHeader, nil, nil, nil)
+	stop := make(chan struct{})
+	resultCh := make(chan *nogopow.Block, 1)
+
+	if err := engine.Seal(nil, genesisBlock, resultCh, stop); err != nil {
 		return nil, err
 	}
-	genesis.Nonce = nonce
-	genesis.Hash = hash
+
+	result, ok := <-resultCh
+	if !ok {
+		close(stop)
+		return nil, fmt.Errorf("genesis mining failed")
+	}
+
+	sealedHeader := result.Header()
+	genesis.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
+	hashBytes := sealedHeader.Hash().Bytes()
+	genesis.Hash = hashBytes
+
 	return genesis, nil
 }
 
@@ -497,15 +526,40 @@ func ValidateGenesisBlock(b *Block, cfg *GenesisConfig, consensus ConsensusParam
 	if cb.Data != genesisMessageOrDefault(cfg) {
 		return fmt.Errorf("genesis message mismatch: %q != %q", cb.Data, genesisMessageOrDefault(cfg))
 	}
-	ok, err := NewProofOfWork(consensus, b).Validate()
-	if err != nil {
+
+	// Validate genesis block using NogoPow engine
+	if err := validateGenesisPoWNogoPow(consensus, b); err != nil {
 		return err
 	}
-	if !ok {
-		return errors.New("invalid genesis pow")
-	}
-	_, err = ensureBlockHash(b, consensus)
+
+	_, err := ensureBlockHash(b, consensus)
 	return err
+}
+
+// validateGenesisPoWNogoPow validates genesis block PoW using NogoPow algorithm
+func validateGenesisPoWNogoPow(consensus ConsensusParams, b *Block) error {
+	engine := nogopow.New(nogopow.DefaultConfig())
+	defer engine.Close()
+
+	header := &nogopow.Header{
+		ParentHash: nogopow.BytesToHash(b.PrevHash),
+		Coinbase:   stringToAddress(b.MinerAddress),
+		Number:     big.NewInt(int64(b.Height)),
+		Time:       uint64(b.TimestampUnix),
+		Difficulty: big.NewInt(int64(b.DifficultyBits)),
+		Nonce:      nogopow.BlockNonce{},
+		Extra:      []byte{},
+	}
+
+	// Set nonce
+	binary.LittleEndian.PutUint64(header.Nonce[:8], b.Nonce)
+
+	// Verify the header
+	if err := engine.VerifyHeader(nil, header, false); err != nil {
+		return fmt.Errorf("invalid genesis pow: %w", err)
+	}
+
+	return nil
 }
 
 func ensureBlockHash(b *Block, consensus ConsensusParams) ([]byte, error) {

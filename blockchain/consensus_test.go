@@ -2,9 +2,13 @@ package main
 
 import (
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/hex"
+	"math/big"
 	"testing"
 	"time"
+
+	"github.com/nogochain/nogo/blockchain/nogopow"
 )
 
 func TestBlockVersionForHeight(t *testing.T) {
@@ -156,16 +160,10 @@ func TestWorkForDifficultyBitsMonotonic(t *testing.T) {
 }
 
 func TestNextDifficultyBits_DisabledCarriesParent(t *testing.T) {
-	p := ConsensusParams{
-		DifficultyEnable:      false,
-		GenesisDifficultyBits: 18,
-		MinDifficultyBits:     1,
-		MaxDifficultyBits:     255,
-	}
-	path := []*Block{{Height: 0, DifficultyBits: 18, TimestampUnix: 10}}
-	if got := nextDifficultyBitsFromPath(p, path); got != 18 {
-		t.Fatalf("got %d", got)
-	}
+	// This test is deprecated - difficulty calculation now uses nogopow engine
+	// The old nextDifficultyBitsFromPath function has been removed
+	// Difficulty adjustment is now handled by nogopow.DifficultyAdjuster
+	t.Skip("deprecated - difficulty calculation moved to nogopow package")
 }
 
 type memChainStore struct {
@@ -239,13 +237,36 @@ func (s *memChainStore) PutGenesisHash(hash []byte) error {
 
 func mineTestBlock(t *testing.T, p ConsensusParams, b *Block) {
 	t.Helper()
-	pow := NewProofOfWork(p, b)
-	nonce, hash, err := pow.Run()
-	if err != nil {
+	
+	// Mine using NogoPow engine
+	engine := nogopow.New(nogopow.DefaultConfig())
+	defer engine.Close()
+	
+	header := &nogopow.Header{
+		ParentHash: nogopow.BytesToHash(b.PrevHash),
+		Coinbase:   stringToAddress(b.MinerAddress),
+		Number:     big.NewInt(int64(b.Height)),
+		Time:       uint64(b.TimestampUnix),
+		Difficulty: big.NewInt(int64(b.DifficultyBits)),
+	}
+	
+	block := nogopow.NewBlock(header, nil, nil, nil)
+	stop := make(chan struct{})
+	resultCh := make(chan *nogopow.Block, 1)
+	
+	if err := engine.Seal(nil, block, resultCh, stop); err != nil {
 		t.Fatal(err)
 	}
-	b.Nonce = nonce
-	b.Hash = hash
+	
+	result, ok := <-resultCh
+	if !ok {
+		close(stop)
+		t.Fatal("mining failed: channel closed")
+	}
+	
+	sealedHeader := result.Header()
+	b.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
+	b.Hash = sealedHeader.Hash().Bytes()
 }
 
 func TestForkChoicePrefersMoreWork(t *testing.T) {
@@ -351,13 +372,25 @@ func TestDifficultyEnforcedWhenEnabled(t *testing.T) {
 	bc.blocksByHash = map[string]*Block{hex.EncodeToString(gen.Hash): gen}
 	bc.initCanonicalIndexesLocked()
 
-	// Block 1 uses carried difficulty = 4 (insufficient history).
+	// Calculate expected difficulty for block 1 using nogopow engine
+	engine := nogopow.New(nogopow.DefaultConfig())
+	defer engine.Close()
+	
+	parentHeader := &nogopow.Header{
+		Number:     big.NewInt(int64(gen.Height)),
+		Time:       uint64(gen.TimestampUnix),
+		Difficulty: big.NewInt(int64(gen.DifficultyBits)),
+	}
+	expectedB1Difficulty := engine.CalcDifficulty(nil, 101, parentHeader)
+	expectedB1Bits := uint32(expectedB1Difficulty.Uint64())
+	
+	// Block 1 uses calculated difficulty
 	b1 := &Block{
 		Version:        1,
 		Height:         1,
 		TimestampUnix:  101,
 		PrevHash:       append([]byte(nil), gen.Hash...),
-		DifficultyBits: 2,
+		DifficultyBits: expectedB1Bits,
 		MinerAddress:   bc.MinerAddress,
 		Transactions: []Transaction{{
 			Type:      TxCoinbase,
@@ -373,8 +406,15 @@ func TestDifficultyEnforcedWhenEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// With window=1 and target=10s, actual span=1s => expected to increase by 1.
-	expectedBits := uint32(3)
+	// Calculate expected difficulty for block 2 using nogopow engine (reuse engine from above)
+	parentHeader2 := &nogopow.Header{
+		Number:     big.NewInt(int64(b1.Height)),
+		Time:       uint64(b1.TimestampUnix),
+		Difficulty: big.NewInt(int64(b1.DifficultyBits)),
+	}
+	expectedDifficulty := engine.CalcDifficulty(nil, 102, parentHeader2)
+	expectedBits := uint32(expectedDifficulty.Uint64())
+	
 	b2Wrong := &Block{
 		Version:        1,
 		Height:         2,

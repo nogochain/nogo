@@ -8,11 +8,54 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 const (
-	defaultChainID = uint64(1)
+	defaultChainID    = uint64(1)
+	maxDifficultyBits = uint32(256)
 )
+
+// ConsensusParams defines the consensus parameters for the blockchain
+type ConsensusParams struct {
+	DifficultyEnable bool
+
+	TargetBlockTime   time.Duration
+	DifficultyWindow  int
+	DifficultyMaxStep uint32
+
+	MinDifficultyBits uint32
+	MaxDifficultyBits uint32
+
+	GenesisDifficultyBits uint32
+
+	MedianTimePastWindow int
+	MaxTimeDrift         int64
+	MaxBlockSize         uint64
+
+	// MerkleEnable gates a new block header commitment scheme (v2 blocks).
+	// When enabled, blocks at height >= MerkleActivationHeight must use Version=2 and commit to a Merkle root.
+	MerkleEnable           bool
+	MerkleActivationHeight uint64
+
+	// BinaryEncodingEnable switches consensus-critical hashing away from JSON serialization
+	// (tx signing hash / txid, and PoW header hashing).
+	//
+	// If enabled, blocks at height >= BinaryEncodingActivationHeight must use the binary
+	// encoding scheme for:
+	// - Transaction signing hash (and therefore txid)
+	// - Block header hashing (PoW)
+	BinaryEncodingEnable           bool
+	BinaryEncodingActivationHeight uint64
+
+	// MonetaryPolicy defines block subsidy + fee allocation rules.
+	MonetaryPolicy MonetaryPolicy
+}
+
+// BinaryEncodingActive returns true if binary encoding is active at the given height
+func (p ConsensusParams) BinaryEncodingActive(height uint64) bool {
+	return p.BinaryEncodingEnable && height >= p.BinaryEncodingActivationHeight
+}
 
 type Account struct {
 	Balance uint64 `json:"balance"`
