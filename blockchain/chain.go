@@ -1,0 +1,874 @@
+package main
+
+import (
+	"bytes"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
+	"math/big"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/nogochain/nogo/blockchain/nogopow"
+)
+
+const (
+	minFee = uint64(1)
+)
+
+// Ensure Blockchain implements nogopow.ChainHeaderReader
+var _ nogopow.ChainHeaderReader = (*Blockchain)(nil)
+
+// GetHeaderByHash returns the header by hash (for NogoPow engine)
+func (bc *Blockchain) GetHeaderByHash(hash nogopow.Hash) *nogopow.Header {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	hashBytes := hash.Bytes()
+	hashStr := string(hashBytes)
+	for _, block := range bc.blocks {
+		if string(block.Hash) == hashStr {
+			var h nogopow.Hash
+			copy(h[:], block.Hash)
+
+			var n nogopow.BlockNonce
+			binary.LittleEndian.PutUint64(n[:8], block.Nonce)
+
+			return &nogopow.Header{
+				Number:     big.NewInt(int64(block.Height)),
+				Time:       uint64(block.TimestampUnix),
+				ParentHash: h, // 这里需要转换
+				Difficulty: big.NewInt(int64(block.DifficultyBits)),
+				Nonce:      n,
+			}
+		}
+	}
+	return nil
+}
+
+type Blockchain struct {
+	ChainID      uint64
+	MinerAddress string
+
+	consensus ConsensusParams
+	rulesHash [32]byte
+
+	events EventSink
+
+	mu sync.RWMutex
+
+	blocks []*Block
+	state  map[string]Account
+	store  ChainStore
+
+	blocksByHash  map[string]*Block
+	bestTipHash   string
+	canonicalWork *big.Int
+
+	txIndex map[string]TxLocation // txid -> location (canonical only)
+
+	addressIndex map[string][]AddressTxEntry // address -> canonical transfer history (oldest->newest)
+}
+
+func LoadBlockchain(chainID uint64, minerAddress string, store ChainStore, genesisSupply uint64) (*Blockchain, error) {
+	envConsensus := defaultConsensusParamsFromEnv()
+	genesisPath, err := GenesisPathFromEnv(chainID)
+	if err != nil {
+		return nil, err
+	}
+	genesisCfg, err := LoadGenesisConfig(genesisPath)
+	if err != nil {
+		return nil, err
+	}
+	if chainID != 0 && genesisCfg.ChainID != chainID {
+		return nil, fmt.Errorf("genesis chainId mismatch: env=%d genesis=%d", chainID, genesisCfg.ChainID)
+	}
+	chainID = genesisCfg.ChainID
+
+	bc := &Blockchain{
+		ChainID:       chainID,
+		MinerAddress:  minerAddress,
+		consensus:     genesisCfg.ConsensusParams,
+		state:         map[string]Account{},
+		store:         store,
+		blocksByHash:  map[string]*Block{},
+		txIndex:       map[string]TxLocation{},
+		addressIndex:  map[string][]AddressTxEntry{},
+		canonicalWork: big.NewInt(0),
+	}
+
+	if minerAddress != "" {
+		// Validate - allow both raw hex and NOGO00 address formats
+		if !strings.HasPrefix(minerAddress, "NOGO") {
+			// Raw hex format - validate directly
+			if _, err := hex.DecodeString(minerAddress); err != nil {
+				return nil, fmt.Errorf("invalid MINER_ADDRESS (not hex or NOGO00): %w", err)
+			}
+		}
+	}
+
+	envConsensus.MonetaryPolicy = bc.consensus.MonetaryPolicy
+	if consensusEnvOverridesSet() && envConsensus != bc.consensus {
+		log.Print("WARNING: consensus env vars are ignored because genesis.json is authoritative")
+	}
+
+	blocks, err := store.ReadCanonical()
+	if err != nil {
+		return nil, err
+	}
+	bc.blocks = blocks
+	allBlocks, err := store.ReadAllBlocks()
+	if err != nil {
+		return nil, err
+	}
+	if len(allBlocks) > 0 {
+		bc.blocksByHash = allBlocks
+	}
+
+	// Operator safety: lock consensus params to this chain store on first run, and refuse
+	// to run if they ever change (prevents accidental config forks).
+	curRulesHash := bc.consensus.MustRulesHash()
+	bc.rulesHash = curRulesHash
+
+	ignoreRulesHash := envBool("IGNORE_RULES_HASH_CHECK", false)
+	if !ignoreRulesHash && envBool("UNSAFE_IGNORE_RULES_HASH_CHECK", false) {
+		ignoreRulesHash = true
+		log.Print("WARNING: UNSAFE_IGNORE_RULES_HASH_CHECK is deprecated; use IGNORE_RULES_HASH_CHECK=true instead")
+	}
+	if ignoreRulesHash {
+		log.Print("WARNING: IGNORE_RULES_HASH_CHECK=true; running with consensus params that do not match stored rules hash")
+	}
+
+	if stored, ok, err := store.GetRulesHash(); err != nil {
+		return nil, err
+	} else if ok {
+		if len(stored) != 32 {
+			return nil, fmt.Errorf("invalid stored rules hash length: %d", len(stored))
+		}
+		var storedHash [32]byte
+		copy(storedHash[:], stored)
+		if storedHash != curRulesHash {
+			if ignoreRulesHash {
+				log.Printf("WARNING: rules hash mismatch ignored: stored=%x current=%x", storedHash, curRulesHash)
+			} else {
+				return nil, fmt.Errorf("consensus params mismatch: stored rulesHash=%x current rulesHash=%x (set IGNORE_RULES_HASH_CHECK=true to bypass, or delete data/ to reinit)", storedHash, curRulesHash)
+			}
+		}
+	} else {
+		// No stored rules hash yet. Initialize it.
+		if len(bc.blocks) > 0 {
+			log.Print("WARNING: initializing rules hash on an existing chain; ensure all nodes use identical consensus env vars")
+		}
+		if err := store.PutRulesHash(curRulesHash[:]); err != nil {
+			return nil, err
+		}
+	}
+
+	if len(bc.blocks) == 0 {
+		genesis, err := BuildGenesisBlock(genesisCfg, bc.consensus)
+		if err != nil {
+			return nil, err
+		}
+		if err := bc.store.AppendCanonical(genesis); err != nil {
+			return nil, err
+		}
+		_ = bc.store.PutBlock(genesis)
+		bc.blocks = append(bc.blocks, genesis)
+	} else {
+		if err := ValidateGenesisBlock(bc.blocks[0], genesisCfg, bc.consensus); err != nil {
+			return nil, err
+		}
+	}
+
+	if len(bc.blocks) == 0 {
+		return nil, errors.New("missing genesis block")
+	}
+	genesisHash, err := ensureBlockHash(bc.blocks[0], bc.consensus)
+	if err != nil {
+		return nil, err
+	}
+	if stored, ok, err := store.GetGenesisHash(); err != nil {
+		return nil, err
+	} else if ok {
+		if !bytes.Equal(stored, genesisHash) {
+			return nil, fmt.Errorf("genesis hash mismatch: stored=%x current=%x", stored, genesisHash)
+		}
+	} else {
+		if err := store.PutGenesisHash(genesisHash); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := bc.recomputeStateLocked(); err != nil {
+		return nil, err
+	}
+	bc.initCanonicalIndexesLocked()
+	return bc, nil
+}
+
+func (bc *Blockchain) RulesHashHex() string {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	if bc.rulesHash == ([32]byte{}) {
+		return ""
+	}
+	return hex.EncodeToString(bc.rulesHash[:])
+}
+
+func (bc *Blockchain) SetEventSink(sink EventSink) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	bc.events = sink
+}
+
+func (bc *Blockchain) LatestBlock() *Block {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.blocks[len(bc.blocks)-1]
+}
+
+func (bc *Blockchain) CanonicalWork() *big.Int {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	if bc.canonicalWork == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Set(bc.canonicalWork)
+}
+
+func (bc *Blockchain) BlockByHeight(height uint64) (*Block, bool) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	if height >= uint64(len(bc.blocks)) {
+		return nil, false
+	}
+	return bc.blocks[int(height)], true
+}
+
+func (bc *Blockchain) CanonicalTxCount() int {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	total := 0
+	for _, b := range bc.blocks {
+		total += len(b.Transactions)
+	}
+	return total
+}
+
+func (bc *Blockchain) Balance(address string) (Account, bool) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	acct, ok := bc.state[address]
+	return acct, ok
+}
+
+func (bc *Blockchain) TotalSupply() uint64 {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	var total uint64
+	for _, acct := range bc.state {
+		if total+acct.Balance < total {
+			return 0
+		}
+		total += acct.Balance
+	}
+	return total
+}
+
+func (bc *Blockchain) SubmitTransfer(tx Transaction, requireAIAudit bool, aiApproved bool) (*Block, error) {
+	// Compatibility helper: mine a single transfer immediately.
+	if requireAIAudit && !aiApproved {
+		return nil, errors.New("transaction rejected by AI auditor")
+	}
+	return bc.MineTransfers([]Transaction{tx})
+}
+
+func (bc *Blockchain) MineTransfers(transfers []Transaction) (*Block, error) {
+	latest := bc.LatestBlock()
+	if latest == nil {
+		return nil, errors.New("no genesis block")
+	}
+
+	prevHash := append([]byte(nil), latest.Hash...)
+	height := latest.Height + 1
+	now := time.Now().Unix()
+	ts := now
+	if ts <= latest.TimestampUnix {
+		ts = latest.TimestampUnix + 1
+	}
+
+	var fees uint64
+	for _, tx := range transfers {
+		if tx.Type != TxTransfer {
+			return nil, errors.New("only transfer txs can be mined")
+		}
+		if tx.ChainID == 0 {
+			tx.ChainID = bc.ChainID
+		}
+		if tx.ChainID != bc.ChainID {
+			return nil, fmt.Errorf("wrong chainId: %d", tx.ChainID)
+		}
+		if err := tx.VerifyForConsensus(bc.consensus, height); err != nil {
+			return nil, err
+		}
+		if tx.Fee < minFee {
+			return nil, fmt.Errorf("fee too low: minFee=%d", minFee)
+		}
+		fees += tx.Fee
+	}
+
+	policy := bc.consensus.MonetaryPolicy
+	reward := policy.BlockReward(height)
+	minerFees := policy.MinerFeeAmount(fees)
+	coinbaseData := fmt.Sprintf("block reward + fees (height=%d)", height)
+	if height == 1 {
+		coinbaseData = "Memphis"
+	}
+	coinbase := Transaction{
+		Type:      TxCoinbase,
+		ChainID:   bc.ChainID,
+		ToAddress: bc.MinerAddress,
+		Amount:    reward + minerFees,
+		Data:      coinbaseData,
+	}
+
+	txs := make([]Transaction, 0, 1+len(transfers))
+	txs = append(txs, coinbase)
+	txs = append(txs, transfers...)
+
+	// Calculate difficulty using NogoPow engine
+	engine := nogopow.New(nogopow.DefaultConfig())
+
+	// Get parent header for difficulty calculation
+	parentHeader := &nogopow.Header{
+		Number:     big.NewInt(int64(latest.Height)),
+		Time:       uint64(latest.TimestampUnix),
+		Difficulty: big.NewInt(int64(latest.DifficultyBits)),
+	}
+
+	// Calculate next difficulty
+	nextDifficulty := engine.CalcDifficulty(bc, uint64(ts), parentHeader)
+
+	newBlock := &Block{
+		Version:        blockVersionForHeight(bc.consensus, height),
+		Height:         height,
+		TimestampUnix:  ts,
+		PrevHash:       prevHash,
+		DifficultyBits: uint32(nextDifficulty.Uint64()),
+		MinerAddress:   bc.MinerAddress,
+		Transactions:   txs,
+	}
+
+	// Create NogoPow block
+	parentHash := nogopow.Hash{}
+	copy(parentHash[:], newBlock.PrevHash)
+
+	header := &nogopow.Header{
+		Number:     big.NewInt(int64(newBlock.Height)),
+		Time:       uint64(newBlock.TimestampUnix),
+		ParentHash: parentHash,
+		Difficulty: nextDifficulty,
+	}
+
+	// Prepare header with dynamic difficulty
+	if err := engine.Prepare(bc, header); err != nil {
+		return nil, fmt.Errorf("failed to prepare header: %w", err)
+	}
+
+	// Create block for mining
+	block := nogopow.NewBlock(header, nil, nil, nil)
+
+	// Mine using NogoPow algorithm (no timeout - wait until solution found)
+	stop := make(chan struct{})
+	resultCh := make(chan *nogopow.Block, 1)
+
+	go func() {
+		err := engine.Seal(bc, block, resultCh, stop)
+		if err != nil {
+			close(resultCh)
+		}
+	}()
+
+	// Wait for result (no timeout)
+	result, ok := <-resultCh
+	if !ok {
+		close(stop)
+		return nil, fmt.Errorf("mining failed: channel closed")
+	}
+	// Extract nonce and hash from sealed block
+	sealedHeader := result.Header()
+	newBlock.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
+	hashBytes := sealedHeader.Hash().Bytes()
+	newBlock.Hash = hashBytes
+
+	bc.mu.Lock()
+	var eventSink EventSink
+	var toPublish *WSEvent
+	defer func() {
+		bc.mu.Unlock()
+		if eventSink != nil && toPublish != nil {
+			eventSink.Publish(*toPublish)
+		}
+	}()
+
+	if err := applyBlockToState(bc.consensus, bc.state, newBlock); err != nil {
+		return nil, err
+	}
+	if err := bc.store.AppendCanonical(newBlock); err != nil {
+		return nil, err
+	}
+	bc.blocks = append(bc.blocks, newBlock)
+	bc.addToIndexLocked(newBlock)
+	bc.indexTxsForBlockLocked(newBlock)
+	bc.indexAddressTxsForBlockLocked(newBlock)
+	bc.bestTipHash = hex.EncodeToString(newBlock.Hash)
+	if bc.canonicalWork == nil {
+		bc.canonicalWork = big.NewInt(0)
+	}
+	bc.canonicalWork.Add(bc.canonicalWork, WorkForDifficultyBits(newBlock.DifficultyBits))
+	toPublish = &WSEvent{
+		Type: "new_block",
+		Data: map[string]any{
+			"height":         newBlock.Height,
+			"hash":           hex.EncodeToString(newBlock.Hash),
+			"prevHash":       hex.EncodeToString(newBlock.PrevHash),
+			"difficultyBits": newBlock.DifficultyBits,
+			"txCount":        len(newBlock.Transactions),
+			"addresses":      addressesForBlock(newBlock),
+		},
+	}
+	eventSink = bc.events
+	return newBlock, nil
+}
+
+func (bc *Blockchain) AuditChain() error {
+	bc.mu.RLock()
+	blocks := append([]*Block(nil), bc.blocks...)
+	consensus := bc.consensus
+	bc.mu.RUnlock()
+	if len(blocks) == 0 {
+		return errors.New("empty chain")
+	}
+	for i, b := range blocks {
+		if i == 0 {
+			if b.Height != 0 || len(b.PrevHash) != 0 {
+				return errors.New("invalid genesis header")
+			}
+			if b.Version != blockVersionForHeight(consensus, 0) {
+				return fmt.Errorf("bad block version at %d: expected %d got %d", b.Height, blockVersionForHeight(consensus, 0), b.Version)
+			}
+		} else {
+			prev := blocks[i-1]
+			if b.Height != prev.Height+1 {
+				return fmt.Errorf("bad height at %d", b.Height)
+			}
+			if string(b.PrevHash) != string(prev.Hash) {
+				return fmt.Errorf("bad prev hash at %d", b.Height)
+			}
+			if err := validateBlockTime(consensus, blocks, i); err != nil {
+				return err
+			}
+			if consensus.DifficultyEnable {
+				expected := expectedDifficultyBitsForBlockIndex(consensus, blocks, i)
+				if b.DifficultyBits != expected {
+					return fmt.Errorf("bad difficulty at %d: expected %d got %d", b.Height, expected, b.DifficultyBits)
+				}
+			}
+			if b.Version != blockVersionForHeight(consensus, b.Height) {
+				return fmt.Errorf("bad block version at %d: expected %d got %d", b.Height, blockVersionForHeight(consensus, b.Height), b.Version)
+			}
+		}
+		if b.DifficultyBits == 0 || b.DifficultyBits > maxDifficultyBits {
+			return fmt.Errorf("difficultyBits out of range at %d: %d", b.Height, b.DifficultyBits)
+		}
+		ok, err := NewProofOfWork(consensus, b).Validate()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("invalid pow at height %d", b.Height)
+		}
+		// tx validity check (structural + signatures)
+		for _, tx := range b.Transactions {
+			if tx.ChainID == 0 {
+				return fmt.Errorf("missing chainId at height %d", b.Height)
+			}
+			if err := tx.VerifyForConsensus(consensus, b.Height); err != nil {
+				return fmt.Errorf("invalid tx at height %d: %w", b.Height, err)
+			}
+		}
+	}
+	// Ensure state is reproducible
+	return bc.recomputeState()
+}
+
+// createGenesis reserved for future use
+//
+//nolint:unused
+func (bc *Blockchain) createGenesis(genesisSupply uint64, genesisToAddress, genesisMinerAddress string, genesisTimestampUnix int64) (*Block, error) {
+	coinbase := Transaction{
+		Type:      TxCoinbase,
+		ChainID:   bc.ChainID,
+		ToAddress: genesisToAddress,
+		Amount:    genesisSupply,
+		Data:      fmt.Sprintf("genesis allocation (supply=%d)", genesisSupply),
+	}
+	genesis := &Block{
+		Version:        blockVersionForHeight(bc.consensus, 0),
+		Height:         0,
+		TimestampUnix:  genesisTimestampUnix,
+		PrevHash:       nil,
+		DifficultyBits: bc.consensus.GenesisDifficultyBits,
+		MinerAddress:   genesisMinerAddress,
+		Transactions:   []Transaction{coinbase},
+	}
+	pow := NewProofOfWork(bc.consensus, genesis)
+	nonce, hash, err := pow.Run()
+	if err != nil {
+		return nil, err
+	}
+	genesis.Nonce = nonce
+	genesis.Hash = hash
+	return genesis, nil
+}
+
+func (bc *Blockchain) recomputeState() error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	return bc.recomputeStateLocked()
+}
+
+func (bc *Blockchain) recomputeStateLocked() error {
+	bc.state = map[string]Account{}
+	for _, b := range bc.blocks {
+		if err := applyBlockToState(bc.consensus, bc.state, b); err != nil {
+			return fmt.Errorf("apply block %d: %w", b.Height, err)
+		}
+	}
+	return nil
+}
+
+type TxLocation struct {
+	Height       uint64 `json:"height"`
+	BlockHashHex string `json:"blockHashHex"`
+	Index        int    `json:"index"`
+}
+
+type AddressTxEntry struct {
+	TxID      string     `json:"txId"`
+	Location  TxLocation `json:"location"`
+	FromAddr  string     `json:"fromAddr"`
+	ToAddress string     `json:"toAddress"`
+	Amount    uint64     `json:"amount"`
+	Fee       uint64     `json:"fee"`
+	Nonce     uint64     `json:"nonce"`
+}
+
+func (bc *Blockchain) TxByID(txid string) (Transaction, TxLocation, bool) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	loc, ok := bc.txIndex[txid]
+	if !ok {
+		return Transaction{}, TxLocation{}, false
+	}
+	if loc.Height >= uint64(len(bc.blocks)) || loc.Index < 0 {
+		return Transaction{}, TxLocation{}, false
+	}
+	b := bc.blocks[int(loc.Height)]
+	if loc.Index >= len(b.Transactions) {
+		return Transaction{}, TxLocation{}, false
+	}
+	if hex.EncodeToString(b.Hash) != loc.BlockHashHex {
+		return Transaction{}, TxLocation{}, false
+	}
+	return b.Transactions[loc.Index], loc, true
+}
+
+func (bc *Blockchain) indexTxsForBlockLocked(b *Block) {
+	if bc.txIndex == nil {
+		bc.txIndex = map[string]TxLocation{}
+	}
+	hashHex := hex.EncodeToString(b.Hash)
+	for i, tx := range b.Transactions {
+		// Only index transfers (coinbase txids can collide).
+		if tx.Type != TxTransfer {
+			continue
+		}
+		txid, err := TxIDHexForConsensus(tx, bc.consensus, b.Height)
+		if err != nil {
+			continue
+		}
+		bc.txIndex[txid] = TxLocation{Height: b.Height, BlockHashHex: hashHex, Index: i}
+	}
+}
+
+func (bc *Blockchain) indexAddressTxsForBlockLocked(b *Block) {
+	if bc.addressIndex == nil {
+		bc.addressIndex = map[string][]AddressTxEntry{}
+	}
+	hashHex := hex.EncodeToString(b.Hash)
+	for i, tx := range b.Transactions {
+		if tx.Type != TxTransfer {
+			continue
+		}
+		txid, err := TxIDHexForConsensus(tx, bc.consensus, b.Height)
+		if err != nil {
+			continue
+		}
+		from, err := tx.FromAddress()
+		if err != nil {
+			continue
+		}
+		entry := AddressTxEntry{
+			TxID: txid,
+			Location: TxLocation{
+				Height:       b.Height,
+				BlockHashHex: hashHex,
+				Index:        i,
+			},
+			FromAddr:  from,
+			ToAddress: tx.ToAddress,
+			Amount:    tx.Amount,
+			Fee:       tx.Fee,
+			Nonce:     tx.Nonce,
+		}
+		bc.addressIndex[from] = append(bc.addressIndex[from], entry)
+		if tx.ToAddress != from {
+			bc.addressIndex[tx.ToAddress] = append(bc.addressIndex[tx.ToAddress], entry)
+		}
+	}
+}
+
+func (bc *Blockchain) reindexAllTxsLocked() {
+	bc.txIndex = map[string]TxLocation{}
+	for _, b := range bc.blocks {
+		bc.indexTxsForBlockLocked(b)
+	}
+}
+
+func (bc *Blockchain) reindexAllAddressTxsLocked() {
+	bc.addressIndex = map[string][]AddressTxEntry{}
+	for _, b := range bc.blocks {
+		bc.indexAddressTxsForBlockLocked(b)
+	}
+}
+
+// AddressTxs returns canonical transfer history for an address, newest-first.
+// cursor is an offset from the newest item (0 means start at newest).
+func (bc *Blockchain) AddressTxs(address string, limit int, cursor int) ([]AddressTxEntry, int, bool) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	if bc.addressIndex == nil {
+		return nil, 0, false
+	}
+	all := bc.addressIndex[address]
+	if len(all) == 0 {
+		return []AddressTxEntry{}, 0, false
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	start := len(all) - 1 - cursor
+	if start < 0 {
+		return []AddressTxEntry{}, cursor, false
+	}
+	out := make([]AddressTxEntry, 0, limit)
+	i := start
+	for i >= 0 && len(out) < limit {
+		out = append(out, all[i])
+		i--
+	}
+	nextCursor := cursor + len(out)
+	more := (len(all) - 1 - nextCursor) >= 0
+	return out, nextCursor, more
+}
+
+func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) error {
+	if p.MaxBlockSize > 0 {
+		size, err := blockSizeForConsensus(b)
+		if err != nil {
+			return err
+		}
+		if uint64(size) > p.MaxBlockSize {
+			return fmt.Errorf("block too large: %d bytes (max %d)", size, p.MaxBlockSize)
+		}
+	}
+	if len(b.Transactions) == 0 {
+		return errors.New("block has no transactions")
+	}
+	// Enforce coinbase position
+	if b.Transactions[0].Type != TxCoinbase {
+		return errors.New("first tx must be coinbase")
+	}
+
+	// Consensus economics: for non-genesis blocks, coinbase must pay subsidy + miner fee share
+	// to the block's declared miner address.
+	if b.Height > 0 {
+		if err := validateAddress(b.MinerAddress); err != nil {
+			return fmt.Errorf("invalid minerAddress: %w", err)
+		}
+		var fees uint64
+		for _, tx := range b.Transactions[1:] {
+			if tx.Type != TxTransfer {
+				continue
+			}
+			fees += tx.Fee
+		}
+		cb := b.Transactions[0]
+		if cb.ToAddress != b.MinerAddress {
+			return errors.New("coinbase toAddress must match minerAddress")
+		}
+		policy := p.MonetaryPolicy
+		expected := policy.BlockReward(b.Height) + policy.MinerFeeAmount(fees)
+		if cb.Amount != expected {
+			return fmt.Errorf("bad coinbase amount: expected %d got %d", expected, cb.Amount)
+		}
+	}
+
+	for i, tx := range b.Transactions {
+		switch tx.Type {
+		case TxCoinbase:
+			if i != 0 {
+				return errors.New("coinbase must be first")
+			}
+			if err := tx.VerifyForConsensus(p, b.Height); err != nil {
+				return err
+			}
+			acct := state[tx.ToAddress]
+			if acct.Balance+tx.Amount < acct.Balance {
+				return errors.New("coinbase balance overflow")
+			}
+			acct.Balance += tx.Amount
+			state[tx.ToAddress] = acct
+		case TxTransfer:
+			if err := tx.VerifyForConsensus(p, b.Height); err != nil {
+				return err
+			}
+			fromAddr, err := tx.FromAddress()
+			if err != nil {
+				return err
+			}
+			from := state[fromAddr]
+			// Nonce must increase sequentially per account
+			if from.Nonce+1 != tx.Nonce {
+				return fmt.Errorf("bad nonce for %s: expected %d got %d", fromAddr, from.Nonce+1, tx.Nonce)
+			}
+			totalDebit := tx.Amount + tx.Fee
+			if from.Balance < totalDebit {
+				return fmt.Errorf("insufficient funds for %s", fromAddr)
+			}
+			from.Balance -= totalDebit
+			from.Nonce = tx.Nonce
+			state[fromAddr] = from
+
+			to := state[tx.ToAddress]
+			if to.Balance+tx.Amount < to.Balance {
+				return errors.New("transfer balance overflow")
+			}
+			to.Balance += tx.Amount
+			state[tx.ToAddress] = to
+		default:
+			return fmt.Errorf("unknown tx type: %q", tx.Type)
+		}
+	}
+	return nil
+}
+
+// SelectMempoolTxs picks a fee-sorted set of transactions that are valid against the current chain state
+// plus the effects of already-selected mempool transactions.
+func (bc *Blockchain) SelectMempoolTxs(mp *Mempool, max int) ([]Transaction, []string, error) {
+	if max <= 0 {
+		max = 100
+	}
+
+	bc.mu.RLock()
+	baseState := make(map[string]Account, len(bc.state))
+	for k, v := range bc.state {
+		baseState[k] = v
+	}
+	bc.mu.RUnlock()
+
+	entries := mp.EntriesSortedByFeeDesc()
+	var picked []Transaction
+	var pickedIDs []string
+
+	state := baseState
+	nextHeight := bc.LatestBlock().Height + 1
+
+	for _, e := range entries {
+		if len(picked) >= max {
+			break
+		}
+		tx := e.tx
+		if tx.Type != TxTransfer {
+			continue
+		}
+		if tx.ChainID == 0 {
+			tx.ChainID = bc.ChainID
+		}
+		if err := tx.VerifyForConsensus(bc.consensus, nextHeight); err != nil {
+			continue
+		}
+		fromAddr, err := tx.FromAddress()
+		if err != nil {
+			continue
+		}
+		from := state[fromAddr]
+		if from.Nonce+1 != tx.Nonce {
+			continue
+		}
+		totalDebit := tx.Amount + tx.Fee
+		if from.Balance < totalDebit {
+			continue
+		}
+
+		// Apply in the simulated state so later txs from same account validate correctly.
+		from.Balance -= totalDebit
+		from.Nonce = tx.Nonce
+		state[fromAddr] = from
+
+		to := state[tx.ToAddress]
+		if to.Balance+tx.Amount < to.Balance {
+			continue
+		}
+		to.Balance += tx.Amount
+		state[tx.ToAddress] = to
+
+		picked = append(picked, tx)
+		pickedIDs = append(pickedIDs, e.txIDHex)
+	}
+
+	return picked, pickedIDs, nil
+}
+
+func (bc *Blockchain) initCanonicalIndexesLocked() {
+	if bc.blocksByHash == nil {
+		bc.blocksByHash = map[string]*Block{}
+	}
+	for _, b := range bc.blocks {
+		bc.addToIndexLocked(b)
+	}
+	bc.bestTipHash = hex.EncodeToString(bc.blocks[len(bc.blocks)-1].Hash)
+	bc.reindexAllTxsLocked()
+	bc.reindexAllAddressTxsLocked()
+	bc.canonicalWork = big.NewInt(0)
+	for _, b := range bc.blocks {
+		bc.canonicalWork.Add(bc.canonicalWork, WorkForDifficultyBits(b.DifficultyBits))
+	}
+}
+
+func (bc *Blockchain) addToIndexLocked(b *Block) {
+	if len(b.Hash) == 0 {
+		return
+	}
+	bc.blocksByHash[hex.EncodeToString(b.Hash)] = b
+}

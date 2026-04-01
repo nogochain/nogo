@@ -1,0 +1,33 @@
+{
+  admin off
+  auto_https off
+}
+
+:80 {
+  redir https://{host}:8443{uri} 308
+}
+
+:8443 {
+  tls internal
+  encode zstd gzip
+  
+  # Security headers
+  header {
+    X-Frame-Options "DENY"
+    X-Content-Type-Options "nosniff"
+    X-XSS-Protection "1; mode=block"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+  }
+  
+  # Rate limiting (basic DoS protection)
+  rate_limit 10 1s
+  rate_limit 100 1m
+  
+  reverse_proxy blockchain:8080
+}
+
+# Metrics endpoint (optional)
+:9090 {
+  metrics /metrics
+}

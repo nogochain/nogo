@@ -1,0 +1,114 @@
+syntax = "proto3";
+
+package nogo;
+
+option go_package = "github.com/NogoChain/NogoChain/proto";
+
+message Block {
+    Header header = 1;
+    repeated Transaction transactions = 2;
+}
+
+message Header {
+    int64 version = 1;
+    string prev_block = 2;
+    string merkle_root = 3;
+    int64 timestamp = 4;
+    int64 height = 5;
+    int64 difficulty = 6;
+    string nonce = 7;
+    string miner = 8;
+}
+
+message Transaction {
+    string txid = 1;
+    string from = 2;
+    string to = 3;
+    int64 amount = 4;
+    int64 fee = 5;
+    int64 nonce = 6;
+    bytes signature = 7;
+    int64 gas_limit = 8;
+    int64 gas_used = 9;
+    bool is_coinbase = 10;
+}
+
+message Ping { int64 nonce = 1; int64 timestamp = 2; }
+message Pong { int64 nonce = 1; }
+
+message GetHeaders {
+    string locator_hash = 1;
+    string hash_stop = 2;
+}
+
+message Headers {
+    repeated Header headers = 1;
+}
+
+message GetBlocks {
+    string locator_hash = 1;
+    string hash_stop = 2;
+}
+
+message GetTransactions {
+    repeated string txids = 1;
+}
+
+message Inv {
+    int32 type = 1;
+    repeated string hashes = 2;
+}
+
+message GetData {
+    repeated Inv items = 1;
+}
+
+message NotFound {
+    repeated string hashes = 1;
+}
+
+message Version {
+    int64 version = 1;
+    int64 services = 2;
+    int64 timestamp = 3;
+    int64 addr_recv = 4;
+    int64 addr_from = 5;
+    int64 nonce = 6;
+    string user_agent = 7;
+    int64 start_height = 8;
+}
+
+message Verack {}
+message Reject {
+    string message = 1;
+    string ccode = 2;
+    string reason = 3;
+}
+
+message P2PMessage {
+    string type = 1;
+    bytes payload = 2;
+    int64 timestamp = 3;
+}
+
+message Hello {
+    uint32 protocol = 1;
+    uint64 chain_id = 2;
+    string rules_hash = 3;
+    string node_id = 4;
+    int64 time_unix = 5;
+    uint32 port = 6;
+    uint64 services = 7;
+}
+
+message PeerAddress {
+    string ip = 1;
+    uint32 port = 2;
+    int64 timestamp = 3;
+}
+
+message Addr {
+    repeated PeerAddress addresses = 1;
+}
+
+message GetAddr {}

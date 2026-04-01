@@ -1,0 +1,6 @@
+# Ignore local on-disk chain state (often root-owned via Docker volumes)
+blockchain/data/
+blockchain/data-node0/
+blockchain/data-node1/
+blockchain/data-node2/
+

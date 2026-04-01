@@ -1,0 +1,19 @@
+{
+  "commands": {
+    "get_balance": {
+      "description": "Queries the Go blockchain ledger for the balance of a given address.",
+      "command": "docker compose exec blockchain ./blockchain get_balance {{address}} http://localhost:8080",
+      "args": [
+        {"name": "address", "description": "The blockchain address to query.", "required": true}
+      ]
+    },
+    "audit_chain": {
+      "description": "Runs a full integrity scan of the blockchain.",
+      "command": "docker compose exec blockchain ./blockchain audit_chain http://localhost:8080"
+    },
+    "chain_info": {
+      "description": "Returns chain metadata (chainId, height, latest hash).",
+      "command": "docker compose exec blockchain ./blockchain chain_info http://localhost:8080"
+    }
+  }
+}

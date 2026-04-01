@@ -1,0 +1,19 @@
+run:
+  tests: false
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+
+issues:
+  exclude-use-default: false
+  
+  # Exclude functions reserved for future use
+  exclude-rules:
+    - linters:
+        - unused
+      text: "func `.*` is unused"
+    - linters:
+        - unused
+      text: "type `.*` is unused"

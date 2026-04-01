@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NogoChain Explorer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; min-height: 100vh; }
+.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+.header { background: #161b22; border-bottom: 1px solid #30363d; padding: 15px 0; margin-bottom: 30px; }
+.header .container { display: flex; align-items: center; gap: 20px; }
+.logo { font-size: 24px; font-weight: bold; color: #58a6ff; }
+.nav { display: flex; gap: 20px; }
+.nav a { color: #8b949e; text-decoration: none; font-size: 14px; cursor: pointer; }
+.nav a:hover { color: #c9d1d9; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 30px; }
+.stat { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; }
+.stat-label { font-size: 12px; color: #8b949e; margin-bottom: 5px; text-transform: uppercase; }
+.stat-value { font-size: 24px; font-weight: bold; color: #58a6ff; }
+.search { display: flex; gap: 10px; margin-bottom: 30px; }
+.search input { flex: 1; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 12px; color: #c9d1d9; font-size: 14px; }
+.search input:focus { outline: none; border-color: #58a6ff; }
+.search button { background: #238636; border: none; border-radius: 6px; padding: 12px 24px; color: white; cursor: pointer; font-weight: bold; }
+.search button:hover { background: #2ea043; }
+.blocks { background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+.block-header { padding: 15px 20px; border-bottom: 1px solid #30363d; font-weight: bold; color: #8b949e; font-size: 14px; }
+.block-row { padding: 15px 20px; border-bottom: 1px solid #21262d; display: grid; grid-template-columns: 80px 1fr 120px 120px; gap: 15px; align-items: center; font-size: 14px; }
+.block-row:last-child { border-bottom: none; }
+.block-row:hover { background: #1c2128; }
+.block-hash { color: #58a6ff; cursor: pointer; font-family: monospace; }
+.block-hash:hover { text-decoration: underline; }
+.block-detail { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-top: 20px; display: none; }
+.block-detail.show { display: block; }
+.detail-row { display: flex; padding: 8px 0; border-bottom: 1px solid #21262d; }
+.detail-label { color: #8b949e; width: 150px; }
+.detail-value { color: #c9d1d9; font-family: monospace; }
+.tx-list { margin-top: 15px; }
+.tx-item { background: #0d1117; border-radius: 4px; padding: 10px; margin-top: 8px; font-size: 13px; }
+.tx-from, .tx-to { font-family: monospace; color: #58a6ff; }
+.tx-amount { color: #3fb950; float: right; }
+.footer { text-align: center; padding: 30px; color: #8b949e; font-size: 12px; margin-top: 40px; }
+.error { background: #f8514966; border: 1px solid #f85149; border-radius: 6px; padding: 15px; color: #f85149; margin-bottom: 20px; display: none; }
+.error.show { display: block; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="container">
+    <div class="logo">NOGO</div>
+    <div class="nav">
+      <a href="#" onclick="showBlocks(); return false;">Blocks</a>
+      <a href="#" onclick="showMempool(); return false;">Mempool</a>
+      <a href="#" onclick="showPeers(); return false;">Peers</a>
+    </div>
+  </div>
+</div>
+<div class="container">
+  <div class="stats" id="stats">
+    <div class="stat"><div class="stat-label">Height</div><div class="stat-value" id="height">-</div></div>
+    <div class="stat"><div class="stat-label">Total Supply</div><div class="stat-value" id="supply">-</div></div>
+    <div class="stat"><div class="stat-label">Difficulty</div><div class="stat-value" id="difficulty">-</div></div>
+    <div class="stat"><div class="stat-label">Peers</div><div class="stat-value" id="peers">-</div></div>
+  </div>
+  
+  <div class="error" id="error"></div>
+  
+  <div class="search">
+    <input type="text" id="searchInput" placeholder="Search by block height, hash, address, or TX ID...">
+    <button onclick="search()">Search</button>
+  </div>
+  
+  <div class="blocks" id="blocks">
+    <div class="block-header">Recent Blocks</div>
+    <div id="blockList">Loading...</div>
+  </div>
+  
+  <div class="block-detail" id="blockDetail">
+    <h3>Block Details</h3>
+    <div id="blockInfo"></div>
+    <div class="tx-list" id="txList"></div>
+  </div>
+</div>
+
+<script>
+const API = window.location.protocol + '//' + window.location.hostname + ':' + (window.location.port || 8080);
+
+async function api(path) {
+  try {
+    const r = await fetch(API + path);
+    if (!r.ok) throw new Error('API error: ' + r.status);
+    return await r.json();
+  } catch(e) {
+    showError('Cannot connect to node at ' + API + ': ' + e.message);
+    return null;
+  }
+}
+
+function showError(msg) {
+  const el = document.getElementById('error');
+  el.textContent = msg;
+  el.classList.add('show');
+}
+function hideError() { document.getElementById('error').classList.remove('show'); }
+
+async function loadStats() {
+  hideError();
+  const info = await api('/chain/info');
+  if (!info) return;
+  
+  document.getElementById('height').textContent = info.height;
+  document.getElementById('supply').textContent = (info.totalSupply / 1e8).toFixed(8) + ' NOGO';
+  document.getElementById('difficulty').textContent = info.difficultyBits + ' bits';
+  document.getElementById('peers').textContent = info.peersCount;
+  
+  const list = document.getElementById('blockList');
+  list.innerHTML = '';
+  for (let h = info.height; h > Math.max(0, info.height - 20); h--) {
+    const block = await api('/block/height/' + h);
+    if (block) {
+      const row = document.createElement('div');
+      row.className = 'block-row';
+      const time = block.header ? new Date(block.header.timestamp * 1000).toLocaleTimeString() : '-';
+      const txs = block.transactions ? block.transactions.length : 0;
+      const hash = block.hash || (block.header ? block.header.hashHex : '') || '-';
+      row.innerHTML = '<span>' + h + '</span><span class="block-hash" onclick="showBlock(' + h + ')">' + hash.substring(0,16) + '...</span><span>' + txs + ' tx</span><span>' + time + '</span>';
+      list.appendChild(row);
+    }
+  }
+}
+
+async function showBlock(height) {
+  const block = await api('/block/height/' + height);
+  const detail = document.getElementById('blockDetail');
+  const info = document.getElementById('blockInfo');
+  const txList = document.getElementById('txList');
+  
+  if (!block) return;
+  
+  const h = block.header || block;
+  info.innerHTML = `
+    <div class="detail-row"><span class="detail-label">Height</span><span class="detail-value">${height}</span></div>
+    <div class="detail-row"><span class="detail-label">Hash</span><span class="detail-value">${h.hashHex || '-'}</span></div>
+    <div class="detail-row"><span class="detail-label">Timestamp</span><span class="detail-value">${h.timestamp ? new Date(h.timestamp * 1000).toLocaleString() : '-'}</span></div>
+    <div class="detail-row"><span class="detail-label">Difficulty</span><span class="detail-value">${h.difficulty || '-'}</span></div>
+    <div class="detail-row"><span class="detail-label">Nonce</span><span class="detail-value">${h.nonce || '-'}</span></div>
+    <div class="detail-row"><span class="detail-label">Merkle Root</span><span class="detail-value">${h.merkleRoot || '-'}</span></div>
+    <div class="detail-row"><span class="detail-label">Miner</span><span class="detail-value">${h.miner || '-'}</span></div>
+  `;
+  
+  txList.innerHTML = '<h4 style="color:#8b949e;margin:15px 0 10px">Transactions</h4>';
+  const txs = block.transactions || [];
+  if (txs.length === 0) {
+    txList.innerHTML += '<div style="color:#8b949e">No transactions</div>';
+  }
+  txs.forEach(tx => {
+    txList.innerHTML += '<div class="tx-item"><span class="tx-from">' + (tx.from || 'COINBASE') + '</span> → <span class="tx-to">' + (tx.to || '-') + '</span><span class="tx-amount">' + ((tx.amount || 0) / 1e8).toFixed(8) + ' NOGO</span></div>';
+  });
+  
+  detail.classList.add('show');
+  detail.scrollIntoView({ behavior: 'smooth' });
+}
+
+async function showBlocks() {
+  document.getElementById('blockDetail').classList.remove('show');
+  document.getElementById('blocks').style.display = 'block';
+  await loadStats();
+}
+
+async function showMempool() {
+  document.getElementById('blockDetail').classList.remove('show');
+  const mp = await api('/mempool');
+  const list = document.getElementById('blockList');
+  
+  if (!mp) return;
+  list.innerHTML = '<div class="block-header">Mempool: ' + mp.size + ' transactions</div>';
+  
+  (mp.txs || []).forEach(tx => {
+    list.innerHTML += '<div class="block-row"><span>' + (tx.txId || '-').substring(0,16) + '</span><span>' + tx.fromAddr + '</span><span>' + tx.toAddress + '</span><span>' + ((tx.amount || 0)/1e8).toFixed(8) + ' NOGO</span></div>';
+  });
+}
+
+async function showPeers() {
+  document.getElementById('blockDetail').classList.remove('show');
+  const info = await api('/chain/info');
+  const list = document.getElementById('blockList');
+  list.innerHTML = '<div class="block-header">Connected Peers</div>';
+  if (info && info.peersCount > 0) {
+    list.innerHTML += '<div style="padding:20px;color:#8b949e">Peer info not exposed via API</div>';
+  } else {
+    list.innerHTML += '<div style="padding:20px;color:#8b949e">No peers connected</div>';
+  }
+}
+
+async function search() {
+  const q = document.getElementById('searchInput').value.trim();
+  if (!q) return;
+  hideError();
+  
+  if (/^\d+$/.test(q)) {
+    const block = await api('/block/height/' + q);
+    if (block) { showBlock(parseInt(q)); return; }
+  }
+  
+  const tx = await api('/tx/' + q);
+  if (tx) {
+    alert('TX: ' + JSON.stringify(tx, null, 2));
+    return;
+  }
+  
+  const bal = await api('/balance/' + q);
+  if (bal) {
+    alert('Balance: ' + JSON.stringify(bal, null, 2));
+    return;
+  }
+  
+  showError('Not found: ' + q);
+}
+
+document.getElementById('searchInput').addEventListener('keypress', e => { if (e.key === 'Enter') search(); });
+
+loadStats();
+setInterval(loadStats, 15000);
+</script>
+</body>
+</html>

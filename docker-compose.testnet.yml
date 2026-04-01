@@ -1,0 +1,105 @@
+services:
+  blockchain-node0:
+    image: nogochain-blockchain:latest
+    user: "0:0"
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - nogochain_testnet_chain_data_node0:/app/data
+      - ./genesis:/app/genesis:ro
+    environment:
+      - CHAIN_ID=${CHAIN_ID:-2}
+      - GENESIS_PATH=${GENESIS_PATH:-genesis/testnet.json}
+      - MINER_ADDRESS=${MINER_ADDRESS_NODE0:-}
+      - PEERS=http://blockchain-node1:8080,http://blockchain-node2:8080
+      - P2P_ENABLE=true
+      - P2P_LISTEN_ADDR=:9090
+      - P2P_PEERS=blockchain-node1:9090,blockchain-node2:9090
+      - TX_GOSSIP_ENABLE=true
+      - TX_GOSSIP_HOPS=${TX_GOSSIP_HOPS:-2}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-0}
+      - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-0}
+      - HTTP_TIMEOUT_SECONDS=${HTTP_TIMEOUT_SECONDS:-10}
+      - HTTP_MAX_HEADER_BYTES=${HTTP_MAX_HEADER_BYTES:-8192}
+      - WS_ENABLE=${WS_ENABLE:-true}
+      - WS_MAX_CONNECTIONS=${WS_MAX_CONNECTIONS:-100}
+      - HTTP_ADDR=127.0.0.1:8080
+      - AUTO_MINE=true
+      - MINE_INTERVAL_MS=${MINE_INTERVAL_MS:-1000}
+      - SYNC_ENABLE=true
+      - SYNC_INTERVAL_MS=${SYNC_INTERVAL_MS:-3000}
+    restart: always
+    command: ["./blockchain", "server"]
+
+  blockchain-node1:
+    image: nogochain-blockchain:latest
+    user: "0:0"
+    ports:
+      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:9091:9090"
+    volumes:
+      - nogochain_testnet_chain_data_node1:/app/data
+      - ./genesis:/app/genesis:ro
+    environment:
+      - CHAIN_ID=${CHAIN_ID:-2}
+      - GENESIS_PATH=${GENESIS_PATH:-genesis/testnet.json}
+      - MINER_ADDRESS=${MINER_ADDRESS_NODE1:-}
+      - PEERS=http://blockchain-node0:8080,http://blockchain-node2:8080
+      - P2P_ENABLE=true
+      - P2P_LISTEN_ADDR=:9090
+      - P2P_PEERS=blockchain-node0:9090,blockchain-node2:9090
+      - TX_GOSSIP_ENABLE=true
+      - TX_GOSSIP_HOPS=${TX_GOSSIP_HOPS:-2}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-0}
+      - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-0}
+      - HTTP_TIMEOUT_SECONDS=${HTTP_TIMEOUT_SECONDS:-10}
+      - HTTP_MAX_HEADER_BYTES=${HTTP_MAX_HEADER_BYTES:-8192}
+      - WS_ENABLE=${WS_ENABLE:-true}
+      - WS_MAX_CONNECTIONS=${WS_MAX_CONNECTIONS:-100}
+      - HTTP_ADDR=127.0.0.1:8080
+      - AUTO_MINE=false
+      - SYNC_ENABLE=true
+      - SYNC_INTERVAL_MS=${SYNC_INTERVAL_MS:-3000}
+    restart: always
+    command: ["./blockchain", "server"]
+
+  blockchain-node2:
+    image: nogochain-blockchain:latest
+    user: "0:0"
+    ports:
+      - "127.0.0.1:8082:8080"
+      - "127.0.0.1:9092:9090"
+    volumes:
+      - nogochain_testnet_chain_data_node2:/app/data
+      - ./genesis:/app/genesis:ro
+    environment:
+      - CHAIN_ID=${CHAIN_ID:-2}
+      - GENESIS_PATH=${GENESIS_PATH:-genesis/testnet.json}
+      - MINER_ADDRESS=${MINER_ADDRESS_NODE2:-}
+      - PEERS=http://blockchain-node0:8080,http://blockchain-node1:8080
+      - P2P_ENABLE=true
+      - P2P_LISTEN_ADDR=:9090
+      - P2P_PEERS=blockchain-node0:9090,blockchain-node1:9090
+      - TX_GOSSIP_ENABLE=true
+      - TX_GOSSIP_HOPS=${TX_GOSSIP_HOPS:-2}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-0}
+      - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-0}
+      - HTTP_TIMEOUT_SECONDS=${HTTP_TIMEOUT_SECONDS:-10}
+      - HTTP_MAX_HEADER_BYTES=${HTTP_MAX_HEADER_BYTES:-8192}
+      - WS_ENABLE=${WS_ENABLE:-true}
+      - WS_MAX_CONNECTIONS=${WS_MAX_CONNECTIONS:-100}
+      - HTTP_ADDR=127.0.0.1:8080
+      - AUTO_MINE=false
+      - SYNC_ENABLE=true
+      - SYNC_INTERVAL_MS=${SYNC_INTERVAL_MS:-3000}
+    restart: always
+    command: ["./blockchain", "server"]
+
+volumes:
+  nogochain_testnet_chain_data_node0:
+  nogochain_testnet_chain_data_node1:
+  nogochain_testnet_chain_data_node2:

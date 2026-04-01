@@ -1,0 +1,30 @@
+{
+  "network": "nogochain-testnet",
+  "chainId": 2,
+  "timestamp": 1735689600,
+  "genesisMinerAddress": "NOGO0000215cb488337e53199586744599db99d497e4f8d4ec8c49779e7c01f2c8a6ef0cbed3cd3d",
+  "initialSupply": "10000000000000",
+  "genesisMessage": "Follow the white rabbit - NogoChain Testnet",
+  "monetaryPolicy": {
+    "initialBlockReward": "5000000000",
+    "halvingInterval": 210000,
+    "minerFeeShare": 100,
+    "tailEmission": "0"
+  },
+  "consensusParams": {
+    "difficultyEnable": true,
+    "difficultyTargetMs": 15000,
+    "difficultyWindow": 20,
+    "difficultyMaxStepBits": 1,
+    "difficultyMinBits": 1,
+    "difficultyMaxBits": 255,
+    "genesisDifficultyBits": 8,
+    "medianTimePastWindow": 11,
+    "maxTimeDrift": 7200,
+    "maxBlockSize": 1000000,
+    "merkleEnable": true,
+    "merkleActivationHeight": 0,
+    "binaryEncodingEnable": true,
+    "binaryEncodingActivationHeight": 0
+  }
+}

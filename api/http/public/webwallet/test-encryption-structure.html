@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>钱包加密测试</title>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .test-section {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        h2 { color: #58a6ff; }
+        .result {
+            background: #0d1117;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+            word-break: break-all;
+            font-size: 12px;
+        }
+        .success { color: #3fb950; }
+        .error { color: #f85149; }
+        button {
+            background: #238636;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover { background: #2ea043; }
+        input {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            color: #c9d1d9;
+            padding: 8px;
+            border-radius: 4px;
+            margin: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔐 钱包加密测试</h1>
+    
+    <div class="test-section">
+        <h2>测试 1: 加密数据结构</h2>
+        <button onclick="testEncryptionStructure()">运行测试</button>
+        <div id="test1Result" class="result"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>测试 2: 解密验证</h2>
+        <button onclick="testDecryption()">运行测试</button>
+        <div id="test2Result" class="result"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>测试 3: 刷新页面模拟</h2>
+        <button onclick="simulateRefresh()">模拟刷新</button>
+        <div id="test3Result" class="result"></div>
+    </div>
+
+    <script>
+        // 加密函数（从钱包代码复制）
+        async function encryptWalletData(data, password) {
+            const enc = new TextEncoder();
+            const salt = window.crypto.getRandomValues(new Uint8Array(16));
+            const iv = window.crypto.getRandomValues(new Uint8Array(12));
+            
+            const keyMaterial = await window.crypto.subtle.importKey(
+                'raw',
+                enc.encode(password),
+                { name: 'PBKDF2' },
+                false,
+                ['deriveKey']
+            );
+            
+            const key = await window.crypto.subtle.deriveKey(
+                {
+                    name: 'PBKDF2',
+                    salt: salt,
+                    iterations: 100000,
+                    hash: 'SHA-256'
+                },
+                keyMaterial,
+                { name: 'AES-GCM', length: 256 },
+                false,
+                ['encrypt']
+            );
+            
+            // 只加密敏感数据（privateKey）
+            const sensitiveData = {
+                privateKey: data.privateKey
+            };
+            const encodedData = enc.encode(JSON.stringify(sensitiveData));
+            const encrypted = await window.crypto.subtle.encrypt(
+                { name: 'AES-GCM', iv: iv },
+                key,
+                encodedData
+            );
+            
+            // 返回加密数据 + 明文地址/公钥
+            return {
+                encrypted: arrayBufferToBase64(encrypted),
+                salt: arrayBufferToBase64(salt),
+                iv: arrayBufferToBase64(iv),
+                version: 1,
+                address: data.address,
+                publicKey: data.publicKey
+            };
+        }
+        
+        async function decryptWalletData(encryptedData, password) {
+            const enc = new TextEncoder();
+            const salt = base64ToUint8Array(encryptedData.salt);
+            const iv = base64ToUint8Array(encryptedData.iv);
+            const encrypted = base64ToUint8Array(encryptedData.encrypted);
+            
+            const keyMaterial = await window.crypto.subtle.importKey(
+                'raw',
+                enc.encode(password),
+                { name: 'PBKDF2' },
+                false,
+                ['deriveKey']
+            );
+            
+            const key = await window.crypto.subtle.deriveKey(
+                {
+                    name: 'PBKDF2',
+                    salt: salt,
+                    iterations: 100000,
+                    hash: 'SHA-256'
+                },
+                keyMaterial,
+                { name: 'AES-GCM', length: 256 },
+                false,
+                ['decrypt']
+            );
+            
+            const decrypted = await window.crypto.subtle.decrypt(
+                { name: 'AES-GCM', iv: iv },
+                key,
+                encrypted
+            );
+            
+            const dec = new TextDecoder();
+            const sensitiveData = JSON.parse(dec.decode(decrypted));
+            
+            // 重建完整钱包数据
+            const walletData = {
+                address: encryptedData.address,
+                publicKey: encryptedData.publicKey,
+                privateKey: sensitiveData.privateKey,
+                encrypted: true
+            };
+            
+            return walletData;
+        }
+        
+        // 工具函数
+        function arrayBufferToBase64(buffer) {
+            let binary = '';
+            const bytes = new Uint8Array(buffer);
+            for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return window.btoa(binary);
+        }
+        
+        function base64ToUint8Array(base64) {
+            const binary_string = window.atob(base64);
+            const len = binary_string.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binary_string.charCodeAt(i);
+            }
+            return bytes;
+        }
+        
+        // 测试 1: 加密数据结构
+        async function testEncryptionStructure() {
+            const resultDiv = document.getElementById('test1Result');
+            resultDiv.innerHTML = '运行中...';
+            
+            try {
+                // 模拟钱包数据
+                const walletData = {
+                    address: 'NOGO0056052e49ddad127d777a383e358f2d9ed909718d6a10e576b28c776ff385b010c3307baf',
+                    publicKey: 'dGVzdHB1Ymxpa2V5MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=',
+                    privateKey: 'dGVzdHByaXZhdGVrZXkxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMg=='
+                };
+                
+                const password = 'testpassword123';
+                const encrypted = await encryptWalletData(walletData, password);
+                
+                let html = '<div class="success">✅ 加密成功</div>';
+                html += '<div><strong>加密数据结构:</strong></div>';
+                html += '<div class="result">';
+                html += '<div>encrypted: ' + encrypted.encrypted.substring(0, 50) + '...</div>';
+                html += '<div>salt: ' + encrypted.salt + '</div>';
+                html += '<div>iv: ' + encrypted.iv + '</div>';
+                html += '<div>version: ' + encrypted.version + '</div>';
+                html += '<div class="success">address (明文): ' + encrypted.address + '</div>';
+                html += '<div class="success">publicKey (明文): ' + encrypted.publicKey + '</div>';
+                html += '<div class="error">privateKey: (已加密，不在明文中)</div>';
+                html += '</div>';
+                
+                resultDiv.innerHTML = html;
+            } catch (e) {
+                resultDiv.innerHTML = '<div class="error">❌ 测试失败：' + e.message + '</div>';
+            }
+        }
+        
+        // 测试 2: 解密验证
+        async function testDecryption() {
+            const resultDiv = document.getElementById('test2Result');
+            resultDiv.innerHTML = '运行中...';
+            
+            try {
+                const walletData = {
+                    address: 'NOGO0056052e49ddad127d777a383e358f2d9ed909718d6a10e576b28c776ff385b010c3307baf',
+                    publicKey: 'dGVzdHB1Ymxpa2V5MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=',
+                    privateKey: 'dGVzdHByaXZhdGVrZXkxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMg=='
+                };
+                
+                const password = 'testpassword123';
+                const encrypted = await encryptWalletData(walletData, password);
+                const decrypted = await decryptWalletData(encrypted, password);
+                
+                let html = '<div class="success">✅ 解密成功</div>';
+                html += '<div><strong>解密后数据:</strong></div>';
+                html += '<div class="result">';
+                html += '<div>address: ' + decrypted.address + '</div>';
+                html += '<div>publicKey: ' + decrypted.publicKey + '</div>';
+                html += '<div class="success">privateKey: ' + decrypted.privateKey + '</div>';
+                html += '<div>encrypted: ' + decrypted.encrypted + '</div>';
+                html += '</div>';
+                
+                // 验证数据一致性
+                html += '<div><strong>数据验证:</strong></div>';
+                html += '<div class="result">';
+                html += '<div class="' + (walletData.address === decrypted.address ? 'success' : 'error') + 
+                        '">address 匹配：' + (walletData.address === decrypted.address ? '✅' : '❌') + '</div>';
+                html += '<div class="' + (walletData.publicKey === decrypted.publicKey ? 'success' : 'error') + 
+                        '">publicKey 匹配：' + (walletData.publicKey === decrypted.publicKey ? '✅' : '❌') + '</div>';
+                html += '<div class="' + (walletData.privateKey === decrypted.privateKey ? 'success' : 'error') + 
+                        '">privateKey 匹配：' + (walletData.privateKey === decrypted.privateKey ? '✅' : '❌') + '</div>';
+                html += '</div>';
+                
+                resultDiv.innerHTML = html;
+            } catch (e) {
+                resultDiv.innerHTML = '<div class="error">❌ 测试失败：' + e.message + '</div>';
+            }
+        }
+        
+        // 测试 3: 模拟刷新页面
+        async function simulateRefresh() {
+            const resultDiv = document.getElementById('test3Result');
+            resultDiv.innerHTML = '运行中...';
+            
+            try {
+                // 1. 创建钱包并加密
+                const walletData = {
+                    address: 'NOGO0056052e49ddad127d777a383e358f2d9ed909718d6a10e576b28c776ff385b010c3307baf',
+                    publicKey: 'dGVzdHB1Ymxpa2V5MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=',
+                    privateKey: 'dGVzdHByaXZhdGVrZXkxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMg=='
+                };
+                
+                const password = 'testpassword123';
+                const encrypted = await encryptWalletData(walletData, password);
+                
+                // 2. 模拟保存到 localStorage
+                localStorage.setItem('testWallet', JSON.stringify(encrypted));
+                resultDiv.innerHTML = '<div>✅ 钱包已加密保存</div>';
+                
+                // 3. 模拟刷新页面（重新读取）
+                setTimeout(() => {
+                    const saved = localStorage.getItem('testWallet');
+                    const parsed = JSON.parse(saved);
+                    
+                    let html = '<div><strong>刷新页面后读取的数据:</strong></div>';
+                    html += '<div class="result">';
+                    html += '<div class="success">✅ address (明文): ' + parsed.address + '</div>';
+                    html += '<div class="success">✅ publicKey (明文): ' + parsed.publicKey + '</div>';
+                    html += '<div>encrypted: ' + parsed.encrypted.substring(0, 30) + '...</div>';
+                    html += '<div>salt: ' + parsed.salt + '</div>';
+                    html += '<div>iv: ' + parsed.iv + '</div>';
+                    html += '</div>';
+                    
+                    html += '<div><strong>可以直接用于:</strong></div>';
+                    html += '<div class="result">';
+                    html += '<div>✅ 显示余额（需要 address）</div>';
+                    html += '<div>✅ 显示公钥（需要 publicKey）</div>';
+                    html += '<div>✅ 生成收款二维码（需要 address）</div>';
+                    html += '<div>✅ 查看交易记录（需要 address）</div>';
+                    html += '<div class="error">❌ 发送交易（需要密码解密 privateKey）</div>';
+                    html += '</div>';
+                    
+                    // 清理测试数据
+                    localStorage.removeItem('testWallet');
+                    
+                    resultDiv.innerHTML = html;
+                }, 500);
+                
+            } catch (e) {
+                resultDiv.innerHTML = '<div class="error">❌ 测试失败：' + e.message + '</div>';
+            }
+        }
+    </script>
+</body>
+</html>

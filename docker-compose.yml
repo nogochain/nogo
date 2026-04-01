@@ -1,0 +1,62 @@
+services:
+  blockchain:
+    build:
+      context: ./blockchain
+      dockerfile: Dockerfile
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
+    ports:
+      - "127.0.0.1:8080:8080" # HTTP API (bound to localhost)
+    volumes:
+      - ${CHAIN_DATA_DIR:-./blockchain/data}:/app/data # For ledger persistence
+      - ./genesis:/app/genesis:ro # Genesis files
+    environment:
+      - AI_AUDITOR_URL=${AI_AUDITOR_URL:-}
+      - CHAIN_ID=${CHAIN_ID:-1}
+      - GENESIS_PATH=${GENESIS_PATH:-genesis/mainnet.json}
+      - MINER_ADDRESS=${MINER_ADDRESS:-}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      - AUTO_MINE=${AUTO_MINE:-false}
+      - MINE_INTERVAL_MS=${MINE_INTERVAL_MS:-1000}
+      - MINE_FORCE_EMPTY_BLOCKS=${MINE_FORCE_EMPTY_BLOCKS:-false}
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-100}
+      - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-20}
+      - HTTP_TIMEOUT_SECONDS=${HTTP_TIMEOUT_SECONDS:-10}
+      - HTTP_MAX_HEADER_BYTES=${HTTP_MAX_HEADER_BYTES:-8192}
+      - HTTP_ADDR=${HTTP_ADDR:-127.0.0.1:8080}
+      - WS_ENABLE=${WS_ENABLE:-true}
+      - WS_MAX_CONNECTIONS=${WS_MAX_CONNECTIONS:-100}
+    restart: always # Ensure the service restarts if the watchdog triggers os.Exit(0)
+    command: ["./blockchain", "server"] # Start the blockchain in server mode
+    # Brand: Add container_name for brand identification
+    container_name: ${BRAND_PREFIX:-mybrand}-blockchain
+
+  ai-auditor:
+    build:
+      context: ./ai-auditor
+      dockerfile: Dockerfile
+    profiles: ["ai"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      - LLM_API_KEY=${LLM_API_KEY:-} # Set in your local environment or .env
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini} # or openai
+    restart: always # Ensure the service restarts if it crashes
+    # Brand: Add container_name for brand identification
+    container_name: ${BRAND_PREFIX:-mybrand}-ai-auditor
+
+  n8n:
+    image: n8nio/n8n:latest
+    profiles: ["orchestration"]
+    ports:
+      - "127.0.0.1:5678:5678"
+    volumes:
+      - ./n8n/data:/home/node/.n8n
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5678/webhook/ # Example, replace with actual n8n webhook URL
+    # Use the image default command/entrypoint.
+    restart: always # Ensure the service restarts if it crashes
+    # Brand: Add container_name for brand identification
+    container_name: ${BRAND_PREFIX:-mybrand}-n8n

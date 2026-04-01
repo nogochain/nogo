@@ -1,0 +1,30 @@
+{
+  "network": "nogochain-mainnet",
+  "chainId": 1,
+  "timestamp": 1742252800,
+  "genesisMinerAddress": "NOGO008ead5f0b4da61dad101c44cd0c41ea679a6f8195b70d67351bb2bbc014a25dbdfecc7dc1",
+  "initialSupply": "1",
+  "genesisMessage": "NogoChain Mainnet Launch - A new era of decentralized finance",
+  "monetaryPolicy": {
+    "initialBlockReward": "800000000",
+    "minimumBlockReward": "10000000",
+    "annualReductionPercent": 10,
+    "minerFeeShare": 100
+  },
+  "consensusParams": {
+    "difficultyEnable": true,
+    "difficultyTargetMs": 17000,
+    "difficultyWindow": 10,
+    "difficultyMaxStepBits": 2,
+    "difficultyMinBits": 1,
+    "difficultyMaxBits": 32,
+    "genesisDifficultyBits": 1,
+    "medianTimePastWindow": 11,
+    "maxTimeDrift": 7200,
+    "maxBlockSize": 2000000,
+    "merkleEnable": true,
+    "merkleActivationHeight": 0,
+    "binaryEncodingEnable": true,
+    "binaryEncodingActivationHeight": 0
+  }
+}

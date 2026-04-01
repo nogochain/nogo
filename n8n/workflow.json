@@ -1,0 +1,120 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "transaction"
+      },
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "json": true,
+      "webhookId": "transaction_webhook",
+      "credentials": {},
+      "id": "e0d0c32b-f1a2-4a0b-8e1d-d5a2b3c7e0f1",
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=http://blockchain:8080/tx",
+        "method": "POST",
+        "jsonBody": true,
+        "bodyParameters": {
+          "values": [
+            {
+              "name": "type",
+              "value": "={{$json.body.type}}"
+            },
+            {
+              "name": "chainId",
+              "value": "={{$json.body.chainId}}"
+            },
+            {
+              "name": "fromPubKey",
+              "value": "={{$json.body.fromPubKey}}"
+            },
+            {
+              "name": "toAddress",
+              "value": "={{$json.body.toAddress}}"
+            },
+            {
+              "name": "amount",
+              "value": "={{$json.body.amount}}"
+            },
+            {
+              "name": "fee",
+              "value": "={{$json.body.fee}}"
+            },
+            {
+              "name": "nonce",
+              "value": "={{$json.body.nonce}}"
+            },
+            {
+              "name": "data",
+              "value": "={{$json.body.data}}"
+            },
+            {
+              "name": "signature",
+              "value": "={{$json.body.signature}}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "values": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "name": "Submit Tx (Blockchain)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "json": true,
+      "id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "data": true
+      },
+      "name": "Return",
+      "type": "n8n-nodes-base.return",
+      "typeVersion": 1,
+      "position": [
+        720,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Submit Tx (Blockchain)",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Submit Tx (Blockchain)": {
+      "main": [
+        [
+          {
+            "node": "Return",
+            "type": "main"
+          }
+        ]
+      ]
+    }
+  }
+}
