@@ -1,154 +1,154 @@
-# NogoChain 文档
+# NogoChain Documentation
 
-NogoChain 是一个高性能、安全、去中心化的区块链平台。本文档提供完整的技术参考和使用指南。
+NogoChain is a high-performance, secure, and decentralized blockchain platform. This documentation provides complete technical reference and usage guides.
 
-## 📚 文档目录
+## 📚 Documentation Index
 
-### 核心文档
+### Core Documentation
+
+- **[Deployment Guide](./DEPLOYMENT-en-US.md)** - Complete system deployment guide
+  - System requirements and environment configuration
+  - Multiple deployment methods (direct run, Docker)
+  - Advanced configuration and performance tuning
+  - Operations monitoring and troubleshooting
+
+- **[API Reference](./API-en-US.md)** - HTTP API interface documentation
+  - Public API endpoints (12 endpoints)
+  - Authenticated API endpoints (8 endpoints)
+  - WebSocket real-time subscription
+  - Error handling and best practices
+
+- **[RPC Interface](./RPC-en-US.md)** - P2P RPC methods documentation
+  - P2P RPC method list
+  - Node synchronization mechanism
+  - Transaction broadcast protocol
+  - WebSocket event subscription
+
+- **[Consensus Algorithm](./CONSENSUS-en-US.md)** - Detailed consensus mechanism
+  - NogoPoW algorithm principles
+  - Difficulty adjustment mechanism
+  - Monetary policy design
+  - Security analysis and performance evaluation
+
+- **[Key Modules](./MODULES-en-US.md)** - Core technical modules
+  - Wallet implementation (HD wallet, mnemonic)
+  - Transaction mechanism (signature, verification, fees)
+  - Block structure (Merkle tree, PoW)
+  - Network protocol (P2P communication, node discovery)
+  - Smart contracts (VM, Gas mechanism)
+
+- **[Startup Guide](./STARTUP-en-US.md)** - Quick startup instructions
+  - Quick start steps
+  - API endpoint list
+  - Troubleshooting
+
+## 🌐 中文文档
 
 - **[部署指南](./DEPLOYMENT-zh-CN.md)** - 系统部署完整指南
-  - 系统要求和环境配置
-  - 多种部署方式（直接运行、Docker）
-  - 高级配置和性能调优
-  - 运维监控和故障排查
-
 - **[API 参考](./API-zh-CN.md)** - HTTP API 接口文档
-  - 公共 API 端点（12 个）
-  - 认证 API 端点（8 个）
-  - WebSocket 实时订阅
-  - 错误处理和最佳实践
-
 - **[RPC 接口](./RPC-zh-CN.md)** - P2P RPC 方法文档
-  - P2P RPC 方法列表
-  - 节点同步机制
-  - 交易广播协议
-  - WebSocket 事件订阅
-
 - **[共识算法](./CONSENSUS-zh-CN.md)** - 共识机制详解
-  - NogoPoW 算法原理
-  - 难度调整机制
-  - 货币政策设计
-  - 安全性分析和性能评估
-
 - **[关键模块](./MODULES-zh-CN.md)** - 核心技术模块说明
-  - 钱包实现（HD 钱包、助记词）
-  - 交易机制（签名、验证、费用）
-  - 区块结构（默克尔树、PoW）
-  - 网络协议（P2P 通信、节点发现）
-  - 智能合约（VM、Gas 机制）
-
 - **[启动说明](./启动说明.md)** - 快速启动指南
-  - 快速启动步骤
-  - API 端点列表
-  - 故障排除
 
-## 🌐 English Documentation
+## 🚀 Quick Start
 
-- **[Deployment Guide](./DEPLOYMENT-en-US.md)** - Complete deployment guide
-- **[API Reference](./API-en-US.md)** - HTTP API documentation
-- **[RPC Interface](./RPC-en-US.md)** - P2P RPC methods
-- **[Consensus Algorithm](./CONSENSUS-en-US.md)** - Consensus mechanism details
-- **[Key Modules](./MODULES-en-US.md)** - Core technical modules
-- **[Startup Guide](./STARTUP-en-US.md)** - Quick startup instructions
+### 1. System Requirements
 
-## 🚀 快速开始
+- **OS**: Windows 10+, Linux, macOS
+- **Go Version**: 1.21.5+
+- **Memory**: Minimum 2GB, Recommended 4GB+
+- **Storage**: Minimum 10GB SSD
 
-### 1. 环境要求
-
-- **操作系统**: Windows 10+, Linux, macOS
-- **Go 版本**: 1.21.5+
-- **内存**: 最低 2GB，推荐 4GB+
-- **存储**: 最低 10GB SSD
-
-### 2. 快速启动（测试网）
+### 2. Quick Start (Testnet)
 
 ```bash
-# 克隆仓库
+# Clone the repository
 git clone https://github.com/nogochain/nogo.git
 cd nogo
 
-# 编译
+# Build
 go build -o nogo.exe ./blockchain
 
-# 启动节点（测试网）
-$env:CHAIN_ID=3
-$env:AUTO_MINE=$true
-$env:MINER_ADDRESS="YOUR_ADDRESS"
-.\nogo.exe server
+# Start node (testnet)
+export CHAIN_ID=3
+export AUTO_MINE=true
+export MINER_ADDRESS="YOUR_ADDRESS"
+./nogo.exe server
 ```
 
-### 3. 访问区块浏览器
+### 3. Access Block Explorer
 
-打开浏览器访问：http://localhost:8080/explorer/
+Open your browser and visit: http://localhost:8080/explorer/
 
-### 4. API 测试
+### 4. API Testing
 
 ```bash
-# 健康检查
+# Health check
 curl http://localhost:8080/health
 
-# 获取链信息
+# Get chain info
 curl http://localhost:8080/chain/info
 
-# 查询余额
+# Query balance
 curl http://localhost:8080/balance/NOGO00...
 ```
 
-## 📖 文档使用说明
+## 📖 Documentation Usage Guide
 
-### 面向开发者
+### For Developers
 
-如果您想开发基于 NogoChain 的应用：
+If you want to develop applications based on NogoChain:
 
-1. 阅读 [API 参考](./API-zh-CN.md) 了解可用的 HTTP 接口
-2. 阅读 [RPC 接口](./RPC-zh-CN.md) 了解 P2P 网络协议
-3. 参考 [关键模块](./MODULES-zh-CN.md) 了解核心实现
-4. 使用 [启动说明](./启动说明.md) 快速搭建开发环境
+1. Read [API Reference](./API-en-US.md) to understand available HTTP interfaces
+2. Read [RPC Interface](./RPC-en-US.md) to understand P2P network protocol
+3. Refer to [Key Modules](./MODULES-en-US.md) to understand core implementation
+4. Use [Startup Guide](./STARTUP-en-US.md) to quickly set up development environment
 
-### 面向节点运营者
+### For Node Operators
 
-如果您想运营 NogoChain 节点：
+If you want to operate NogoChain nodes:
 
-1. 详细阅读 [部署指南](./DEPLOYMENT-zh-CN.md)
-2. 了解 [共识算法](./CONSENSUS-zh-CN.md) 的工作原理
-3. 配置监控和告警（部署指南中有详细说明）
-4. 定期备份节点数据
+1. Read [Deployment Guide](./DEPLOYMENT-en-US.md) in detail
+2. Understand how [Consensus Algorithm](./CONSENSUS-en-US.md) works
+3. Configure monitoring and alerts (detailed in deployment guide)
+4. Regularly backup node data
 
-### 面向研究人员
+### For Researchers
 
-如果您对 NogoChain 的共识机制或经济模型感兴趣：
+If you are interested in NogoChain's consensus mechanism or economic model:
 
-1. 精读 [共识算法](./CONSENSUS-zh-CN.md) 文档
-2. 了解难度调整算法的数学原理
-3. 研究货币政策的设计思路
-4. 分析安全性证明和性能数据
+1. Study [Consensus Algorithm](./CONSENSUS-en-US.md) documentation carefully
+2. Understand the mathematical principles of difficulty adjustment algorithm
+3. Research the design philosophy of monetary policy
+4. Analyze security proofs and performance data
 
-## 🔗 相关链接
+## 🔗 Related Links
 
-- **官方网站**: https://nogochain.io
-- **GitHub 仓库**: https://github.com/nogochain/nogo
-- **技术白皮书**: （待发布）
-- **社区论坛**: （待发布）
+- **Official Website**: https://nogochain.org
+- **GitHub Repository**: https://github.com/nogochain/nogo
+- **Technical Whitepaper**: (Coming soon)
+- **Community Forum**: (Coming soon)
 
-## 📝 文档版本
+## 📝 Documentation Version
 
-- **文档版本**: 1.0.0
-- **最后更新**: 2026-04-01
-- **基于代码版本**: NogoChain v1.0.0
+- **Documentation Version**: 1.0.0
+- **Last Updated**: 2026-04-01
+- **Based on Code Version**: NogoChain v1.0.0
 
-## 🤝 贡献文档
+## 🤝 Contributing to Documentation
 
-欢迎提交文档改进建议！请通过以下方式贡献：
+We welcome documentation improvement suggestions! Please contribute through the following methods:
 
-1. 提交 Issue 报告文档问题
-2. 提交 Pull Request 改进文档内容
-3. 参与文档翻译工作
+1. Submit an Issue to report documentation problems
+2. Submit a Pull Request to improve documentation content
+3. Participate in documentation translation work
 
-## 📄 许可证
+## 📄 License
 
-本文档采用与 NogoChain 相同的开源许可证。
+This documentation uses the same open source license as NogoChain.
 
 ---
 
-**维护者**: NogoChain 开发团队  
-**联系方式**: docs@nogochain.io
+**Maintainer**: NogoChain Development Team  
+**Contact**: docs@nogochain.org
