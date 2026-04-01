@@ -2,7 +2,7 @@
   "network": "nogochain-mainnet",
   "chainId": 1,
   "timestamp": 1742252800,
-  "genesisMinerAddress": "NOGO008ead5f0b4da61dad101c44cd0c41ea679a6f8195b70d67351bb2bbc014a25dbdfecc7dc1",
+  "genesisMinerAddress": "NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c",
   "initialSupply": "1",
   "genesisMessage": "NogoChain Mainnet Launch - A new era of decentralized finance",
   "monetaryPolicy": {

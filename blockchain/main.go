@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -173,18 +172,9 @@ func main() {
 			MaxHeaderBytes:    maxHeaderBytes,
 		}
 
-		// Create listener with custom socket options for Windows
-		lc := net.ListenConfig{
-			Control: func(network, address string, c syscall.RawConn) error {
-				return c.Control(func(fd uintptr) {
-					// Set SO_REUSEADDR for Windows
-					syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-				})
-			},
-			KeepAlive: 3 * time.Minute,
-		}
+		// Create listener with custom socket options
 		log.Printf("NogoChain node listening on %s (miner=%s, aiAuditor=%t)", addr, bc.MinerAddress, aiURL != "")
-		ln, err := lc.Listen(context.Background(), "tcp", addr)
+		ln, err := createListener(addr)
 		if err != nil {
 			log.Fatalf("Failed to bind to %s: %v", addr, err)
 		}

@@ -2,7 +2,7 @@
   "network": "nogochain-testnet",
   "chainId": 2,
   "timestamp": 1735689600,
-  "genesisMinerAddress": "NOGO0000215cb488337e53199586744599db99d497e4f8d4ec8c49779e7c01f2c8a6ef0cbed3cd3d",
+  "genesisMinerAddress": "NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c",
   "initialSupply": "10000000000000",
   "genesisMessage": "Follow the white rabbit - NogoChain Testnet",
   "monetaryPolicy": {
