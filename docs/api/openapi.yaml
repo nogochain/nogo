@@ -2,6 +2,7 @@ openapi: 3.0.3
 info:
   title: NogoChain API
   description: |
+<<<<<<< HEAD
     # NogoChain API Documentation
     
     HTTP API documentation for NogoChain blockchain node
@@ -14,10 +15,17 @@ info:
     
     部分接口需要 Admin Token 认证，通过 `Authorization` 头传递：
     
+=======
+    NogoChain 区块链节点的 HTTP API 接口文档
+    
+    ## 认证方式
+    部分接口需要 Admin Token 认证，通过 `Authorization` 头传递：
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
     ```
     Authorization: Bearer YOUR_ADMIN_TOKEN
     ```
     
+<<<<<<< HEAD
     ## Base URLs / 基础 URL
     
     - Mainnet: `http://main.nogochain.org:8080`
@@ -27,6 +35,13 @@ info:
     
     All endpoints return JSON format data. Success responses include `data` field, error responses include `error` field.
     
+=======
+    ## 基础 URL
+    - 主网：`http://main.nogochain.org:8080`
+    - 本地：`http://localhost:8080`
+    
+    ## 响应格式
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
     所有接口返回 JSON 格式数据，成功响应包含 `data` 字段，错误响应包含 `error` 字段。
   version: 1.1.0
   contact:
@@ -42,6 +57,7 @@ servers:
 
 tags:
   - name: System
+<<<<<<< HEAD
     description: System endpoints (health check, version info) / 系统相关接口（健康检查、版本信息）
   - name: Chain
     description: Blockchain information (chain info, blocks, transactions) / 区块链信息查询（链信息、区块、交易）
@@ -55,18 +71,42 @@ tags:
     description: Mining endpoints / 挖矿相关接口
   - name: WebSocket
     description: WebSocket real-time subscription / WebSocket 实时订阅
+=======
+    description: 系统相关接口（健康检查、版本信息）
+  - name: Chain
+    description: 区块链信息查询（链信息、区块、交易）
+  - name: Transaction
+    description: 交易相关操作（提交、查询）
+  - name: Wallet
+    description: 钱包相关操作（创建、签名）
+  - name: P2P
+    description: P2P 网络相关接口
+  - name: Mining
+    description: 挖矿相关接口
+  - name: WebSocket
+    description: WebSocket 实时订阅
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 
 paths:
   /health:
     get:
       tags:
         - System
+<<<<<<< HEAD
       summary: Health Check / 健康检查
       description: Check if the node is running normally / 检查节点是否正常运行
       operationId: getHealth
       responses:
         '200':
           description: Node is healthy / 节点健康
+=======
+      summary: 健康检查
+      description: 检查节点是否正常运行
+      operationId: getHealth
+      responses:
+        '200':
+          description: 节点健康
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           content:
             application/json:
               schema:
@@ -76,18 +116,31 @@ paths:
                     type: string
                     example: ok
         '503':
+<<<<<<< HEAD
           description: Node is unavailable / 节点异常
+=======
+          description: 节点异常
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 
   /version:
     get:
       tags:
         - System
+<<<<<<< HEAD
       summary: Version Info / 版本信息
       description: Get node version and build information / 获取节点版本和构建信息
       operationId: getVersion
       responses:
         '200':
           description: Version information / 版本信息
+=======
+      summary: 版本信息
+      description: 获取节点版本和构建信息
+      operationId: getVersion
+      responses:
+        '200':
+          description: 版本信息
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           content:
             application/json:
               schema:
@@ -97,12 +150,21 @@ paths:
     get:
       tags:
         - Chain
+<<<<<<< HEAD
       summary: Chain Info / 链信息
       description: Get complete information about the current blockchain / 获取当前区块链的完整信息
       operationId: getChainInfo
       responses:
         '200':
           description: Chain information / 链信息
+=======
+      summary: 链信息
+      description: 获取当前区块链的完整信息
+      operationId: getChainInfo
+      responses:
+        '200':
+          description: 链信息
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           content:
             application/json:
               schema:
@@ -112,14 +174,23 @@ paths:
     get:
       tags:
         - Chain
+<<<<<<< HEAD
       summary: Get Block by Height / 按高度查询区块
       description: Get block details by block height / 根据区块高度获取区块详情
+=======
+      summary: 按高度查询区块
+      description: 根据区块高度获取区块详情
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
       operationId: getBlockByHeight
       parameters:
         - name: height
           in: path
           required: true
+<<<<<<< HEAD
           description: Block height, or use "latest" for the latest block / 区块高度，或使用 "latest" 获取最新区块
+=======
+          description: 区块高度，或使用 "latest" 获取最新区块
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           schema:
             oneOf:
               - type: integer
@@ -129,71 +200,118 @@ paths:
                 example: latest
       responses:
         '200':
+<<<<<<< HEAD
           description: Block details / 区块详情
+=======
+          description: 区块详情
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Block'
         '404':
+<<<<<<< HEAD
           description: Block not found / 区块不存在
+=======
+          description: 区块不存在
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 
   /block/hash/{hash}:
     get:
       tags:
         - Chain
+<<<<<<< HEAD
       summary: Get Block by Hash / 按哈希查询区块
       description: Get block details by block hash / 根据区块哈希获取区块详情
+=======
+      summary: 按哈希查询区块
+      description: 根据区块哈希获取区块详情
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
       operationId: getBlockByHash
       parameters:
         - name: hash
           in: path
           required: true
+<<<<<<< HEAD
           description: Block hash (64 character hexadecimal) / 区块哈希（64 字符十六进制）
+=======
+          description: 区块哈希（64 字符十六进制）
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           schema:
             type: string
             format: hex
             example: bbba903f8a8c06e1f170d91aeab8eb11234a1ffa88a709d71323bfb41b31f3e2
       responses:
         '200':
+<<<<<<< HEAD
           description: Block details / 区块详情
+=======
+          description: 区块详情
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Block'
         '404':
+<<<<<<< HEAD
           description: Block not found / 区块不存在
+=======
+          description: 区块不存在
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 
   /tx/{txid}:
     get:
       tags:
         - Transaction
+<<<<<<< HEAD
       summary: Get Transaction / 查询交易
       description: Get transaction details by transaction ID / 根据交易 ID 获取交易详情
+=======
+      summary: 查询交易
+      description: 根据交易 ID 获取交易详情
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
       operationId: getTransaction
       parameters:
         - name: txid
           in: path
           required: true
+<<<<<<< HEAD
           description: Transaction ID (64 character hexadecimal) / 交易 ID（64 字符十六进制）
+=======
+          description: 交易 ID（64 字符十六进制）
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           schema:
             type: string
             format: hex
       responses:
         '200':
+<<<<<<< HEAD
           description: Transaction details / 交易详情
+=======
+          description: 交易详情
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Transaction'
         '404':
+<<<<<<< HEAD
           description: Transaction not found / 交易未找到
+=======
+          description: 交易未找到
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 
   /tx:
     post:
       tags:
         - Transaction
+<<<<<<< HEAD
       summary: Submit Transaction / 提交交易
       description: Broadcast a signed transaction to the network / 向网络广播已签名的交易
+=======
+      summary: 提交交易
+      description: 向网络广播已签名的交易
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
       operationId: submitTransaction
       requestBody:
         required: true
@@ -205,12 +323,20 @@ paths:
                 rawTx:
                   type: string
                   format: hex
+<<<<<<< HEAD
                   description: Signed transaction in hexadecimal / 已签名的交易（十六进制）
+=======
+                  description: 已签名的交易（十六进制）
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
               required:
                 - rawTx
       responses:
         '200':
+<<<<<<< HEAD
           description: Transaction submitted successfully / 交易提交成功
+=======
+          description: 交易提交成功
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           content:
             application/json:
               schema:
@@ -220,28 +346,47 @@ paths:
                     type: string
                     format: hex
         '400':
+<<<<<<< HEAD
           description: Invalid transaction / 交易无效
         '500':
           description: Submission failed / 提交失败
+=======
+          description: 交易无效
+        '500':
+          description: 提交失败
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 
   /balance/{address}:
     get:
       tags:
         - Chain
+<<<<<<< HEAD
       summary: Get Balance / 查询余额
       description: Get NOGO balance for a specific address / 获取指定地址的 NOGO 余额
+=======
+      summary: 查询余额
+      description: 获取指定地址的 NOGO 余额
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
       operationId: getBalance
       parameters:
         - name: address
           in: path
           required: true
+<<<<<<< HEAD
           description: NogoChain address / NogoChain 地址
+=======
+          description: NogoChain 地址
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           schema:
             type: string
             example: NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c
       responses:
         '200':
+<<<<<<< HEAD
           description: Balance information / 余额信息
+=======
+          description: 余额信息
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           content:
             application/json:
               schema:
@@ -252,22 +397,39 @@ paths:
                   balance:
                     type: integer
                     format: int64
+<<<<<<< HEAD
                     description: Balance in smallest unit (1 NOGO = 10^8) / 余额（最小单位，1 NOGO = 10^8）
                   balanceNOGO:
                     type: number
                     format: double
                     description: Balance in NOGO unit / 余额（NOGO 单位）
+=======
+                    description: 余额（最小单位，1 NOGO = 10^8）
+                  balanceNOGO:
+                    type: number
+                    format: double
+                    description: 余额（NOGO 单位）
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 
   /mempool:
     get:
       tags:
         - Transaction
+<<<<<<< HEAD
       summary: Get Mempool / 内存池
       description: Get list of pending transactions / 获取待确认交易列表
       operationId: getMempool
       responses:
         '200':
           description: Mempool transaction list / 内存池交易列表
+=======
+      summary: 内存池
+      description: 获取待确认交易列表
+      operationId: getMempool
+      responses:
+        '200':
+          description: 内存池交易列表
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           content:
             application/json:
               schema:
@@ -284,8 +446,13 @@ paths:
     post:
       tags:
         - Wallet
+<<<<<<< HEAD
       summary: Create Wallet / 创建钱包
       description: Create a new HD wallet / 创建新的 HD 钱包
+=======
+      summary: 创建钱包
+      description: 创建新的 HD 钱包
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
       operationId: createWallet
       security:
         - bearerAuth: []
@@ -298,26 +465,43 @@ paths:
               properties:
                 mnemonic:
                   type: string
+<<<<<<< HEAD
                   description: Optional, provide mnemonic to import wallet / 可选，提供助记词导入钱包
+=======
+                  description: 可选，提供助记词导入钱包
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
                   minLength: 1
               required:
                 - mnemonic
       responses:
         '200':
+<<<<<<< HEAD
           description: Wallet created successfully / 钱包创建成功
+=======
+          description: 钱包创建成功
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/WalletInfo'
         '400':
+<<<<<<< HEAD
           description: Invalid parameters / 参数错误
+=======
+          description: 参数错误
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 
   /wallet/sign:
     post:
       tags:
         - Wallet
+<<<<<<< HEAD
       summary: Sign Transaction / 签名交易
       description: Sign a transaction using the wallet / 使用钱包对交易进行签名
+=======
+      summary: 签名交易
+      description: 使用钱包对交易进行签名
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
       operationId: signTransaction
       security:
         - bearerAuth: []
@@ -330,6 +514,7 @@ paths:
               properties:
                 from:
                   type: string
+<<<<<<< HEAD
                   description: Sender address / 发送方地址
                 to:
                   type: string
@@ -346,13 +531,35 @@ paths:
                   type: integer
                   format: int64
                   description: Random number (anti-replay) / 随机数（防重放）
+=======
+                  description: 发送方地址
+                to:
+                  type: string
+                  description: 接收方地址
+                amount:
+                  type: integer
+                  format: int64
+                  description: 金额（最小单位）
+                fee:
+                  type: integer
+                  format: int64
+                  description: 手续费（最小单位）
+                nonce:
+                  type: integer
+                  format: int64
+                  description: 随机数（防重放）
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
               required:
                 - from
                 - to
                 - amount
       responses:
         '200':
+<<<<<<< HEAD
           description: Signature successful / 签名成功
+=======
+          description: 签名成功
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           content:
             application/json:
               schema:
@@ -361,18 +568,31 @@ paths:
                   rawTx:
                     type: string
                     format: hex
+<<<<<<< HEAD
                     description: Signed transaction / 已签名的交易
+=======
+                    description: 已签名的交易
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 
   /p2p/getaddr:
     get:
       tags:
         - P2P
+<<<<<<< HEAD
       summary: Get Peer Addresses / 获取节点列表
       description: Get list of known P2P node addresses / 获取已知的 P2P 节点地址列表
       operationId: getPeerAddresses
       responses:
         '200':
           description: Peer address list / 节点地址列表
+=======
+      summary: 获取节点列表
+      description: 获取已知的 P2P 节点地址列表
+      operationId: getPeerAddresses
+      responses:
+        '200':
+          description: 节点地址列表
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           content:
             application/json:
               schema:
@@ -388,12 +608,21 @@ paths:
     get:
       tags:
         - WebSocket
+<<<<<<< HEAD
       summary: WebSocket Connection / WebSocket 连接
       description: Establish WebSocket connection to subscribe to real-time events / 建立 WebSocket 连接以订阅实时事件
       operationId: websocketConnection
       responses:
         '101':
           description: Protocol switch successful, WebSocket connection established / 协议切换成功，建立 WebSocket 连接
+=======
+      summary: WebSocket 连接
+      description: 建立 WebSocket 连接以订阅实时事件
+      operationId: websocketConnection
+      responses:
+        '101':
+          description: 协议切换成功，建立 WebSocket 连接
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 
 components:
   securitySchemes:
@@ -401,7 +630,11 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+<<<<<<< HEAD
       description: Use ADMIN_TOKEN as Bearer Token / 使用 ADMIN_TOKEN 作为 Bearer Token
+=======
+      description: 使用 ADMIN_TOKEN 作为 Bearer Token
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 
   schemas:
     VersionInfo:
@@ -419,21 +652,33 @@ components:
 
     ChainInfo:
       type: object
+<<<<<<< HEAD
       description: Blockchain information / 区块链信息
+=======
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
       properties:
         height:
           type: integer
           format: int64
+<<<<<<< HEAD
           description: Block height / 区块高度
+=======
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           example: 105
         latestHash:
           type: string
           format: hex
+<<<<<<< HEAD
           description: Latest block hash / 最新区块哈希
         genesisHash:
           type: string
           format: hex
           description: Genesis block hash / 创世区块哈希
+=======
+        genesisHash:
+          type: string
+          format: hex
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
         difficultyBits:
           type: integer
           format: int32
@@ -443,12 +688,19 @@ components:
           example: "379008"
         peersCount:
           type: integer
+<<<<<<< HEAD
           description: Number of connected peers / 节点数量
+=======
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           example: 1
         rulesHash:
           type: string
           format: hex
+<<<<<<< HEAD
           description: Consensus rules hash / 共识规则哈希
+=======
+          description: 共识规则哈希
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
         consensusParams:
           $ref: '#/components/schemas/ConsensusParams'
         monetaryPolicy:
@@ -456,6 +708,7 @@ components:
 
     ConsensusParams:
       type: object
+<<<<<<< HEAD
       description: Consensus parameters / 共识参数
       properties:
         difficultyTargetMs:
@@ -481,15 +734,39 @@ components:
         maxTimeDrift:
           type: integer
           description: Maximum timestamp drift in seconds / 最大时间偏移（秒）
+=======
+      properties:
+        difficultyTargetMs:
+          type: integer
+          example: 17000
+        difficultyWindow:
+          type: integer
+          example: 10
+        difficultyMinBits:
+          type: integer
+          example: 1
+        difficultyMaxBits:
+          type: integer
+          example: 32
+        maxBlockSize:
+          type: integer
+          example: 2000000
+        maxTimeDrift:
+          type: integer
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           example: 7200
 
     MonetaryPolicy:
       type: object
+<<<<<<< HEAD
       description: Monetary policy parameters / 货币政策参数
+=======
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
       properties:
         initialBlockReward:
           type: integer
           format: int64
+<<<<<<< HEAD
           description: Initial block reward in smallest unit / 初始区块奖励（最小单位）
           example: 800000000
         halvingInterval:
@@ -503,15 +780,30 @@ components:
         minerFeeShare:
           type: integer
           description: Miner fee share percentage / 矿工手续费分成比例
+=======
+          example: 800000000
+        halvingInterval:
+          type: integer
+          example: 0
+        tailEmission:
+          type: integer
+          example: 0
+        minerFeeShare:
+          type: integer
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           example: 100
 
     Block:
       type: object
+<<<<<<< HEAD
       description: Block structure / 区块结构
+=======
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
       properties:
         height:
           type: integer
           format: int64
+<<<<<<< HEAD
           description: Block height / 区块高度
         hash:
           type: string
@@ -543,16 +835,44 @@ components:
         transactions:
           type: array
           description: List of transactions / 交易列表
+=======
+        hash:
+          type: string
+          format: hex
+        prevHash:
+          type: string
+          format: hex
+        timestamp:
+          type: string
+          format: date-time
+        timestampUnix:
+          type: integer
+          format: int64
+        difficultyBits:
+          type: integer
+          format: int32
+        nonce:
+          type: integer
+          format: int64
+        minerAddress:
+          type: string
+        transactions:
+          type: array
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           items:
             $ref: '#/components/schemas/Transaction'
 
     Transaction:
       type: object
+<<<<<<< HEAD
       description: Transaction structure / 交易结构
+=======
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
       properties:
         txid:
           type: string
           format: hex
+<<<<<<< HEAD
           description: Transaction ID / 交易 ID
         version:
           type: integer
@@ -561,31 +881,50 @@ components:
         inputs:
           type: array
           description: Transaction inputs / 交易输入
+=======
+        version:
+          type: integer
+          format: int32
+        inputs:
+          type: array
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           items:
             $ref: '#/components/schemas/TxInput'
         outputs:
           type: array
+<<<<<<< HEAD
           description: Transaction outputs / 交易输出
+=======
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           items:
             $ref: '#/components/schemas/TxOutput'
         lockTime:
           type: integer
           format: int64
+<<<<<<< HEAD
           description: Lock time / 锁定时间
         signatures:
           type: array
           description: Signatures / 签名列表
+=======
+        signatures:
+          type: array
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           items:
             type: string
             format: hex
 
     TxInput:
       type: object
+<<<<<<< HEAD
       description: Transaction input / 交易输入
+=======
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
       properties:
         prevTxID:
           type: string
           format: hex
+<<<<<<< HEAD
           description: Previous transaction ID / 前一个交易 ID
         prevIndex:
           type: integer
@@ -602,10 +941,24 @@ components:
     TxOutput:
       type: object
       description: Transaction output / 交易输出
+=======
+        prevIndex:
+          type: integer
+        scriptSig:
+          type: string
+          format: hex
+        sequence:
+          type: integer
+          format: int64
+
+    TxOutput:
+      type: object
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
       properties:
         value:
           type: integer
           format: int64
+<<<<<<< HEAD
           description: Output value in smallest unit / 输出值（最小单位）
         scriptPubKey:
           type: string
@@ -628,4 +981,23 @@ components:
         derivationPath:
           type: string
           description: HD derivation path / HD 推导路径
+=======
+        scriptPubKey:
+          type: string
+          format: hex
+        address:
+          type: string
+
+    WalletInfo:
+      type: object
+      properties:
+        mnemonic:
+          type: string
+          description: 助记词（仅首次返回）
+        address:
+          type: string
+          description: 默认地址
+        derivationPath:
+          type: string
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
           example: "m/44'/0'/0'/0/0"

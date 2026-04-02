@@ -99,7 +99,11 @@ func TestDifficultyBoundary(t *testing.T) {
 	config.MinimumDifficulty = 1000
 	config.BoundDivisor = 2048
 	config.AdjustmentSensitivity = 0.5
+<<<<<<< HEAD
 
+=======
+	
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 	adjuster := nogopow.NewDifficultyAdjuster(config)
 
 	// Create parent with high difficulty
@@ -113,11 +117,30 @@ func TestDifficultyBoundary(t *testing.T) {
 	// The PI controller limits increases to 10% per block
 	currentTime := parent.Time
 	newDiff := adjuster.CalcDifficulty(currentTime, parent)
+<<<<<<< HEAD
 
+=======
+	
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 	// Check that difficulty increased (blocks too fast)
 	if newDiff.Cmp(parent.Difficulty) <= 0 {
 		t.Errorf("Expected difficulty to increase for instant block, got %d vs %d",
 			newDiff.Uint64(), parent.Difficulty.Uint64())
+<<<<<<< HEAD
+=======
+	}
+	
+	// Check that increase is within 10% bound
+	maxIncreasePercent := big.NewFloat(0.10)
+	parentDiffFloat := new(big.Float).SetInt(parent.Difficulty)
+	maxIncrease := new(big.Float).Mul(parentDiffFloat, maxIncreasePercent)
+	maxIncreaseInt, _ := maxIncrease.Int(nil)
+	maxAllowed := new(big.Int).Add(parent.Difficulty, maxIncreaseInt)
+	
+	if newDiff.Cmp(maxAllowed) > 0 {
+		t.Errorf("Difficulty increase exceeded 10%% boundary: %d vs %d", 
+			newDiff.Uint64(), maxAllowed.Uint64())
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 	}
 
 	// Check that increase is within 10% bound

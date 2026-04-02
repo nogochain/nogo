@@ -35,10 +35,16 @@ func validateDifficultyNogoPow(consensus ConsensusParams, path []*Block, idx int
 	if currentBlock.DifficultyBits < consensus.MinDifficultyBits {
 		return fmt.Errorf("difficulty %d below min %d", currentBlock.DifficultyBits, consensus.MinDifficultyBits)
 	}
+<<<<<<< HEAD
 	// No maximum difficulty limit - difficulty can grow unbounded as network hashrate increases
 	// if currentBlock.DifficultyBits > consensus.MaxDifficultyBits {
 	// 	return fmt.Errorf("difficulty %d above max %d", currentBlock.DifficultyBits, consensus.MaxDifficultyBits)
 	// }
+=======
+	if currentBlock.DifficultyBits > consensus.MaxDifficultyBits {
+		return fmt.Errorf("difficulty %d above max %d", currentBlock.DifficultyBits, consensus.MaxDifficultyBits)
+	}
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 
 	// Optional: Validate difficulty adjustment logic for recent blocks only
 	// This can be enabled for testing but disabled in production sync

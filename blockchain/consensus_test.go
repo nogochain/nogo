@@ -237,11 +237,19 @@ func (s *memChainStore) PutGenesisHash(hash []byte) error {
 
 func mineTestBlock(t *testing.T, p ConsensusParams, b *Block) {
 	t.Helper()
+<<<<<<< HEAD
 
 	// Mine using NogoPow engine
 	engine := nogopow.New(nogopow.DefaultConfig())
 	defer engine.Close()
 
+=======
+	
+	// Mine using NogoPow engine
+	engine := nogopow.New(nogopow.DefaultConfig())
+	defer engine.Close()
+	
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 	header := &nogopow.Header{
 		ParentHash: nogopow.BytesToHash(b.PrevHash),
 		Coinbase:   stringToAddress(b.MinerAddress),
@@ -249,6 +257,7 @@ func mineTestBlock(t *testing.T, p ConsensusParams, b *Block) {
 		Time:       uint64(b.TimestampUnix),
 		Difficulty: big.NewInt(int64(b.DifficultyBits)),
 	}
+<<<<<<< HEAD
 
 	block := nogopow.NewBlock(header, nil, nil, nil)
 	stop := make(chan struct{})
@@ -258,12 +267,27 @@ func mineTestBlock(t *testing.T, p ConsensusParams, b *Block) {
 		t.Fatal(err)
 	}
 
+=======
+	
+	block := nogopow.NewBlock(header, nil, nil, nil)
+	stop := make(chan struct{})
+	resultCh := make(chan *nogopow.Block, 1)
+	
+	if err := engine.Seal(nil, block, resultCh, stop); err != nil {
+		t.Fatal(err)
+	}
+	
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 	result, ok := <-resultCh
 	if !ok {
 		close(stop)
 		t.Fatal("mining failed: channel closed")
 	}
+<<<<<<< HEAD
 
+=======
+	
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 	sealedHeader := result.Header()
 	b.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
 	b.Hash = sealedHeader.Hash().Bytes()
@@ -375,7 +399,11 @@ func TestDifficultyEnforcedWhenEnabled(t *testing.T) {
 	// Calculate expected difficulty for block 1 using nogopow engine
 	engine := nogopow.New(nogopow.DefaultConfig())
 	defer engine.Close()
+<<<<<<< HEAD
 
+=======
+	
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 	parentHeader := &nogopow.Header{
 		Number:     big.NewInt(int64(gen.Height)),
 		Time:       uint64(gen.TimestampUnix),
@@ -383,7 +411,11 @@ func TestDifficultyEnforcedWhenEnabled(t *testing.T) {
 	}
 	expectedB1Difficulty := engine.CalcDifficulty(nil, 101, parentHeader)
 	expectedB1Bits := uint32(expectedB1Difficulty.Uint64())
+<<<<<<< HEAD
 
+=======
+	
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 	// Block 1 uses calculated difficulty
 	b1 := &Block{
 		Version:        1,
@@ -414,7 +446,11 @@ func TestDifficultyEnforcedWhenEnabled(t *testing.T) {
 	}
 	expectedDifficulty := engine.CalcDifficulty(nil, 102, parentHeader2)
 	expectedBits := uint32(expectedDifficulty.Uint64())
+<<<<<<< HEAD
 
+=======
+	
+>>>>>>> aefa2ba184ff509295634ed7e5c33a0d90cee6cd
 	b2Wrong := &Block{
 		Version:        1,
 		Height:         2,
