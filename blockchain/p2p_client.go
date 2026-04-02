@@ -4,15 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net"
 	"strings"
 	"time"
 )
 
 type P2PClient struct {
-	chainID   uint64
-	rulesHash string
-	nodeID    string
+	chainID       uint64
+	rulesHash     string
+	nodeID        string
+	publicIP      string
+	advertiseSelf bool
 
 	dialTimeout time.Duration
 	ioTimeout   time.Duration
@@ -23,13 +27,17 @@ func NewP2PClient(chainID uint64, rulesHash string, nodeID string) *P2PClient {
 	if strings.TrimSpace(nodeID) == "" {
 		nodeID = "unknown"
 	}
+	publicIP, _ := detectPublicIP()
+	advertiseSelf := envBool("P2P_ADVERTISE_SELF", true)
 	return &P2PClient{
-		chainID:     chainID,
-		rulesHash:   strings.TrimSpace(rulesHash),
-		nodeID:      nodeID,
-		dialTimeout: 5 * time.Second,
-		ioTimeout:   10 * time.Second,
-		maxMsgBytes: 4 << 20,
+		chainID:       chainID,
+		rulesHash:     strings.TrimSpace(rulesHash),
+		nodeID:        nodeID,
+		publicIP:      publicIP,
+		advertiseSelf: advertiseSelf,
+		dialTimeout:   5 * time.Second,
+		ioTimeout:     10 * time.Second,
+		maxMsgBytes:   4 << 20,
 	}
 }
 
@@ -39,12 +47,15 @@ func (c *P2PClient) do(ctx context.Context, peer string, reqType string, reqPayl
 		return errors.New("empty peer")
 	}
 
+	log.Printf("P2P client: dialing peer %s", peer)
 	d := net.Dialer{Timeout: c.dialTimeout}
 	conn, err := d.DialContext(ctx, "tcp", peer)
 	if err != nil {
+		log.Printf("P2P client: failed to dial %s: %v", peer, err)
 		return err
 	}
 	defer conn.Close()
+	log.Printf("P2P client: connected to %s (local addr: %s)", peer, conn.LocalAddr().String())
 
 	_ = conn.SetDeadline(time.Now().Add(c.ioTimeout))
 
@@ -72,6 +83,22 @@ func (c *P2PClient) do(ctx context.Context, peer string, reqType string, reqPayl
 	}
 	if c.rulesHash != "" && hello.RulesHash != c.rulesHash {
 		return errors.New("rules hash mismatch")
+	}
+
+	// Send addr message after successful hello handshake if advertiseSelf is true
+	if c.advertiseSelf {
+		if c.publicIP != "" {
+			if err := validatePublicIP(c.publicIP); err == nil {
+				log.Printf("P2P client: sending addr message with public IP %s", c.publicIP)
+				c.sendAddrMessage(conn)
+			} else {
+				log.Printf("P2P client: public IP %s validation failed: %v, skipping addr message", c.publicIP, err)
+			}
+		} else {
+			// No public IP detected, still send addr message if peer might be on local network
+			// The peer will see our connection address even if we don't advertise
+			log.Printf("P2P client: no public IP available, skipping addr message (peer can still use connection address)")
+		}
 	}
 
 	// request -> response
@@ -155,4 +182,51 @@ func (c *P2PClient) RequestBlock(ctx context.Context, peer string, hashHex strin
 		return nil, err
 	}
 	return &block, nil
+}
+
+type peerAddr struct {
+	IP        string `json:"ip"`
+	Port      int    `json:"port"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+func (c *P2PClient) sendAddrMessage(conn net.Conn) error {
+	host, portStr, err := net.SplitHostPort(conn.LocalAddr().String())
+	if err != nil {
+		log.Printf("P2P client failed to parse local address: %v", err)
+		return err
+	}
+	if host == "" || host == "0.0.0.0" {
+		host = c.publicIP
+	}
+	var port int
+	if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil || port <= 0 {
+		port = 9090
+	}
+	addrMsg := map[string]any{
+		"addresses": []peerAddr{
+			{
+				IP:        c.publicIP,
+				Port:      port,
+				Timestamp: time.Now().Unix(),
+			},
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_ = conn.SetDeadline(time.Now().Add(1 * time.Second))
+		done <- p2pWriteJSON(conn, p2pEnvelope{Type: "addr", Payload: mustJSON(addrMsg)})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			log.Printf("P2P client failed to send addr message: %v", err)
+		}
+		return err
+	case <-ctx.Done():
+		log.Printf("P2P client addr message send timeout")
+		return ctx.Err()
+	}
 }

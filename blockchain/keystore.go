@@ -24,7 +24,7 @@ type KeystoreFile struct {
 	KDF KeystoreKDF `json:"kdf"`
 
 	Cipher KeystoreCipher `json:"cipher"`
-	
+
 	// Optional encrypted mnemonic for backup purposes
 	// Only present if wallet was created from mnemonic
 	EncryptedMnemonic *EncryptedMnemonic `json:"encryptedMnemonic,omitempty"`
@@ -33,8 +33,8 @@ type KeystoreFile struct {
 // EncryptedMnemonic stores an encrypted mnemonic phrase
 // Uses separate salt/nonce for enhanced security
 type EncryptedMnemonic struct {
-	SaltB64      string `json:"saltB64"`
-	NonceB64     string `json:"nonceB64"`
+	SaltB64       string `json:"saltB64"`
+	NonceB64      string `json:"nonceB64"`
 	CiphertextB64 string `json:"ciphertextB64"`
 }
 
@@ -269,57 +269,57 @@ func WriteKeystoreWithMnemonic(path string, w *Wallet, mnemonic, password string
 	if err := WriteKeystore(path, w, password, params); err != nil {
 		return err
 	}
-	
+
 	// If mnemonic provided, encrypt and store it
 	if mnemonic == "" {
 		return nil
 	}
-	
+
 	// Read existing keystore
 	ks, err := ReadKeystore(path)
 	if err != nil {
 		return err
 	}
-	
+
 	// Derive separate key for mnemonic encryption
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
 		return err
 	}
-	
+
 	mnemonicKey := pbkdf2HMACSHA256([]byte(password), salt, params.Iterations, 32)
-	
+
 	// Encrypt mnemonic
 	block, err := aes.NewCipher(mnemonicKey)
 	if err != nil {
 		return err
 	}
-	
+
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return err
 	}
-	
+
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return err
 	}
-	
+
 	ciphertext := gcm.Seal(nil, nonce, []byte(mnemonic), nil)
-	
+
 	// Store encrypted mnemonic
 	ks.EncryptedMnemonic = &EncryptedMnemonic{
-		SaltB64:      base64.StdEncoding.EncodeToString(salt),
-		NonceB64:     base64.StdEncoding.EncodeToString(nonce),
+		SaltB64:       base64.StdEncoding.EncodeToString(salt),
+		NonceB64:      base64.StdEncoding.EncodeToString(nonce),
 		CiphertextB64: base64.StdEncoding.EncodeToString(ciphertext),
 	}
-	
+
 	// Write updated keystore
 	b, err := json.MarshalIndent(ks, "", "  ")
 	if err != nil {
 		return err
 	}
-	
+
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
@@ -334,46 +334,46 @@ func ExportMnemonicFromKeystore(path string, password string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	
+
 	// Check if mnemonic is stored
 	if ks.EncryptedMnemonic == nil {
 		return "", errors.New("no mnemonic stored in keystore")
 	}
-	
+
 	// Derive mnemonic decryption key
 	salt, err := base64.StdEncoding.DecodeString(ks.EncryptedMnemonic.SaltB64)
 	if err != nil {
 		return "", err
 	}
-	
+
 	mnemonicKey := pbkdf2HMACSHA256([]byte(password), salt, ks.KDF.Iterations, 32)
-	
+
 	// Decrypt mnemonic
 	block, err := aes.NewCipher(mnemonicKey)
 	if err != nil {
 		return "", err
 	}
-	
+
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return "", err
 	}
-	
+
 	nonce, err := base64.StdEncoding.DecodeString(ks.EncryptedMnemonic.NonceB64)
 	if err != nil {
 		return "", err
 	}
-	
+
 	ciphertext, err := base64.StdEncoding.DecodeString(ks.EncryptedMnemonic.CiphertextB64)
 	if err != nil {
 		return "", err
 	}
-	
+
 	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		return "", ErrKeystoreWrongPassword
 	}
-	
+
 	return string(plain), nil
 }
 
@@ -381,7 +381,7 @@ func ExportMnemonicFromKeystore(path string, password string) (string, error) {
 // Returns the wallet and the mnemonic (either provided or newly generated)
 func CreateWalletFromMnemonic(mnemonic, passphrase string) (*Wallet, string, error) {
 	var err error
-	
+
 	// If no mnemonic provided, generate a new one
 	if mnemonic == "" {
 		mnemonic, err = GenerateMnemonic()
@@ -389,17 +389,17 @@ func CreateWalletFromMnemonic(mnemonic, passphrase string) (*Wallet, string, err
 			return nil, "", err
 		}
 	}
-	
+
 	// Validate mnemonic
 	if !ValidateMnemonic(mnemonic) {
 		return nil, "", errors.New("invalid mnemonic phrase")
 	}
-	
+
 	// Create wallet from mnemonic
 	wallet, err := WalletFromMnemonic(mnemonic, passphrase)
 	if err != nil {
 		return nil, "", err
 	}
-	
+
 	return wallet, mnemonic, nil
 }

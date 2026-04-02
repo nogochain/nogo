@@ -56,55 +56,93 @@ func (s *SyncLoop) SyncOnce(ctx context.Context) {
 	}
 	strictIdentity := envBool("STRICT_PEER_IDENTITY", true)
 
-	for _, peer := range s.pm.Peers() {
+	peers := s.pm.Peers()
+	log.Printf("sync: starting sync round, localHeight=%d, peers=%d", localHeight, len(peers))
+
+	for _, peer := range peers {
+		log.Printf("sync: checking peer %s", peer)
 		info, err := s.pm.FetchChainInfo(ctx, peer)
 		if err != nil {
+			log.Printf("sync: failed to fetch chain info from %s: %v", peer, err)
 			continue
 		}
+		log.Printf("sync: peer %s chain info: height=%d, chainId=%d, rulesHash=%s, genesisHash=%s", peer, info.Height, info.ChainID, info.RulesHash, info.GenesisHash)
 		if info.ChainID != s.bc.ChainID {
+			log.Printf("sync: peer %s chainId mismatch: local=%d, peer=%d", peer, s.bc.ChainID, info.ChainID)
 			continue
 		}
 		if strictIdentity && (info.RulesHash == "" || info.GenesisHash == "") {
+			log.Printf("sync: peer %s missing rulesHash or genesisHash (strict mode)", peer)
 			continue
 		}
 		if info.RulesHash != "" && localRulesHash != "" && info.RulesHash != localRulesHash {
+			log.Printf("sync: peer %s rulesHash mismatch: local=%s, peer=%s", peer, localRulesHash, info.RulesHash)
 			continue
 		}
 		if info.GenesisHash != "" && localGenesisHash != "" && info.GenesisHash != localGenesisHash {
+			log.Printf("sync: peer %s genesisHash mismatch: local=%s, peer=%s", peer, localGenesisHash, info.GenesisHash)
 			continue
 		}
 		if info.Height <= localHeight {
+			log.Printf("sync: peer %s height not ahead: local=%d, peer=%d", peer, localHeight, info.Height)
 			continue
 		}
 
 		var from uint64
-		if info.Height > s.window {
-			from = info.Height - s.window
+		var limit int
+		
+		// Always start from our current height + 1
+		from = localHeight + 1
+		
+		// Limit the number of headers to fetch in one round
+		limit = int(s.window)
+		if info.Height-from+1 < uint64(limit) {
+			limit = int(info.Height - from + 1)
 		}
+		
+		log.Printf("sync: fetching headers from=%d limit=%d (local=%d, peer=%d)", from, limit, localHeight, info.Height)
 
-		headers, err := s.pm.FetchHeadersFrom(ctx, peer, from, int(s.window))
+		// Fetch headers
+		headers, err := s.pm.FetchHeadersFrom(ctx, peer, from, limit)
 		if err != nil {
+			log.Printf("sync: failed to fetch headers: %v", err)
 			continue
 		}
+		log.Printf("sync: fetched %d headers", len(headers))
+
+		// Fetch and add blocks sequentially
 		for _, h := range headers {
 			if _, ok := s.bc.BlockByHash(h.HashHex); ok {
 				continue
 			}
 			b, err := s.pm.FetchBlockByHash(ctx, peer, h.HashHex)
 			if err != nil {
-				continue
+				log.Printf("sync: failed to fetch block %d: %v", h.Height, err)
+				break
 			}
 			_, err = s.bc.AddBlock(b)
-			if err != nil && errors.Is(err, ErrUnknownParent) {
-				// fetch parent chain then retry once
-				if ferr := s.pm.EnsureAncestors(ctx, s.bc, h.PrevHashHex); ferr == nil {
-					_, _ = s.bc.AddBlock(b)
-				}
-				continue
-			}
 			if err != nil {
-				log.Printf("sync: add block failed: %v", err)
+				log.Printf("sync: failed to add block %d: %v", h.Height, err)
+				// Try to fetch missing ancestors
+				if errors.Is(err, ErrUnknownParent) {
+					if ferr := s.pm.EnsureAncestors(ctx, s.bc, h.PrevHashHex); ferr != nil {
+						log.Printf("sync: failed to fetch ancestors: %v", ferr)
+						break
+					}
+					// Retry adding the block
+					_, err = s.bc.AddBlock(b)
+					if err != nil {
+						log.Printf("sync: still failed to add block %d after fetching ancestors: %v", h.Height, err)
+						break
+					}
+				} else {
+					break
+				}
 			}
+		}
+		// Log current height after sync round
+		if latest := s.bc.LatestBlock(); latest != nil {
+			log.Printf("sync: sync round completed, height=%d", latest.Height)
 		}
 	}
 

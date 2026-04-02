@@ -1,0 +1,27 @@
+FROM golang:1.21-alpine AS builder
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-s -w" -o nogo .
+
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /root/
+COPY --from=builder /app/nogo .
+COPY --from=builder /app/genesis ../genesis/
+
+EXPOSE 8080
+
+ENV MINER_ADDRESS="NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c"
+ENV GENESIS_PATH="../genesis/mainnet.json"
+ENV CHAIN_ID=1
+ENV AUTO_MINE=true
+ENV HTTP_ADDR="0.0.0.0:8080"
+ENV RATE_LIMIT_REQUESTS=100
+ENV RATE_LIMIT_BURST=20
+
+CMD ["./nogo", "server"]

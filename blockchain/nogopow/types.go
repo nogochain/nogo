@@ -95,15 +95,15 @@ func NewBlock(header *Header, txs []*Transaction, uncles []*Header, receipts []*
 
 // Transaction represents a blockchain transaction
 type Transaction struct {
-	Type      TransactionType
-	ChainID   uint64
+	Type       TransactionType
+	ChainID    uint64
 	FromPubKey []byte
 	ToAddress  string
-	Amount    uint64
-	Fee       uint64
-	Nonce     uint64
-	Data      string
-	Signature []byte
+	Amount     uint64
+	Fee        uint64
+	Nonce      uint64
+	Data       string
+	Signature  []byte
 }
 
 // TransactionType represents the type of transaction
@@ -157,30 +157,30 @@ func rlpEncode(w interface{}, v interface{}) {
 	writer.Write(header.Coinbase.Bytes())
 	writer.Write(header.Root.Bytes())
 	writer.Write(header.TxHash.Bytes())
-	
+
 	// Number as big.Int bytes
 	if header.Number != nil {
 		writer.Write(header.Number.Bytes())
 	}
-	
+
 	// GasLimit as 8 bytes
 	gasBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(gasBytes, header.GasLimit)
 	writer.Write(gasBytes)
-	
+
 	// Time as 8 bytes
 	timeBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(timeBytes, header.Time)
 	writer.Write(timeBytes)
-	
+
 	// Extra data
 	if len(header.Extra) > 0 {
 		writer.Write(header.Extra)
 	}
-	
+
 	// Nonce
 	writer.Write(header.Nonce[:])
-	
+
 	// Difficulty as big.Int bytes
 	if header.Difficulty != nil {
 		writer.Write(header.Difficulty.Bytes())

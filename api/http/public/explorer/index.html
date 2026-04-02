@@ -232,6 +232,9 @@ body {
 .blocks-table tbody tr:hover {
   background: var(--bg-tertiary);
 }
+.blocks-table tbody tr[style*="animation"] {
+  animation-fill-mode: both;
+}
 .block-hash-link { 
   color: var(--accent-blue); 
   cursor: pointer; 
@@ -619,22 +622,28 @@ body {
 <!-- Footer -->
 <footer class="footer">
   <p>NogoChain Block Explorer v1.0 | 
-    <a href="http://localhost:8080/" target="_blank">API</a> | 
-    <a href="http://localhost:8080/webwallet/" target="_blank">Wallet</a>
+    <a href="/" target="_blank">API</a> | 
+    <a href="/webwallet/" target="_blank">Wallet</a>
   </p>
   <p style="margin-top: 10px; opacity: 0.7;">Powered by NogoChain Network</p>
 </footer>
 
 <script>
-const API = window.location.protocol + '//' + window.location.hostname + ':' + (window.location.port || 8080);
+// Build API URL correctly: use current hostname and port from browser
+const API = window.location.protocol + '//' + window.location.host;
 
-async function api(path) {
+async function api(path, silent = false) {
   try {
     const r = await fetch(API + path);
-    if (!r.ok) throw new Error('API error: ' + r.status);
+    if (!r.ok) {
+      if (!silent) throw new Error('API error: ' + r.status);
+      return null;
+    }
     return await r.json();
   } catch(e) {
-    showError('Cannot connect to node at ' + API + ': ' + e.message);
+    if (!silent) {
+      showError('Cannot connect to node at ' + API + ': ' + e.message);
+    }
     return null;
   }
 }
@@ -696,6 +705,25 @@ function base64ToHex(base64) {
   return Array.from(raw).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
 }
 
+// Create a table row for a block
+function createBlockRow(height, block) {
+  const row = document.createElement('tr');
+  const time = block.timestampUnix ? new Date(block.timestampUnix * 1000).toLocaleTimeString() : '-';
+  const txs = block.transactions ? block.transactions.length : 0;
+  const hashHex = block.hash ? base64ToHex(block.hash) : '-';
+  const hashShort = hashHex !== '-' ? hashHex.substring(0, 16) : '-';
+  const miner = block.minerAddress ? block.minerAddress.substring(0, 16) + '...' : '-';
+  
+  row.innerHTML = `
+    <td><strong>${height.toLocaleString()}</strong></td>
+    <td><span class="block-hash-link" onclick="showBlock(${height})">${hashShort}... <button class="copy-btn" onclick="event.stopPropagation(); copyToClipboard('${hashHex}', 'Hash')">📋</button></span></td>
+    <td>${miner}</td>
+    <td><span style="background:var(--bg-tertiary);padding:4px 12px;border-radius:12px;font-size:12px;">${txs}</span></td>
+    <td style="color:var(--text-secondary)">${time}</td>
+  `;
+  return row;
+}
+
 // Load stats and blocks
 async function loadStats() {
   hideError();
@@ -711,29 +739,61 @@ async function loadStats() {
   document.getElementById('peers').textContent = (info.peersCount || 0).toLocaleString();
   
   const tbody = document.getElementById('blocksBody');
-  tbody.innerHTML = '';
   
-  const startHeight = info.height;
-  const endHeight = Math.max(0, startHeight - 19);
+  if (isInitialLoad) {
+    // Initial load: build the entire table
+    tbody.innerHTML = '';
+    displayedBlockHeights.clear();
+    
+    const startHeight = info.height;
+    const endHeight = Math.max(0, startHeight - (MAX_BLOCKS_DISPLAY - 1));
+    
+    for (let h = startHeight; h >= endHeight; h--) {
+      const block = await api('/block/height/' + h);
+      if (block) {
+        const row = createBlockRow(h, block);
+        tbody.appendChild(row);
+        displayedBlockHeights.add(h);
+      }
+    }
+    
+    isInitialLoad = false;
+  }
+}
+
+// Incrementally add new block at the top
+async function addNewBlock(height) {
+  if (displayedBlockHeights.has(height)) {
+    return; // Already displayed
+  }
   
-  for (let h = startHeight; h >= endHeight; h--) {
-    const block = await api('/block/height/' + h);
-    if (block) {
-      const row = document.createElement('tr');
-      const time = block.timestampUnix ? new Date(block.timestampUnix * 1000).toLocaleTimeString() : '-';
-      const txs = block.transactions ? block.transactions.length : 0;
-      const hashHex = block.hash ? base64ToHex(block.hash) : '-';
-      const hashShort = hashHex !== '-' ? hashHex.substring(0, 16) : '-';
-      const miner = block.minerAddress ? block.minerAddress.substring(0, 16) + '...' : '-';
-      
-      row.innerHTML = `
-        <td><strong>${h.toLocaleString()}</strong></td>
-        <td><span class="block-hash-link" onclick="showBlock(${h})">${hashShort}... <button class="copy-btn" onclick="event.stopPropagation(); copyToClipboard('${hashHex}', 'Hash')">📋</button></span></td>
-        <td>${miner}</td>
-        <td><span style="background:var(--bg-tertiary);padding:4px 12px;border-radius:12px;font-size:12px;">${txs}</span></td>
-        <td style="color:var(--text-secondary)">${time}</td>
-      `;
-      tbody.appendChild(row);
+  const block = await api('/block/height/' + height);
+  if (!block) return;
+  
+  const tbody = document.getElementById('blocksBody');
+  const newRow = createBlockRow(height, block);
+  
+  // Insert at the top with animation
+  newRow.style.animation = 'slideDown 0.3s ease-out';
+  const firstRow = tbody.firstChild;
+  if (firstRow) {
+    tbody.insertBefore(newRow, firstRow);
+  } else {
+    tbody.appendChild(newRow);
+  }
+  
+  displayedBlockHeights.add(height);
+  
+  // Remove oldest block if exceeding limit
+  while (displayedBlockHeights.size > MAX_BLOCKS_DISPLAY) {
+    const lastRow = tbody.lastChild;
+    if (lastRow) {
+      const heightCell = lastRow.querySelector('td strong');
+      if (heightCell) {
+        const oldHeight = parseInt(heightCell.textContent.replace(/,/g, ''));
+        displayedBlockHeights.delete(oldHeight);
+      }
+      lastRow.remove();
     }
   }
 }
@@ -745,10 +805,22 @@ async function checkForNewBlocks() {
   
   const currentHeight = info.height || 0;
   
-  // Only refresh if height has changed
+  // Only process if height has changed
   if (currentHeight > lastKnownHeight) {
     console.log('New block detected! Height:', currentHeight);
-    await loadStats();
+    
+    // Update stats immediately
+    document.getElementById('height').textContent = currentHeight.toLocaleString();
+    document.getElementById('supply').textContent = ((info.totalSupply || 0) / 1e8).toFixed(8) + ' NOGO';
+    document.getElementById('difficulty').textContent = info.difficultyBits?.toLocaleString() || '-';
+    document.getElementById('peers').textContent = (info.peersCount || 0).toLocaleString();
+    
+    // Incrementally add new blocks from lastKnownHeight + 1 to currentHeight
+    for (let h = lastKnownHeight + 1; h <= currentHeight; h++) {
+      await addNewBlock(h);
+    }
+    
+    lastKnownHeight = currentHeight;
   }
 }
 
@@ -1015,27 +1087,24 @@ async function search() {
   }
   
   // Search by hash (block or transaction)
-if (/^[0-9a-fA-F]{64}$/.test(q)) {
-  // Try to find transaction first
-  try {
-    const txResult = await api('/tx/' + q);
+  if (/^[0-9a-fA-F]{64}$/.test(q)) {
+    // Try to find transaction first (silently)
+    const txResult = await api('/tx/' + q, true);
     if (txResult && txResult.transaction) {
       showTransactionDetails(txResult);
       return;
     }
-  } catch (e) {
+    
     // Transaction not found, try block
+    const block = await api('/block/hash/' + q);
+    if (block && block.height) { 
+      showBlock(block.height); 
+      return; 
+    }
+    
+    showError('Block or transaction not found');
+    return;
   }
-  
-  const block = await api('/block/hash/' + q);
-  if (block && block.height) { 
-    showBlock(block.height); 
-    return; 
-  }
-  
-  showError('Block or transaction not found');
-  return;
-}
   
   showError('Invalid search format');
 }
@@ -1045,13 +1114,144 @@ document.getElementById('searchInput').addEventListener('keypress', e => {
   if (e.key === 'Enter') search(); 
 });
 
+// WebSocket connection management
+function initializeWebSocket() {
+  const wsUrl = 'ws://' + window.location.host + '/ws';
+  console.log('Attempting WebSocket connection to:', wsUrl);
+  
+  try {
+    wsConnection = new WebSocket(wsUrl);
+    
+    wsConnection.onopen = function() {
+      console.log('✓ WebSocket connected');
+      wsReconnectAttempts = 0;
+      // Subscribe to new_block events
+      subscribeToBlocks();
+    };
+    
+    wsConnection.onmessage = function(event) {
+      try {
+        const message = JSON.parse(event.data);
+        console.log('WebSocket message received:', message);
+        
+        if (message.type === 'new_block') {
+          handleNewBlockEvent(message.data);
+        }
+      } catch (err) {
+        console.error('Failed to parse WebSocket message:', err);
+      }
+    };
+    
+    wsConnection.onclose = function(event) {
+      console.log('WebSocket closed, code:', event.code, 'reason:', event.reason);
+      wsConnection = null;
+      scheduleReconnect();
+    };
+    
+    wsConnection.onerror = function(error) {
+      console.error('WebSocket error:', error);
+    };
+  } catch (err) {
+    console.error('Failed to create WebSocket:', err);
+    scheduleReconnect();
+  }
+}
+
+function subscribeToBlocks() {
+  if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  
+  const subscribeMsg = {
+    type: 'subscribe',
+    topic: 'type',
+    event: 'new_block'
+  };
+  
+  wsConnection.send(JSON.stringify(subscribeMsg));
+  console.log('Subscribed to new_block events');
+}
+
+async function handleNewBlockEvent(blockData) {
+  console.log('🆕 New block event received:', blockData);
+  
+  const height = blockData.height;
+  if (!height) {
+    console.error('Invalid block data: missing height');
+    return;
+  }
+  
+  // Update statistics immediately
+  document.getElementById('height').textContent = height.toLocaleString();
+  
+  // Fetch latest chain info to update all statistics
+  const info = await api('/chain/info');
+  if (info) {
+    document.getElementById('supply').textContent = ((info.totalSupply || 0) / 1e8).toFixed(8) + ' NOGO';
+    document.getElementById('difficulty').textContent = info.difficultyBits?.toLocaleString() || '-';
+    document.getElementById('peers').textContent = (info.peersCount || 0).toLocaleString();
+  }
+  
+  // Incrementally add the new block
+  addNewBlock(height);
+  
+  // Update last known height
+  lastKnownHeight = height;
+  
+  // Show toast notification
+  showToast('🆕 New block #' + height.toLocaleString());
+}
+
+function scheduleReconnect() {
+  if (wsReconnectAttempts >= WS_MAX_RECONNECT_ATTEMPTS) {
+    console.log('Max WebSocket reconnection attempts reached. Using polling fallback.');
+    return;
+  }
+  
+  wsReconnectAttempts++;
+  const delay = WS_RECONNECT_DELAY_MS * wsReconnectAttempts; // Exponential backoff
+  
+  console.log(`Scheduling WebSocket reconnect attempt ${wsReconnectAttempts}/${WS_MAX_RECONNECT_ATTEMPTS} in ${delay}ms`);
+  
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer);
+  }
+  
+  wsReconnectTimer = setTimeout(() => {
+    console.log('Attempting WebSocket reconnection...');
+    initializeWebSocket();
+  }, delay);
+}
+
+function closeWebSocket() {
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+  
+  if (wsConnection) {
+    wsConnection.close(1000, 'Client closing');
+    wsConnection = null;
+  }
+}
+
 // Global state for block polling
 let lastKnownHeight = 0;
 let isInitialLoad = true;
+let displayedBlockHeights = new Set();
+const MAX_BLOCKS_DISPLAY = 20;
+
+// WebSocket connection state
+let wsConnection = null;
+let wsReconnectTimer = null;
+let wsReconnectAttempts = 0;
+const WS_MAX_RECONNECT_ATTEMPTS = 10;
+const WS_RECONNECT_DELAY_MS = 3000;
 
 // Initialize
 loadStats();
-// Poll for new blocks every 5 seconds
+initializeWebSocket();
+// Poll for new blocks every 5 seconds (fallback)
 setInterval(checkForNewBlocks, 5000);
 </script>
 </body>

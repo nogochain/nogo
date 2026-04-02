@@ -28,6 +28,24 @@ func getGitCommit() string {
 	return strings.TrimSpace(string(out))
 }
 
+func getPeerHeight(pm PeerAPI) uint64 {
+	if pm == nil {
+		return 0
+	}
+	
+	var maxHeight uint64
+	for _, peer := range pm.Peers() {
+		info, err := pm.FetchChainInfo(context.Background(), peer)
+		if err != nil {
+			continue
+		}
+		if info.Height > maxHeight {
+			maxHeight = info.Height
+		}
+	}
+	return maxHeight
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -42,7 +60,7 @@ func main() {
 		}
 
 		miner := os.Getenv("MINER_ADDRESS")
-		autoMine := envBool("AUTO_MINE", true)
+		autoMine := envBool("AUTO_MINE", false)
 		if autoMine && strings.TrimSpace(miner) == "" {
 			log.Fatal("MINER_ADDRESS is required when AUTO_MINE=true")
 		}
@@ -62,13 +80,6 @@ func main() {
 		mpSize := envInt("MEMPOOL_MAX", 10_000)
 		mp := NewMempool(mpSize)
 
-		var minerLoop *Miner
-		if strings.TrimSpace(miner) != "" {
-			maxTxPerBlock := envInt("MAX_TX_PER_BLOCK", 100)
-			forceEmptyBlocks := envBool("MINE_FORCE_EMPTY_BLOCKS", false)
-			minerLoop = NewMiner(bc, mp, maxTxPerBlock, forceEmptyBlocks)
-		}
-
 		peers := ParsePeersEnv(os.Getenv("PEERS"))
 		var peerMgr *PeerManager
 		if len(peers) > 0 {
@@ -77,16 +88,27 @@ func main() {
 		txGossip := peerMgr != nil && envBool("TX_GOSSIP_ENABLE", true)
 
 		// Optional: TCP P2P transport (separate from HTTP RPC).
+		// Initialize P2P before miner so miner can use p2pMgr for block broadcast
 		p2pPeers := ParseP2PPeersEnv(os.Getenv("P2P_PEERS"))
 		nodeID := strings.TrimSpace(os.Getenv("NODE_ID"))
 		if nodeID == "" {
 			nodeID = strings.TrimSpace(miner)
 		}
 		var p2pMgr *P2PPeerManager
-		if len(p2pPeers) > 0 {
+		// Always create peer manager if P2P is enabled, even without configured peers
+		// This allows the node to accept incoming connections and block broadcasts
+		p2pEnable := envBool("P2P_ENABLE", len(p2pPeers) > 0)
+		if p2pEnable {
 			p2pMgr = NewP2PPeerManager(chainID, bc.RulesHashHex(), nodeID, p2pPeers)
 		}
-		p2pEnable := envBool("P2P_ENABLE", len(p2pPeers) > 0)
+
+		var minerLoop *Miner
+		if strings.TrimSpace(miner) != "" {
+			maxTxPerBlock := envInt("MAX_TX_PER_BLOCK", 100)
+			forceEmptyBlocks := envBool("MINE_FORCE_EMPTY_BLOCKS", false)
+			// Pass p2pMgr to miner for block broadcast (prefer P2P over HTTP peers)
+			minerLoop = NewMiner(bc, mp, p2pMgr, maxTxPerBlock, forceEmptyBlocks)
+		}
 
 		metrics := NewMetrics(bc, mp, peerMgr)
 
@@ -109,11 +131,6 @@ func main() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		if autoMine && minerLoop != nil {
-			interval := envDurationMS("MINE_INTERVAL_MS", 1000*time.Millisecond)
-			go minerLoop.Run(ctx, interval)
-		}
-
 		// Prefer P2P for sync if configured, otherwise fall back to HTTP peers.
 		var syncPM PeerAPI
 		if p2pMgr != nil {
@@ -125,16 +142,8 @@ func main() {
 			syncInterval := envDurationMS("SYNC_INTERVAL_MS", 3000*time.Millisecond)
 			go NewSyncLoop(syncPM, bc, syncInterval).Run(ctx)
 		}
-		if p2pEnable {
-			p2pListen := strings.TrimSpace(os.Getenv("P2P_LISTEN_ADDR"))
-			p2pSrv := NewP2PServer(bc, syncPM, mp, p2pListen, nodeID)
-			go func() {
-				if err := p2pSrv.Serve(ctx); err != nil {
-					log.Printf("p2p server error: %v", err)
-				}
-			}()
-		}
 
+		// Start HTTP server immediately for block explorer access during sync
 		addr := strings.TrimSpace(os.Getenv("HTTP_ADDR"))
 		if addr == "" {
 			addr = ":8080"
@@ -176,13 +185,67 @@ func main() {
 		log.Printf("NogoChain node listening on %s (miner=%s, aiAuditor=%t)", addr, bc.MinerAddress, aiURL != "")
 		ln, err := createListener(addr)
 		if err != nil {
-			log.Fatalf("Failed to bind to %s: %v", addr, err)
+			log.Fatalf("failed to bind: %v", err)
 		}
-		defer ln.Close()
 
-		if err := httpSrv.Serve(ln); err != nil {
-			log.Fatal(err)
+		go func() {
+			if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("HTTP server error: %v", err)
+			}
+		}()
+
+		// Start P2P server for peer communication
+		if p2pEnable {
+			p2pListen := strings.TrimSpace(os.Getenv("P2P_LISTEN_ADDR"))
+			p2pSrv := NewP2PServer(bc, syncPM, mp, p2pListen, nodeID)
+			log.Printf("P2P server starting with peer manager=%v", p2pMgr != nil)
+			go func() {
+				if err := p2pSrv.Serve(ctx); err != nil {
+					log.Printf("p2p server error: %v", err)
+				}
+			}()
+			// Start periodic stale peer cleanup
+			if p2pMgr != nil {
+				go runPeerCleanupLoop(ctx, p2pMgr)
+			}
+		} else {
+			log.Print("P2P server disabled (p2pEnable=false)")
 		}
+
+		// Wait for initial sync to complete before starting mining (if auto-mine enabled and has peers)
+		if autoMine && minerLoop != nil && syncPM != nil {
+			log.Print("Waiting for initial sync to complete before starting mining...")
+			time.Sleep(5 * time.Second) // Initial delay for first sync cycle
+
+			// Check if we're synced by comparing with peer heights
+			localHeight := bc.LatestBlock().Height
+			peerHeight := getPeerHeight(syncPM)
+			if peerHeight > localHeight {
+				log.Printf("Sync in progress: local height=%d, peer height=%d", localHeight, peerHeight)
+				// Wait until we're within 10 blocks of the highest peer
+				for peerHeight > localHeight+10 {
+					time.Sleep(3 * time.Second)
+					localHeight = bc.LatestBlock().Height
+					peerHeight = getPeerHeight(syncPM)
+					log.Printf("Syncing... local=%d, peer=%d", localHeight, peerHeight)
+				}
+				log.Printf("Initial sync completed. Local height: %d", localHeight)
+			} else {
+				log.Printf("Node is synced. Local height: %d", localHeight)
+			}
+		} else if autoMine && minerLoop != nil {
+			// No peers configured (genesis node), start mining immediately
+			log.Print("No peers configured, starting mining immediately...")
+		}
+
+		if autoMine && minerLoop != nil {
+			interval := envDurationMS("MINE_INTERVAL_MS", 1000*time.Millisecond)
+			go minerLoop.Run(ctx, interval)
+		}
+
+		// Block forever to keep the server running
+		// All goroutines (HTTP server, P2P server, miner, sync loop) run in background
+		select {}
 
 	default:
 		if err := runCLI(os.Args[1:]); err != nil {

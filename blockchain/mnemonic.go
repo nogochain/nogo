@@ -238,10 +238,10 @@ var wordlist = []string{
 const (
 	// MnemonicWordCount is the number of words in a mnemonic phrase
 	MnemonicWordCount = 12
-	
+
 	// MnemonicEntropyBits is the entropy size in bits (128 bits for 12 words)
 	MnemonicEntropyBits = 128
-	
+
 	// MnemonicChecksumBits is the checksum size in bits
 	MnemonicChecksumBits = MnemonicEntropyBits / 32
 )
@@ -269,30 +269,30 @@ func EntropyToMnemonic(entropy []byte) (string, error) {
 	// Calculate checksum
 	hash := sha256.Sum256(entropy)
 	checksumBits := MnemonicChecksumBits
-	
+
 	// Combine entropy and checksum
 	entropyBits := len(entropy) * 8
 	totalBits := entropyBits + checksumBits
-	
+
 	// Create bit array
 	bitArray := make([]bool, totalBits)
-	
+
 	// Copy entropy bits
 	for i := 0; i < entropyBits; i++ {
 		byteIndex := i / 8
 		bitIndex := 7 - (i % 8)
 		bitArray[i] = (entropy[byteIndex] & (1 << bitIndex)) != 0
 	}
-	
+
 	// Copy checksum bits
 	for i := 0; i < checksumBits; i++ {
 		bitArray[entropyBits+i] = (hash[0] & (1 << (7 - i))) != 0
 	}
-	
+
 	// Convert to words (11 bits per word)
 	wordCount := totalBits / 11
 	words := make([]string, wordCount)
-	
+
 	for i := 0; i < wordCount; i++ {
 		index := uint16(0)
 		for j := 0; j < 11; j++ {
@@ -302,7 +302,7 @@ func EntropyToMnemonic(entropy []byte) (string, error) {
 		}
 		words[i] = wordlist[index]
 	}
-	
+
 	return strings.Join(words, " "), nil
 }
 
@@ -310,11 +310,11 @@ func EntropyToMnemonic(entropy []byte) (string, error) {
 // Validates the mnemonic checksum according to BIP39
 func MnemonicToEntropy(mnemonic string) ([]byte, error) {
 	words := strings.Fields(mnemonic)
-	
+
 	if len(words) != MnemonicWordCount {
 		return nil, fmt.Errorf("invalid mnemonic word count: %d, expected %d", len(words), MnemonicWordCount)
 	}
-	
+
 	// Convert words to indices
 	indices := make([]uint16, len(words))
 	for i, word := range words {
@@ -330,22 +330,22 @@ func MnemonicToEntropy(mnemonic string) ([]byte, error) {
 			return nil, fmt.Errorf("invalid mnemonic word: %s", word)
 		}
 	}
-	
+
 	// Convert indices to bits
 	totalBits := len(words) * 11
 	bitArray := make([]bool, totalBits)
-	
+
 	for i, index := range indices {
 		for j := 0; j < 11; j++ {
 			bitArray[i*11+j] = (index & (1 << (10 - j))) != 0
 		}
 	}
-	
+
 	// Extract entropy and checksum
 	entropyBits := totalBits - MnemonicChecksumBits
 	entropyBytes := (entropyBits + 7) / 8
 	entropy := make([]byte, entropyBytes)
-	
+
 	for i := 0; i < entropyBits; i++ {
 		if bitArray[i] {
 			byteIndex := i / 8
@@ -353,22 +353,22 @@ func MnemonicToEntropy(mnemonic string) ([]byte, error) {
 			entropy[byteIndex] |= (1 << bitIndex)
 		}
 	}
-	
+
 	// Verify checksum
 	hash := sha256.Sum256(entropy)
 	expectedChecksum := (hash[0] >> (8 - MnemonicChecksumBits)) & ((1 << MnemonicChecksumBits) - 1)
-	
+
 	actualChecksum := uint8(0)
 	for i := 0; i < MnemonicChecksumBits; i++ {
 		if bitArray[entropyBits+i] {
 			actualChecksum |= (1 << (MnemonicChecksumBits - 1 - i))
 		}
 	}
-	
+
 	if actualChecksum != expectedChecksum {
 		return nil, errors.New("invalid mnemonic checksum")
 	}
-	
+
 	return entropy, nil
 }
 
@@ -378,17 +378,17 @@ func MnemonicToEntropy(mnemonic string) ([]byte, error) {
 func MnemonicToSeed(mnemonic, passphrase string) ([]byte, error) {
 	// Normalize mnemonic (NFKD normalization would be applied here in full implementation)
 	normalizedMnemonic := strings.ToLower(strings.TrimSpace(mnemonic))
-	
+
 	// Create salt: "mnemonic" + passphrase
 	salt := "mnemonic" + passphrase
-	
+
 	// Use PBKDF2 with HMAC-SHA512 (2048 iterations as per BIP39)
 	// For simplicity, using SHA512 directly - production should use PBKDF2
 	hmac := sha512.New()
 	hmac.Write([]byte(salt))
 	hmac.Write([]byte(normalizedMnemonic))
 	seed := hmac.Sum(nil)
-	
+
 	// In production, iterate 2048 times with PBKDF2
 	// This is a simplified version for demonstration
 	for i := 0; i < 2047; i++ {
@@ -396,7 +396,7 @@ func MnemonicToSeed(mnemonic, passphrase string) ([]byte, error) {
 		hmac.Write(seed)
 		seed = hmac.Sum(nil)
 	}
-	
+
 	return seed, nil
 }
 
@@ -408,19 +408,19 @@ func WalletFromMnemonic(mnemonic, passphrase string) (*Wallet, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Create HD wallet from seed
 	hdWallet, err := NewHDWallet(seed)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Derive using simple path: m/0 (non-hardened for compatibility)
 	derived, err := hdWallet.Derive("m/0")
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return &Wallet{
 		PrivateKey: derived.PrivateKey,
 		PublicKey:  derived.PublicKey,

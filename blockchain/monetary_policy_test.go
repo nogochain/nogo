@@ -193,15 +193,15 @@ func TestGetUncleReward(t *testing.T) {
 		uncleHeight  uint64
 		expected     *big.Int
 	}{
-		{10, 9, big.NewInt(7 * NogoNOGO)},  // distance=1: (8-1)/8 * 8 = 7
-		{10, 8, big.NewInt(6 * NogoNOGO)},  // distance=2: (8-2)/8 * 8 = 6
-		{10, 7, big.NewInt(5 * NogoNOGO)},  // distance=3: (8-3)/8 * 8 = 5
-		{10, 6, big.NewInt(4 * NogoNOGO)},  // distance=4: (8-4)/8 * 8 = 4
-		{10, 5, big.NewInt(3 * NogoNOGO)},  // distance=5: (8-5)/8 * 8 = 3
-		{10, 4, big.NewInt(2 * NogoNOGO)},  // distance=6: (8-6)/8 * 8 = 2
-		{10, 10, big.NewInt(0)},            // same height: invalid
-		{10, 11, big.NewInt(0)},            // uncle in future: invalid
-		{10, 3, big.NewInt(0)},             // too old (distance=7): invalid
+		{10, 9, big.NewInt(7 * NogoNOGO)}, // distance=1: (8-1)/8 * 8 = 7
+		{10, 8, big.NewInt(6 * NogoNOGO)}, // distance=2: (8-2)/8 * 8 = 6
+		{10, 7, big.NewInt(5 * NogoNOGO)}, // distance=3: (8-3)/8 * 8 = 5
+		{10, 6, big.NewInt(4 * NogoNOGO)}, // distance=4: (8-4)/8 * 8 = 4
+		{10, 5, big.NewInt(3 * NogoNOGO)}, // distance=5: (8-5)/8 * 8 = 3
+		{10, 4, big.NewInt(2 * NogoNOGO)}, // distance=6: (8-6)/8 * 8 = 2
+		{10, 10, big.NewInt(0)},           // same height: invalid
+		{10, 11, big.NewInt(0)},           // uncle in future: invalid
+		{10, 3, big.NewInt(0)},            // too old (distance=7): invalid
 	}
 
 	for _, tc := range testCases {
@@ -250,10 +250,10 @@ func TestGetNephewBonus(t *testing.T) {
 		uncleCount int
 		expected   *big.Int
 	}{
-		{0, big.NewInt(0)},                          // 0 uncles: no bonus
-		{1, new(big.Int).Set(expectedPerUncle)},     // 1 uncle: 0.25 NOGO
-		{2, new(big.Int).Mul(expectedPerUncle, big.NewInt(2))}, // 2 uncles: 0.5 NOGO
-		{3, new(big.Int).Mul(expectedPerUncle, big.NewInt(2))}, // 3 uncles: capped at 2
+		{0, big.NewInt(0)},                                      // 0 uncles: no bonus
+		{1, new(big.Int).Set(expectedPerUncle)},                 // 1 uncle: 0.25 NOGO
+		{2, new(big.Int).Mul(expectedPerUncle, big.NewInt(2))},  // 2 uncles: 0.5 NOGO
+		{3, new(big.Int).Mul(expectedPerUncle, big.NewInt(2))},  // 3 uncles: capped at 2
 		{10, new(big.Int).Mul(expectedPerUncle, big.NewInt(2))}, // 10 uncles: capped at 2
 	}
 
@@ -409,11 +409,11 @@ func TestMonetaryPolicyGetTotalMinerReward(t *testing.T) {
 func TestMonetaryPolicyValidate(t *testing.T) {
 	// Valid policy
 	validPolicy := MonetaryPolicy{
-		InitialBlockReward:   8 * NogoNOGO,
+		InitialBlockReward:     8 * NogoNOGO,
 		AnnualReductionPercent: 10,
-		MinimumBlockReward:   NogoNOGO / 10,
-		UncleRewardEnabled:   true,
-		MaxUncleDepth:        6,
+		MinimumBlockReward:     NogoNOGO / 10,
+		UncleRewardEnabled:     true,
+		MaxUncleDepth:          6,
 	}
 	if err := validPolicy.Validate(); err != nil {
 		t.Errorf("Valid policy should not error: %v", err)
@@ -438,7 +438,7 @@ func TestMonetaryPolicyValidate(t *testing.T) {
 
 	// Invalid: reduction percent > 100
 	invalidPolicy = MonetaryPolicy{
-		InitialBlockReward:   8 * NogoNOGO,
+		InitialBlockReward:     8 * NogoNOGO,
 		AnnualReductionPercent: 101,
 	}
 	if err := invalidPolicy.Validate(); err == nil {
@@ -475,14 +475,14 @@ func TestValidateEconomicParameters(t *testing.T) {
 // TestMonetaryPolicyMarshalBinary tests binary serialization
 func TestMonetaryPolicyMarshalBinary(t *testing.T) {
 	policy := MonetaryPolicy{
-		InitialBlockReward:   8 * NogoNOGO,
+		InitialBlockReward:     8 * NogoNOGO,
 		AnnualReductionPercent: 10,
-		MinimumBlockReward:   NogoNOGO / 10,
-		UncleRewardEnabled:   true,
-		MaxUncleDepth:        6,
-		HalvingInterval:      0, // Legacy field
-		MinerFeeShare:        100,
-		TailEmission:         0, // Legacy field
+		MinimumBlockReward:     NogoNOGO / 10,
+		UncleRewardEnabled:     true,
+		MaxUncleDepth:          6,
+		HalvingInterval:        0, // Legacy field
+		MinerFeeShare:          100,
+		TailEmission:           0, // Legacy field
 	}
 
 	data, err := policy.MarshalBinary()
@@ -490,7 +490,7 @@ func TestMonetaryPolicyMarshalBinary(t *testing.T) {
 		t.Fatalf("MarshalBinary failed: %v", err)
 	}
 
-	// Expected size: 1 (version) + 8 (initial) + 8 (halving) + 1 (fee share) + 8 (tail) + 
+	// Expected size: 1 (version) + 8 (initial) + 8 (halving) + 1 (fee share) + 8 (tail) +
 	//                1 (reduction) + 8 (min) + 1 (uncle) + 1 (depth) = 37 bytes
 	if len(data) != 37 {
 		t.Errorf("Expected 37 bytes, got %d", len(data))

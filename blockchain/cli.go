@@ -35,7 +35,7 @@ func runCLI(args []string) error {
 		b, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(b))
 		return nil
-	
+
 	case "create_wallet_mnemonic":
 		// usage: blockchain create_wallet_mnemonic [mnemonic] [passphrase]
 		// If mnemonic not provided, generates a new one
@@ -47,12 +47,12 @@ func runCLI(args []string) error {
 		if len(args) >= 3 {
 			passphrase = args[2]
 		}
-		
+
 		w, generatedMnemonic, err := CreateWalletFromMnemonic(mnemonic, passphrase)
 		if err != nil {
 			return err
 		}
-		
+
 		out := map[string]any{
 			"address":   w.Address,
 			"publicKey": w.PublicKeyBase64(),
@@ -62,14 +62,14 @@ func runCLI(args []string) error {
 		b, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(b))
 		return nil
-	
+
 	case "create_keystore_mnemonic":
 		// usage: blockchain create_keystore_mnemonic <file> [password] [mnemonic] [passphrase]
 		// Creates a keystore with encrypted mnemonic backup
 		if len(args) < 2 {
 			return errors.New("usage: blockchain create_keystore_mnemonic <file> [password] [mnemonic] [passphrase]")
 		}
-		
+
 		passArg := ""
 		if len(args) >= 3 {
 			passArg = args[2]
@@ -82,21 +82,21 @@ func runCLI(args []string) error {
 		if len(args) >= 5 {
 			passphrase = args[4]
 		}
-		
+
 		pass, err := ReadWalletPassword(passArg, "Keystore password: ", true)
 		if err != nil {
 			return err
 		}
-		
+
 		w, finalMnemonic, err := CreateWalletFromMnemonic(mnemonic, passphrase)
 		if err != nil {
 			return err
 		}
-		
+
 		if err := WriteKeystoreWithMnemonic(args[1], w, finalMnemonic, pass, DefaultKeystoreParams()); err != nil {
 			return err
 		}
-		
+
 		out := map[string]any{
 			"keystore": args[1],
 			"address":  w.Address,
@@ -105,29 +105,29 @@ func runCLI(args []string) error {
 		b, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(b))
 		return nil
-	
+
 	case "export_mnemonic":
 		// usage: blockchain export_mnemonic <file> [password]
 		// Exports mnemonic from a keystore file
 		if len(args) < 2 {
 			return errors.New("usage: blockchain export_mnemonic <file> [password]")
 		}
-		
+
 		passArg := ""
 		if len(args) >= 3 {
 			passArg = args[2]
 		}
-		
+
 		pass, err := ReadWalletPassword(passArg, "Keystore password: ", false)
 		if err != nil {
 			return err
 		}
-		
+
 		mnemonic, err := ExportMnemonicFromKeystore(args[1], pass)
 		if err != nil {
 			return err
 		}
-		
+
 		out := map[string]any{
 			"keystore": args[1],
 			"mnemonic": mnemonic,

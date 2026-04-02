@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,11 +22,17 @@ type P2PServer struct {
 
 	listenAddr string
 	nodeID     string
+	publicIP   string
 
-	maxConns    int
-	maxMsgSize  int
-	sem         chan struct{}
-	blockRecvCB func(*Block)
+	maxConns      int
+	maxMsgSize    int
+	maxPeers      int
+	maxAddrReturn int
+	advertiseSelf bool
+	sem           chan struct{}
+	blockRecvCB   func(*Block)
+	peerPorts     map[string]int // Track peer ports: IP -> port
+	peerPortsMu   sync.RWMutex
 }
 
 func NewP2PServer(bc *Blockchain, pm PeerAPI, mp *Mempool, listenAddr string, nodeID string) *P2PServer {
@@ -33,14 +42,42 @@ func NewP2PServer(bc *Blockchain, pm PeerAPI, mp *Mempool, listenAddr string, no
 	if strings.TrimSpace(nodeID) == "" {
 		nodeID = bc.MinerAddress
 	}
+
+	publicIP, err := GetPublicIPWithFallback()
+	if err != nil {
+		log.Printf("P2P public IP detection failed: %v (node will operate without public IP advertisement)", err)
+	}
+	if publicIP != "" {
+		log.Printf("P2P public IP detected: %s", publicIP)
+	}
+
+	advertiseSelf := envBool("P2P_ADVERTISE_SELF", true)
+	maxPeers := envInt("P2P_MAX_PEERS", 1000)
+	maxAddrReturn := envInt("P2P_MAX_ADDR_RETURN", 100)
+
+	if maxPeers <= 0 {
+		maxPeers = 1000
+	}
+	if maxAddrReturn <= 0 {
+		maxAddrReturn = 100
+	}
+	if maxAddrReturn > maxPeers {
+		maxAddrReturn = maxPeers
+	}
+
 	s := &P2PServer{
-		bc:         bc,
-		pm:         pm,
-		mp:         mp,
-		listenAddr: listenAddr,
-		nodeID:     nodeID,
-		maxConns:   envInt("P2P_MAX_CONNECTIONS", 200),
-		maxMsgSize: envInt("P2P_MAX_MESSAGE_BYTES", 4<<20),
+		bc:            bc,
+		pm:            pm,
+		mp:            mp,
+		listenAddr:    listenAddr,
+		nodeID:        nodeID,
+		publicIP:      publicIP,
+		maxConns:      envInt("P2P_MAX_CONNECTIONS", 200),
+		maxMsgSize:    envInt("P2P_MAX_MESSAGE_BYTES", 4<<20),
+		maxPeers:      maxPeers,
+		maxAddrReturn: maxAddrReturn,
+		advertiseSelf: advertiseSelf,
+		peerPorts:     make(map[string]int),
 	}
 	if s.maxConns <= 0 {
 		s.maxConns = 200
@@ -49,6 +86,9 @@ func NewP2PServer(bc *Blockchain, pm PeerAPI, mp *Mempool, listenAddr string, no
 		s.maxMsgSize = 4 << 20
 	}
 	s.sem = make(chan struct{}, s.maxConns)
+
+	log.Printf("P2P configuration: advertiseSelf=%v, maxPeers=%d, maxAddrReturn=%d", advertiseSelf, maxPeers, maxAddrReturn)
+
 	return s
 }
 
@@ -119,6 +159,32 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 
 	// Reply hello.
 	_ = p2pWriteJSON(c, p2pEnvelope{Type: "hello", Payload: mustJSON(newP2PHello(s.bc.ChainID, s.bc.RulesHashHex(), s.nodeID))})
+
+	// Add the connecting peer to peer manager (if available)
+	// This ensures we track inbound connections even if they don't send addr message
+	if s.pm != nil {
+		peerAddr := c.RemoteAddr().String()
+		// Extract host and use P2P listen port
+		host, remotePort, err := net.SplitHostPort(peerAddr)
+		if err != nil {
+			log.Printf("P2P server: failed to parse peer address %s: %v", peerAddr, err)
+		} else {
+			// Store the actual port used by the peer
+			port, _ := strconv.Atoi(remotePort)
+			s.peerPortsMu.Lock()
+			s.peerPorts[host] = port
+			s.peerPortsMu.Unlock()
+
+			// Use the P2P listen port for the peer
+			_, listenPort, err := net.SplitHostPort(s.listenAddr)
+			if err != nil {
+				listenPort = "9090"
+			}
+			formattedPeer := fmt.Sprintf("%s:%s", host, listenPort)
+			log.Printf("P2P server: adding inbound peer %s (from %s, remote port=%d)", formattedPeer, peerAddr, port)
+			s.pm.AddPeer(formattedPeer)
+		}
+	}
 
 	// One request per connection (simple and safe).
 	raw, err = p2pReadJSON(c, s.maxMsgSize)
@@ -264,18 +330,145 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 		return err
 	}
 
-	if s.bc != nil {
-		_, err := s.bc.AddBlock(&block)
-		if err != nil {
-			log.Printf("p2p block broadcast add result: %v", err)
+	log.Printf("p2p: received block broadcast height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
+
+	// Try to add the block
+	accepted, err := s.bc.AddBlock(&block)
+	if err != nil {
+		log.Printf("p2p block broadcast add result: %v", err)
+
+		// If parent is unknown, try to fetch missing ancestor blocks
+		if err == ErrUnknownParent {
+			log.Printf("p2p: unknown parent, attempting to fetch missing blocks")
+			// Create a context with timeout
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			// Try to sync missing blocks from the sender (blocking)
+			if syncErr := s.syncMissingBlocks(ctx, c, &block); syncErr != nil {
+				log.Printf("p2p: failed to sync missing blocks: %v", syncErr)
+				// Return the original error if sync fails
+				return p2pWriteJSON(c, p2pEnvelope{Type: "block_broadcast_ack", Payload: mustJSON(map[string]any{
+					"hash":     fmt.Sprintf("%x", block.Hash),
+					"accepted": false,
+					"error":    fmt.Sprintf("unknown parent and sync failed: %v", syncErr),
+				})})
+			}
+
+			// Retry adding the block after syncing ancestors
+			accepted, err = s.bc.AddBlock(&block)
+			if err != nil {
+				log.Printf("p2p: still failed to add block after sync: %v", err)
+				return p2pWriteJSON(c, p2pEnvelope{Type: "block_broadcast_ack", Payload: mustJSON(map[string]any{
+					"hash":     fmt.Sprintf("%x", block.Hash),
+					"accepted": false,
+					"error":    err.Error(),
+				})})
+			}
+			if accepted {
+				log.Printf("p2p: successfully synced and accepted block height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
+			}
 		}
+	} else if accepted {
+		log.Printf("p2p: block accepted height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
 	}
 
 	if s.blockRecvCB != nil {
 		s.blockRecvCB(&block)
 	}
 
-	return p2pWriteJSON(c, p2pEnvelope{Type: "block_broadcast_ack", Payload: mustJSON(map[string]any{"hash": fmt.Sprintf("%x", block.Hash)})})
+	return p2pWriteJSON(c, p2pEnvelope{Type: "block_broadcast_ack", Payload: mustJSON(map[string]any{
+		"hash":     fmt.Sprintf("%x", block.Hash),
+		"accepted": accepted,
+		"error": func() string {
+			if err != nil {
+				return err.Error()
+			}
+			return ""
+		}(),
+	})})
+}
+
+// syncMissingBlocks fetches missing ancestor blocks from the peer
+func (s *P2PServer) syncMissingBlocks(ctx context.Context, c net.Conn, targetBlock *Block) error {
+	log.Printf("p2p: starting sync of missing blocks, target height=%d", targetBlock.Height)
+
+	// Walk backwards from the target block until we find a known ancestor
+	currentHash := targetBlock.PrevHash
+
+	maxDepth := 100 // Safety limit
+	for i := 0; i < maxDepth; i++ {
+		// Check if this block is known
+		block, exists := s.bc.BlockByHash(hex.EncodeToString(currentHash))
+		if exists {
+			log.Printf("p2p: found known ancestor at height=%d hash=%s", block.Height, hex.EncodeToString(currentHash))
+			break
+		}
+
+		// Request the missing block from the peer using P2P client
+		// Use the peer's actual connection port (not a hardcoded port)
+		log.Printf("p2p: requesting missing block hash=%s", hex.EncodeToString(currentHash))
+		peerHost, _, err := net.SplitHostPort(c.RemoteAddr().String())
+		if err != nil {
+			return fmt.Errorf("failed to parse peer address: %w", err)
+		}
+
+		// Use the port that the peer actually used for connection
+		s.peerPortsMu.RLock()
+		peerPort := s.peerPorts[peerHost]
+		s.peerPortsMu.RUnlock()
+
+		var fetchedBlock *Block
+		if peerPort <= 0 {
+			// Fallback to common P2P ports if we don't know the peer's port
+			log.Printf("p2p: unknown port for peer %s, trying common ports", peerHost)
+			portsToTry := []int{9090, 9091, 9092, 8080, 8081}
+			var fetchErr error
+			for _, port := range portsToTry {
+				peerAddr := fmt.Sprintf("%s:%d", peerHost, port)
+				fetchedBlock, fetchErr = RequestBlockFromPeer(ctx, peerAddr, hex.EncodeToString(currentHash))
+				if fetchErr == nil {
+					log.Printf("p2p: successfully fetched block from %s", peerAddr)
+					break
+				}
+			}
+			if fetchErr != nil {
+				return fmt.Errorf("failed to fetch block %s from all tried ports: %w", hex.EncodeToString(currentHash), fetchErr)
+			}
+		} else {
+			// Use the actual port
+			peerAddr := fmt.Sprintf("%s:%d", peerHost, peerPort)
+			var err error
+			fetchedBlock, err = RequestBlockFromPeer(ctx, peerAddr, hex.EncodeToString(currentHash))
+			if err != nil {
+				return fmt.Errorf("failed to fetch block %s from %s: %w", hex.EncodeToString(currentHash), peerAddr, err)
+			}
+		}
+
+		// Add the block to the chain
+		accepted, err := s.bc.AddBlock(fetchedBlock)
+		if err != nil {
+			log.Printf("p2p: failed to add fetched block: %v", err)
+			// Continue trying to fetch more blocks
+		} else if accepted {
+			log.Printf("p2p: synced missing block height=%d hash=%s", fetchedBlock.Height, hex.EncodeToString(fetchedBlock.Hash))
+		}
+
+		// Move to the next ancestor
+		currentHash = fetchedBlock.PrevHash
+	}
+
+	// Now try to add the original target block again
+	log.Printf("p2p: retrying to add target block height=%d", targetBlock.Height)
+	accepted, err := s.bc.AddBlock(targetBlock)
+	if err != nil {
+		return fmt.Errorf("still failed to add target block after sync: %w", err)
+	}
+	if accepted {
+		log.Printf("p2p: successfully synced and accepted target block height=%d hash=%s", targetBlock.Height, hex.EncodeToString(targetBlock.Hash))
+	}
+
+	return nil
 }
 
 func (s *P2PServer) handleBlockReq(c net.Conn, payload json.RawMessage) error {
@@ -310,17 +503,48 @@ func (s *P2PServer) handleGetAddr(c net.Conn) error {
 		Timestamp int64  `json:"timestamp"`
 	}
 	var peerAddrs []peerAddr
-	for _, addr := range s.pm.Peers() {
+	now := time.Now().Unix()
+	if s.advertiseSelf && s.publicIP != "" && validatePublicIP(s.publicIP) == nil {
+		host, portStr, err := net.SplitHostPort(s.listenAddr)
+		if err != nil {
+			host = "0.0.0.0"
+			portStr = "9090"
+		}
+		if host == "" || host == "0.0.0.0" {
+			host = s.publicIP
+		}
+		var port int
+		fmt.Sscanf(portStr, "%d", &port)
+		if port <= 0 {
+			port = 9090
+		}
+		peerAddrs = append(peerAddrs, peerAddr{
+			IP:        s.publicIP,
+			Port:      port,
+			Timestamp: now,
+		})
+	}
+	// Use GetActivePeers to return only recently active peers (< 24h)
+	for _, addr := range s.pm.GetActivePeers() {
+		if len(peerAddrs) >= s.maxAddrReturn {
+			break
+		}
 		host, portStr, err := net.SplitHostPort(addr)
 		if err != nil {
 			continue
 		}
+		if err := validatePublicIP(host); err != nil {
+			continue
+		}
 		var port int
 		fmt.Sscanf(portStr, "%d", &port)
+		if port <= 0 {
+			continue
+		}
 		peerAddrs = append(peerAddrs, peerAddr{
 			IP:        host,
 			Port:      port,
-			Timestamp: time.Now().Unix(),
+			Timestamp: now,
 		})
 	}
 	return p2pWriteJSON(c, p2pEnvelope{Type: "addr", Payload: mustJSON(map[string]any{"addresses": peerAddrs})})
@@ -328,6 +552,7 @@ func (s *P2PServer) handleGetAddr(c net.Conn) error {
 
 func (s *P2PServer) handleAddr(c net.Conn, payload json.RawMessage) error {
 	if s.pm == nil {
+		log.Printf("P2P handleAddr: peer manager is nil, skipping")
 		return nil
 	}
 	type addrMsg struct {
@@ -344,6 +569,7 @@ func (s *P2PServer) handleAddr(c net.Conn, payload json.RawMessage) error {
 	for _, a := range msg.Addresses {
 		addr := fmt.Sprintf("%s:%d", a.IP, a.Port)
 		if addr != "" && addr != ":" {
+			log.Printf("P2P handleAddr: adding peer %s", addr)
 			s.pm.AddPeer(addr)
 		}
 	}
@@ -353,4 +579,76 @@ func (s *P2PServer) handleAddr(c net.Conn, payload json.RawMessage) error {
 func mustJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+// RequestBlockFromPeer fetches a block from a remote peer
+func RequestBlockFromPeer(ctx context.Context, peerAddr string, hashHex string) (*Block, error) {
+	conn, err := net.DialTimeout("tcp", peerAddr, 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to peer %s: %w", peerAddr, err)
+	}
+	defer conn.Close()
+
+	// Set deadline for the operation
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	// Send hello first
+	hello := newP2PHello(1, "", "")
+	hello.Protocol = 1
+	if err := p2pWriteJSON(conn, p2pEnvelope{Type: "hello", Payload: mustJSON(hello)}); err != nil {
+		return nil, fmt.Errorf("failed to send hello: %w", err)
+	}
+
+	// Read hello response
+	raw, err := p2pReadJSON(conn, 1<<20)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read hello response: %w", err)
+	}
+	var env p2pEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, fmt.Errorf("failed to parse hello response: %w", err)
+	}
+	if env.Type != "hello" {
+		return nil, errors.New("peer did not respond with hello")
+	}
+
+	// Request the block
+	req := p2pBlockReq{HashHex: hashHex}
+	if err := p2pWriteJSON(conn, p2pEnvelope{Type: "block_req", Payload: mustJSON(req)}); err != nil {
+		return nil, fmt.Errorf("failed to send block request: %w", err)
+	}
+
+	// Read response
+	raw, err = p2pReadJSON(conn, 4<<20)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read block response: %w", err)
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, fmt.Errorf("failed to parse block response: %w", err)
+	}
+
+	if env.Type == "error" {
+		var errResp map[string]any
+		if err := json.Unmarshal(env.Payload, &errResp); err == nil {
+			if errMsg, ok := errResp["error"].(string); ok {
+				return nil, fmt.Errorf("peer error: %s", errMsg)
+			}
+		}
+		return nil, errors.New("peer returned error")
+	}
+
+	if env.Type == "not_found" {
+		return nil, fmt.Errorf("block not found on peer: %s", hashHex)
+	}
+
+	if env.Type != "block" {
+		return nil, fmt.Errorf("unexpected response type: %s", env.Type)
+	}
+
+	var block Block
+	if err := json.Unmarshal(env.Payload, &block); err != nil {
+		return nil, fmt.Errorf("failed to parse block: %w", err)
+	}
+
+	return &block, nil
 }

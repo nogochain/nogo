@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"log"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 type Miner struct {
 	bc *Blockchain
 	mp *Mempool
+	pm PeerAPI
 
 	maxTxPerBlock    int
 	forceEmptyBlocks bool
@@ -21,13 +23,14 @@ type Miner struct {
 	stopped chan struct{}
 }
 
-func NewMiner(bc *Blockchain, mp *Mempool, maxTxPerBlock int, forceEmptyBlocks bool) *Miner {
+func NewMiner(bc *Blockchain, mp *Mempool, pm PeerAPI, maxTxPerBlock int, forceEmptyBlocks bool) *Miner {
 	if maxTxPerBlock <= 0 {
 		maxTxPerBlock = 100
 	}
 	return &Miner{
 		bc:               bc,
 		mp:               mp,
+		pm:               pm,
 		maxTxPerBlock:    maxTxPerBlock,
 		forceEmptyBlocks: forceEmptyBlocks,
 		wakeCh:           make(chan struct{}, 1),
@@ -92,6 +95,10 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 		return nil, err
 	}
 	log.Printf("miner: successfully mined block at height %d, diff=%d", b.Height, b.DifficultyBits)
+	
+	// Broadcast the new block to all peers
+	go m.broadcastBlock(ctx, b)
+	
 	if len(selectedIDs) > 0 {
 		m.mp.RemoveMany(selectedIDs)
 		m.mu.Lock()
@@ -110,4 +117,20 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 		}
 	}
 	return b, nil
+}
+
+// broadcastBlock broadcasts the mined block to all connected peers
+func (m *Miner) broadcastBlock(ctx context.Context, block *Block) {
+	if m.pm == nil {
+		log.Printf("miner: no peer manager available, skipping block broadcast")
+		return
+	}
+	
+	log.Printf("miner: broadcasting block %d (%s) to peers", block.Height, hex.EncodeToString(block.Hash))
+	if pm, ok := m.pm.(*P2PPeerManager); ok {
+		pm.BroadcastBlock(ctx, block)
+		log.Printf("miner: block broadcast completed")
+	} else {
+		log.Printf("miner: peer manager does not support block broadcast")
+	}
 }

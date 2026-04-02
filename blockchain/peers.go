@@ -62,6 +62,12 @@ func (pm *PeerManager) AddPeer(addr string) {
 	pm.peers = append(pm.peers, addr)
 }
 
+// GetActivePeers returns all peers (HTTP PeerManager doesn't track timestamps)
+// This is a compatibility method for the PeerAPI interface
+func (pm *PeerManager) GetActivePeers() []string {
+	return pm.Peers()
+}
+
 type chainInfo struct {
 	ChainID     uint64 `json:"chainId"`
 	Height      uint64 `json:"height"`

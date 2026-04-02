@@ -37,11 +37,11 @@ type testGenesisJSON struct {
 }
 
 type testMonetaryJSON struct {
-	InitialBlockReward   string `json:"initialBlockReward"`
-	HalvingInterval      uint64 `json:"halvingInterval"`
-	MinerFeeShare        uint8  `json:"minerFeeShare"`
-	TailEmission         string `json:"tailEmission"`
-	MinimumBlockReward   string `json:"minimumBlockReward,omitempty"`
+	InitialBlockReward string `json:"initialBlockReward"`
+	HalvingInterval    uint64 `json:"halvingInterval"`
+	MinerFeeShare      uint8  `json:"minerFeeShare"`
+	TailEmission       string `json:"tailEmission"`
+	MinimumBlockReward string `json:"minimumBlockReward,omitempty"`
 }
 
 func defaultTestConsensusJSON() testConsensusJSON {

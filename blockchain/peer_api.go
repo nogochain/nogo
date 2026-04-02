@@ -7,6 +7,7 @@ import "context"
 type PeerAPI interface {
 	Peers() []string
 	AddPeer(addr string)
+	GetActivePeers() []string
 
 	FetchChainInfo(ctx context.Context, peer string) (*chainInfo, error)
 	FetchHeadersFrom(ctx context.Context, peer string, fromHeight uint64, count int) ([]BlockHeader, error)

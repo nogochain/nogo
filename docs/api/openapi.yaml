@@ -1,0 +1,631 @@
+openapi: 3.0.3
+info:
+  title: NogoChain API
+  description: |
+    # NogoChain API Documentation
+    
+    HTTP API documentation for NogoChain blockchain node
+    
+    NogoChain 区块链节点的 HTTP API 接口文档
+    
+    ## Authentication / 认证方式
+    
+    Some endpoints require Admin Token authentication, pass via `Authorization` header:
+    
+    部分接口需要 Admin Token 认证，通过 `Authorization` 头传递：
+    
+    ```
+    Authorization: Bearer YOUR_ADMIN_TOKEN
+    ```
+    
+    ## Base URLs / 基础 URL
+    
+    - Mainnet: `http://main.nogochain.org:8080`
+    - Local: `http://localhost:8080`
+    
+    ## Response Format / 响应格式
+    
+    All endpoints return JSON format data. Success responses include `data` field, error responses include `error` field.
+    
+    所有接口返回 JSON 格式数据，成功响应包含 `data` 字段，错误响应包含 `error` 字段。
+  version: 1.1.0
+  contact:
+    name: NogoChain Team
+    url: https://nogochain.org
+    email: dev@nogochain.org
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: http://main.nogochain.org:8080
+    description: NogoChain Mainnet
+
+tags:
+  - name: System
+    description: System endpoints (health check, version info) / 系统相关接口（健康检查、版本信息）
+  - name: Chain
+    description: Blockchain information (chain info, blocks, transactions) / 区块链信息查询（链信息、区块、交易）
+  - name: Transaction
+    description: Transaction operations (submit, query) / 交易相关操作（提交、查询）
+  - name: Wallet
+    description: Wallet operations (create, sign) / 钱包相关操作（创建、签名）
+  - name: P2P
+    description: P2P network endpoints / P2P 网络相关接口
+  - name: Mining
+    description: Mining endpoints / 挖矿相关接口
+  - name: WebSocket
+    description: WebSocket real-time subscription / WebSocket 实时订阅
+
+paths:
+  /health:
+    get:
+      tags:
+        - System
+      summary: Health Check / 健康检查
+      description: Check if the node is running normally / 检查节点是否正常运行
+      operationId: getHealth
+      responses:
+        '200':
+          description: Node is healthy / 节点健康
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+        '503':
+          description: Node is unavailable / 节点异常
+
+  /version:
+    get:
+      tags:
+        - System
+      summary: Version Info / 版本信息
+      description: Get node version and build information / 获取节点版本和构建信息
+      operationId: getVersion
+      responses:
+        '200':
+          description: Version information / 版本信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionInfo'
+
+  /chain/info:
+    get:
+      tags:
+        - Chain
+      summary: Chain Info / 链信息
+      description: Get complete information about the current blockchain / 获取当前区块链的完整信息
+      operationId: getChainInfo
+      responses:
+        '200':
+          description: Chain information / 链信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChainInfo'
+
+  /block/height/{height}:
+    get:
+      tags:
+        - Chain
+      summary: Get Block by Height / 按高度查询区块
+      description: Get block details by block height / 根据区块高度获取区块详情
+      operationId: getBlockByHeight
+      parameters:
+        - name: height
+          in: path
+          required: true
+          description: Block height, or use "latest" for the latest block / 区块高度，或使用 "latest" 获取最新区块
+          schema:
+            oneOf:
+              - type: integer
+                format: int64
+                example: 100
+              - type: string
+                example: latest
+      responses:
+        '200':
+          description: Block details / 区块详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Block'
+        '404':
+          description: Block not found / 区块不存在
+
+  /block/hash/{hash}:
+    get:
+      tags:
+        - Chain
+      summary: Get Block by Hash / 按哈希查询区块
+      description: Get block details by block hash / 根据区块哈希获取区块详情
+      operationId: getBlockByHash
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          description: Block hash (64 character hexadecimal) / 区块哈希（64 字符十六进制）
+          schema:
+            type: string
+            format: hex
+            example: bbba903f8a8c06e1f170d91aeab8eb11234a1ffa88a709d71323bfb41b31f3e2
+      responses:
+        '200':
+          description: Block details / 区块详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Block'
+        '404':
+          description: Block not found / 区块不存在
+
+  /tx/{txid}:
+    get:
+      tags:
+        - Transaction
+      summary: Get Transaction / 查询交易
+      description: Get transaction details by transaction ID / 根据交易 ID 获取交易详情
+      operationId: getTransaction
+      parameters:
+        - name: txid
+          in: path
+          required: true
+          description: Transaction ID (64 character hexadecimal) / 交易 ID（64 字符十六进制）
+          schema:
+            type: string
+            format: hex
+      responses:
+        '200':
+          description: Transaction details / 交易详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '404':
+          description: Transaction not found / 交易未找到
+
+  /tx:
+    post:
+      tags:
+        - Transaction
+      summary: Submit Transaction / 提交交易
+      description: Broadcast a signed transaction to the network / 向网络广播已签名的交易
+      operationId: submitTransaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rawTx:
+                  type: string
+                  format: hex
+                  description: Signed transaction in hexadecimal / 已签名的交易（十六进制）
+              required:
+                - rawTx
+      responses:
+        '200':
+          description: Transaction submitted successfully / 交易提交成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txid:
+                    type: string
+                    format: hex
+        '400':
+          description: Invalid transaction / 交易无效
+        '500':
+          description: Submission failed / 提交失败
+
+  /balance/{address}:
+    get:
+      tags:
+        - Chain
+      summary: Get Balance / 查询余额
+      description: Get NOGO balance for a specific address / 获取指定地址的 NOGO 余额
+      operationId: getBalance
+      parameters:
+        - name: address
+          in: path
+          required: true
+          description: NogoChain address / NogoChain 地址
+          schema:
+            type: string
+            example: NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c
+      responses:
+        '200':
+          description: Balance information / 余额信息
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  address:
+                    type: string
+                  balance:
+                    type: integer
+                    format: int64
+                    description: Balance in smallest unit (1 NOGO = 10^8) / 余额（最小单位，1 NOGO = 10^8）
+                  balanceNOGO:
+                    type: number
+                    format: double
+                    description: Balance in NOGO unit / 余额（NOGO 单位）
+
+  /mempool:
+    get:
+      tags:
+        - Transaction
+      summary: Get Mempool / 内存池
+      description: Get list of pending transactions / 获取待确认交易列表
+      operationId: getMempool
+      responses:
+        '200':
+          description: Mempool transaction list / 内存池交易列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  txs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transaction'
+
+  /wallet/create:
+    post:
+      tags:
+        - Wallet
+      summary: Create Wallet / 创建钱包
+      description: Create a new HD wallet / 创建新的 HD 钱包
+      operationId: createWallet
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mnemonic:
+                  type: string
+                  description: Optional, provide mnemonic to import wallet / 可选，提供助记词导入钱包
+                  minLength: 1
+              required:
+                - mnemonic
+      responses:
+        '200':
+          description: Wallet created successfully / 钱包创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletInfo'
+        '400':
+          description: Invalid parameters / 参数错误
+
+  /wallet/sign:
+    post:
+      tags:
+        - Wallet
+      summary: Sign Transaction / 签名交易
+      description: Sign a transaction using the wallet / 使用钱包对交易进行签名
+      operationId: signTransaction
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from:
+                  type: string
+                  description: Sender address / 发送方地址
+                to:
+                  type: string
+                  description: Recipient address / 接收方地址
+                amount:
+                  type: integer
+                  format: int64
+                  description: Amount in smallest unit / 金额（最小单位）
+                fee:
+                  type: integer
+                  format: int64
+                  description: Fee in smallest unit / 手续费（最小单位）
+                nonce:
+                  type: integer
+                  format: int64
+                  description: Random number (anti-replay) / 随机数（防重放）
+              required:
+                - from
+                - to
+                - amount
+      responses:
+        '200':
+          description: Signature successful / 签名成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rawTx:
+                    type: string
+                    format: hex
+                    description: Signed transaction / 已签名的交易
+
+  /p2p/getaddr:
+    get:
+      tags:
+        - P2P
+      summary: Get Peer Addresses / 获取节点列表
+      description: Get list of known P2P node addresses / 获取已知的 P2P 节点地址列表
+      operationId: getPeerAddresses
+      responses:
+        '200':
+          description: Peer address list / 节点地址列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  peers:
+                    type: array
+                    items:
+                      type: string
+                      example: "223.254.144.158:9090"
+
+  /ws:
+    get:
+      tags:
+        - WebSocket
+      summary: WebSocket Connection / WebSocket 连接
+      description: Establish WebSocket connection to subscribe to real-time events / 建立 WebSocket 连接以订阅实时事件
+      operationId: websocketConnection
+      responses:
+        '101':
+          description: Protocol switch successful, WebSocket connection established / 协议切换成功，建立 WebSocket 连接
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Use ADMIN_TOKEN as Bearer Token / 使用 ADMIN_TOKEN 作为 Bearer Token
+
+  schemas:
+    VersionInfo:
+      type: object
+      properties:
+        version:
+          type: string
+          example: dev
+        buildTime:
+          type: string
+          example: unknown
+        goVersion:
+          type: string
+          example: go1.21.5
+
+    ChainInfo:
+      type: object
+      description: Blockchain information / 区块链信息
+      properties:
+        height:
+          type: integer
+          format: int64
+          description: Block height / 区块高度
+          example: 105
+        latestHash:
+          type: string
+          format: hex
+          description: Latest block hash / 最新区块哈希
+        genesisHash:
+          type: string
+          format: hex
+          description: Genesis block hash / 创世区块哈希
+        difficultyBits:
+          type: integer
+          format: int32
+          example: 11
+        chainWork:
+          type: string
+          example: "379008"
+        peersCount:
+          type: integer
+          description: Number of connected peers / 节点数量
+          example: 1
+        rulesHash:
+          type: string
+          format: hex
+          description: Consensus rules hash / 共识规则哈希
+        consensusParams:
+          $ref: '#/components/schemas/ConsensusParams'
+        monetaryPolicy:
+          $ref: '#/components/schemas/MonetaryPolicy'
+
+    ConsensusParams:
+      type: object
+      description: Consensus parameters / 共识参数
+      properties:
+        difficultyTargetMs:
+          type: integer
+          description: Target block time in milliseconds / 目标出块时间（毫秒）
+          example: 17000
+        difficultyWindow:
+          type: integer
+          description: Difficulty adjustment window / 难度调整窗口
+          example: 10
+        difficultyMinBits:
+          type: integer
+          description: Minimum difficulty bits / 最小难度位数
+          example: 1
+        difficultyMaxBits:
+          type: integer
+          description: Maximum difficulty bits / 最大难度位数
+          example: 32
+        maxBlockSize:
+          type: integer
+          description: Maximum block size in bytes / 最大区块大小（字节）
+          example: 2000000
+        maxTimeDrift:
+          type: integer
+          description: Maximum timestamp drift in seconds / 最大时间偏移（秒）
+          example: 7200
+
+    MonetaryPolicy:
+      type: object
+      description: Monetary policy parameters / 货币政策参数
+      properties:
+        initialBlockReward:
+          type: integer
+          format: int64
+          description: Initial block reward in smallest unit / 初始区块奖励（最小单位）
+          example: 800000000
+        halvingInterval:
+          type: integer
+          description: Block reward halving interval / 区块奖励减半间隔
+          example: 0
+        tailEmission:
+          type: integer
+          description: Tail emission rate / 尾部发行率
+          example: 0
+        minerFeeShare:
+          type: integer
+          description: Miner fee share percentage / 矿工手续费分成比例
+          example: 100
+
+    Block:
+      type: object
+      description: Block structure / 区块结构
+      properties:
+        height:
+          type: integer
+          format: int64
+          description: Block height / 区块高度
+        hash:
+          type: string
+          format: hex
+          description: Block hash / 区块哈希
+        prevHash:
+          type: string
+          format: hex
+          description: Previous block hash / 前一个区块哈希
+        timestamp:
+          type: string
+          format: date-time
+          description: Block timestamp (ISO 8601) / 区块时间戳（ISO 8601 格式）
+        timestampUnix:
+          type: integer
+          format: int64
+          description: Block timestamp (Unix epoch) / 区块时间戳（Unix 时间戳）
+        difficultyBits:
+          type: integer
+          format: int32
+          description: Difficulty target / 难度目标
+        nonce:
+          type: integer
+          format: int64
+          description: Mining nonce / 挖矿随机数
+        minerAddress:
+          type: string
+          description: Miner address / 矿工地址
+        transactions:
+          type: array
+          description: List of transactions / 交易列表
+          items:
+            $ref: '#/components/schemas/Transaction'
+
+    Transaction:
+      type: object
+      description: Transaction structure / 交易结构
+      properties:
+        txid:
+          type: string
+          format: hex
+          description: Transaction ID / 交易 ID
+        version:
+          type: integer
+          format: int32
+          description: Transaction version / 交易版本
+        inputs:
+          type: array
+          description: Transaction inputs / 交易输入
+          items:
+            $ref: '#/components/schemas/TxInput'
+        outputs:
+          type: array
+          description: Transaction outputs / 交易输出
+          items:
+            $ref: '#/components/schemas/TxOutput'
+        lockTime:
+          type: integer
+          format: int64
+          description: Lock time / 锁定时间
+        signatures:
+          type: array
+          description: Signatures / 签名列表
+          items:
+            type: string
+            format: hex
+
+    TxInput:
+      type: object
+      description: Transaction input / 交易输入
+      properties:
+        prevTxID:
+          type: string
+          format: hex
+          description: Previous transaction ID / 前一个交易 ID
+        prevIndex:
+          type: integer
+          description: Previous output index / 前一个输出索引
+        scriptSig:
+          type: string
+          format: hex
+          description: Signature script / 签名脚本
+        sequence:
+          type: integer
+          format: int64
+          description: Sequence number / 序列号
+
+    TxOutput:
+      type: object
+      description: Transaction output / 交易输出
+      properties:
+        value:
+          type: integer
+          format: int64
+          description: Output value in smallest unit / 输出值（最小单位）
+        scriptPubKey:
+          type: string
+          format: hex
+          description: Public key script / 公钥脚本
+        address:
+          type: string
+          description: Recipient address / 接收方地址
+
+    WalletInfo:
+      type: object
+      description: Wallet information / 钱包信息
+      properties:
+        mnemonic:
+          type: string
+          description: Mnemonic phrase (shown only once) / 助记词（仅首次返回）
+        address:
+          type: string
+          description: Default address / 默认地址
+        derivationPath:
+          type: string
+          description: HD derivation path / HD 推导路径
+          example: "m/44'/0'/0'/0/0"

@@ -418,7 +418,7 @@ func hashMatrix(result []uint8) [32]byte {
 		}
 	}
 
-	var mat32 [matSize][matSize/4]uint32
+	var mat32 [matSize][matSize / 4]uint32
 
 	for i := 0; i < matSize; i++ {
 		for j := 0; j < matSize/4; j++ {
