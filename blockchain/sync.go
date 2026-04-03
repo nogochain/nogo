@@ -28,7 +28,7 @@ func NewSyncLoop(pm PeerAPI, bc *Blockchain, interval time.Duration) *SyncLoop {
 		bc:       bc,
 		miner:    nil, // Will be set later via SetMiner method
 		interval: interval,
-		window:   200,
+		window:   SyncBatchSize,
 	}
 }
 
@@ -74,13 +74,72 @@ func (s *SyncLoop) SyncOnce(ctx context.Context) {
 	peers := s.pm.Peers()
 	log.Printf("sync: starting sync round, localHeight=%d, peers=%d", localHeight, len(peers))
 
+	// CRITICAL: Calculate network height to detect if we're behind
+	// This helps identify when we need to sync even if individual peers report lower heights
+	var networkHeight uint64
+	for _, peer := range peers {
+		info, err := s.pm.FetchChainInfo(ctx, peer)
+		if err != nil {
+			continue
+		}
+		if info.Height > networkHeight {
+			networkHeight = info.Height
+		}
+	}
+	if networkHeight > localHeight {
+		log.Printf("sync: network has advanced (local=%d, network=%d), will attempt to sync", localHeight, networkHeight)
+		
+		// CRITICAL: If network is significantly ahead, we may be on a fork
+		// Proactively rollback to find common ancestor
+		heightDiff := networkHeight - localHeight
+		if heightDiff > 10 {
+			log.Printf("sync: network is significantly ahead (diff=%d), checking for fork", heightDiff)
+			
+			// Calculate a safe rollback point (go back 10% of the difference, min 1, max 20)
+			rollbackDepth := heightDiff / 10
+			if rollbackDepth < 1 {
+				rollbackDepth = 1
+			}
+			if rollbackDepth > 20 {
+				rollbackDepth = 20
+			}
+			
+			targetHeight := localHeight - rollbackDepth
+			if targetHeight > 0 {
+				log.Printf("sync: proactively rolling back %d blocks to height %d to resolve potential fork",
+					rollbackDepth, targetHeight)
+				if err := s.bc.RollbackToHeight(targetHeight); err != nil {
+					log.Printf("sync: proactive rollback failed: %v, continuing with normal sync", err)
+				} else {
+					log.Printf("sync: proactive rollback completed, new local height=%d", targetHeight)
+					// Update localHeight for the sync loop
+					localHeight = targetHeight
+				}
+			}
+		}
+	}
+
+	// Track successful sync to mark peer as healthy
+	syncSuccess := false
+
 	for _, peer := range peers {
 		log.Printf("sync: checking peer %s", peer)
 		info, err := s.pm.FetchChainInfo(ctx, peer)
 		if err != nil {
 			log.Printf("sync: failed to fetch chain info from %s: %v", peer, err)
+			// Record failure for connection errors
+			if pm, ok := s.pm.(*P2PPeerManager); ok {
+				pm.RecordPeerFailure(peer)
+			}
 			continue
 		}
+		
+		// Record success for successful connection
+		if pm, ok := s.pm.(*P2PPeerManager); ok {
+			pm.RecordPeerSuccess(peer)
+		}
+		syncSuccess = true
+		
 		log.Printf("sync: peer %s chain info: height=%d, chainId=%d, rulesHash=%s, genesisHash=%s", peer, info.Height, info.ChainID, info.RulesHash, info.GenesisHash)
 		if info.ChainID != s.bc.ChainID {
 			log.Printf("sync: peer %s chainId mismatch: local=%d, peer=%d", peer, s.bc.ChainID, info.ChainID)
@@ -138,19 +197,69 @@ func (s *SyncLoop) SyncOnce(ctx context.Context) {
 			_, err = s.bc.AddBlock(b)
 			if err != nil {
 				log.Printf("sync: failed to add block %d: %v", h.Height, err)
-				// Try to fetch missing ancestors
+				
+				// Handle unknown parent error
 				if errors.Is(err, ErrUnknownParent) {
-					if ferr := s.pm.EnsureAncestors(ctx, s.bc, h.PrevHashHex); ferr != nil {
-						log.Printf("sync: failed to fetch ancestors: %v", ferr)
-						break
-					}
-					// Retry adding the block after fetching ancestors
-					_, err = s.bc.AddBlock(b)
-					if err != nil {
-						log.Printf("sync: still failed to add block %d after fetching ancestors: %v", h.Height, err)
+					// Check if we need to reorganize the chain
+					parentBlock, parentExists := s.bc.BlockByHash(h.PrevHashHex)
+					if !parentExists {
+						// Parent doesn't exist locally
+						// Check if the parent height is lower than or equal to our current height
+						// This indicates a fork that needs to be resolved
+						localHeight := s.bc.LatestBlock().Height
+						expectedParentHeight := h.Height - 1
+						
+						if expectedParentHeight <= localHeight {
+							// We have a local block at this height that's on a different fork
+							// Need to rollback local fork and sync from network
+							log.Printf("sync: detected fork at height %d (local=%d, network parent=%d), initiating reorganization",
+								expectedParentHeight, localHeight, expectedParentHeight)
+							
+							// Find the common ancestor and rollback to it
+							_, rollbackHeight := s.findCommonAncestor(h.PrevHashHex, peer)
+							if rollbackHeight > 0 && rollbackHeight <= localHeight {
+								log.Printf("sync: rolling back from height %d to %d (common ancestor)", localHeight, rollbackHeight)
+								
+								// Rollback the local chain
+								if rollbackErr := s.bc.RollbackToHeight(rollbackHeight); rollbackErr != nil {
+									log.Printf("sync: failed to rollback chain: %v", rollbackErr)
+									break
+								}
+								
+								// Retry adding the block after rollback
+								_, err = s.bc.AddBlock(b)
+								if err != nil {
+									log.Printf("sync: still failed to add block %d after rollback: %v", h.Height, err)
+									break
+								}
+								log.Printf("sync: successfully added block %d after reorganization", h.Height)
+							} else {
+								// Cannot find a suitable rollback point
+								log.Printf("sync: cannot resolve fork, skipping block %d (rollbackHeight=%d, localHeight=%d)", 
+									h.Height, rollbackHeight, localHeight)
+								break
+							}
+						} else {
+							// Try to fetch missing ancestors
+							if ferr := s.pm.EnsureAncestors(ctx, s.bc, h.PrevHashHex); ferr != nil {
+								log.Printf("sync: failed to fetch ancestors: %v", ferr)
+								break
+							}
+							// Retry adding the block after fetching ancestors
+							_, err = s.bc.AddBlock(b)
+							if err != nil {
+								log.Printf("sync: still failed to add block %d after fetching ancestors: %v", h.Height, err)
+								break
+							}
+						}
+					} else {
+						// Parent exists but AddBlock still failed - log details
+						log.Printf("sync: parent block exists (height=%d, hash=%s) but AddBlock failed",
+							parentBlock.Height, h.PrevHashHex)
 						break
 					}
 				} else {
+					// Other error - break and retry next sync round
 					break
 				}
 			}
@@ -161,7 +270,52 @@ func (s *SyncLoop) SyncOnce(ctx context.Context) {
 		}
 	}
 
+	// Cleanup stale peers periodically (every 100 sync rounds)
+	if syncSuccess {
+		if pm, ok := s.pm.(*P2PPeerManager); ok {
+			pm.CleanupStalePeers()
+		}
+	}
+
 	s.discoverPeers(ctx)
+}
+
+// findCommonAncestor finds the common ancestor between local chain and network chain
+// Returns the common ancestor hash and the height to rollback to
+func (s *SyncLoop) findCommonAncestor(networkParentHash string, peer string) (string, uint64) {
+	// Walk backwards from the network parent to find a block we know
+	currentHash := networkParentHash
+	maxSteps := 100 // Safety limit
+	
+	for step := 0; step < maxSteps; step++ {
+		// Check if we know this block
+		block, exists := s.bc.BlockByHash(currentHash)
+		if exists {
+			// Found common ancestor
+			log.Printf("sync: found common ancestor at height=%d hash=%s after %d steps",
+				block.Height, currentHash, step)
+			return currentHash, block.Height
+		}
+		
+		// Fetch the block from peer to get its parent
+		b, err := s.pm.FetchBlockByHash(context.Background(), peer, currentHash)
+		if err != nil {
+			log.Printf("sync: failed to fetch block %s from peer: %v", currentHash, err)
+			break
+		}
+		
+		// Move to parent
+		currentHash = fmt.Sprintf("%x", b.PrevHash)
+		
+		// Check if we've reached genesis
+		if len(b.PrevHash) == 0 || currentHash == "" {
+			log.Printf("sync: reached genesis without finding common ancestor")
+			return "", 0
+		}
+	}
+	
+	log.Printf("sync: failed to find common ancestor after %d steps", maxSteps)
+	return "", 0
 }
 
 func (s *SyncLoop) discoverPeers(ctx context.Context) {

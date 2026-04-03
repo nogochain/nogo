@@ -7,15 +7,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
+type PeerEntry struct {
+	Address      string
+	LastSuccess  time.Time
+	LastFailure  time.Time
+	FailCount    int
+	IsActive     bool
+}
+
 type PeerManager struct {
-	peers []string
+	peers      []string
+	peerMap    map[string]*PeerEntry
+	peersMu    sync.RWMutex
 
 	client *http.Client
 
@@ -39,33 +51,126 @@ func ParsePeersEnv(peersEnv string) []string {
 }
 
 func NewPeerManager(peers []string) *PeerManager {
-	return &PeerManager{
-		peers: peers,
+	pm := &PeerManager{
+		peers: make([]string, 0, len(peers)),
+		peerMap: make(map[string]*PeerEntry),
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 		maxAncestorDepth: 256,
 	}
+	
+	// Initialize peer entries
+	for _, addr := range peers {
+		pm.addPeerInternal(addr)
+	}
+	
+	return pm
 }
 
-func (pm *PeerManager) Peers() []string { return append([]string(nil), pm.peers...) }
-
-func (pm *PeerManager) AddPeer(addr string) {
+// addPeerInternal adds a peer without locking (caller must hold lock)
+func (pm *PeerManager) addPeerInternal(addr string) {
 	if addr == "" {
 		return
 	}
-	for _, p := range pm.peers {
-		if p == addr {
-			return
-		}
+	
+	// Check if already exists
+	if _, exists := pm.peerMap[addr]; exists {
+		return
 	}
+	
 	pm.peers = append(pm.peers, addr)
+	pm.peerMap[addr] = &PeerEntry{
+		Address:  addr,
+		IsActive: true,
+	}
 }
 
-// GetActivePeers returns all peers (HTTP PeerManager doesn't track timestamps)
-// This is a compatibility method for the PeerAPI interface
+func (pm *PeerManager) Peers() []string {
+	pm.peersMu.RLock()
+	defer pm.peersMu.RUnlock()
+	
+	// Return only active peers
+	activePeers := make([]string, 0, len(pm.peers))
+	for _, addr := range pm.peers {
+		if entry, exists := pm.peerMap[addr]; exists && entry.IsActive {
+			activePeers = append(activePeers, addr)
+		}
+	}
+	return activePeers
+}
+
+func (pm *PeerManager) AddPeer(addr string) {
+	pm.peersMu.Lock()
+	defer pm.peersMu.Unlock()
+	
+	pm.addPeerInternal(addr)
+}
+
+// RecordPeerSuccess records a successful connection to a peer
+func (pm *PeerManager) RecordPeerSuccess(addr string) {
+	pm.peersMu.Lock()
+	defer pm.peersMu.Unlock()
+	
+	if entry, exists := pm.peerMap[addr]; exists {
+		entry.LastSuccess = time.Now()
+		entry.IsActive = true
+		entry.FailCount = 0
+	}
+}
+
+// RecordPeerFailure records a failed connection to a peer
+func (pm *PeerManager) RecordPeerFailure(addr string) {
+	pm.peersMu.Lock()
+	defer pm.peersMu.Unlock()
+	
+	if entry, exists := pm.peerMap[addr]; exists {
+		entry.LastFailure = time.Now()
+		entry.FailCount++
+		
+		// Mark peer as inactive after 5 consecutive failures
+		if entry.FailCount >= 5 {
+			entry.IsActive = false
+			log.Printf("peer_manager: marked peer %s as inactive (failures=%d)", addr, entry.FailCount)
+		}
+	}
+}
+
+// CleanupStalePeers removes peers that have been inactive for too long
+func (pm *PeerManager) CleanupStalePeers() {
+	pm.peersMu.Lock()
+	defer pm.peersMu.Unlock()
+	
+	now := time.Now()
+	cleanupThreshold := 24 * time.Hour // Remove peers inactive for 24 hours
+	
+	for addr, entry := range pm.peerMap {
+		if !entry.IsActive && entry.LastFailure.Before(now.Add(-cleanupThreshold)) {
+			// Remove from peers list
+			for i, peerAddr := range pm.peers {
+				if peerAddr == addr {
+					pm.peers = append(pm.peers[:i], pm.peers[i+1:]...)
+					break
+				}
+			}
+			delete(pm.peerMap, addr)
+			log.Printf("peer_manager: removed stale peer %s", addr)
+		}
+	}
+}
+
+// GetActivePeers returns all active peers
 func (pm *PeerManager) GetActivePeers() []string {
-	return pm.Peers()
+	pm.peersMu.RLock()
+	defer pm.peersMu.RUnlock()
+	
+	activePeers := make([]string, 0, len(pm.peers))
+	for _, entry := range pm.peerMap {
+		if entry.IsActive {
+			activePeers = append(activePeers, entry.Address)
+		}
+	}
+	return activePeers
 }
 
 type chainInfo struct {

@@ -28,6 +28,7 @@ type P2PPeerManager struct {
 	mu             sync.RWMutex
 	peers          []string
 	peerTimestamps map[string]int64
+	peerFailCounts map[string]int  // Track consecutive connection failures
 	maxPeers       int
 	client         *P2PClient
 }
@@ -69,16 +70,18 @@ func NewP2PPeerManager(chainID uint64, rulesHash string, nodeID string, peers []
 	pm := &P2PPeerManager{
 		peers:          make([]string, 0, len(peers)),
 		peerTimestamps: make(map[string]int64, len(peers)),
+		peerFailCounts: make(map[string]int, len(peers)),
 		maxPeers:       maxPeers,
 		client:         NewP2PClient(chainID, rulesHash, nodeID),
 	}
 
-	// Initialize with configured peers
+	// Initialize with configured peers (validate format only, allow private IPs)
 	now := time.Now().Unix()
 	for _, peer := range peers {
-		if err := validatePublicIPFromAddr(peer); err == nil {
+		if err := validatePeerAddressFormat(peer); err == nil {
 			pm.peers = append(pm.peers, peer)
 			pm.peerTimestamps[peer] = now
+			pm.peerFailCounts[peer] = 0
 		} else {
 			log.Printf("P2P peer manager: skipping invalid peer %s: %v", peer, err)
 		}
@@ -140,14 +143,15 @@ func (pm *P2PPeerManager) Peers() []string {
 }
 
 // AddPeer adds a new peer to the manager with timestamp tracking (thread-safe)
-// Enforces maxPeers limit and validates IP addresses
+// Enforces maxPeers limit and validates IP addresses for configured peers
+// Note: Does NOT validate public IP to allow local network peers with dynamic ports
 func (pm *P2PPeerManager) AddPeer(addr string) {
 	if addr == "" {
 		return
 	}
 
-	// Validate public IP - reject private IPs
-	if err := validatePublicIPFromAddr(addr); err != nil {
+	// Validate address format (but allow private IPs for local network)
+	if err := validatePeerAddressFormat(addr); err != nil {
 		log.Printf("P2P peer manager: rejected peer %s: %v", addr, err)
 		return
 	}
@@ -160,6 +164,8 @@ func (pm *P2PPeerManager) AddPeer(addr string) {
 		if p == addr {
 			// Update timestamp for existing peer
 			pm.peerTimestamps[addr] = time.Now().Unix()
+			// Reset failure count on successful reconnection
+			pm.peerFailCounts[addr] = 0
 			// Move to end of list (most recently seen)
 			pm.peers = append(pm.peers[:i], pm.peers[i+1:]...)
 			pm.peers = append(pm.peers, addr)
@@ -173,13 +179,85 @@ func (pm *P2PPeerManager) AddPeer(addr string) {
 		oldestPeer := pm.peers[0]
 		pm.peers = pm.peers[1:]
 		delete(pm.peerTimestamps, oldestPeer)
+		delete(pm.peerFailCounts, oldestPeer)
 		log.Printf("P2P peer manager: removed oldest peer %s (maxPeers=%d reached)", oldestPeer, pm.maxPeers)
 	}
 
 	// Add new peer with current timestamp
 	pm.peers = append(pm.peers, addr)
 	pm.peerTimestamps[addr] = time.Now().Unix()
+	pm.peerFailCounts[addr] = 0
 	log.Printf("P2P peer manager: added peer %s (total=%d/%d)", addr, len(pm.peers), pm.maxPeers)
+}
+
+// validatePeerAddressFormat validates the format of a peer address (host:port)
+// Unlike validatePublicIPFromAddr, this allows private IPs for local network peers
+func validatePeerAddressFormat(addr string) error {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid address format: %w", err)
+	}
+	
+	// Validate port
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port > 65535 {
+		return fmt.Errorf("invalid port: %s", portStr)
+	}
+	
+	// Validate host (IP or domain name)
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Not an IP, try to resolve as domain name
+		ips, err := net.LookupIP(host)
+		if err != nil {
+			return fmt.Errorf("invalid host and not resolvable: %s", host)
+		}
+		if len(ips) == 0 {
+			return fmt.Errorf("no IP addresses found for domain: %s", host)
+		}
+		// Domain resolved successfully, accept it
+		return nil
+	}
+	
+	// Valid IP format (including private IPs for local network)
+	return nil
+}
+
+// RecordPeerSuccess records a successful connection to a peer
+func (pm *P2PPeerManager) RecordPeerSuccess(addr string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	
+	if _, exists := pm.peerFailCounts[addr]; exists {
+		pm.peerFailCounts[addr] = 0
+		pm.peerTimestamps[addr] = time.Now().Unix()
+	}
+}
+
+// RecordPeerFailure records a failed connection to a peer
+func (pm *P2PPeerManager) RecordPeerFailure(addr string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	
+	if failCount, exists := pm.peerFailCounts[addr]; exists {
+		pm.peerFailCounts[addr] = failCount + 1
+		
+		// Mark peer for removal after 10 consecutive failures
+		if pm.peerFailCounts[addr] >= 10 {
+			// Remove from peers list
+			for i, p := range pm.peers {
+				if p == addr {
+					pm.peers = append(pm.peers[:i], pm.peers[i+1:]...)
+					break
+				}
+			}
+			delete(pm.peerTimestamps, addr)
+			delete(pm.peerFailCounts, addr)
+			log.Printf("P2P peer manager: removed peer %s after %d consecutive failures", addr, pm.peerFailCounts[addr]+1)
+		} else {
+			log.Printf("P2P peer manager: peer %s connection failed (count=%d)", addr, pm.peerFailCounts[addr])
+		}
+	}
 }
 
 // CleanupStalePeers removes peers that haven't been seen in PeerExpiryDuration (thread-safe)
@@ -277,6 +355,29 @@ func (pm *P2PPeerManager) FetchChainInfo(ctx context.Context, peer string) (*cha
 		return nil, err
 	}
 	return &out, nil
+}
+
+// DiscoverPeersFromPeer connects to a peer and requests their peer list via getaddr
+func (pm *P2PPeerManager) DiscoverPeersFromPeer(ctx context.Context, peer string) {
+	log.Printf("P2P peer discovery: requesting peer list from %s", peer)
+	
+	var addrResp struct {
+		Addresses []peerAddr `json:"addresses"`
+	}
+	if err := pm.client.do(ctx, peer, "getaddr", nil, &addrResp, "addr"); err != nil {
+		log.Printf("P2P peer discovery: failed to get addresses from %s: %v", peer, err)
+		return
+	}
+	
+	addedCount := 0
+	for _, a := range addrResp.Addresses {
+		addr := fmt.Sprintf("%s:%d", a.IP, a.Port)
+		if addr != "" && addr != ":" {
+			pm.AddPeer(addr)
+			addedCount++
+		}
+	}
+	log.Printf("P2P peer discovery: added %d peers from %s", addedCount, peer)
 }
 
 // FetchHeadersFrom fetches block headers from a peer starting at a specific height

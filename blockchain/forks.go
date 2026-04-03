@@ -83,16 +83,16 @@ func validateDifficultyNogoPow(consensus ConsensusParams, path []*Block, idx int
 		// Calculate expected difficulty using NogoPow algorithm
 		expectedDifficulty := adjuster.CalcDifficulty(uint64(currentBlock.TimestampUnix), parentHeader)
 
-		// Validate difficulty is within TIGHT bounds (±20% instead of ±50%)
-		// Tighter bounds provide better security while accounting for implementation differences
+		// Validate difficulty is within TIGHT bounds (±10%)
+		// This is CRITICAL for preventing forks with different difficulties
+		// Uses DifficultyTolerancePercent from config.go
 		actualDifficulty := big.NewInt(int64(currentBlock.DifficultyBits))
 
-		// Calculate acceptable range: [expected * 0.8, expected * 1.2]
-		// This is tighter than the old ±50% to prevent manipulation
-		minAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(80))
+		// Calculate acceptable range: [expected * (100-tolerance)%, expected * (100+tolerance)%]
+		minAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100-DifficultyTolerancePercent))
 		minAllowed.Div(minAllowed, big.NewInt(100))
 
-		maxAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(120))
+		maxAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100+DifficultyTolerancePercent))
 		maxAllowed.Div(maxAllowed, big.NewInt(100))
 
 		if actualDifficulty.Cmp(minAllowed) < 0 {
@@ -141,6 +141,18 @@ func (bc *Blockchain) AddBlock(b *Block) (bool, error) {
 	}
 	if err := validateBlockPoWNogoPow(bc.consensus, b, parent); err != nil {
 		return false, err
+	}
+
+	// Validate difficulty adjustment (CRITICAL: prevent forks with different difficulties)
+	// This must be done BEFORE adding the block to prevent accepting invalid difficulties
+	if bc.consensus.DifficultyEnable && parent != nil {
+		// Create a temporary path for difficulty validation
+		tempPath := []*Block{parent, b}
+		if err := validateDifficultyNogoPow(bc.consensus, tempPath, 1); err != nil {
+			log.Printf("AddBlock: rejecting block height=%d hash=%s due to difficulty validation failure: %v",
+				b.Height, hex.EncodeToString(b.Hash), err)
+			return false, fmt.Errorf("difficulty validation failed: %w", err)
+		}
 	}
 
 	// Basic tx checks (signatures/encoding/chainId)
@@ -301,6 +313,94 @@ func (bc *Blockchain) AddBlock(b *Block) (bool, error) {
 		})
 	}
 	return !wasExtension, nil
+}
+
+// RollbackToHeight rolls back the blockchain to the specified height
+// This is used for chain reorganization when a fork is detected
+func (bc *Blockchain) RollbackToHeight(targetHeight uint64) error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	
+	if targetHeight >= bc.blocks[len(bc.blocks)-1].Height {
+		return fmt.Errorf("cannot rollback to height %d, current height is %d",
+			targetHeight, bc.blocks[len(bc.blocks)-1].Height)
+	}
+	
+	// Find the block at target height
+	var targetBlock *Block
+	for _, b := range bc.blocks {
+		if b.Height == targetHeight {
+			targetBlock = b
+			break
+		}
+	}
+	
+	if targetBlock == nil {
+		return fmt.Errorf("block at height %d not found", targetHeight)
+	}
+	
+	log.Printf("RollbackToHeight: rolling back from height %d to %d (hash=%s)",
+		bc.blocks[len(bc.blocks)-1].Height, targetHeight, hex.EncodeToString(targetBlock.Hash))
+	
+	// Remove blocks above target height from blocksByHash
+	for i := len(bc.blocks) - 1; i > int(targetHeight); i-- {
+		block := bc.blocks[i]
+		hashHex := hex.EncodeToString(block.Hash)
+		delete(bc.blocksByHash, hashHex)
+		
+		// Remove transactions from txIndex
+		for _, tx := range block.Transactions {
+			txid, err := TxIDHex(tx)
+			if err == nil {
+				delete(bc.txIndex, txid)
+			}
+			
+			// Remove address index entries
+		for _, addr := range addressesForBlock(block) {
+			// Find and remove entries for this address at this block height
+			if entries, ok := bc.addressIndex[addr]; ok {
+				newEntries := make([]AddressTxEntry, 0, len(entries))
+				for _, entry := range entries {
+					if entry.Location.Height != block.Height {
+						newEntries = append(newEntries, entry)
+					}
+				}
+				if len(newEntries) == 0 {
+					delete(bc.addressIndex, addr)
+				} else {
+					bc.addressIndex[addr] = newEntries
+				}
+			}
+		}
+		}
+	}
+	
+	// Truncate blocks array
+	bc.blocks = bc.blocks[:targetHeight+1]
+	
+	// Update best tip
+	bc.bestTipHash = hex.EncodeToString(targetBlock.Hash)
+	
+	// Recompute state from genesis to target height using existing method
+	if err := bc.recomputeStateLocked(); err != nil {
+		return fmt.Errorf("failed to recompute state after rollback: %w", err)
+	}
+	
+	// Recompute canonical work
+	work := big.NewInt(0)
+	for i := 0; i <= int(targetHeight); i++ {
+		block := bc.blocks[i]
+		work.Add(work, WorkForDifficultyBits(block.DifficultyBits))
+	}
+	bc.canonicalWork = work
+	
+	// Rewrite canonical chain on disk
+	if err := bc.store.RewriteCanonical(bc.blocks); err != nil {
+		return fmt.Errorf("failed to rewrite canonical chain: %w", err)
+	}
+	
+	log.Printf("RollbackToHeight: successfully rolled back to height %d", targetHeight)
+	return nil
 }
 
 func (bc *Blockchain) computeCanonicalForTipLocked(tipHashHex string) ([]*Block, map[string]Account, *big.Int, error) {

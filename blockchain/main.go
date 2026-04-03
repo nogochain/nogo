@@ -45,6 +45,7 @@ func getPeerHeight(pm PeerAPI) uint64 {
 	}
 
 	var maxHeight uint64
+	var bestPeer string
 	for _, peer := range pm.Peers() {
 		info, err := pm.FetchChainInfo(context.Background(), peer)
 		if err != nil {
@@ -52,7 +53,11 @@ func getPeerHeight(pm PeerAPI) uint64 {
 		}
 		if info.Height > maxHeight {
 			maxHeight = info.Height
+			bestPeer = peer
 		}
+	}
+	if maxHeight > 0 && bestPeer != "" {
+		log.Printf("miner: getPeerHeight returns height=%d from peer=%s (total peers=%d)", maxHeight, bestPeer, len(pm.Peers()))
 	}
 	return maxHeight
 }

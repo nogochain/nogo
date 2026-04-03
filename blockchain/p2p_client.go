@@ -52,6 +52,7 @@ func (c *P2PClient) do(ctx context.Context, peer string, reqType string, reqPayl
 	conn, err := d.DialContext(ctx, "tcp", peer)
 	if err != nil {
 		log.Printf("P2P client: failed to dial %s: %v", peer, err)
+		// Note: Connection failure is recorded by caller if they have access to PeerManager
 		return err
 	}
 	defer conn.Close()
@@ -85,21 +86,10 @@ func (c *P2PClient) do(ctx context.Context, peer string, reqType string, reqPayl
 		return errors.New("rules hash mismatch")
 	}
 
-	// Send addr message after successful hello handshake if advertiseSelf is true
-	if c.advertiseSelf {
-		if c.publicIP != "" {
-			if err := validatePublicIP(c.publicIP); err == nil {
-				log.Printf("P2P client: sending addr message with public IP %s", c.publicIP)
-				c.sendAddrMessage(conn)
-			} else {
-				log.Printf("P2P client: public IP %s validation failed: %v, skipping addr message", c.publicIP, err)
-			}
-		} else {
-			// No public IP detected, still send addr message if peer might be on local network
-			// The peer will see our connection address even if we don't advertise
-			log.Printf("P2P client: no public IP available, skipping addr message (peer can still use connection address)")
-		}
-	}
+	// CRITICAL FIX: Do NOT send addr message here
+	// The addr message should only be sent in response to getaddr requests
+	// Sending it here disrupts the request-response flow for sync operations
+	// The P2P server will still advertise peers via handleGetAddr
 
 	// request -> response
 	var payload json.RawMessage

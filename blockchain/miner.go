@@ -25,6 +25,12 @@ type Miner struct {
 	verificationCtx context.Context
 	verifyCancel    context.CancelFunc
 	verifyDoneCh    chan struct{}
+
+	// CRITICAL: Mining interruption support for fast chain switching
+	miningCtx    context.Context
+	miningCancel context.CancelFunc
+	isMining     bool
+	miningMu     sync.Mutex
 }
 
 func NewMiner(bc *Blockchain, mp *Mempool, pm PeerAPI, maxTxPerBlock int, forceEmptyBlocks bool) *Miner {
@@ -62,7 +68,7 @@ func (m *Miner) OnBlockAdded() {
 		// Wait for a short period to allow block processing
 		// In production, this should be tied to actual validation completion
 		select {
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(VerificationTimeoutMs * time.Millisecond):
 			// Verification timeout - force end verification
 			m.EndVerification()
 		case <-m.stopped:
@@ -131,6 +137,47 @@ func (m *Miner) IsVerifying() bool {
 	return m.verifyCancel != nil
 }
 
+// InterruptMining stops any ongoing mining operation
+// This is called when a new block is received to ensure fast chain switching
+func (m *Miner) InterruptMining() {
+	m.miningMu.Lock()
+	defer m.miningMu.Unlock()
+
+	if m.isMining && m.miningCancel != nil {
+		log.Printf("miner: interrupting ongoing mining operation")
+		m.miningCancel()
+		m.isMining = false
+	}
+}
+
+// ResumeMining allows new mining operations after interruption
+func (m *Miner) ResumeMining() {
+	m.miningMu.Lock()
+	defer m.miningMu.Unlock()
+
+	m.miningCtx, m.miningCancel = context.WithCancel(context.Background())
+	m.isMining = true
+	log.Printf("miner: mining resumed")
+}
+
+// isMiningActive checks if mining context is active
+func (m *Miner) isMiningActive() bool {
+	m.miningMu.Lock()
+	defer m.miningMu.Unlock()
+
+	if !m.isMining || m.miningCtx == nil {
+		return false
+	}
+
+	select {
+	case <-m.miningCtx.Done():
+		m.isMining = false
+		return false
+	default:
+		return true
+	}
+}
+
 func (m *Miner) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 1 * time.Second
@@ -138,6 +185,9 @@ func (m *Miner) Run(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	defer close(m.stopped)
+
+	// Initialize mining context
+	m.ResumeMining()
 
 	for {
 		select {
@@ -151,7 +201,30 @@ func (m *Miner) Run(ctx context.Context, interval time.Duration) {
 				continue
 			}
 
-			_, _ = m.MineOnce(ctx, false)
+			// Check if mining was interrupted
+			if !m.isMiningActive() {
+				log.Printf("miner: mining interrupted, skipping tick")
+				continue
+			}
+
+			block, err := m.MineOnce(ctx, false)
+
+			// CRITICAL: After successfully mining a block, wait for network to sync
+			// This prevents forks caused by rapid consecutive block mining
+			if block != nil && err == nil {
+				log.Printf("miner: block mined at height %d, waiting %dms for network sync before next mining...", block.Height, NetworkSyncCheckDelayMs)
+				time.Sleep(NetworkSyncCheckDelayMs * time.Millisecond)
+
+				// Re-check network height after wait
+				if m.pm != nil {
+					peerHeight := getPeerHeight(m.pm)
+					localHeight := m.bc.LatestBlock().Height
+					if peerHeight > localHeight {
+						log.Printf("miner: network advanced during sync wait (local=%d, peer=%d) - resuming sync", localHeight, peerHeight)
+						continue
+					}
+				}
+			}
 		case <-m.wakeCh:
 			// Check if verification is in progress
 			if m.isVerificationActive() {
@@ -160,7 +233,30 @@ func (m *Miner) Run(ctx context.Context, interval time.Duration) {
 				continue
 			}
 
-			_, _ = m.MineOnce(ctx, false)
+			// Check if mining was interrupted
+			if !m.isMiningActive() {
+				log.Printf("miner: mining interrupted, skipping wake event")
+				continue
+			}
+
+			block, err := m.MineOnce(ctx, false)
+
+			// CRITICAL: After successfully mining a block, wait for network to sync
+			// This prevents forks caused by rapid consecutive block mining
+			if block != nil && err == nil {
+				log.Printf("miner: block mined at height %d, waiting %dms for network sync before next mining...", block.Height, NetworkSyncCheckDelayMs)
+				time.Sleep(NetworkSyncCheckDelayMs * time.Millisecond)
+
+				// Re-check network height after wait
+				if m.pm != nil {
+					peerHeight := getPeerHeight(m.pm)
+					localHeight := m.bc.LatestBlock().Height
+					if peerHeight > localHeight {
+						log.Printf("miner: network advanced during sync wait (local=%d, peer=%d) - resuming sync", localHeight, peerHeight)
+						continue
+					}
+				}
+			}
 		}
 	}
 }
@@ -191,6 +287,11 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 		return nil, nil
 	}
 
+	// Mark mining as active
+	m.miningMu.Lock()
+	m.isMining = true
+	m.miningMu.Unlock()
+
 	// CRITICAL: Before mining, check if network has advanced
 	// If so, pause mining and sync instead to prevent forks
 	if m.pm != nil {
@@ -203,16 +304,51 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 			return nil, nil
 		}
 
-		// Additional safety: if peer height equals local height, wait a tiny bit
-		// to ensure we're not competing with peer who just mined
-		if peerHeight == localHeight {
-			// Very short wait - just enough to let any pending block propagate
-			time.Sleep(500 * time.Millisecond)
+		// CRITICAL: Implement true convergence mechanism
+		// If peer height equals local height OR peer height is unknown (0), use deterministic delay
+		// Strategy: Use deterministic delay based on miner address to avoid collisions
+		if peerHeight == localHeight || peerHeight == 0 {
+			// Calculate deterministic delay based on miner address
+			// This ensures different miners wait different amounts of time
+			minerAddr := m.bc.MinerAddress
+			hashSuffix := 0
+			if len(minerAddr) >= 4 {
+				// Use last 2 hex chars of miner address for delay (0-255ms)
+				for i := len(minerAddr) - 1; i >= 0 && i >= len(minerAddr)-2; i-- {
+					c := minerAddr[i]
+					var val int
+					if c >= '0' && c <= '9' {
+						val = int(c - '0')
+					} else if c >= 'a' && c <= 'f' {
+						val = int(c - 'a' + 10)
+					} else if c >= 'A' && c <= 'F' {
+						val = int(c - 'A' + 10)
+					}
+					hashSuffix = (hashSuffix << 4) | val
+				}
+			}
 
-			// Re-check after short wait
+			// Wait baseDelay + variableDelay based on miner address
+			// This spreads out mining attempts to avoid collisions
+			// CRITICAL: Always wait even if peerHeight is 0 (unknown peer state)
+			baseDelay := time.Duration(MinerConvergenceBaseDelayMs) * time.Millisecond
+			variableDelay := time.Duration(hashSuffix) * time.Millisecond
+			totalDelay := baseDelay + variableDelay
+
+			log.Printf("miner: detected same height or unknown peer (local=%d, peer=%d), waiting %v to avoid competition (miner=%s)", localHeight, peerHeight, totalDelay, minerAddr[:16])
+			time.Sleep(totalDelay)
+
+			// Re-check after delay - if peer mined a block, abort
 			newPeerHeight := getPeerHeight(m.pm)
 			if newPeerHeight > localHeight {
-				log.Printf("miner: network advanced during wait (local=%d, peer=%d) - aborting mining", localHeight, newPeerHeight)
+				log.Printf("miner: network advanced during convergence wait (local=%d, peer=%d) - aborting mining", localHeight, newPeerHeight)
+				return nil, nil
+			}
+
+			// Final check: ensure we're still at the same height
+			newLocalHeight := m.bc.LatestBlock().Height
+			if newLocalHeight != localHeight {
+				log.Printf("miner: local height changed during wait (old=%d, new=%d) - aborting mining", localHeight, newLocalHeight)
 				return nil, nil
 			}
 		}
@@ -238,12 +374,25 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 	}
 	log.Printf("miner: successfully mined block at height %d, diff=%d", b.Height, b.DifficultyBits)
 
+	// CRITICAL: Re-check timestamp before validation
+	// Network may have advanced during mining, so we need to ensure our block time is valid
+	parent := m.bc.LatestBlock()
+	if parent == nil {
+		log.Printf("miner: no parent block for timestamp check")
+		return nil, errors.New("no parent block")
+	}
+	if b.TimestampUnix <= parent.TimestampUnix {
+		b.TimestampUnix = parent.TimestampUnix + 1
+		log.Printf("miner: adjusted block timestamp from %d to %d (parent time was %d)",
+			b.TimestampUnix-1, b.TimestampUnix, parent.TimestampUnix)
+	}
+
 	// CRITICAL: Validate the mined block before adding to chain and broadcasting
 	// This ensures we don't propagate invalid blocks
 	log.Printf("miner: validating mined block height=%d hash=%x", b.Height, b.Hash)
 
-	// Get parent block for validation
-	parent := m.bc.LatestBlock()
+	// Get parent block for validation (re-fetch in case chain changed)
+	parent = m.bc.LatestBlock()
 	if parent == nil {
 		log.Printf("miner: no parent block for validation")
 		return nil, errors.New("no parent block")
@@ -252,6 +401,40 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 	// Validate POW seal
 	if err := validateBlockPoWNogoPow(m.bc.consensus, b, parent); err != nil {
 		log.Printf("miner: POW validation failed for mined block: %v", err)
+
+		// CRITICAL: Check if network has advanced and we need to rollback
+		peerHeight := getPeerHeight(m.pm)
+		localHeight := m.bc.LatestBlock().Height
+
+		if peerHeight > localHeight {
+			log.Printf("miner: validation failed but network has advanced (local=%d, peer=%d) - triggering rollback and sync",
+				localHeight, peerHeight)
+
+			// Find the fork point and rollback
+			// Calculate how many blocks to rollback
+			rollbackDepth := peerHeight - localHeight
+			if rollbackDepth < 1 {
+				rollbackDepth = 1
+			}
+			if rollbackDepth > 10 {
+				rollbackDepth = 10 // Safety limit
+			}
+
+			targetHeight := localHeight
+			if rollbackDepth > 0 {
+				targetHeight = localHeight - uint64(rollbackDepth)
+			}
+
+			log.Printf("miner: rolling back %d blocks to height %d", rollbackDepth, targetHeight)
+			if rollbackErr := m.bc.RollbackToHeight(targetHeight); rollbackErr != nil {
+				log.Printf("miner: rollback failed: %v", rollbackErr)
+				return nil, rollbackErr
+			}
+
+			log.Printf("miner: rollback completed, returning to sync loop")
+			return nil, nil
+		}
+
 		// Don't return error - just don't broadcast this invalid block
 		return nil, nil
 	}
@@ -260,10 +443,76 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 	accepted, err := m.bc.AddBlock(b)
 	if err != nil {
 		log.Printf("miner: failed to add mined block to chain: %v", err)
+
+		// CRITICAL: Check if network has advanced and we need to rollback
+		peerHeight := getPeerHeight(m.pm)
+		localHeight := m.bc.LatestBlock().Height
+
+		if peerHeight > localHeight {
+			log.Printf("miner: AddBlock failed but network has advanced (local=%d, peer=%d) - triggering rollback",
+				localHeight, peerHeight)
+
+			// Calculate rollback depth
+			rollbackDepth := peerHeight - localHeight
+			if rollbackDepth < 1 {
+				rollbackDepth = 1
+			}
+			if rollbackDepth > 10 {
+				rollbackDepth = 10 // Safety limit
+			}
+
+			targetHeight := localHeight
+			if rollbackDepth > 0 {
+				targetHeight = localHeight - uint64(rollbackDepth)
+			}
+
+			log.Printf("miner: rolling back %d blocks to height %d", rollbackDepth, targetHeight)
+			if rollbackErr := m.bc.RollbackToHeight(targetHeight); rollbackErr != nil {
+				log.Printf("miner: rollback failed: %v", rollbackErr)
+				return nil, rollbackErr
+			}
+
+			log.Printf("miner: rollback completed, returning to sync loop")
+			return nil, nil
+		}
+
 		return nil, err
 	}
 	if !accepted {
 		log.Printf("miner: mined block was not accepted to chain")
+
+		// CRITICAL: Check if we should rollback due to network advancement
+		peerHeight := getPeerHeight(m.pm)
+		localHeight := m.bc.LatestBlock().Height
+
+		if peerHeight > localHeight {
+			log.Printf("miner: block rejected but network has advanced (local=%d, peer=%d) - triggering rollback",
+				localHeight, peerHeight)
+
+			// Calculate rollback depth
+			rollbackDepth := peerHeight - localHeight
+			if rollbackDepth < 1 {
+				rollbackDepth = 1
+			}
+			if rollbackDepth > 10 {
+				rollbackDepth = 10 // Safety limit
+			}
+
+			targetHeight := localHeight
+			if rollbackDepth > 0 {
+				targetHeight = localHeight - uint64(rollbackDepth)
+			}
+
+			log.Printf("miner: rolling back %d blocks to height %d", rollbackDepth, targetHeight)
+			if rollbackErr := m.bc.RollbackToHeight(targetHeight); rollbackErr != nil {
+				log.Printf("miner: rollback failed: %v", rollbackErr)
+				return nil, rollbackErr
+			}
+
+			log.Printf("miner: rollback completed, returning to sync loop")
+			return nil, nil
+		}
+
 		return nil, nil
 	}
 

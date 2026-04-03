@@ -74,7 +74,7 @@ func NewP2PServer(bc *Blockchain, pm PeerAPI, mp *Mempool, listenAddr string, no
 		listenAddr:    listenAddr,
 		nodeID:        nodeID,
 		publicIP:      publicIP,
-		maxConns:      envInt("P2P_MAX_CONNECTIONS", 200),
+		maxConns:      envInt("P2P_MAX_CONNECTIONS", DefaultP2PMaxConnections),
 		maxMsgSize:    envInt("P2P_MAX_MESSAGE_BYTES", 4<<20),
 		maxPeers:      maxPeers,
 		maxAddrReturn: maxAddrReturn,
@@ -82,7 +82,7 @@ func NewP2PServer(bc *Blockchain, pm PeerAPI, mp *Mempool, listenAddr string, no
 		peerPorts:     make(map[string]int),
 	}
 	if s.maxConns <= 0 {
-		s.maxConns = 200
+		s.maxConns = DefaultP2PMaxConnections
 	}
 	if s.maxMsgSize <= 0 {
 		s.maxMsgSize = 4 << 20
@@ -110,6 +110,11 @@ func (s *P2PServer) Serve(ctx context.Context) error {
 	defer ln.Close()
 
 	log.Printf("P2P listening on %s (nodeId=%s)", s.listenAddr, s.nodeID)
+
+	// Start peer discovery loop if peer manager is available
+	if s.pm != nil {
+		go s.runPeerDiscoveryLoop(ctx)
+	}
 
 	for {
 		c, err := ln.Accept()
@@ -190,6 +195,11 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 			formattedPeer := fmt.Sprintf("%s:%s", host, listenPort)
 			log.Printf("P2P server: adding inbound peer %s (from %s, remote port=%d)", formattedPeer, peerAddr, port)
 			s.pm.AddPeer(formattedPeer)
+			
+			// Record successful connection
+		if pm, ok := s.pm.(*P2PPeerManager); ok {
+			pm.RecordPeerSuccess(formattedPeer)
+		}
 		}
 	}
 
@@ -257,8 +267,8 @@ func (s *P2PServer) writeChainInfo(w io.Writer) error {
 }
 
 func (s *P2PServer) writeHeadersFrom(w io.Writer, from uint64, count int) error {
-	if count <= 0 || count > 500 {
-		count = 100
+	if count <= 0 || count > MaxSyncRange {
+		count = SyncBatchSize
 	}
 	headers := s.bc.HeadersFrom(from, count)
 	return p2pWriteJSON(w, p2pEnvelope{Type: "headers", Payload: mustJSON(headers)})
@@ -347,17 +357,29 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 	}
 
 	log.Printf("p2p: received block broadcast height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
-
-	// Note: We no longer pause mining here during block broadcast handling.
-	// Mining is controlled by the sync loop (sync.go) which properly coordinates
-	// verification and mining to prevent deadlocks.
-	// The AddBlock function already performs full validation, so additional
-	// verification pausing here is redundant and causes sync issues.
+	
+	// CRITICAL: Interrupt ongoing mining to ensure fast chain switching
+	// This prevents forks caused by mining on an outdated chain
+	if s.miner != nil {
+		s.miner.InterruptMining()
+	}
 
 	// Try to add the block
 	accepted, err := s.bc.AddBlock(&block)
 	if err != nil {
 		log.Printf("p2p block broadcast add result: %v", err)
+		log.Printf("p2p: block details - height=%d, hash=%s, prevHash=%s, difficulty=%d, timestamp=%d, miner=%s",
+			block.Height, hex.EncodeToString(block.Hash), hex.EncodeToString(block.PrevHash),
+			block.DifficultyBits, block.TimestampUnix, block.MinerAddress)
+		
+		// Log parent block info if available
+		parentHashHex := hex.EncodeToString(block.PrevHash)
+		if parent, ok := s.bc.BlockByHash(parentHashHex); ok {
+			log.Printf("p2p: parent block found - height=%d, hash=%s, difficulty=%d, timestamp=%d",
+				parent.Height, hex.EncodeToString(parent.Hash), parent.DifficultyBits, parent.TimestampUnix)
+		} else {
+			log.Printf("p2p: parent block NOT found in local chain")
+		}
 
 		// If parent is unknown, try to fetch missing ancestor blocks
 		if err == ErrUnknownParent {
@@ -393,6 +415,28 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 		}
 	} else if accepted {
 		log.Printf("p2p: block accepted height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
+		
+		// CRITICAL: Wait longer before resuming mining to allow block propagation
+		// This prevents forks caused by mining on top of a block that hasn't propagated yet
+		if s.miner != nil {
+			go func() {
+				// Wait for block propagation delay to allow block to propagate through network
+				// This is critical for fork prevention
+				time.Sleep(time.Duration(BlockPropagationDelayMs) * time.Millisecond)
+				
+				// Before resuming, check if network has advanced further
+				currentHeight := s.bc.LatestBlock().Height
+				peerHeight := getPeerHeight(s.pm)
+				
+				if peerHeight > currentHeight {
+					log.Printf("p2p: network advanced during propagation wait (local=%d, peer=%d) - NOT resuming mining, let sync handle it", currentHeight, peerHeight)
+					return
+				}
+				
+				s.miner.ResumeMining()
+				log.Printf("p2p: mining resumed after block %d propagated (height=%d)", block.Height, currentHeight)
+			}()
+		}
 	}
 
 	if s.blockRecvCB != nil {
@@ -596,6 +640,65 @@ func (s *P2PServer) handleAddr(c net.Conn, payload json.RawMessage) error {
 		}
 	}
 	return p2pWriteJSON(c, p2pEnvelope{Type: "addr_ack", Payload: nil})
+}
+
+// runPeerDiscoveryLoop periodically discovers new peers from configured peers
+func (s *P2PServer) runPeerDiscoveryLoop(ctx context.Context) {
+	if s.pm == nil {
+		return
+	}
+
+	// Wait for initial connections to establish
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(time.Duration(PeerDiscoveryIntervalSec/6) * time.Second): // 5 seconds default
+	}
+
+	// Discover peers at configured interval
+	ticker := time.NewTicker(time.Duration(PeerDiscoveryIntervalSec) * time.Second)
+	defer ticker.Stop()
+
+	log.Printf("P2P peer discovery: starting loop (interval=%ds)", PeerDiscoveryIntervalSec)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("P2P peer discovery: stopping loop")
+			return
+		case <-ticker.C:
+			// Get initial peers from environment configuration
+			initialPeers := s.pm.Peers()
+			if len(initialPeers) == 0 {
+				log.Printf("P2P peer discovery: no initial peers configured")
+				continue
+			}
+
+			// Try to discover peers from the first few configured peers
+			discoverCount := 0
+			for i, peer := range initialPeers {
+				if i >= MaxPeersDiscoverPerRound { // Limit to prevent flooding
+					break
+				}
+				
+				// Create a context with timeout for discovery
+				discoverCtx, cancel := context.WithTimeout(ctx, time.Duration(PeerDiscoveryTimeoutSec)*time.Second)
+				
+				// Use type assertion to call DiscoverPeersFromPeer on *P2PPeerManager
+				if pm, ok := s.pm.(*P2PPeerManager); ok {
+					pm.DiscoverPeersFromPeer(discoverCtx, peer)
+				}
+				
+				cancel()
+				discoverCount++
+			}
+			
+			// Use type assertion to call GetPeerCount on *P2PPeerManager
+			if pm, ok := s.pm.(*P2PPeerManager); ok {
+				log.Printf("P2P peer discovery: completed discovery from %d peers, total peers now: %d", discoverCount, pm.GetPeerCount())
+			}
+		}
+	}
 }
 
 func mustJSON(v any) json.RawMessage {

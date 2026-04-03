@@ -92,13 +92,13 @@ func (ps *PeerScorer) calculateScore(p *PeerScore) float64 {
 	}
 
 	latencyFactor := 1.0
-	if avgLatency < 100 {
+	if avgLatency < float64(LatencyExcellentThresholdMs) {
 		latencyFactor = 1.5
-	} else if avgLatency < 500 {
+	} else if avgLatency < float64(LatencyGoodThresholdMs) {
 		latencyFactor = 1.2
-	} else if avgLatency > 2000 {
+	} else if avgLatency > float64(LatencyPoorThresholdMs)*2 {
 		latencyFactor = 0.5
-	} else if avgLatency > 5000 {
+	} else if avgLatency > float64(LatencyPoorThresholdMs)*5 {
 		latencyFactor = 0.2
 	}
 

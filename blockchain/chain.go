@@ -320,21 +320,26 @@ func validateDifficultyAdjustment(consensus ConsensusParams, block *Block, paren
 	expectedDifficulty := adjuster.CalcDifficulty(uint64(block.TimestampUnix), parentHeader)
 
 	// Validate difficulty change is within allowed bounds
-	// Allow ±50% deviation from expected (to account for different implementations)
+	// CRITICAL: Tighten tolerance to prevent forks
+	// Allow only ±DifficultyTolerancePercent% deviation from expected
+	// This ensures all nodes agree on difficulty calculation
 	actualDifficulty := big.NewInt(int64(block.DifficultyBits))
 
-	// Calculate acceptable range
-	minAllowed := new(big.Int).Div(expectedDifficulty, big.NewInt(2))
-	maxAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(3))
+	// Calculate acceptable range (±DifficultyTolerancePercent%)
+	minAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100-DifficultyTolerancePercent))
+	minAllowed.Div(minAllowed, big.NewInt(100)) // (100 - tolerance)% of expected
+
+	maxAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100+DifficultyTolerancePercent))
+	maxAllowed.Div(maxAllowed, big.NewInt(100)) // (100 + tolerance)% of expected
 
 	if actualDifficulty.Cmp(minAllowed) < 0 {
-		return fmt.Errorf("difficulty adjustment too aggressive: actual %d < min allowed %d (expected %d)",
-			actualDifficulty.Uint64(), minAllowed.Uint64(), expectedDifficulty.Uint64())
+		return fmt.Errorf("difficulty too low: actual %d < min allowed %d (expected %d, tolerance=±%d%%)",
+			actualDifficulty.Uint64(), minAllowed.Uint64(), expectedDifficulty.Uint64(), DifficultyTolerancePercent)
 	}
 
 	if actualDifficulty.Cmp(maxAllowed) > 0 {
-		return fmt.Errorf("difficulty adjustment too aggressive: actual %d > max allowed %d (expected %d)",
-			actualDifficulty.Uint64(), maxAllowed.Uint64(), expectedDifficulty.Uint64())
+		return fmt.Errorf("difficulty too high: actual %d > max allowed %d (expected %d, tolerance=±%d%%)",
+			actualDifficulty.Uint64(), maxAllowed.Uint64(), expectedDifficulty.Uint64(), DifficultyTolerancePercent)
 	}
 
 	return nil
