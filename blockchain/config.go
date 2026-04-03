@@ -37,7 +37,8 @@ const (
 
 	// Verification timeout
 	// Maximum time to wait for block verification before forcing resume
-	VerificationTimeoutMs = 500 // 500 milliseconds
+	// Enhanced for better timestamp validation
+	VerificationTimeoutMs = 5000 // 5 seconds
 
 	// Network sync check interval
 	// Time to wait after mining a block before checking network state
@@ -75,13 +76,21 @@ const (
 	TargetBlockTimeSec = 17 // 17 seconds
 
 	// Maximum block time drift
-	// Allowed timestamp deviation for blocks (72 hours for initial sync)
-	// TODO: Reduce to 2 hours (7200) after network stabilization
-	MaxBlockTimeDriftSec = 259200 // 72 hours
+	// Allowed timestamp deviation for blocks (2 hours for production)
+	// Enhanced timestamp validation for network stability
+	MaxBlockTimeDriftSec = 7200 // 2 hours
 
 	// Sync batch size
 	// Number of blocks to sync in single batch
-	SyncBatchSize = 200
+	SyncBatchSize = 100
+
+	// Fork detection threshold
+	// Maximum blocks to rollback during chain reorganization
+	MaxRollbackDepth = 20
+
+	// Long fork detection threshold
+	// Threshold for detecting and handling long chain forks
+	LongForkThreshold = 10
 
 	// Maximum sync range
 	// Maximum number of blocks to sync in one operation

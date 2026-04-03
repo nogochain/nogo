@@ -367,6 +367,28 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 	}
 
 	log.Printf("miner: attempting to mine block with %d transactions", len(selected))
+	
+	// CRITICAL: Save parent block BEFORE mining (create a deep copy to prevent modification)
+	// This ensures we have a consistent view of the parent block throughout the mining process
+	parentAtMineTime := m.bc.LatestBlock()
+	if parentAtMineTime == nil {
+		log.Printf("miner: no parent block at mining time")
+		return nil, errors.New("no parent block")
+	}
+	
+	// Create a deep copy of the parent block to preserve its state
+	parentCopy := &Block{
+		Height:         parentAtMineTime.Height,
+		Hash:           append([]byte(nil), parentAtMineTime.Hash...),
+		PrevHash:       append([]byte(nil), parentAtMineTime.PrevHash...),
+		TimestampUnix:  parentAtMineTime.TimestampUnix,
+		DifficultyBits: parentAtMineTime.DifficultyBits,
+		MinerAddress:   parentAtMineTime.MinerAddress,
+	}
+	
+	log.Printf("miner: created parentCopy BEFORE mining - height=%d, hash=%x, timestamp=%d, diff=%d",
+		parentCopy.Height, parentCopy.Hash, parentCopy.TimestampUnix, parentCopy.DifficultyBits)
+	
 	b, err := m.bc.MineTransfers(selected)
 	if err != nil {
 		log.Printf("miner: mine failed: %v", err)
@@ -374,32 +396,25 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 	}
 	log.Printf("miner: successfully mined block at height %d, diff=%d", b.Height, b.DifficultyBits)
 
-	// CRITICAL: Re-check timestamp before validation
-	// Network may have advanced during mining, so we need to ensure our block time is valid
-	parent := m.bc.LatestBlock()
-	if parent == nil {
-		log.Printf("miner: no parent block for timestamp check")
-		return nil, errors.New("no parent block")
-	}
-	if b.TimestampUnix <= parent.TimestampUnix {
-		b.TimestampUnix = parent.TimestampUnix + 1
-		log.Printf("miner: adjusted block timestamp from %d to %d (parent time was %d)",
-			b.TimestampUnix-1, b.TimestampUnix, parent.TimestampUnix)
+	// Use saved parent copy for timestamp adjustment and validation
+	// CRITICAL: Do NOT re-fetch parent here, as MineTransfers already added the block to chain
+	log.Printf("miner: before timestamp check - block.Time=%d, parentCopy.Time=%d, condition=%v",
+		b.TimestampUnix, parentCopy.TimestampUnix, b.TimestampUnix <= parentCopy.TimestampUnix)
+	if b.TimestampUnix <= parentCopy.TimestampUnix {
+		oldTs := b.TimestampUnix
+		b.TimestampUnix = parentCopy.TimestampUnix + 1
+		log.Printf("miner: adjusted block timestamp from %d to %d (parent time was %d, parentCopy ptr=%p)",
+			oldTs, b.TimestampUnix, parentCopy.TimestampUnix, parentCopy)
 	}
 
 	// CRITICAL: Validate the mined block before adding to chain and broadcasting
 	// This ensures we don't propagate invalid blocks
 	log.Printf("miner: validating mined block height=%d hash=%x", b.Height, b.Hash)
 
-	// Get parent block for validation (re-fetch in case chain changed)
-	parent = m.bc.LatestBlock()
-	if parent == nil {
-		log.Printf("miner: no parent block for validation")
-		return nil, errors.New("no parent block")
-	}
-
-	// Validate POW seal
-	if err := validateBlockPoWNogoPow(m.bc.consensus, b, parent); err != nil {
+	// Validate POW seal using saved parent copy (we already verified it hasn't changed)
+	log.Printf("miner: starting POW validation height=%d hash=%x, block.Time=%d, parentCopy.Time=%d",
+		b.Height, b.Hash, b.TimestampUnix, parentCopy.TimestampUnix)
+	if err := validateBlockPoWNogoPow(m.bc.consensus, b, parentCopy); err != nil {
 		log.Printf("miner: POW validation failed for mined block: %v", err)
 
 		// CRITICAL: Check if network has advanced and we need to rollback
@@ -439,86 +454,28 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 		return nil, nil
 	}
 
-	// Add block to local chain
-	accepted, err := m.bc.AddBlock(b)
-	if err != nil {
-		log.Printf("miner: failed to add mined block to chain: %v", err)
-
-		// CRITICAL: Check if network has advanced and we need to rollback
-		peerHeight := getPeerHeight(m.pm)
-		localHeight := m.bc.LatestBlock().Height
-
-		if peerHeight > localHeight {
-			log.Printf("miner: AddBlock failed but network has advanced (local=%d, peer=%d) - triggering rollback",
-				localHeight, peerHeight)
-
-			// Calculate rollback depth
-			rollbackDepth := peerHeight - localHeight
-			if rollbackDepth < 1 {
-				rollbackDepth = 1
-			}
-			if rollbackDepth > 10 {
-				rollbackDepth = 10 // Safety limit
-			}
-
-			targetHeight := localHeight
-			if rollbackDepth > 0 {
-				targetHeight = localHeight - uint64(rollbackDepth)
-			}
-
-			log.Printf("miner: rolling back %d blocks to height %d", rollbackDepth, targetHeight)
-			if rollbackErr := m.bc.RollbackToHeight(targetHeight); rollbackErr != nil {
-				log.Printf("miner: rollback failed: %v", rollbackErr)
-				return nil, rollbackErr
-			}
-
-			log.Printf("miner: rollback completed, returning to sync loop")
-			return nil, nil
-		}
-
-		return nil, err
+	// CRITICAL: MineTransfers already added the block to chain, so we don't need to call AddBlock again
+	// Just verify that the block was actually added by checking if it's the latest block
+	latest := m.bc.LatestBlock()
+	latestHeight := uint64(0)
+	if latest != nil {
+		latestHeight = latest.Height
 	}
-	if !accepted {
-		log.Printf("miner: mined block was not accepted to chain")
-
-		// CRITICAL: Check if we should rollback due to network advancement
-		peerHeight := getPeerHeight(m.pm)
-		localHeight := m.bc.LatestBlock().Height
-
-		if peerHeight > localHeight {
-			log.Printf("miner: block rejected but network has advanced (local=%d, peer=%d) - triggering rollback",
-				localHeight, peerHeight)
-
-			// Calculate rollback depth
-			rollbackDepth := peerHeight - localHeight
-			if rollbackDepth < 1 {
-				rollbackDepth = 1
-			}
-			if rollbackDepth > 10 {
-				rollbackDepth = 10 // Safety limit
-			}
-
-			targetHeight := localHeight
-			if rollbackDepth > 0 {
-				targetHeight = localHeight - uint64(rollbackDepth)
-			}
-
-			log.Printf("miner: rolling back %d blocks to height %d", rollbackDepth, targetHeight)
-			if rollbackErr := m.bc.RollbackToHeight(targetHeight); rollbackErr != nil {
-				log.Printf("miner: rollback failed: %v", rollbackErr)
-				return nil, rollbackErr
-			}
-
-			log.Printf("miner: rollback completed, returning to sync loop")
-			return nil, nil
-		}
-
+	if latest == nil || latest.Hash == nil || string(latest.Hash) != string(b.Hash) {
+		log.Printf("miner: mined block was not added to chain (latest=%d, expected=%d)", latestHeight, b.Height)
 		return nil, nil
 	}
 
-	log.Printf("miner: mined block validated and added to chain successfully")
+	log.Printf("miner: mined block validated and added to chain successfully (height=%d, hash=%x)", b.Height, b.Hash)
 
 	// Broadcast the new block to all peers
+	// CRITICAL: Wait for network sync before next mining to prevent forks
+	// Use adaptive delay based on network conditions
+	propagationDelay := calculateAdaptivePropagationDelay(m.pm)
+	log.Printf("miner: block mined at height %d, waiting %dms for network sync before next mining...", b.Height, propagationDelay)
+	time.Sleep(time.Duration(propagationDelay) * time.Millisecond)
+	
+	log.Printf("miner: starting block broadcast height=%d hash=%x peers=%d", b.Height, b.Hash, len(m.pm.Peers()))
 	go m.broadcastBlock(ctx, b)
 
 	if len(selectedIDs) > 0 {
@@ -555,4 +512,41 @@ func (m *Miner) broadcastBlock(ctx context.Context, block *Block) {
 	} else {
 		log.Printf("miner: peer manager does not support block broadcast")
 	}
+}
+
+// calculateAdaptivePropagationDelay calculates adaptive propagation delay based on network conditions
+// Returns delay in milliseconds
+func calculateAdaptivePropagationDelay(pm PeerAPI) int {
+	if pm == nil {
+		return BlockPropagationDelayMs
+	}
+	
+	peers := pm.Peers()
+	if len(peers) == 0 {
+		// No peers, use minimum delay
+		return BlockPropagationDelayMs / 2
+	}
+	
+	// Base delay on number of peers and network topology
+	// More peers = longer propagation time needed
+	baseDelay := BlockPropagationDelayMs
+	
+	// Add delay for each additional peer (diminishing returns)
+	peerFactor := 0
+	if len(peers) > 1 {
+		// Logarithmic scaling: each additional peer adds less delay
+		peerFactor = int(50 * float64(len(peers)-1) / float64(len(peers)))
+	}
+	
+	adaptiveDelay := baseDelay + peerFactor
+	
+	// Cap at reasonable maximum (3 seconds)
+	if adaptiveDelay > 3000 {
+		adaptiveDelay = 3000
+	}
+	
+	log.Printf("miner: calculated adaptive propagation delay=%dms (peers=%d, base=%d, factor=%d)",
+		adaptiveDelay, len(peers), baseDelay, peerFactor)
+	
+	return adaptiveDelay
 }

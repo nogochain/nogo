@@ -454,25 +454,28 @@ func (pm *P2PPeerManager) BroadcastBlock(ctx context.Context, block *Block) {
 	pm.mu.RUnlock()
 
 	if len(peers) == 0 {
-		log.Printf("P2P peer manager: no peers to broadcast block")
+		log.Printf("P2P peer manager: no peers to broadcast block height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
 		return
 	}
 
-	log.Printf("P2P peer manager: broadcasting block height=%d hash=%s to %d peers", block.Height, hex.EncodeToString(block.Hash), len(peers))
+	log.Printf("P2P peer manager: broadcasting block height=%d hash=%s to %d peers: %v", block.Height, hex.EncodeToString(block.Hash), len(peers), peers)
 
 	var wg sync.WaitGroup
 	for _, peer := range peers {
 		wg.Add(1)
 		go func(p string) {
 			defer wg.Done()
+			log.Printf("P2P peer manager: broadcasting block height=%d to peer %s", block.Height, p)
 			_, err := pm.client.BroadcastBlock(ctx, p, block)
 			if err != nil {
 				log.Printf("p2p broadcast block to %s failed: %v", p, err)
+			} else {
+				log.Printf("p2p broadcast block to %s succeeded", p)
 			}
 		}(peer)
 	}
 	wg.Wait()
-	log.Printf("P2P peer manager: block broadcast completed")
+	log.Printf("P2P peer manager: block broadcast completed height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
 }
 
 // EnsureAncestors recursively fetches ancestor blocks to ensure chain continuity

@@ -290,6 +290,9 @@ func validateDifficultyAdjustment(consensus ConsensusParams, block *Block, paren
 		return errors.New("block or parent is nil")
 	}
 
+	log.Printf("validateDifficultyAdjustment: height=%d, parent_diff=%d, block_diff=%d, parent_time=%d, block_time=%d",
+		block.Height, parent.DifficultyBits, block.DifficultyBits, parent.TimestampUnix, block.TimestampUnix)
+
 	// Check parent difficulty
 	if parent.DifficultyBits < consensus.MinDifficultyBits {
 		return fmt.Errorf("parent difficulty %d below min %d", parent.DifficultyBits, consensus.MinDifficultyBits)
@@ -299,6 +302,14 @@ func validateDifficultyAdjustment(consensus ConsensusParams, block *Block, paren
 	if block.TimestampUnix <= parent.TimestampUnix {
 		return fmt.Errorf("block timestamp %d not greater than parent timestamp %d",
 			block.TimestampUnix, parent.TimestampUnix)
+	}
+	
+	// CRITICAL: Validate timestamp is not too far in the future
+	// This prevents timestamp manipulation attacks
+	now := time.Now().Unix()
+	if block.TimestampUnix > now + MaxBlockTimeDriftSec {
+		return fmt.Errorf("block timestamp %d too far in future (max allowed %d, now=%d)",
+			block.TimestampUnix, now+MaxBlockTimeDriftSec, now)
 	}
 
 	// Use NogoPow difficulty adjuster to calculate expected difficulty
@@ -680,6 +691,8 @@ func (bc *Blockchain) MineTransfers(transfers []Transaction) (*Block, error) {
 	if ts <= latest.TimestampUnix {
 		ts = latest.TimestampUnix + 1
 	}
+	log.Printf("MineTransfers: height=%d, now=%d, parent_time=%d, block_time=%d",
+		height, now, latest.TimestampUnix, ts)
 
 	var fees uint64
 	for _, tx := range transfers {

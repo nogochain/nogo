@@ -142,18 +142,24 @@ func (s *P2PServer) Serve(ctx context.Context) error {
 func (s *P2PServer) handleConn(c net.Conn) error {
 	defer c.Close()
 
+	log.Printf("P2P server: new connection from %s", c.RemoteAddr().String())
+
 	_ = c.SetDeadline(time.Now().Add(15 * time.Second))
 
 	// Expect hello first.
 	raw, err := p2pReadJSON(c, 1<<20)
 	if err != nil {
+		log.Printf("P2P server: failed to read from %s: %v", c.RemoteAddr().String(), err)
 		return err
 	}
 	var env p2pEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
+		log.Printf("P2P server: failed to unmarshal from %s: %v", c.RemoteAddr().String(), err)
 		return err
 	}
+	log.Printf("P2P server: received message type=%s from %s", env.Type, c.RemoteAddr().String())
 	if env.Type != "hello" {
+		log.Printf("P2P server: expected hello but got %s from %s", env.Type, c.RemoteAddr().String())
 		return errors.New("expected hello")
 	}
 	var hello p2pHello
@@ -195,11 +201,11 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 			formattedPeer := fmt.Sprintf("%s:%s", host, listenPort)
 			log.Printf("P2P server: adding inbound peer %s (from %s, remote port=%d)", formattedPeer, peerAddr, port)
 			s.pm.AddPeer(formattedPeer)
-			
+
 			// Record successful connection
-		if pm, ok := s.pm.(*P2PPeerManager); ok {
-			pm.RecordPeerSuccess(formattedPeer)
-		}
+			if pm, ok := s.pm.(*P2PPeerManager); ok {
+				pm.RecordPeerSuccess(formattedPeer)
+			}
 		}
 	}
 
@@ -249,6 +255,15 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 
 func (s *P2PServer) writeChainInfo(w io.Writer) error {
 	latest := s.bc.LatestBlock()
+	if latest == nil {
+		log.Printf("writeChainInfo: latest block is nil, returning height=0")
+		return p2pWriteJSON(w, p2pEnvelope{Type: "chain_info", Payload: mustJSON(map[string]any{
+			"chainId":    s.bc.ChainID,
+			"height":     0,
+			"latestHash": "",
+		})})
+	}
+
 	genesis, _ := s.bc.BlockByHeight(0)
 	peersCount := 0
 	if s.pm != nil {
@@ -263,6 +278,7 @@ func (s *P2PServer) writeChainInfo(w io.Writer) error {
 		"genesisTimestampUnix": genesis.TimestampUnix,
 		"peersCount":           peersCount,
 	}
+	log.Printf("writeChainInfo: returning height=%d hash=%s", latest.Height, fmt.Sprintf("%x", latest.Hash))
 	return p2pWriteJSON(w, p2pEnvelope{Type: "chain_info", Payload: mustJSON(out)})
 }
 
@@ -357,7 +373,7 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 	}
 
 	log.Printf("p2p: received block broadcast height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
-	
+
 	// CRITICAL: Interrupt ongoing mining to ensure fast chain switching
 	// This prevents forks caused by mining on an outdated chain
 	if s.miner != nil {
@@ -371,7 +387,7 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 		log.Printf("p2p: block details - height=%d, hash=%s, prevHash=%s, difficulty=%d, timestamp=%d, miner=%s",
 			block.Height, hex.EncodeToString(block.Hash), hex.EncodeToString(block.PrevHash),
 			block.DifficultyBits, block.TimestampUnix, block.MinerAddress)
-		
+
 		// Log parent block info if available
 		parentHashHex := hex.EncodeToString(block.PrevHash)
 		if parent, ok := s.bc.BlockByHash(parentHashHex); ok {
@@ -415,7 +431,7 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 		}
 	} else if accepted {
 		log.Printf("p2p: block accepted height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
-		
+
 		// CRITICAL: Wait longer before resuming mining to allow block propagation
 		// This prevents forks caused by mining on top of a block that hasn't propagated yet
 		if s.miner != nil {
@@ -423,16 +439,16 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 				// Wait for block propagation delay to allow block to propagate through network
 				// This is critical for fork prevention
 				time.Sleep(time.Duration(BlockPropagationDelayMs) * time.Millisecond)
-				
+
 				// Before resuming, check if network has advanced further
 				currentHeight := s.bc.LatestBlock().Height
 				peerHeight := getPeerHeight(s.pm)
-				
+
 				if peerHeight > currentHeight {
 					log.Printf("p2p: network advanced during propagation wait (local=%d, peer=%d) - NOT resuming mining, let sync handle it", currentHeight, peerHeight)
 					return
 				}
-				
+
 				s.miner.ResumeMining()
 				log.Printf("p2p: mining resumed after block %d propagated (height=%d)", block.Height, currentHeight)
 			}()
@@ -680,19 +696,19 @@ func (s *P2PServer) runPeerDiscoveryLoop(ctx context.Context) {
 				if i >= MaxPeersDiscoverPerRound { // Limit to prevent flooding
 					break
 				}
-				
+
 				// Create a context with timeout for discovery
 				discoverCtx, cancel := context.WithTimeout(ctx, time.Duration(PeerDiscoveryTimeoutSec)*time.Second)
-				
+
 				// Use type assertion to call DiscoverPeersFromPeer on *P2PPeerManager
 				if pm, ok := s.pm.(*P2PPeerManager); ok {
 					pm.DiscoverPeersFromPeer(discoverCtx, peer)
 				}
-				
+
 				cancel()
 				discoverCount++
 			}
-			
+
 			// Use type assertion to call GetPeerCount on *P2PPeerManager
 			if pm, ok := s.pm.(*P2PPeerManager); ok {
 				log.Printf("P2P peer discovery: completed discovery from %d peers, total peers now: %d", discoverCount, pm.GetPeerCount())

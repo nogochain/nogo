@@ -261,6 +261,43 @@ func (da *DifficultyAdjuster) enforceBoundaryConditions(newDifficulty, parentDif
 		newDifficulty.Set(maxAllowed)
 	}
 
+	// Constraint 4: SMOOTHING - Apply exponential moving average filter
+	// This reduces short-term volatility while maintaining long-term convergence
+	// Formula: smoothedDiff = 0.7 * newDifficulty + 0.3 * parentDiff
+	// This provides a balance between responsiveness and stability
+	smoothingFactor := big.NewFloat(0.7) // 70% weight to new value, 30% to old
+	parentWeight := big.NewFloat(0.3)
+
+	parentDiffFloat := new(big.Float).SetInt(parentDiff)
+	newDiffFloat := new(big.Float).SetInt(newDifficulty)
+
+	weightedNew := new(big.Float).Mul(newDiffFloat, smoothingFactor)
+	weightedOld := new(big.Float).Mul(parentDiffFloat, parentWeight)
+	smoothedDiff := new(big.Float).Add(weightedNew, weightedOld)
+
+	// Convert back to integer, but ensure we don't lose too much precision
+	smoothedInt, _ := smoothedDiff.Int(nil)
+
+	// Only apply smoothing if it doesn't violate other constraints
+	// Ensure smoothed value is between parentDiff and newDifficulty (inclusive)
+	// Manual min/max calculation since big.Int doesn't have Min/Max methods
+	minValue := new(big.Int).Set(parentDiff)
+	if newDifficulty.Cmp(minValue) < 0 {
+		minValue.Set(newDifficulty)
+	}
+	maxValue := new(big.Int).Set(parentDiff)
+	if newDifficulty.Cmp(maxValue) > 0 {
+		maxValue.Set(newDifficulty)
+	}
+
+	if smoothedInt.Cmp(minValue) >= 0 && smoothedInt.Cmp(maxValue) <= 0 {
+		// Apply smoothing, but ensure at least 1 unit change
+		diffChange := new(big.Int).Sub(smoothedInt, parentDiff)
+		if diffChange.Sign() != 0 || newDifficulty.Cmp(parentDiff) == 0 {
+			newDifficulty = smoothedInt
+		}
+	}
+
 	return newDifficulty
 }
 
