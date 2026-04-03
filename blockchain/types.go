@@ -14,6 +14,66 @@ import (
 const (
 	defaultChainID    = uint64(1)
 	maxDifficultyBits = uint32(256)
+
+	difficultyAdjustmentInterval = uint64(100)
+	powVerifyProbabilityThreshold = uint8(26)
+)
+
+// Default configuration constants for production deployment
+const (
+	// DefaultMempoolMax is the default maximum number of transactions in mempool
+	DefaultMempoolMax = 10000
+	
+	// DefaultMaxTxPerBlock is the default maximum transactions per block
+	DefaultMaxTxPerBlock = 100
+	
+	// DefaultHTTPTimeout is the default HTTP request timeout in seconds
+	DefaultHTTPTimeout = 10
+	
+	// DefaultWSPort is the default WebSocket port
+	DefaultWSPort = 8080
+	
+	// DefaultWSMaxConnections is the default maximum WebSocket connections
+	DefaultWSMaxConnections = 100
+	
+	// DefaultRateLimitRequests is the default rate limit requests per second (0 = disabled)
+	DefaultRateLimitRequests = 0
+	
+	// DefaultRateLimitBurst is the default rate limit burst size (0 = disabled)
+	DefaultRateLimitBurst = 0
+	
+	// DefaultHTTPMaxHeaderBytes is the default maximum HTTP header size in bytes
+	DefaultHTTPMaxHeaderBytes = 8192
+	
+	// DefaultP2PMaxConnections is the default maximum P2P connections
+	DefaultP2PMaxConnections = 200
+	
+	// DefaultP2PMaxMessageBytes is the default maximum P2P message size (4MB)
+	DefaultP2PMaxMessageBytes = 4 << 20
+	
+	// DefaultP2PMaxPeers is the default maximum number of P2P peers
+	DefaultP2PMaxPeers = 1000
+	
+	// DefaultP2PMaxAddrReturn is the default maximum addresses to return in getaddr
+	DefaultP2PMaxAddrReturn = 100
+	
+	// DefaultSyncInterval is the default sync interval in milliseconds
+	DefaultSyncInterval = 3000 * time.Millisecond
+	
+	// DefaultMineInterval is the default mining interval in milliseconds
+	DefaultMineInterval = 1000 * time.Millisecond
+	
+	// DefaultMaxPoolConns is the default maximum connection pool size
+	DefaultMaxPoolConns = 100
+	
+	// DefaultMaxConnsPerPeer is the default maximum connections per peer
+	DefaultMaxConnsPerPeer = 3
+	
+	// DefaultSyncWorkers is the default number of sync workers
+	DefaultSyncWorkers = 8
+	
+	// DefaultSyncBatchSize is the default sync batch size
+	DefaultSyncBatchSize = 100
 )
 
 // ConsensusParams defines the consensus parameters for the blockchain

@@ -103,6 +103,8 @@ type GenesisConfig struct {
 	GenesisMinerAddress string
 	InitialSupply       uint64
 	GenesisMessage      string
+	GenesisBlockHash    string // Pre-mined genesis block hash (for new nodes to sync)
+	GenesisBlockNonce   string // Pre-mined genesis block nonce (for new nodes to sync)
 	MonetaryPolicy      MonetaryPolicy
 	ConsensusParams     ConsensusParams
 }
@@ -572,4 +574,59 @@ func ensureBlockHash(b *Block, consensus ConsensusParams) ([]byte, error) {
 		b.Hash = append([]byte(nil), sum[:]...)
 	}
 	return sum[:], nil
+}
+
+// LoadGenesisBlockFromFile loads genesis block from genesis.json file
+// This allows new nodes to sync with existing network instead of mining their own genesis
+func LoadGenesisBlockFromFile(genesisPath string) (*Block, error) {
+	if genesisPath == "" {
+		return nil, errors.New("genesis path is empty")
+	}
+	
+	data, err := os.ReadFile(genesisPath)
+	if err != nil {
+		return nil, err
+	}
+	
+	var cfg GenesisConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	
+	// Check if genesis block has pre-mined data
+	if cfg.GenesisBlockHash != "" && cfg.GenesisBlockNonce != "" {
+		// Pre-mined genesis block - reconstruct it
+		hashBytes, err := hex.DecodeString(cfg.GenesisBlockHash)
+		if err != nil {
+			return nil, fmt.Errorf("invalid genesis hash: %w", err)
+		}
+		
+		nonce, err := strconv.ParseUint(cfg.GenesisBlockNonce, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid genesis nonce: %w", err)
+		}
+		
+		coinbase := Transaction{
+			Type:      TxCoinbase,
+			ChainID:   cfg.ChainID,
+			ToAddress: cfg.GenesisMinerAddress,
+			Amount:    cfg.InitialSupply,
+			Data:      genesisMessageOrDefault(&cfg),
+		}
+		
+		genesis := &Block{
+			Version:        1,
+			Height:         0,
+			TimestampUnix:  cfg.Timestamp,
+			DifficultyBits: cfg.ConsensusParams.GenesisDifficultyBits,
+			MinerAddress:   cfg.GenesisMinerAddress,
+			Transactions:   []Transaction{coinbase},
+			Hash:           hashBytes,
+			Nonce:          nonce,
+		}
+		
+		return genesis, nil
+	}
+	
+	return nil, errors.New("genesis block not pre-mined in config")
 }

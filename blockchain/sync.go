@@ -13,6 +13,7 @@ import (
 type SyncLoop struct {
 	pm PeerAPI
 	bc *Blockchain
+	miner *Miner // Reference to miner for pause/resume during sync
 
 	interval time.Duration
 	window   uint64
@@ -25,9 +26,15 @@ func NewSyncLoop(pm PeerAPI, bc *Blockchain, interval time.Duration) *SyncLoop {
 	return &SyncLoop{
 		pm:       pm,
 		bc:       bc,
+		miner:    nil, // Will be set later via SetMiner method
 		interval: interval,
 		window:   200,
 	}
+}
+
+// SetMiner sets the miner reference for pause/resume during sync
+func (s *SyncLoop) SetMiner(miner *Miner) {
+	s.miner = miner
 }
 
 func (s *SyncLoop) Run(ctx context.Context) {
@@ -48,6 +55,14 @@ func (s *SyncLoop) SyncOnce(ctx context.Context) {
 	if s.pm == nil {
 		return
 	}
+	
+	// Check if miner is currently verifying a block
+	// If so, skip this sync round to avoid conflicts
+	if s.miner != nil && s.miner.IsVerifying() {
+		log.Printf("sync: skipping sync round, miner is verifying block")
+		return
+	}
+	
 	localHeight := s.bc.LatestBlock().Height
 	localRulesHash := s.bc.RulesHashHex()
 	localGenesisHash := ""
@@ -110,7 +125,7 @@ func (s *SyncLoop) SyncOnce(ctx context.Context) {
 		}
 		log.Printf("sync: fetched %d headers", len(headers))
 
-		// Fetch and add blocks sequentially
+		// Fetch and add blocks sequentially with full validation
 		for _, h := range headers {
 			if _, ok := s.bc.BlockByHash(h.HashHex); ok {
 				continue
@@ -129,7 +144,7 @@ func (s *SyncLoop) SyncOnce(ctx context.Context) {
 						log.Printf("sync: failed to fetch ancestors: %v", ferr)
 						break
 					}
-					// Retry adding the block
+					// Retry adding the block after fetching ancestors
 					_, err = s.bc.AddBlock(b)
 					if err != nil {
 						log.Printf("sync: still failed to add block %d after fetching ancestors: %v", h.Height, err)
@@ -161,14 +176,17 @@ func (s *SyncLoop) discoverPeers(ctx context.Context) {
 		go func(p string) {
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, p+"/p2p/getaddr", nil)
 			if err != nil {
+				log.Printf("peer discovery: failed to create request for %s: %v", p, err)
 				return
 			}
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
+				log.Printf("peer discovery: failed to fetch addresses from %s: %v", p, err)
 				return
 			}
 			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
+				log.Printf("peer discovery: non-OK status from %s: %d", p, resp.StatusCode)
 				return
 			}
 			var result struct {
@@ -178,6 +196,7 @@ func (s *SyncLoop) discoverPeers(ctx context.Context) {
 				} `json:"addresses"`
 			}
 			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				log.Printf("peer discovery: failed to decode response from %s: %v", p, err)
 				return
 			}
 			for _, a := range result.Addresses {

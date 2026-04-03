@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -1171,4 +1173,30 @@ func (s *Server) handleWalletBIP39(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+// createTLSConfig creates a TLS configuration for production deployment
+// Returns nil if TLS is not configured (certFile or keyFile is empty)
+func createTLSConfig(certFile, keyFile string) *tls.Config {
+	if certFile == "" || keyFile == "" {
+		return nil
+	}
+
+	// Load TLS certificate and key
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		log.Printf("failed to load TLS certificate: %v", err)
+		return nil
+	}
+
+	// Create TLS configuration with secure defaults
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{cert},
+		CipherSuites: []uint16{
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+		},
+		PreferServerCipherSuites: true,
+	}
 }

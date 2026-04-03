@@ -16,9 +16,10 @@ import (
 )
 
 type P2PServer struct {
-	bc *Blockchain
-	pm PeerAPI
-	mp *Mempool
+	bc    *Blockchain
+	pm    PeerAPI
+	mp    *Mempool
+	miner *Miner // Reference to miner for pause/resume during block processing
 
 	listenAddr string
 	nodeID     string
@@ -69,6 +70,7 @@ func NewP2PServer(bc *Blockchain, pm PeerAPI, mp *Mempool, listenAddr string, no
 		bc:            bc,
 		pm:            pm,
 		mp:            mp,
+		miner:         nil, // Will be set later via SetMiner method
 		listenAddr:    listenAddr,
 		nodeID:        nodeID,
 		publicIP:      publicIP,
@@ -90,6 +92,11 @@ func NewP2PServer(bc *Blockchain, pm PeerAPI, mp *Mempool, listenAddr string, no
 	log.Printf("P2P configuration: advertiseSelf=%v, maxPeers=%d, maxAddrReturn=%d", advertiseSelf, maxPeers, maxAddrReturn)
 
 	return s
+}
+
+// SetMiner sets the miner reference for pause/resume during block processing
+func (s *P2PServer) SetMiner(miner *Miner) {
+	s.miner = miner
 }
 
 func (s *P2PServer) ListenAddr() string { return s.listenAddr }
@@ -289,7 +296,11 @@ func (s *P2PServer) handleTransactionReq(c net.Conn, payload json.RawMessage) er
 	}
 
 	if s.mp != nil {
-		_, _ = s.mp.Add(tx)
+		if _, err := s.mp.Add(tx); err != nil {
+			log.Printf("p2p: failed to add tx to mempool: %v", err)
+			_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "mempool_add_failed"})})
+			return err
+		}
 	}
 
 	return p2pWriteJSON(c, p2pEnvelope{Type: "tx_ack", Payload: mustJSON(map[string]any{"txid": txid})})
@@ -308,11 +319,16 @@ func (s *P2PServer) handleTransactionBroadcast(c net.Conn, payload json.RawMessa
 
 	txid, err := TxIDHex(tx)
 	if err != nil {
+		_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "invalid_tx"})})
 		return err
 	}
 
 	if s.mp != nil {
-		_, _ = s.mp.Add(tx)
+		if _, err := s.mp.Add(tx); err != nil {
+			log.Printf("p2p: failed to add tx to mempool: %v", err)
+			_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "mempool_add_failed"})})
+			return err
+		}
 	}
 
 	return p2pWriteJSON(c, p2pEnvelope{Type: "tx_broadcast_ack", Payload: mustJSON(map[string]any{"txid": txid})})
@@ -332,6 +348,12 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 
 	log.Printf("p2p: received block broadcast height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
 
+	// Note: We no longer pause mining here during block broadcast handling.
+	// Mining is controlled by the sync loop (sync.go) which properly coordinates
+	// verification and mining to prevent deadlocks.
+	// The AddBlock function already performs full validation, so additional
+	// verification pausing here is redundant and causes sync issues.
+
 	// Try to add the block
 	accepted, err := s.bc.AddBlock(&block)
 	if err != nil {
@@ -341,8 +363,8 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 		if err == ErrUnknownParent {
 			log.Printf("p2p: unknown parent, attempting to fetch missing blocks")
 			// Create a context with timeout
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel() // Cancel the context when done
 
 			// Try to sync missing blocks from the sender (blocking)
 			if syncErr := s.syncMissingBlocks(ctx, c, &block); syncErr != nil {
@@ -583,14 +605,14 @@ func mustJSON(v any) json.RawMessage {
 
 // RequestBlockFromPeer fetches a block from a remote peer
 func RequestBlockFromPeer(ctx context.Context, peerAddr string, hashHex string) (*Block, error) {
-	conn, err := net.DialTimeout("tcp", peerAddr, 10*time.Second)
+	conn, err := net.DialTimeout("tcp", peerAddr, 30*time.Second) // Increased from 10s to 30s for unstable networks
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to peer %s: %w", peerAddr, err)
+		return nil, fmt.Errorf("failed to connect to peer %s: %v", peerAddr, err)
 	}
 	defer conn.Close()
 
 	// Set deadline for the operation
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	conn.SetDeadline(time.Now().Add(60 * time.Second)) // Increased from 30s to 60s for slow networks
 
 	// Send hello first
 	hello := newP2PHello(1, "", "")

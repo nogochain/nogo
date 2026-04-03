@@ -1,15 +1,17 @@
 # NogoChain Makefile
 # Reproducible build system
 
-.PHONY: build build-reproducible test lint fmt vuln docker-build docker-build-reproducible docker-up docker-down clean install-deps smoke testnet mainnet
+.PHONY: build build-reproducible test test-race lint vet fmt vuln docker-build docker-build-reproducible docker-up docker-down clean install-deps smoke testnet mainnet
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
 GOFLAGS := -trimpath -mod=readonly
+LDFLAGS := -ldflags="-s -w"
+BUILD_FLAGS := -race -vet
 
-# Default build (cmd/node)
-build:
-	go build ${GOFLAGS} -o nogo ./cmd/node
+# Default build (cmd/node) with production flags
+build: vet
+	go build $(BUILD_FLAGS) $(LDFLAGS) -o nogo ./cmd/node
 
 # Reproducible build (deterministic)
 build-reproducible:
@@ -22,9 +24,17 @@ build-reproducible:
 build-debug:
 	go build -o nogo ./cmd/node
 
-# Run tests
+# Run tests with race detector
 test:
 	go test -v -race -coverprofile=coverage.out ./...
+
+# Run tests with race detector only
+test-race:
+	go test -race ./...
+
+# Run go vet for static analysis
+vet:
+	go vet ./...
 
 # Run linter
 lint:

@@ -50,6 +50,9 @@ type Config struct {
 	MetricsEnabled     bool
 	MetricsPort        int
 	P2PSeeds           string
+	// TLS configuration for production deployment
+	TLSCertFile string
+	TLSKeyFile  string
 }
 
 func LoadConfig() *Config {
@@ -93,6 +96,8 @@ func LoadConfig() *Config {
 		MetricsEnabled:     getEnvBool("METRICS_ENABLED", true),
 		MetricsPort:        getEnvInt("METRICS_PORT", 0),
 		P2PSeeds:           getEnvStr("P2P_SEEDS", ""),
+		TLSCertFile:        getEnvStr("TLS_CERT_FILE", ""),
+		TLSKeyFile:         getEnvStr("TLS_KEY_FILE", ""),
 	}
 }
 

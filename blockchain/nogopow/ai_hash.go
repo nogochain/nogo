@@ -36,6 +36,12 @@ func legacyAlgorithm(headerHash, seed [32]byte) [32]byte {
 	return hashMatrix(result)
 }
 
+// CalcSeedCache calculates cache data from seed
+// Exported version for external use
+func CalcSeedCache(seed []byte) []uint32 {
+	return calcSeedCache(seed)
+}
+
 func calcSeedCache(seed []byte) []uint32 {
 	extSeed := extendBytes(seed, 3)
 	v := make([]uint32, 32*1024)

@@ -399,6 +399,31 @@ func (t *NogopowEngine) computePoW(blockHash, seed Hash) Hash {
 	return hashMatrix(result)
 }
 
+// ComputePoW computes the proof-of-work hash using NogoPow algorithm
+// Exported version for external validation
+func (t *NogopowEngine) ComputePoW(blockHash, seed Hash) Hash {
+	return t.computePoW(blockHash, seed)
+}
+
+// ComputePoWWithCache computes the proof-of-work hash using provided cache data
+// Exported version for external validation with custom cache
+func (t *NogopowEngine) ComputePoWWithCache(blockHash, seed Hash, cacheData []uint32) Hash {
+	t.config.Log.Info("NogoPow computePoWWithCache",
+		"seed", seed.Hex(),
+		"blockHash", blockHash.Hex(),
+		"cacheDataLen", len(cacheData),
+		"cacheDataFirst", cacheData[0],
+	)
+
+	if t.config.ReuseObjects && t.matA != nil {
+		result := mulMatrixWithPool(blockHash.Bytes(), cacheData, t.matA, t.matB, t.matRes)
+		return hashMatrix(result)
+	}
+
+	result := mulMatrix(blockHash.Bytes(), cacheData)
+	return hashMatrix(result)
+}
+
 // SealHash returns the hash of a block prior to sealing
 func (t *NogopowEngine) SealHash(header *Header) Hash {
 	hasher := sha3.NewLegacyKeccak256()
@@ -480,4 +505,10 @@ func difficultyToTarget(difficulty *big.Int) *big.Int {
 	maxTarget := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
 	target := new(big.Int).Div(maxTarget, difficulty)
 	return target
+}
+
+// DifficultyToTarget converts difficulty to target threshold
+// Exported version for external validation
+func DifficultyToTarget(difficulty *big.Int) *big.Int {
+	return difficultyToTarget(difficulty)
 }
