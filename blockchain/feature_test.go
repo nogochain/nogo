@@ -126,7 +126,7 @@ func TestGenerateAddress(t *testing.T) {
 func TestDNSDomainRegistration(t *testing.T) {
 	db := NewDNSDatabase()
 
-	err := db.RegisterDomain("alice.nogo", "NOGO00abc123", "解析器地址", 86400)
+	err := db.RegisterDomain("alice.nogo", "NOGO00abc123", "resolver address", 86400)
 	if err != nil {
 		t.Errorf("Failed to register domain: %v", err)
 	}

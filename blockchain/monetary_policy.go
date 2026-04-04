@@ -137,8 +137,8 @@ type MonetaryPolicy struct {
 // Production-grade implementation using integer arithmetic only
 // to ensure deterministic results across all platforms
 //
-// Go 版本锁定：go 1.21.5 - 使用 big.Int 确保精度
-// 错误处理：禁止忽略错误，所有分支显式处理
+// Go version lock: go 1.21.5 - using big.Int for precision
+// Error handling: no ignored errors, all branches handled explicitly
 func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
 	// Use default policy if not configured
 	if p.InitialBlockReward == 0 {
@@ -162,7 +162,7 @@ func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
 
 	// Apply reduction for each year (reward = reward * 9 / 10)
 	// Using loop to avoid floating point and ensure precision
-	// 数学与数值安全：整数运算防溢出
+	// Math & numeric safety: integer overflow prevention
 	for i := uint64(0); i < years; i++ {
 		// Check for underflow before calculation
 		// If reward is already at or below minimum, return minimum
@@ -185,7 +185,7 @@ func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
 		return minReward
 	}
 
-	// 整数运算防溢出：确保结果在 uint64 范围内
+	// Integer overflow prevention: ensure result fits in uint64
 	if !reward.IsUint64() {
 		return minReward
 	}
@@ -239,7 +239,7 @@ func GetBlockReward(blockNumber *big.Int) *big.Int {
 
 // GetBlockRewardInNogo returns the block reward in NOGO units (as float64)
 // Use only for display purposes, not for calculations
-// 金融/高精度计算用 math/big 包，禁止 float64 处理货币
+// Financial/high-precision calculations use math/big package, no float64 for currency
 func GetBlockRewardInNogo(blockNumber *big.Int) float64 {
 	rewardWei := GetBlockReward(blockNumber)
 	// Convert wei to NOGO: divide by 10^8
@@ -253,7 +253,7 @@ func GetBlockRewardInNogo(blockNumber *big.Int) float64 {
 // where distance = nephewNumber - uncleNumber
 //
 // This incentivizes miners to include uncle blocks for chain security
-// 并发安全：输入参数验证，无共享状态
+// Concurrency safety: input validation, no shared state
 func GetUncleReward(nephewNumber, uncleNumber *big.Int, blockReward *big.Int) *big.Int {
 	// Validate inputs
 	if nephewNumber == nil || uncleNumber == nil || blockReward == nil {
@@ -317,7 +317,7 @@ func (p MonetaryPolicy) GetUncleReward(nephewHeight, uncleHeight uint64, blockRe
 // GetNephewBonus calculates the bonus for including uncle blocks
 // Bonus = reward / 32 per uncle (max 2 uncles)
 // This incentivizes miners to include uncle blocks
-// 并发安全：无共享状态，纯函数
+// Concurrency safety: no shared state, pure function
 func GetNephewBonus(blockReward *big.Int, uncleCount int) *big.Int {
 	if blockReward == nil || uncleCount <= 0 {
 		return big.NewInt(0)
@@ -354,7 +354,7 @@ func (p MonetaryPolicy) GetNephewBonus(blockReward uint64, uncleCount int) uint6
 
 // GetTotalMinerReward calculates total reward for a miner including uncle bonuses
 // Total reward = block reward + nephew bonus
-// 数学与数值安全：使用 big.Int 防止溢出
+// Math & numeric safety: using big.Int to prevent overflow
 func GetTotalMinerReward(blockNumber *big.Int, uncleCount int) *big.Int {
 	blockReward := GetBlockReward(blockNumber)
 	nephewBonus := GetNephewBonus(blockReward, uncleCount)
@@ -369,7 +369,7 @@ func (p MonetaryPolicy) GetTotalMinerReward(height uint64, uncleCount int) uint6
 	blockReward := p.BlockReward(height)
 	nephewBonus := p.GetNephewBonus(blockReward, uncleCount)
 
-	// 整数运算防溢出检查
+	// Integer overflow prevention check
 	if blockReward > ^uint64(0)-nephewBonus {
 		return blockReward // Return base reward if overflow would occur
 	}
@@ -432,7 +432,7 @@ func (p MonetaryPolicy) GetInflationRateAtHeight(currentHeight uint64) float64 {
 // - Uncle depth must be reasonable (1-10)
 // - Miner fee share must be between 0 and 100
 //
-// 逻辑完整性：覆盖所有分支，显式边界检查
+// Logic completeness: cover all branches, explicit boundary checks
 func (p MonetaryPolicy) Validate() error {
 	// Check initial reward is positive
 	if p.InitialBlockReward == 0 {
@@ -533,7 +533,7 @@ func ValidateEconomicParameters() bool {
 // MarshalBinary serializes the monetary policy to binary format
 // Used for rules hash calculation
 // Includes legacy fields for backward compatibility with existing consensus
-// 生产环境适配：支持二进制序列化用于共识
+// Production environment adaptation: supports binary serialization for consensus
 func (p MonetaryPolicy) MarshalBinary() ([]byte, error) {
 	buf := new(bytes.Buffer)
 
@@ -615,7 +615,7 @@ type monetaryPolicyJSON struct {
 
 // parseMonetaryPolicy parses monetary policy from JSON
 // Supports both new economic model and legacy halving model
-// 配置管理：支持 JSON 配置中心注入
+// Configuration management: supports JSON configuration center injection
 func parseMonetaryPolicy(raw json.RawMessage) (MonetaryPolicy, error) {
 	if len(raw) == 0 {
 		// Return default policy if not specified
@@ -689,7 +689,7 @@ func parseMonetaryPolicy(raw json.RawMessage) (MonetaryPolicy, error) {
 }
 
 // init performs initialization checks
-// 安全规范：启动时验证经济参数
+// Security specification: validate economic parameters on startup
 func init() {
 	// Validate economic parameters on package load
 	if !ValidateEconomicParameters() {

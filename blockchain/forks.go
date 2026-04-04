@@ -225,7 +225,7 @@ func (bc *Blockchain) AddBlock(b *Block) (bool, error) {
 	if workComparison > 0 {
 		// New chain has more cumulative work - always accept
 		better = true
-		log.Printf("AddBlock: 工作量更大 高度=%d 哈希=%s (%v > %v) - 切换链",
+		log.Printf("AddBlock: more work height=%d hash=%s (%v > %v) - switching chain",
 			b.Height, hashHex, newWork, currentWork)
 	} else if workComparison == 0 {
 		// Equal work - use numeric hash comparison (smaller hash wins)
@@ -236,16 +236,16 @@ func (bc *Blockchain) AddBlock(b *Block) (bool, error) {
 		if newHashInt.Cmp(currentHashInt) < 0 {
 			// New block has smaller hash - accept it and switch chains
 			better = true
-			log.Printf("⚔️ 哈希比拼输了！高度=%d 对方哈希更小 - 执行重组切换到对方链", b.Height)
+			log.Printf("hash comparison lost! height=%d opponent hash smaller - executing reorg to switch to opponent chain", b.Height)
 		} else if newHashInt.Cmp(currentHashInt) == 0 {
 			// This should not happen due to duplicate check above
-			log.Printf("AddBlock: 重复区块 高度=%d 哈希=%s", b.Height, hashHex)
+			log.Printf("AddBlock: duplicate block height=%d hash=%s", b.Height, hashHex)
 			return false, nil
 		} else {
 			// New block has larger hash but equal work
 			// This is a competing block at same height - I won, keep my chain
 			// Store the competing block as a side block for potential future use
-			log.Printf("🏆 哈希比拼赢了！高度=%d 本地哈希更小 - 保留本地链，存储对方区块为旁支 (不切换)", b.Height)
+			log.Printf("hash comparison won! height=%d local hash smaller - keeping local chain, storing opponent block as side block (no switch)", b.Height)
 			// Note: We don't switch, but we also don't reject - store it for potential reorg
 			return false, nil
 		}

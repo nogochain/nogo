@@ -89,6 +89,7 @@ type ConsensusParams struct {
 	MedianTimePastWindow int
 	MaxTimeDrift         int64
 	MaxBlockSize         uint64
+	MaxTransactionsPerBlock int
 
 	// MerkleEnable gates a new block header commitment scheme (v2 blocks).
 	// When enabled, blocks at height >= MerkleActivationHeight must use Version=2 and commit to a Merkle root.

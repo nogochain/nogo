@@ -10,16 +10,16 @@ import (
 )
 
 // =============================================================================
-// Configuration Constants (所有数值通过配置注入，此处仅为默认值)
+// Configuration Constants (all values injected via configuration, defaults here)
 // =============================================================================
 const (
-	DefaultRateLimitConnectionsPerSecond = 10  // 每秒连接数限制
-	DefaultRateLimitMessagesPerSecond    = 100 // 每秒消息数限制
-	DefaultRateLimitBanDuration          = 300 // 封禁时长（秒）
-	DefaultRateLimitViolationsThreshold  = 10  // 违规阈值
-	DefaultTokenBucketMaxTokens          = 100 // 令牌桶最大容量
-	DefaultTokenBucketRefillRate         = 10  // 令牌补充速率（个/秒）
-	DefaultBlacklistCleanupInterval      = 60  // 黑名单清理间隔（秒）
+	DefaultRateLimitConnectionsPerSecond = 10  // connections per second limit
+	DefaultRateLimitMessagesPerSecond    = 100 // messages per second limit
+	DefaultRateLimitBanDuration          = 300 // ban duration in seconds
+	DefaultRateLimitViolationsThreshold  = 10  // violations threshold
+	DefaultTokenBucketMaxTokens          = 100 // token bucket max capacity
+	DefaultTokenBucketRefillRate         = 10  // token refill rate (tokens/second)
+	DefaultBlacklistCleanupInterval      = 60  // blacklist cleanup interval in seconds
 )
 
 // =============================================================================
@@ -48,16 +48,16 @@ func RegisterMetrics() {
 }
 
 // =============================================================================
-// RateLimitConfig 限流配置结构
+// RateLimitConfig rate limiting configuration
 // =============================================================================
 type RateLimitConfig struct {
-	ConnectionsPerSecond     int           `json:"connections_per_second"`     // 每秒连接数限制
-	MessagesPerSecond        int           `json:"messages_per_second"`        // 每秒消息数限制
-	BanDuration              time.Duration `json:"ban_duration"`               // 封禁时长
-	ViolationsThreshold      int           `json:"violations_threshold"`       // 违规阈值
-	TokenBucketMaxTokens     int           `json:"token_bucket_max_tokens"`    // 令牌桶最大容量
-	TokenBucketRefillRate    int           `json:"token_bucket_refill_rate"`   // 令牌补充速率
-	BlacklistCleanupInterval time.Duration `json:"blacklist_cleanup_interval"` // 黑名单清理间隔
+	ConnectionsPerSecond     int           `json:"connections_per_second"`     // connections per second limit
+	MessagesPerSecond        int           `json:"messages_per_second"`        // messages per second limit
+	BanDuration              time.Duration `json:"ban_duration"`               // ban duration
+	ViolationsThreshold      int           `json:"violations_threshold"`       // violations threshold
+	TokenBucketMaxTokens     int           `json:"token_bucket_max_tokens"`    // token bucket max capacity
+	TokenBucketRefillRate    int           `json:"token_bucket_refill_rate"`   // token refill rate
+	BlacklistCleanupInterval time.Duration `json:"blacklist_cleanup_interval"` // blacklist cleanup interval
 }
 
 // DefaultRateLimitConfig returns default rate limit configuration
@@ -74,14 +74,14 @@ func DefaultRateLimitConfig() *RateLimitConfig {
 }
 
 // =============================================================================
-// TokenBucket 令牌桶算法实现
+// TokenBucket token bucket algorithm implementation
 // =============================================================================
 type TokenBucket struct {
 	mu         sync.Mutex
-	tokens     float64   // 当前令牌数
-	maxTokens  float64   // 最大令牌容量
-	refillRate float64   // 令牌补充速率（个/秒）
-	lastRefill time.Time // 上次补充时间
+	tokens     float64   // current tokens
+	maxTokens  float64   // max token capacity
+	refillRate float64   // token refill rate (tokens/second)
+	lastRefill time.Time // last refill time
 }
 
 // NewTokenBucket creates a new token bucket
@@ -164,7 +164,7 @@ func (tb *TokenBucket) Reset() {
 }
 
 // =============================================================================
-// IPBlacklist IP 黑名单管理
+// IPBlacklist IP blacklist management
 // =============================================================================
 type blacklistEntry struct {
 	ip         string
