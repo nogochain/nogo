@@ -1,12 +1,14 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"fmt"
 	"math/big"
 	"sync"
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/nogopow"
+	"github.com/nogochain/nogo/internal/crypto"
 )
 
 // BlockValidator provides unified block validation interface
@@ -15,14 +17,16 @@ import (
 type BlockValidator struct {
 	consensus ConsensusParams
 	chainID   uint64
+	metrics   *Metrics
 	mu        sync.RWMutex
 }
 
 // NewBlockValidator creates a new block validator with the given consensus parameters
-func NewBlockValidator(consensus ConsensusParams, chainID uint64) *BlockValidator {
+func NewBlockValidator(consensus ConsensusParams, chainID uint64, metrics *Metrics) *BlockValidator {
 	return &BlockValidator{
 		consensus: consensus,
 		chainID:   chainID,
+		metrics:   metrics,
 	}
 }
 
@@ -46,6 +50,13 @@ func (v *BlockValidator) UpdateConsensus(consensus ConsensusParams) {
 //
 // Returns nil if block is valid, error describing the validation failure otherwise
 func (v *BlockValidator) ValidateBlock(block *Block, parent *Block, state map[string]Account) error {
+	startTime := time.Now()
+	defer func() {
+		if v.metrics != nil {
+			v.metrics.ObserveBlockVerification(time.Since(startTime))
+		}
+	}()
+
 	v.mu.RLock()
 	consensus := v.consensus
 	v.mu.RUnlock()
@@ -78,9 +89,9 @@ func (v *BlockValidator) ValidateBlock(block *Block, parent *Block, state map[st
 			return fmt.Errorf("timestamp validation failed: block time %d not greater than parent time %d",
 				block.TimestampUnix, parent.TimestampUnix)
 		}
-		// Check if block time is too far in future (using local clock + tolerance)
+		// Check if block time is too far in future (using NTP synchronized time + tolerance)
 		// This is a sanity check, not consensus rule
-		maxAllowedTime := time.Now().Unix() + BlockTimeMaxDrift
+		maxAllowedTime := getNetworkTimeUnix() + BlockTimeMaxDrift
 		if block.TimestampUnix > maxAllowedTime {
 			return fmt.Errorf("timestamp validation failed: block time %d too far in future (max allowed %d)",
 				block.TimestampUnix, maxAllowedTime)
@@ -88,7 +99,7 @@ func (v *BlockValidator) ValidateBlock(block *Block, parent *Block, state map[st
 	}
 
 	// Step 5: Transaction validation
-	if err := v.validateTransactions(block, consensus); err != nil {
+	if err := v.validateTransactions(block, consensus, v.metrics); err != nil {
 		return fmt.Errorf("transaction validation failed: %w", err)
 	}
 
@@ -200,7 +211,7 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
 }
 
 // validateTransactions validates all transactions in a block
-func (v *BlockValidator) validateTransactions(block *Block, consensus ConsensusParams) error {
+func (v *BlockValidator) validateTransactions(block *Block, consensus ConsensusParams, metrics *Metrics) error {
 	if len(block.Transactions) == 0 {
 		return fmt.Errorf("block has no transactions")
 	}
@@ -210,24 +221,99 @@ func (v *BlockValidator) validateTransactions(block *Block, consensus ConsensusP
 		return fmt.Errorf("first transaction must be coinbase")
 	}
 
-	// Validate each transaction
-	for i, tx := range block.Transactions {
-		if tx.ChainID == 0 {
-			tx.ChainID = v.chainID
+	// Validate each transaction's chainId first
+	for i := range block.Transactions {
+		if block.Transactions[i].ChainID == 0 {
+			block.Transactions[i].ChainID = v.chainID
 		}
-		if tx.ChainID != v.chainID {
-			return fmt.Errorf("transaction %d has wrong chainId: %d", i, tx.ChainID)
+		if block.Transactions[i].ChainID != v.chainID {
+			return fmt.Errorf("transaction %d has wrong chainId: %d", i, block.Transactions[i].ChainID)
 		}
+	}
 
-		if err := tx.VerifyForConsensus(consensus, block.Height); err != nil {
-			return fmt.Errorf("transaction %d verification failed: %w", i, err)
-		}
+	// Batch verify transfer transaction signatures
+	if err := v.verifyTransactionsBatch(block, consensus); err != nil {
+		return err
 	}
 
 	// Validate coinbase economics for non-genesis blocks
 	if block.Height > 0 {
 		if err := v.validateCoinbaseEconomics(block); err != nil {
 			return fmt.Errorf("coinbase economics validation failed: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// verifyTransactionsBatch performs batch signature verification for transactions
+func (v *BlockValidator) verifyTransactionsBatch(block *Block, consensus ConsensusParams) error {
+	n := len(block.Transactions)
+	results := make([]bool, n)
+
+	// Coinbase transactions are always valid structurally
+	results[0] = true
+
+	// Prepare batch verification for transfer transactions
+	if n <= crypto.BATCH_VERIFY_THRESHOLD {
+		// Small batch, use individual verification
+		for i := 1; i < n; i++ {
+			tx := block.Transactions[i]
+			if tx.Type != TxTransfer {
+				results[i] = true
+				continue
+			}
+			err := tx.VerifyForConsensus(consensus, block.Height)
+			results[i] = (err == nil)
+		}
+	} else {
+		// Large batch, use batch verification
+		batchPubKeys := make([]crypto.PublicKey, 0, n)
+		batchMessages := make([][]byte, 0, n)
+		batchSignatures := make([][]byte, 0, n)
+		batchIndices := make([]int, 0, n)
+
+		for i := 1; i < n; i++ {
+			tx := block.Transactions[i]
+			if tx.Type != TxTransfer {
+				results[i] = true
+				continue
+			}
+			if len(tx.FromPubKey) != ed25519.PublicKeySize || len(tx.Signature) != ed25519.SignatureSize {
+				results[i] = false
+				continue
+			}
+
+			h, err := txSigningHashForConsensus(tx, consensus, block.Height)
+			if err != nil {
+				results[i] = false
+				continue
+			}
+
+			batchPubKeys = append(batchPubKeys, tx.FromPubKey)
+			batchMessages = append(batchMessages, h)
+			batchSignatures = append(batchSignatures, tx.Signature)
+			batchIndices = append(batchIndices, i)
+		}
+
+		if len(batchPubKeys) > 0 {
+			batchResults, err := crypto.VerifyBatch(batchPubKeys, batchMessages, batchSignatures)
+			if err != nil {
+				for _, idx := range batchIndices {
+					results[idx] = false
+				}
+			} else {
+				for k, idx := range batchIndices {
+					results[idx] = batchResults[k]
+				}
+			}
+		}
+	}
+
+	// Check results and return detailed error
+	for i, valid := range results {
+		if !valid {
+			return fmt.Errorf("transaction %d verification failed", i)
 		}
 	}
 

@@ -2,10 +2,13 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nogochain/nogo/internal/crypto"
 )
 
 type mempoolEntry struct {
@@ -18,17 +21,19 @@ type Mempool struct {
 	mu sync.Mutex
 
 	maxSize int
+	metrics *Metrics
 
 	entries       map[string]mempoolEntry      // txid -> entry
 	bySenderNonce map[string]map[uint64]string // fromAddr -> nonce -> txid
 }
 
-func NewMempool(maxSize int) *Mempool {
+func NewMempool(maxSize int, metrics *Metrics) *Mempool {
 	if maxSize <= 0 {
 		maxSize = 10_000
 	}
 	return &Mempool{
 		maxSize:       maxSize,
+		metrics:       metrics,
 		entries:       map[string]mempoolEntry{},
 		bySenderNonce: map[string]map[uint64]string{},
 	}
@@ -52,7 +57,6 @@ func (m *Mempool) Add(tx Transaction) (string, error) {
 func (m *Mempool) AddWithTxID(tx Transaction, txid string, p ConsensusParams, height uint64) (string, error) {
 	var err error
 	if strings.TrimSpace(txid) == "" {
-		// If consensus params aren't provided, fall back to legacy.
 		if p == (ConsensusParams{}) && height == 0 {
 			txid, err = txIDHex(tx)
 		} else {
@@ -77,7 +81,6 @@ func (m *Mempool) AddWithTxID(tx Transaction, txid string, p ConsensusParams, he
 		return existingID, errors.New("nonce already in mempool")
 	}
 	if len(m.entries) >= m.maxSize {
-		// simplistic eviction: evict one lowest-fee entry (and dependent nonce chain)
 		lowest := m.lowestFeeLocked()
 		if lowest == "" {
 			return "", errors.New("mempool full")
@@ -87,7 +90,90 @@ func (m *Mempool) AddWithTxID(tx Transaction, txid string, p ConsensusParams, he
 
 	m.entries[txid] = mempoolEntry{tx: tx, txIDHex: txid, received: time.Now()}
 	m.indexLocked(fromAddr, tx.Nonce, txid)
+
+	if m.metrics != nil {
+		go m.metrics.UpdateMempoolMetrics()
+	}
+
 	return txid, nil
+}
+
+func (m *Mempool) AddMany(txs []Transaction, p ConsensusParams, height uint64) ([]string, []error) {
+	txids := make([]string, len(txs))
+	errs := make([]error, len(txs))
+
+	if len(txs) < crypto.BATCH_VERIFY_THRESHOLD {
+		for i, tx := range txs {
+			txid, err := m.AddWithTxID(tx, "", p, height)
+			txids[i] = txid
+			errs[i] = err
+		}
+		return txids, errs
+	}
+
+	validResults := make([]bool, len(txs))
+	for i, tx := range txs {
+		if tx.Type != TxTransfer {
+			validResults[i] = true
+			continue
+		}
+		if len(tx.FromPubKey) != 32 || len(tx.Signature) != 64 {
+			validResults[i] = false
+			continue
+		}
+	}
+
+	for i := 0; i < len(txs); i += crypto.BATCH_VERIFY_MAX_SIZE {
+		end := i + crypto.BATCH_VERIFY_MAX_SIZE
+		if end > len(txs) {
+			end = len(txs)
+		}
+
+		batchPubKeys := make([]crypto.PublicKey, 0)
+		batchMessages := make([][]byte, 0)
+		batchSignatures := make([][]byte, 0)
+		batchIndices := make([]int, 0)
+
+		for j := i; j < end; j++ {
+			if txs[j].Type != TxTransfer || !validResults[j] {
+				continue
+			}
+			batchPubKeys = append(batchPubKeys, txs[j].FromPubKey)
+			h, err := txSigningHashForConsensus(txs[j], p, height)
+			if err != nil {
+				validResults[j] = false
+				continue
+			}
+			batchMessages = append(batchMessages, h)
+			batchSignatures = append(batchSignatures, txs[j].Signature)
+			batchIndices = append(batchIndices, j)
+		}
+
+		if len(batchPubKeys) > 0 {
+			batchValid, err := crypto.VerifyBatch(batchPubKeys, batchMessages, batchSignatures)
+			if err != nil {
+				for _, idx := range batchIndices {
+					validResults[idx] = false
+				}
+			} else {
+				for k, idx := range batchIndices {
+					validResults[idx] = batchValid[k]
+				}
+			}
+		}
+	}
+
+	for i, tx := range txs {
+		if !validResults[i] {
+			errs[i] = fmt.Errorf("signature verification failed")
+			continue
+		}
+		txid, err := m.AddWithTxID(tx, "", p, height)
+		txids[i] = txid
+		errs[i] = err
+	}
+
+	return txids, errs
 }
 
 // ReplaceByFee replaces an existing mempool tx for the same (fromAddr, nonce) if and only if the new
@@ -138,6 +224,11 @@ func (m *Mempool) ReplaceByFeeWithTxID(tx Transaction, txid string, p ConsensusP
 	}
 	m.entries[txid] = mempoolEntry{tx: tx, txIDHex: txid, received: time.Now()}
 	m.indexLocked(fromAddr, tx.Nonce, txid)
+
+	if m.metrics != nil {
+		go m.metrics.UpdateMempoolMetrics()
+	}
+
 	return txid, true, evicted, nil
 }
 
@@ -145,6 +236,10 @@ func (m *Mempool) Remove(txid string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.removeLocked(txid)
+
+	if m.metrics != nil {
+		go m.metrics.UpdateMempoolMetrics()
+	}
 }
 
 func (m *Mempool) RemoveMany(txids []string) {
@@ -152,6 +247,10 @@ func (m *Mempool) RemoveMany(txids []string) {
 	defer m.mu.Unlock()
 	for _, id := range txids {
 		m.removeLocked(id)
+	}
+
+	if m.metrics != nil {
+		go m.metrics.UpdateMempoolMetrics()
 	}
 }
 

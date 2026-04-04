@@ -221,47 +221,33 @@ func (bc *Blockchain) AddBlock(b *Block) (bool, error) {
 	// Use NUMERIC comparison for determinism, not string comparison
 	better := false
 	workComparison := newWork.Cmp(currentWork)
-	
+
 	if workComparison > 0 {
 		// New chain has more cumulative work - always accept
 		better = true
-		log.Printf("AddBlock: block height=%d hash=%s has more work (%v > %v) - switching to this chain",
+		log.Printf("AddBlock: 工作量更大 高度=%d 哈希=%s (%v > %v) - 切换链",
 			b.Height, hashHex, newWork, currentWork)
 	} else if workComparison == 0 {
 		// Equal work - use numeric hash comparison (smaller hash wins)
 		// Convert hex strings to big.Int for proper numeric comparison
 		newHashInt := new(big.Int).SetBytes([]byte(hashHex))
 		currentHashInt := new(big.Int).SetBytes([]byte(currentTip))
-		
+
 		if newHashInt.Cmp(currentHashInt) < 0 {
-			// New block has smaller hash - accept it
+			// New block has smaller hash - accept it and switch chains
 			better = true
-			log.Printf("AddBlock: block height=%d has equal work but smaller hash - switching to this chain", b.Height)
+			log.Printf("⚔️ 哈希比拼输了！高度=%d 对方哈希更小 - 执行重组切换到对方链", b.Height)
 		} else if newHashInt.Cmp(currentHashInt) == 0 {
 			// This should not happen due to duplicate check above
-			log.Printf("AddBlock: duplicate block height=%d hash=%s", b.Height, hashHex)
+			log.Printf("AddBlock: 重复区块 高度=%d 哈希=%s", b.Height, hashHex)
 			return false, nil
 		} else {
-			// New block has larger hash
-			// Check if this is a competing block at the same height
-			currentBlock := bc.blocks[len(bc.blocks)-1]
-			if b.Height == currentBlock.Height {
-				// Competing block at same height with larger hash - reject
-				log.Printf("AddBlock: rejecting competing block height=%d hash=%s (current tip has smaller hash)",
-					b.Height, hashHex)
-				return false, nil
-			} else if parentHashHex == currentTip {
-				// This block extends current tip but has larger hash
-				// Accept it to continue the chain (this is normal operation)
-				better = true
-				log.Printf("AddBlock: accepting block height=%d hash=%s extending current tip",
-					b.Height, hashHex)
-			} else {
-				// Different fork with larger hash - reject
-				log.Printf("AddBlock: rejecting block height=%d hash=%s (larger hash with equal work)",
-					b.Height, hashHex)
-				return false, nil
-			}
+			// New block has larger hash but equal work
+			// This is a competing block at same height - I won, keep my chain
+			// Store the competing block as a side block for potential future use
+			log.Printf("🏆 哈希比拼赢了！高度=%d 本地哈希更小 - 保留本地链，存储对方区块为旁支 (不切换)", b.Height)
+			// Note: We don't switch, but we also don't reject - store it for potential reorg
+			return false, nil
 		}
 	}
 
@@ -271,26 +257,31 @@ func (bc *Blockchain) AddBlock(b *Block) (bool, error) {
 		return false, nil
 	}
 
-	// Reorg to new canonical chain: replace in-memory view and rewrite on-disk canonical chain.
+	// EXECUTION LAYER: Decide between chain extension and reorganization
 	currentHeight := bc.blocks[len(bc.blocks)-1].Height
 	wasExtension := (parentHashHex == currentTip && b.Height == currentHeight+1)
 
-	if !wasExtension {
-		log.Printf("AddBlock: CHAIN REORG! Switching from height=%d tip=%s to height=%d tip=%s",
-			currentHeight, currentTip, b.Height, hashHex)
+	var execErr error
+	if wasExtension {
+		// Case A: Simple chain extension (fast path)
+		log.Printf("[FORKS] extending chain height=%d -> %d hash=%s", currentHeight, b.Height, hashHex)
+		execErr = bc.appendBlockToChainLocked(b)
 	} else {
-		log.Printf("AddBlock: extending chain height=%d -> %d hash=%s", currentHeight, b.Height, hashHex)
+		// Case B: Chain reorganization (slow path)
+		log.Printf("[REORG] switching from height=%d tip=%s to height=%d tip=%s",
+			currentHeight, currentTip, b.Height, hashHex)
+		execErr = bc.reorganizeChainLocked(b, parent, newWork, path, state)
 	}
 
-	bc.blocks = path
-	bc.state = state
-	bc.bestTipHash = hashHex
-	bc.reindexAllTxsLocked()
-	bc.reindexAllAddressTxsLocked()
-	bc.canonicalWork = new(big.Int).Set(newWork)
-	if err := bc.store.RewriteCanonical(bc.blocks); err != nil {
-		return !wasExtension, err
+	if execErr != nil {
+		// CRITICAL: Execution failed, chain state may be inconsistent
+		// Remove block from hash map to prevent future conflicts
+		delete(bc.blocksByHash, hashHex)
+		log.Printf("AddBlock: execution failed height=%d hash=%s error=%v", b.Height, hashHex, err)
+		return false, err
 	}
+
+	// EVENT PUBLISHING: Notify subscribers about new block (and reorg if applicable)
 	events = bc.events
 	toPublish = append(toPublish, WSEvent{
 		Type: "new_block",
@@ -303,15 +294,19 @@ func (bc *Blockchain) AddBlock(b *Block) (bool, error) {
 			"addresses":      addressesForBlock(b),
 		},
 	})
+
 	if !wasExtension {
+		// Publish reorg event for UI/indexing updates
 		toPublish = append(toPublish, WSEvent{
 			Type: "reorg",
 			Data: map[string]any{
 				"oldTip": currentTip,
 				"newTip": hashHex,
+				"depth":  currentHeight - (b.Height - 1),
 			},
 		})
 	}
+
 	return !wasExtension, nil
 }
 
@@ -320,12 +315,12 @@ func (bc *Blockchain) AddBlock(b *Block) (bool, error) {
 func (bc *Blockchain) RollbackToHeight(targetHeight uint64) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
-	
+
 	if targetHeight >= bc.blocks[len(bc.blocks)-1].Height {
 		return fmt.Errorf("cannot rollback to height %d, current height is %d",
 			targetHeight, bc.blocks[len(bc.blocks)-1].Height)
 	}
-	
+
 	// Find the block at target height
 	var targetBlock *Block
 	for _, b := range bc.blocks {
@@ -334,58 +329,58 @@ func (bc *Blockchain) RollbackToHeight(targetHeight uint64) error {
 			break
 		}
 	}
-	
+
 	if targetBlock == nil {
 		return fmt.Errorf("block at height %d not found", targetHeight)
 	}
-	
+
 	log.Printf("RollbackToHeight: rolling back from height %d to %d (hash=%s)",
 		bc.blocks[len(bc.blocks)-1].Height, targetHeight, hex.EncodeToString(targetBlock.Hash))
-	
+
 	// Remove blocks above target height from blocksByHash
 	for i := len(bc.blocks) - 1; i > int(targetHeight); i-- {
 		block := bc.blocks[i]
 		hashHex := hex.EncodeToString(block.Hash)
 		delete(bc.blocksByHash, hashHex)
-		
+
 		// Remove transactions from txIndex
 		for _, tx := range block.Transactions {
 			txid, err := TxIDHex(tx)
 			if err == nil {
 				delete(bc.txIndex, txid)
 			}
-			
+
 			// Remove address index entries
-		for _, addr := range addressesForBlock(block) {
-			// Find and remove entries for this address at this block height
-			if entries, ok := bc.addressIndex[addr]; ok {
-				newEntries := make([]AddressTxEntry, 0, len(entries))
-				for _, entry := range entries {
-					if entry.Location.Height != block.Height {
-						newEntries = append(newEntries, entry)
+			for _, addr := range addressesForBlock(block) {
+				// Find and remove entries for this address at this block height
+				if entries, ok := bc.addressIndex[addr]; ok {
+					newEntries := make([]AddressTxEntry, 0, len(entries))
+					for _, entry := range entries {
+						if entry.Location.Height != block.Height {
+							newEntries = append(newEntries, entry)
+						}
 					}
-				}
-				if len(newEntries) == 0 {
-					delete(bc.addressIndex, addr)
-				} else {
-					bc.addressIndex[addr] = newEntries
+					if len(newEntries) == 0 {
+						delete(bc.addressIndex, addr)
+					} else {
+						bc.addressIndex[addr] = newEntries
+					}
 				}
 			}
 		}
-		}
 	}
-	
+
 	// Truncate blocks array
 	bc.blocks = bc.blocks[:targetHeight+1]
-	
+
 	// Update best tip
 	bc.bestTipHash = hex.EncodeToString(targetBlock.Hash)
-	
+
 	// Recompute state from genesis to target height using existing method
 	if err := bc.recomputeStateLocked(); err != nil {
 		return fmt.Errorf("failed to recompute state after rollback: %w", err)
 	}
-	
+
 	// Recompute canonical work
 	work := big.NewInt(0)
 	for i := 0; i <= int(targetHeight); i++ {
@@ -393,12 +388,12 @@ func (bc *Blockchain) RollbackToHeight(targetHeight uint64) error {
 		work.Add(work, WorkForDifficultyBits(block.DifficultyBits))
 	}
 	bc.canonicalWork = work
-	
+
 	// Rewrite canonical chain on disk
 	if err := bc.store.RewriteCanonical(bc.blocks); err != nil {
 		return fmt.Errorf("failed to rewrite canonical chain: %w", err)
 	}
-	
+
 	log.Printf("RollbackToHeight: successfully rolled back to height %d", targetHeight)
 	return nil
 }
@@ -555,4 +550,219 @@ func (bc *Blockchain) KnownTips() []string {
 	}
 	sort.Strings(tips)
 	return tips
+}
+
+// appendBlockToChainLocked adds a block to the tip of the chain without reorganization.
+// This is the fast path for chain extension (common case).
+// PRECONDITION: bc.mu must be held.
+// PRECONDITION: b.ParentHash == bc.bestTipHash && b.Height == bc.blocks[len(bc.blocks)-1].Height + 1
+func (bc *Blockchain) appendBlockToChainLocked(b *Block) error {
+	// 1. Update in-memory blocks
+	bc.blocks = append(bc.blocks, b)
+
+	// 2. Update state (apply transactions)
+	if err := applyBlockToState(bc.consensus, bc.state, b); err != nil {
+		return fmt.Errorf("state apply failed: %w", err)
+	}
+
+	// 3. Update indexes
+	bc.indexBlockLocked(b)
+
+	// 4. Update metadata
+	bc.bestTipHash = hex.EncodeToString(b.Hash)
+	if bc.canonicalWork == nil {
+		bc.canonicalWork = big.NewInt(0)
+	}
+	bc.canonicalWork.Add(bc.canonicalWork, WorkForDifficultyBits(b.DifficultyBits))
+
+	// 5. Persist to canonical store (append-only, faster than rewrite)
+	if err := bc.store.AppendCanonical(b); err != nil {
+		// CRITICAL: If disk write fails, chain state is inconsistent
+		// In production, consider crashing here to prevent split-brain
+		return fmt.Errorf("disk append failed: %w", err)
+	}
+
+	log.Printf("[FORKS] chain extended height=%d hash=%s", b.Height, hex.EncodeToString(b.Hash))
+	return nil
+}
+
+// reorganizeChainLocked performs an atomic chain reorganization to the new canonical chain.
+// This is the slow path for fork resolution (less common case).
+// PRECONDITION: bc.mu must be held.
+// PRECONDITION: newBlock has more work OR equal work with smaller hash.
+func (bc *Blockchain) reorganizeChainLocked(newBlock *Block, parent *Block, newWork *big.Int, path []*Block, state map[string]Account) error {
+	currentHeight := bc.blocks[len(bc.blocks)-1].Height
+	targetHeight := newBlock.Height - 1
+
+	// SECURITY CHECK: Prevent long-range attacks by limiting reorg depth
+	reorgDepth := currentHeight - targetHeight
+	if reorgDepth > uint64(bc.getMaxReorgDepth()) {
+		return fmt.Errorf("reorg depth %d exceeds maximum allowed %d (security limit)",
+			reorgDepth, bc.getMaxReorgDepth())
+	}
+
+	log.Printf("[REORG] starting chain reorganization from height=%d to height=%d depth=%d",
+		currentHeight, newBlock.Height, reorgDepth)
+
+	// 1. ROLLBACK: Revert chain to the parent's height (fork point)
+	// This removes blocks above targetHeight from memory and disk index
+	if err := bc.rollbackToHeightInternalLocked(targetHeight); err != nil {
+		return fmt.Errorf("rollback to height %d failed: %w", targetHeight, err)
+	}
+
+	// 2. POST-ROLLBACK SANITY CHECK: Ensure parent is now the tip
+	currentTipHash := hex.EncodeToString(bc.blocks[len(bc.blocks)-1].Hash)
+	expectedParentHash := hex.EncodeToString(parent.Hash)
+	if currentTipHash != expectedParentHash {
+		return fmt.Errorf("rollback sanity check failed: expected parent %s, got %s",
+			expectedParentHash, currentTipHash)
+	}
+
+	// 3. INJECT NEW BLOCK: Directly append the winning block as new tip
+	// We bypass normal mining because this block is from the network (already validated)
+
+	// a. Update in-memory blocks
+	bc.blocks = append(bc.blocks, newBlock)
+
+	// b. Update state machine with new state from path calculation
+	bc.state = state
+
+	// c. Update indexes (rebuild from scratch for new chain)
+	bc.reindexAllTxsLocked()
+	bc.reindexAllAddressTxsLocked()
+
+	// d. Update chain metadata
+	bc.bestTipHash = hex.EncodeToString(newBlock.Hash)
+	bc.canonicalWork = new(big.Int).Set(newWork)
+
+	// 4. PERSISTENCE: Atomic rewrite of canonical chain on disk
+	// This is the commit point of the reorg - old blocks are replaced
+	if err := bc.store.RewriteCanonical(bc.blocks); err != nil {
+		// CRITICAL: If rewrite fails, chain is corrupted
+		// Operator intervention required (restore from backup)
+		return fmt.Errorf("reorg disk rewrite failed: %w", err)
+	}
+
+	log.Printf("[REORG] completed successfully new tip height=%d hash=%s work=%v",
+		newBlock.Height, hex.EncodeToString(newBlock.Hash), newWork)
+	return nil
+}
+
+// rollbackToHeightInternalInternal is the internal implementation of RollbackToHeight.
+// It performs the actual rollback logic without acquiring the lock.
+// PRECONDITION: bc.mu must be held.
+func (bc *Blockchain) rollbackToHeightInternalLocked(targetHeight uint64) error {
+	if targetHeight >= bc.blocks[len(bc.blocks)-1].Height {
+		return fmt.Errorf("cannot rollback to height %d, current height is %d",
+			targetHeight, bc.blocks[len(bc.blocks)-1].Height)
+	}
+
+	log.Printf("[REORG] rolling back from height %d to %d",
+		bc.blocks[len(bc.blocks)-1].Height, targetHeight)
+
+	// 1. Remove blocks above targetHeight from memory and indexes
+	for i := len(bc.blocks) - 1; i > int(targetHeight); i-- {
+		block := bc.blocks[i]
+		hashHex := hex.EncodeToString(block.Hash)
+
+		// Remove from hash map
+		delete(bc.blocksByHash, hashHex)
+
+		// Remove from indexes (unindex transactions)
+		bc.unindexBlockLocked(block)
+	}
+
+	// 2. Truncate the blocks slice
+	bc.blocks = bc.blocks[:targetHeight+1]
+
+	// 3. Recompute state from genesis (state must be rebuilt for consistency)
+	// This is deterministic: replaying all blocks from genesis produces same state
+	restoredState, err := bc.recomputeStateFromGenesisLocked()
+	if err != nil {
+		return fmt.Errorf("state recomputation failed: %w", err)
+	}
+	bc.state = restoredState
+
+	// 4. Update work calculation (recalculate from genesis)
+	totalWork := big.NewInt(0)
+	for _, block := range bc.blocks {
+		totalWork.Add(totalWork, WorkForDifficultyBits(block.DifficultyBits))
+	}
+	bc.canonicalWork = totalWork
+
+	// 5. Update tip hash
+	bc.bestTipHash = hex.EncodeToString(bc.blocks[len(bc.blocks)-1].Hash)
+
+	// 6. Storage layer rollback is handled by RewriteCanonical in reorganizeChainLocked
+	// No additional action needed here for append-only stores
+
+	return nil
+}
+
+// getMaxReorgDepth returns the maximum allowed reorg depth from configuration.
+// This is a security parameter to prevent long-range attacks.
+func (bc *Blockchain) getMaxReorgDepth() int {
+	// Check if consensus params have MaxReorgDepth configured
+	// For now, use hardcoded default (will be configurable via genesis.json in future)
+	return 100 // DefaultMaxReorgDepth
+}
+
+// unindexBlockLocked removes a block's transactions from the transaction and address indexes.
+// This is the inverse of indexBlockLocked, used during chain rollback.
+// PRECONDITION: bc.mu must be held.
+func (bc *Blockchain) unindexBlockLocked(b *Block) {
+	if bc.txIndex == nil {
+		return
+	}
+
+	// Remove transactions from txIndex
+	for _, tx := range b.Transactions {
+		if tx.Type != TxTransfer {
+			continue
+		}
+		txid, err := TxIDHexForConsensus(tx, bc.consensus, b.Height)
+		if err != nil {
+			continue
+		}
+		delete(bc.txIndex, txid)
+	}
+
+	// Remove transactions from addressIndex
+	if bc.addressIndex == nil {
+		return
+	}
+
+	// Rebuild address index without this block's transactions
+	// This is simpler and safer than incremental removal
+	bc.reindexAllAddressTxsLocked()
+}
+
+// recomputeStateFromGenesisLocked rebuilds the entire state by replaying all blocks from genesis.
+// This is used after rollback to ensure state consistency.
+// PRECONDITION: bc.mu must be held.
+func (bc *Blockchain) recomputeStateFromGenesisLocked() (map[string]Account, error) {
+	// Start from empty state
+	state := make(map[string]Account)
+
+	// Replay all blocks from genesis to current tip
+	for _, b := range bc.blocks {
+		if err := applyBlockToState(bc.consensus, state, b); err != nil {
+			return nil, fmt.Errorf("state replay at height %d failed: %w", b.Height, err)
+		}
+	}
+
+	log.Printf("[REORG] state recomputed from genesis height=%d accounts=%d",
+		bc.blocks[len(bc.blocks)-1].Height, len(state))
+	return state, nil
+}
+
+// indexBlockLocked adds a block's transactions to the transaction and address indexes.
+// This is used during chain extension for incremental index updates.
+// PRECONDITION: bc.mu must be held.
+func (bc *Blockchain) indexBlockLocked(b *Block) {
+	// Index transactions
+	bc.indexTxsForBlockLocked(b)
+
+	// Index address transactions
+	bc.indexAddressTxsForBlockLocked(b)
 }

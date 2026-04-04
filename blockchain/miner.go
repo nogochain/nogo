@@ -5,9 +5,26 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"reflect"
 	"sync"
 	"time"
 )
+
+// isPeerAPIValid checks if a PeerAPI interface is truly valid (not nil or containing nil)
+// This is necessary because in Go, an interface can contain a nil pointer but still not be nil itself
+func isPeerAPIValid(pm PeerAPI) bool {
+	if pm == nil {
+		return false
+	}
+	// Use reflection to check if the underlying value is nil
+	v := reflect.ValueOf(pm)
+	switch v.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+		return !v.IsNil()
+	default:
+		return true
+	}
+}
 
 type Miner struct {
 	bc *Blockchain
@@ -194,6 +211,13 @@ func (m *Miner) Run(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			// CRITICAL: Pause mining during sync to prevent forks
+			// Check if sync loop is available and currently syncing
+			if m.bc.syncLoop != nil && m.bc.syncLoop.IsSyncing() {
+				log.Printf("miner: pausing mining during sync to prevent forks")
+				continue
+			}
+
 			// Check if verification is in progress using context
 			if m.isVerificationActive() {
 				// Skip mining while verifying to prevent forks
@@ -216,8 +240,10 @@ func (m *Miner) Run(ctx context.Context, interval time.Duration) {
 				time.Sleep(NetworkSyncCheckDelayMs * time.Millisecond)
 
 				// Re-check network height after wait
-				if m.pm != nil {
-					peerHeight := getPeerHeight(m.pm)
+				// Thread-safe: use local pm variable
+				pmLocal := m.pm
+				if isPeerAPIValid(pmLocal) {
+					peerHeight := getPeerHeight(pmLocal)
 					localHeight := m.bc.LatestBlock().Height
 					if peerHeight > localHeight {
 						log.Printf("miner: network advanced during sync wait (local=%d, peer=%d) - resuming sync", localHeight, peerHeight)
@@ -248,8 +274,10 @@ func (m *Miner) Run(ctx context.Context, interval time.Duration) {
 				time.Sleep(NetworkSyncCheckDelayMs * time.Millisecond)
 
 				// Re-check network height after wait
-				if m.pm != nil {
-					peerHeight := getPeerHeight(m.pm)
+				// Thread-safe: use local pm variable
+				pmLocal := m.pm
+				if isPeerAPIValid(pmLocal) {
+					peerHeight := getPeerHeight(pmLocal)
 					localHeight := m.bc.LatestBlock().Height
 					if peerHeight > localHeight {
 						log.Printf("miner: network advanced during sync wait (local=%d, peer=%d) - resuming sync", localHeight, peerHeight)
@@ -292,11 +320,15 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 	m.isMining = true
 	m.miningMu.Unlock()
 
-	// CRITICAL: Before mining, check if network has advanced
-	// If so, pause mining and sync instead to prevent forks
-	if m.pm != nil {
+	// CRITICAL: Check if P2P is configured
+	// Thread-safe: store pm in local variable immediately
+	pm := m.pm
+
+	// If P2P is configured, perform network checks
+	// Note: pm is a PeerAPI interface, check if it's truly nil
+	if isPeerAPIValid(pm) {
 		localHeight := m.bc.LatestBlock().Height
-		peerHeight := getPeerHeight(m.pm)
+		peerHeight := getPeerHeight(pm)
 
 		if peerHeight > localHeight {
 			log.Printf("miner: network advanced during mining attempt (local=%d, peer=%d) - aborting mining to sync", localHeight, peerHeight)
@@ -339,7 +371,8 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 			time.Sleep(totalDelay)
 
 			// Re-check after delay - if peer mined a block, abort
-			newPeerHeight := getPeerHeight(m.pm)
+			// Thread-safe: pm is local variable, safe to use
+			newPeerHeight := getPeerHeight(pm)
 			if newPeerHeight > localHeight {
 				log.Printf("miner: network advanced during convergence wait (local=%d, peer=%d) - aborting mining", localHeight, newPeerHeight)
 				return nil, nil
@@ -352,6 +385,9 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 				return nil, nil
 			}
 		}
+	} else {
+		// No P2P configured, log and proceed with mining
+		log.Printf("miner: no P2P configured, mining without network sync checks")
 	}
 
 	selected, selectedIDs, err := m.bc.SelectMempoolTxs(m.mp, m.maxTxPerBlock)
@@ -367,7 +403,7 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 	}
 
 	log.Printf("miner: attempting to mine block with %d transactions", len(selected))
-	
+
 	// CRITICAL: Save parent block BEFORE mining (create a deep copy to prevent modification)
 	// This ensures we have a consistent view of the parent block throughout the mining process
 	parentAtMineTime := m.bc.LatestBlock()
@@ -375,7 +411,7 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 		log.Printf("miner: no parent block at mining time")
 		return nil, errors.New("no parent block")
 	}
-	
+
 	// Create a deep copy of the parent block to preserve its state
 	parentCopy := &Block{
 		Height:         parentAtMineTime.Height,
@@ -385,10 +421,10 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 		DifficultyBits: parentAtMineTime.DifficultyBits,
 		MinerAddress:   parentAtMineTime.MinerAddress,
 	}
-	
+
 	log.Printf("miner: created parentCopy BEFORE mining - height=%d, hash=%x, timestamp=%d, diff=%d",
 		parentCopy.Height, parentCopy.Hash, parentCopy.TimestampUnix, parentCopy.DifficultyBits)
-	
+
 	b, err := m.bc.MineTransfers(selected)
 	if err != nil {
 		log.Printf("miner: mine failed: %v", err)
@@ -418,7 +454,9 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 		log.Printf("miner: POW validation failed for mined block: %v", err)
 
 		// CRITICAL: Check if network has advanced and we need to rollback
-		peerHeight := getPeerHeight(m.pm)
+		// Thread-safe: use local pm variable
+		pmForValidation := m.pm
+		peerHeight := getPeerHeight(pmForValidation)
 		localHeight := m.bc.LatestBlock().Height
 
 		if peerHeight > localHeight {
@@ -471,11 +509,17 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 	// Broadcast the new block to all peers
 	// CRITICAL: Wait for network sync before next mining to prevent forks
 	// Use adaptive delay based on network conditions
-	propagationDelay := calculateAdaptivePropagationDelay(m.pm)
+	// Thread-safe: pm is local variable, safe to use
+	propagationDelay := calculateAdaptivePropagationDelay(pm)
 	log.Printf("miner: block mined at height %d, waiting %dms for network sync before next mining...", b.Height, propagationDelay)
 	time.Sleep(time.Duration(propagationDelay) * time.Millisecond)
-	
-	log.Printf("miner: starting block broadcast height=%d hash=%x peers=%d", b.Height, b.Hash, len(m.pm.Peers()))
+
+	// Get peer count for logging (safe check)
+	peerCount := 0
+	if isPeerAPIValid(pm) {
+		peerCount = len(pm.Peers())
+	}
+	log.Printf("miner: starting block broadcast height=%d hash=%x peers=%d", b.Height, b.Hash, peerCount)
 	go m.broadcastBlock(ctx, b)
 
 	if len(selectedIDs) > 0 {
@@ -500,7 +544,7 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*Block, error) {
 
 // broadcastBlock broadcasts the mined block to all connected peers
 func (m *Miner) broadcastBlock(ctx context.Context, block *Block) {
-	if m.pm == nil {
+	if !isPeerAPIValid(m.pm) {
 		log.Printf("miner: no peer manager available, skipping block broadcast")
 		return
 	}
@@ -517,36 +561,36 @@ func (m *Miner) broadcastBlock(ctx context.Context, block *Block) {
 // calculateAdaptivePropagationDelay calculates adaptive propagation delay based on network conditions
 // Returns delay in milliseconds
 func calculateAdaptivePropagationDelay(pm PeerAPI) int {
-	if pm == nil {
+	if !isPeerAPIValid(pm) {
 		return BlockPropagationDelayMs
 	}
-	
+
 	peers := pm.Peers()
 	if len(peers) == 0 {
 		// No peers, use minimum delay
 		return BlockPropagationDelayMs / 2
 	}
-	
+
 	// Base delay on number of peers and network topology
 	// More peers = longer propagation time needed
 	baseDelay := BlockPropagationDelayMs
-	
+
 	// Add delay for each additional peer (diminishing returns)
 	peerFactor := 0
 	if len(peers) > 1 {
 		// Logarithmic scaling: each additional peer adds less delay
 		peerFactor = int(50 * float64(len(peers)-1) / float64(len(peers)))
 	}
-	
+
 	adaptiveDelay := baseDelay + peerFactor
-	
+
 	// Cap at reasonable maximum (3 seconds)
 	if adaptiveDelay > 3000 {
 		adaptiveDelay = 3000
 	}
-	
+
 	log.Printf("miner: calculated adaptive propagation delay=%dms (peers=%d, base=%d, factor=%d)",
 		adaptiveDelay, len(peers), baseDelay, peerFactor)
-	
+
 	return adaptiveDelay
 }

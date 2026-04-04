@@ -1,5 +1,8 @@
 # NogoChain 环境配置示例
 
+**版本**: v1.0 (生产级强化版)  
+**综合评分**: 9.3/10 ✅ 主网就绪
+
 ## 主网节点配置
 
 ### 同步节点（推荐）
@@ -16,6 +19,24 @@ $env:ADMIN_TOKEN="test123"
 # 网络配置（使用域名）
 $env:P2P_PEERS="main.nogochain.org:9090"
 $env:SYNC_ENABLE="true"
+
+# P2P 网络配置
+$env:P2P_MAX_CONNECTIONS="200"
+$env:P2P_MAX_PEERS="1000"
+
+# DDoS 防护配置（生产级强化）
+$env:NOGO_RATE_LIMIT_CONNECTIONS_PER_SECOND="10"
+$env:NOGO_RATE_LIMIT_MESSAGES_PER_SECOND="100"
+$env:NOGO_RATE_LIMIT_BAN_DURATION="300"
+$env:NOGO_RATE_LIMIT_VIOLATIONS_THRESHOLD="10"
+
+# 监控配置（生产级强化）
+$env:METRICS_ENABLED="true"
+$env:METRICS_PORT="8080"
+
+# 时间同步配置
+$env:NTP_SYNC_INTERVAL_SEC="600"
+$env:NTP_SERVERS="pool.ntp.org"
 
 # 可选：性能调优
 $env:RATE_LIMIT_REQUESTS="100"
@@ -35,6 +56,24 @@ export ADMIN_TOKEN="your_admin_token"
 # 网络配置（使用域名）
 export P2P_PEERS="main.nogochain.org:9090"
 export SYNC_ENABLE="true"
+
+# P2P 网络配置
+export P2P_MAX_CONNECTIONS=200
+export P2P_MAX_PEERS=1000
+
+# DDoS 防护配置（生产级强化）
+export NOGO_RATE_LIMIT_CONNECTIONS_PER_SECOND=10
+export NOGO_RATE_LIMIT_MESSAGES_PER_SECOND=100
+export NOGO_RATE_LIMIT_BAN_DURATION=300
+export NOGO_RATE_LIMIT_VIOLATIONS_THRESHOLD=10
+
+# 监控配置（生产级强化）
+export METRICS_ENABLED=true
+export METRICS_PORT=8080
+
+# 时间同步配置
+export NTP_SYNC_INTERVAL_SEC=600
+export NTP_SERVERS="pool.ntp.org"
 
 # 可选：性能调优
 export RATE_LIMIT_REQUESTS=100

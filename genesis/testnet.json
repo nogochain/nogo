@@ -7,9 +7,11 @@
   "genesisMessage": "Follow the white rabbit - NogoChain Testnet",
   "monetaryPolicy": {
     "initialBlockReward": "5000000000",
-    "halvingInterval": 210000,
+    "minimumBlockReward": "10000000",
+    "annualReductionPercent": 10,
     "minerFeeShare": 100,
-    "tailEmission": "0"
+    "uncleRewardEnabled": true,
+    "maxUncleDepth": 6
   },
   "consensusParams": {
     "difficultyEnable": true,
@@ -22,6 +24,7 @@
     "medianTimePastWindow": 11,
     "maxTimeDrift": 7200,
     "maxBlockSize": 1000000,
+    "maxTransactionsPerBlock": 100,
     "merkleEnable": true,
     "merkleActivationHeight": 0,
     "binaryEncodingEnable": true,

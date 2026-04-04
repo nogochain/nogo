@@ -676,8 +676,6 @@ func defaultTestConsensusParams() ConsensusParams {
 	}
 }
 
-
-
 // TestPOWValidationWithRealMainnetBlocks tests validation with simulated mainnet blocks (1-300)
 func TestPOWValidationWithRealMainnetBlocks(t *testing.T) {
 	t.Skip("Skipping due to mining time - covered by integration tests")

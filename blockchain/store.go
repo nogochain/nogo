@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -135,16 +136,20 @@ func (s *GobStore) RewriteCanonical(blocks []*Block) error {
 	enc := gob.NewEncoder(w)
 	for _, b := range blocks {
 		if err := enc.Encode(b); err != nil {
-			_ = f.Close()
-			return err
+			if closeErr := f.Close(); closeErr != nil {
+				log.Printf("store: failed to close file on encode error: %v", closeErr)
+			}
+			return fmt.Errorf("encode block: %w", err)
 		}
 	}
 	if err := w.Flush(); err != nil {
-		_ = f.Close()
-		return err
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("store: failed to close file on flush error: %v", closeErr)
+		}
+		return fmt.Errorf("flush buffer: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		return err
+		return fmt.Errorf("close file: %w", err)
 	}
 	return os.Rename(tmp, s.path)
 }

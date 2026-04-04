@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/nogopow"
+	"github.com/nogochain/nogo/internal/ntp"
 )
 
 const (
@@ -303,11 +304,12 @@ func validateDifficultyAdjustment(consensus ConsensusParams, block *Block, paren
 		return fmt.Errorf("block timestamp %d not greater than parent timestamp %d",
 			block.TimestampUnix, parent.TimestampUnix)
 	}
-	
+
 	// CRITICAL: Validate timestamp is not too far in the future
 	// This prevents timestamp manipulation attacks
-	now := time.Now().Unix()
-	if block.TimestampUnix > now + MaxBlockTimeDriftSec {
+	// Use NTP synchronized time if available, fallback to local time
+	now := getNetworkTimeUnix()
+	if block.TimestampUnix > now+MaxBlockTimeDriftSec {
 		return fmt.Errorf("block timestamp %d too far in future (max allowed %d, now=%d)",
 			block.TimestampUnix, now+MaxBlockTimeDriftSec, now)
 	}
@@ -447,6 +449,9 @@ type Blockchain struct {
 	txIndex map[string]TxLocation // txid -> location (canonical only)
 
 	addressIndex map[string][]AddressTxEntry // address -> canonical transfer history (oldest->newest)
+
+	// Reference to sync loop for mining coordination
+	syncLoop *SyncLoop
 }
 
 func LoadBlockchain(chainID uint64, minerAddress string, store ChainStore, genesisSupply uint64) (*Blockchain, error) {
@@ -686,7 +691,8 @@ func (bc *Blockchain) MineTransfers(transfers []Transaction) (*Block, error) {
 
 	prevHash := append([]byte(nil), latest.Hash...)
 	height := latest.Height + 1
-	now := time.Now().Unix()
+	// Use NTP synchronized time for block timestamp
+	now := getNetworkTimeUnix()
 	ts := now
 	if ts <= latest.TimestampUnix {
 		ts = latest.TimestampUnix + 1
@@ -1312,4 +1318,17 @@ func (bc *Blockchain) addToIndexLocked(b *Block) {
 		return
 	}
 	bc.blocksByHash[hex.EncodeToString(b.Hash)] = b
+}
+
+// getNetworkTimeUnix returns the current Unix timestamp using NTP synchronized time
+// Falls back to local system time if NTP synchronization is not available
+// This ensures all nodes use a consistent time reference for consensus
+func getNetworkTimeUnix() int64 {
+	return ntp.NowUnix()
+}
+
+// getNetworkTime returns the current time using NTP synchronized time
+// Falls back to local system time if NTP synchronization is not available
+func getNetworkTime() time.Time {
+	return ntp.Now()
 }

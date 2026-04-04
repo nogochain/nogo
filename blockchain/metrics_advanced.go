@@ -76,7 +76,7 @@ func (m *MetricsCollector) GetMetrics() map[string]any {
 
 	uptime := time.Since(m.startTime)
 
-	return map[string]any{
+	metrics := map[string]any{
 		"uptime_seconds":     uptime.Seconds(),
 		"block_height":       m.chainHeight,
 		"total_blocks":       m.blockCount,
@@ -90,6 +90,17 @@ func (m *MetricsCollector) GetMetrics() map[string]any {
 		"errors_count":       m.errors,
 		"timestamp":          time.Now().Unix(),
 	}
+
+	// Add NTP synchronization metrics
+	if ntpSync := getNTPStatus(); ntpSync != nil {
+		metrics["ntp_synchronized"] = ntpSync["synchronized"]
+		metrics["ntp_offset_ms"] = ntpSync["offset_ms"]
+		metrics["ntp_offset"] = ntpSync["offset"]
+		metrics["ntp_last_sync"] = ntpSync["last_sync"]
+		metrics["ntp_servers"] = ntpSync["servers"]
+	}
+
+	return metrics
 }
 
 func (m *MetricsCollector) ServeHTTP(w http.ResponseWriter, r *http.Request) {

@@ -34,6 +34,12 @@ type P2PServer struct {
 	blockRecvCB   func(*Block)
 	peerPorts     map[string]int // Track peer ports: IP -> port
 	peerPortsMu   sync.RWMutex
+
+	// Peer scoring system
+	scorer *PeerScorer
+
+	// DDoS protection
+	rateLimiter *RateLimiter
 }
 
 func NewP2PServer(bc *Blockchain, pm PeerAPI, mp *Mempool, listenAddr string, nodeID string) *P2PServer {
@@ -66,6 +72,9 @@ func NewP2PServer(bc *Blockchain, pm PeerAPI, mp *Mempool, listenAddr string, no
 		maxAddrReturn = maxPeers
 	}
 
+	// Initialize rate limiter for DDoS protection
+	rateLimiter := NewRateLimiter(DefaultRateLimitConfig())
+
 	s := &P2PServer{
 		bc:            bc,
 		pm:            pm,
@@ -80,6 +89,8 @@ func NewP2PServer(bc *Blockchain, pm PeerAPI, mp *Mempool, listenAddr string, no
 		maxAddrReturn: maxAddrReturn,
 		advertiseSelf: advertiseSelf,
 		peerPorts:     make(map[string]int),
+		scorer:        NewPeerScorer(maxPeers),
+		rateLimiter:   rateLimiter,
 	}
 	if s.maxConns <= 0 {
 		s.maxConns = DefaultP2PMaxConnections
@@ -89,7 +100,8 @@ func NewP2PServer(bc *Blockchain, pm PeerAPI, mp *Mempool, listenAddr string, no
 	}
 	s.sem = make(chan struct{}, s.maxConns)
 
-	log.Printf("P2P configuration: advertiseSelf=%v, maxPeers=%d, maxAddrReturn=%d", advertiseSelf, maxPeers, maxAddrReturn)
+	log.Printf("P2P configuration: advertiseSelf=%v, maxPeers=%d, maxAddrReturn=%d, scorer_enabled=true",
+		advertiseSelf, maxPeers, maxAddrReturn)
 
 	return s
 }
@@ -127,14 +139,27 @@ func (s *P2PServer) Serve(ctx context.Context) error {
 			}
 		}
 
+		// DDoS protection: Check connection rate limit
+		remoteAddr := c.RemoteAddr().String()
+		host, _, _ := net.SplitHostPort(remoteAddr)
+		if !s.rateLimiter.AllowConnection(host) {
+			log.Printf("p2p server: connection rate limit exceeded for %s", remoteAddr)
+			_ = c.Close()
+			continue
+		}
+
 		select {
 		case s.sem <- struct{}{}:
 			go func() {
 				defer func() { <-s.sem }()
-				_ = s.handleConn(c)
+				if err := s.handleConn(c); err != nil {
+					log.Printf("p2p server: handleConn error: %v", err)
+				}
 			}()
 		default:
-			_ = c.Close()
+			if closeErr := c.Close(); closeErr != nil {
+				log.Printf("p2p server: failed to close connection: %v", closeErr)
+			}
 		}
 	}
 }
@@ -142,7 +167,16 @@ func (s *P2PServer) Serve(ctx context.Context) error {
 func (s *P2PServer) handleConn(c net.Conn) error {
 	defer c.Close()
 
-	log.Printf("P2P server: new connection from %s", c.RemoteAddr().String())
+	remoteAddr := c.RemoteAddr().String()
+	host, _, _ := net.SplitHostPort(remoteAddr)
+
+	// DDoS protection: Check if IP is banned
+	if s.rateLimiter.IsBanned(host) {
+		log.Printf("P2P server: rejecting banned IP %s", remoteAddr)
+		return fmt.Errorf("IP banned")
+	}
+
+	log.Printf("P2P server: new connection from %s", remoteAddr)
 
 	_ = c.SetDeadline(time.Now().Add(15 * time.Second))
 
@@ -210,6 +244,12 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 	}
 
 	// One request per connection (simple and safe).
+	// DDoS protection: Check message rate limit
+	if !s.rateLimiter.AllowMessage(s.nodeID, host) {
+		log.Printf("P2P server: message rate limit exceeded for %s", remoteAddr)
+		return fmt.Errorf("message rate limit exceeded")
+	}
+
 	raw, err = p2pReadJSON(c, s.maxMsgSize)
 	if err != nil {
 		return err
@@ -441,12 +481,17 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 				time.Sleep(time.Duration(BlockPropagationDelayMs) * time.Millisecond)
 
 				// Before resuming, check if network has advanced further
+				// Thread-safe: use local pm variable
+				pmLocal := s.pm
 				currentHeight := s.bc.LatestBlock().Height
-				peerHeight := getPeerHeight(s.pm)
 
-				if peerHeight > currentHeight {
-					log.Printf("p2p: network advanced during propagation wait (local=%d, peer=%d) - NOT resuming mining, let sync handle it", currentHeight, peerHeight)
-					return
+				if pmLocal != nil {
+					peerHeight := getPeerHeight(pmLocal)
+
+					if peerHeight > currentHeight {
+						log.Printf("p2p: network advanced during propagation wait (local=%d, peer=%d) - NOT resuming mining, let sync handle it", currentHeight, peerHeight)
+						return
+					}
 				}
 
 				s.miner.ResumeMining()

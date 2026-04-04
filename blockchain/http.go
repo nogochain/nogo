@@ -46,7 +46,12 @@ type Server struct {
 
 func NewServer(bc *Blockchain, aiAuditorURL string, mp *Mempool, miner *Miner, peers *PeerManager, txGossip bool, metrics *Metrics, adminToken string, limiter *IPRateLimiter, trustProxy bool, wsEnable bool, wsHub *WSHub) *Server {
 	if metrics == nil {
-		metrics = NewMetrics(bc, mp, peers)
+		nodeID := strings.TrimSpace(os.Getenv("NODE_ID"))
+		if nodeID == "" {
+			nodeID = bc.MinerAddress
+		}
+		chainID := bc.ChainID
+		metrics = NewMetrics(bc, mp, peers, nil, nodeID, chainID)
 	}
 	s := &Server{
 		bc:          bc,
@@ -784,16 +789,20 @@ func (s *Server) callAIAuditor(ctx context.Context, tx Transaction) (bool, error
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.aiAuditor, bytes.NewReader(b))
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("create AI auditor request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: s.httpTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("query AI auditor: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("http: failed to close AI auditor response body: %v", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("ai auditor status: %s", resp.Status)
@@ -802,7 +811,7 @@ func (s *Server) callAIAuditor(ctx context.Context, tx Transaction) (bool, error
 		Valid bool `json:"valid"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
-		return false, err
+		return false, fmt.Errorf("decode AI auditor response: %w", err)
 	}
 	return out.Valid, nil
 }

@@ -6,6 +6,8 @@ import (
 	"encoding/gob"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -39,8 +41,10 @@ func OpenBoltStore(path string) (*BoltStore, error) {
 		}
 		return nil
 	}); err != nil {
-		_ = db.Close()
-		return nil, err
+		if closeErr := db.Close(); closeErr != nil {
+			log.Printf("bolt store: failed to close database on init error: %v", closeErr)
+		}
+		return nil, fmt.Errorf("init bolt database: %w", err)
 	}
 	return s, nil
 }

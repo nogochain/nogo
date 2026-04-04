@@ -582,17 +582,17 @@ func LoadGenesisBlockFromFile(genesisPath string) (*Block, error) {
 	if genesisPath == "" {
 		return nil, errors.New("genesis path is empty")
 	}
-	
+
 	data, err := os.ReadFile(genesisPath)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var cfg GenesisConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
-	
+
 	// Check if genesis block has pre-mined data
 	if cfg.GenesisBlockHash != "" && cfg.GenesisBlockNonce != "" {
 		// Pre-mined genesis block - reconstruct it
@@ -600,12 +600,12 @@ func LoadGenesisBlockFromFile(genesisPath string) (*Block, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid genesis hash: %w", err)
 		}
-		
+
 		nonce, err := strconv.ParseUint(cfg.GenesisBlockNonce, 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("invalid genesis nonce: %w", err)
 		}
-		
+
 		coinbase := Transaction{
 			Type:      TxCoinbase,
 			ChainID:   cfg.ChainID,
@@ -613,7 +613,7 @@ func LoadGenesisBlockFromFile(genesisPath string) (*Block, error) {
 			Amount:    cfg.InitialSupply,
 			Data:      genesisMessageOrDefault(&cfg),
 		}
-		
+
 		genesis := &Block{
 			Version:        1,
 			Height:         0,
@@ -624,9 +624,9 @@ func LoadGenesisBlockFromFile(genesisPath string) (*Block, error) {
 			Hash:           hashBytes,
 			Nonce:          nonce,
 		}
-		
+
 		return genesis, nil
 	}
-	
+
 	return nil, errors.New("genesis block not pre-mined in config")
 }

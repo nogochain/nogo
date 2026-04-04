@@ -119,10 +119,14 @@ func (s *p2pSecureServer) Serve(ctx context.Context) error {
 		case s.sem <- struct{}{}:
 			go func() {
 				defer func() { <-s.sem }()
-				_ = s.handleConn(conn)
+				if err := s.handleConn(conn); err != nil {
+					log.Printf("p2p secure server: handleConn error: %v", err)
+				}
 			}()
 		default:
-			_ = conn.Close()
+			if closeErr := conn.Close(); closeErr != nil {
+				log.Printf("p2p secure server: failed to close connection: %v", closeErr)
+			}
 		}
 	}
 }

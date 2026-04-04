@@ -253,8 +253,6 @@ func TestIntegration_ConcurrentValidation(t *testing.T) {
 	t.Log("Concurrent validation test passed")
 }
 
-
-
 // TestIntegration_BlockValidationPipeline tests full validation pipeline
 func TestIntegration_BlockValidationPipeline(t *testing.T) {
 	store := newMemChainStore()
@@ -373,7 +371,3 @@ func TestIntegration_ProbabilisticVerificationDistribution(t *testing.T) {
 
 	t.Log("Probabilistic verification distribution test passed")
 }
-
-
-
-

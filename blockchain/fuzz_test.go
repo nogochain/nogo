@@ -28,13 +28,13 @@ func FuzzTxValidation(data []byte) int {
 	}
 
 	tx := &Tx{
-		FromPubKey:  pubKey,
-		ToAddress:   hex.EncodeToString(toAddr),
-		Amount:      uint64(amount) + 1,
-		Nonce:       uint64(nonce) + 1,
-		Fee:         uint64(fee) + 1,
-		Data:        data[100:],
-		ChainID:     1,
+		FromPubKey: pubKey,
+		ToAddress:  hex.EncodeToString(toAddr),
+		Amount:     uint64(amount) + 1,
+		Nonce:      uint64(nonce) + 1,
+		Fee:        uint64(fee) + 1,
+		Data:       data[100:],
+		ChainID:    1,
 	}
 
 	key := ed25519.PrivateKey(privKey)

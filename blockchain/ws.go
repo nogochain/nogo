@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"sort"
@@ -95,8 +96,12 @@ func (h *WSHub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	if len(h.conns) >= h.maxConns {
 		h.mu.Unlock()
-		_ = client.writeClose(1013, "server overloaded")
-		_ = conn.Close()
+		if closeErr := client.writeClose(1013, "server overloaded"); closeErr != nil {
+			log.Printf("websocket: failed to write close message: %v", closeErr)
+		}
+		if closeErr := conn.Close(); closeErr != nil {
+			log.Printf("websocket: failed to close connection: %v", closeErr)
+		}
 		return
 	}
 	h.conns[client] = struct{}{}
@@ -464,7 +469,9 @@ func wsUpgrade(w http.ResponseWriter, r *http.Request) (net.Conn, *bufio.ReadWri
 	resp.WriteString("Sec-WebSocket-Accept: " + accept + "\r\n")
 	resp.WriteString("\r\n")
 	if _, err := conn.Write(resp.Bytes()); err != nil {
-		_ = conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			log.Printf("websocket: failed to close connection on handshake error: %v", closeErr)
+		}
 		return nil, nil, err
 	}
 	return conn, rw, nil

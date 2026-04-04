@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -414,9 +415,13 @@ func cliGetBalance(server, address string) error {
 	addAdminAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("get balance request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("cli: failed to close balance response body: %v", closeErr)
+		}
+	}()
 	b, _ := io.ReadAll(resp.Body)
 	if err := require2xx(resp, b); err != nil {
 		return err
@@ -431,9 +436,13 @@ func cliAuditChain(server string) error {
 	addAdminAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("audit chain request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("cli: failed to close audit response body: %v", closeErr)
+		}
+	}()
 	b, _ := io.ReadAll(resp.Body)
 	if err := require2xx(resp, b); err != nil {
 		return err
@@ -447,9 +456,13 @@ func cliChainInfo(server string) error {
 	addAdminAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("chain info request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("cli: failed to close chain info response body: %v", closeErr)
+		}
+	}()
 	b, _ := io.ReadAll(resp.Body)
 	if err := require2xx(resp, b); err != nil {
 		return err
@@ -463,9 +476,13 @@ func cliMempool(server string) error {
 	addAdminAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("mempool request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("cli: failed to close mempool response body: %v", closeErr)
+		}
+	}()
 	b, _ := io.ReadAll(resp.Body)
 	if err := require2xx(resp, b); err != nil {
 		return err
@@ -486,9 +503,13 @@ func cliSend(server, privB64, to string, amount, fee, nonce uint64, data string)
 	addAdminAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("send transaction request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("cli: failed to close send tx response body: %v", closeErr)
+		}
+	}()
 	out, _ := io.ReadAll(resp.Body)
 	if err := require2xx(resp, out); err != nil {
 		return err
@@ -583,16 +604,20 @@ func fetchChainInfo(server string) (*chainInfoView, error) {
 	addAdminAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch chain info: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("cli: failed to close chain info response body: %v", closeErr)
+		}
+	}()
 	body, _ := io.ReadAll(resp.Body)
 	if err := require2xx(resp, body); err != nil {
 		return nil, err
 	}
 	var v chainInfoView
 	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&v); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode chain info: %w", err)
 	}
 	if v.ChainID == 0 {
 		return nil, errors.New("server returned invalid chainId=0")
@@ -620,16 +645,20 @@ func fetchAccount(server, address string) (*accountView, error) {
 	addAdminAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch account: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("cli: failed to close account response body: %v", closeErr)
+		}
+	}()
 	body, _ := io.ReadAll(resp.Body)
 	if err := require2xx(resp, body); err != nil {
 		return nil, err
 	}
 	var v accountView
 	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&v); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode account: %w", err)
 	}
 	return &v, nil
 }
@@ -664,9 +693,13 @@ func cliSendKeystore(server, ksPath, password, to string, amount, fee, nonce uin
 	addAdminAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("send tx keystore request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("cli: failed to close send tx keystore response body: %v", closeErr)
+		}
+	}()
 	out, _ := io.ReadAll(resp.Body)
 	if err := require2xx(resp, out); err != nil {
 		return err
@@ -680,9 +713,13 @@ func cliTx(server, txid string) error {
 	addAdminAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("get transaction request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("cli: failed to close tx response body: %v", closeErr)
+		}
+	}()
 	b, _ := io.ReadAll(resp.Body)
 	if err := require2xx(resp, b); err != nil {
 		return err
@@ -696,9 +733,13 @@ func cliBlockByHeight(server string, height uint64) error {
 	addAdminAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("get block by height request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("cli: failed to close block by height response body: %v", closeErr)
+		}
+	}()
 	b, _ := io.ReadAll(resp.Body)
 	if err := require2xx(resp, b); err != nil {
 		return err
@@ -712,9 +753,13 @@ func cliBlockByHash(server, hashHex string) error {
 	addAdminAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("get block by hash request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("cli: failed to close block by hash response body: %v", closeErr)
+		}
+	}()
 	b, _ := io.ReadAll(resp.Body)
 	if err := require2xx(resp, b); err != nil {
 		return err

@@ -11,30 +11,50 @@ import (
 )
 
 type SyncLoop struct {
-	pm    PeerAPI
-	bc    *Blockchain
-	miner *Miner // Reference to miner for pause/resume during sync
+	pm      PeerAPI
+	bc      *Blockchain
+	miner   *Miner // Reference to miner for pause/resume during sync
+	metrics *Metrics
 
 	interval time.Duration
 	window   uint64
+
+	// Sync state tracking
+	isSyncing bool      // True when actively syncing blocks
+	lastSync  time.Time // Time of last successful sync
 }
 
-func NewSyncLoop(pm PeerAPI, bc *Blockchain, interval time.Duration) *SyncLoop {
+func NewSyncLoop(pm PeerAPI, bc *Blockchain, interval time.Duration, metrics *Metrics) *SyncLoop {
 	if interval <= 0 {
 		interval = 3 * time.Second
 	}
-	return &SyncLoop{
+	sl := &SyncLoop{
 		pm:       pm,
 		bc:       bc,
 		miner:    nil, // Will be set later via SetMiner method
 		interval: interval,
-		window:   SyncBatchSize,
+		window:   10,
 	}
+	// Set sync loop reference in blockchain for mining coordination
+	bc.syncLoop = sl
+	return sl
 }
 
 // SetMiner sets the miner reference for pause/resume during sync
 func (s *SyncLoop) SetMiner(miner *Miner) {
 	s.miner = miner
+}
+
+// IsSyncing returns true if the node is currently syncing blocks
+// Miners should check this and pause mining during sync to prevent forks
+func (s *SyncLoop) IsSyncing() bool {
+	return s.isSyncing
+}
+
+// IsSynced returns true if the node has recently synced (within last 10 seconds)
+// This allows miners to resume mining after sync completes
+func (s *SyncLoop) IsSynced() bool {
+	return !s.isSyncing && time.Since(s.lastSync) < 10*time.Second
 }
 
 func (s *SyncLoop) Run(ctx context.Context) {
@@ -52,6 +72,14 @@ func (s *SyncLoop) Run(ctx context.Context) {
 }
 
 func (s *SyncLoop) SyncOnce(ctx context.Context) {
+	// Mark sync as started
+	s.isSyncing = true
+
+	defer func() {
+		// Mark sync as completed
+		s.isSyncing = false
+		s.lastSync = time.Now()
+	}()
 	if s.pm == nil {
 		return
 	}
@@ -129,6 +157,11 @@ func (s *SyncLoop) SyncOnce(ctx context.Context) {
 				}
 			}
 		}
+	}
+
+	// Update sync progress metric
+	if s.metrics != nil {
+		s.metrics.UpdateSyncProgress()
 	}
 
 	// Track successful sync to mark peer as healthy
@@ -350,7 +383,11 @@ func (s *SyncLoop) discoverPeers(ctx context.Context) {
 				log.Printf("peer discovery: failed to fetch addresses from %s: %v", p, err)
 				return
 			}
-			defer resp.Body.Close()
+			defer func() {
+				if closeErr := resp.Body.Close(); closeErr != nil {
+					log.Printf("peer discovery: failed to close response body from %s: %v", p, closeErr)
+				}
+			}()
 			if resp.StatusCode != http.StatusOK {
 				log.Printf("peer discovery: non-OK status from %s: %d", p, resp.StatusCode)
 				return

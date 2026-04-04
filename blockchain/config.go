@@ -20,33 +20,36 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/nogochain/nogo/config"
 )
 
 // Production configuration constants
-// All time-critical parameters are defined here for production-grade deployment
+// All time-critical parameters are now loaded from config package
+// Environment variables can override defaults (see config/constants.go)
 const (
 	// Mining convergence parameters
 	// Deterministic delay prevents multiple miners from competing simultaneously
-	MinerConvergenceBaseDelayMs     = 200 // Base delay in milliseconds
-	MinerConvergenceVariableDelayMs = 256 // Maximum variable delay (2^8 for 8-bit hex suffix)
+	MinerConvergenceBaseDelayMs     = config.DefaultMinerConvergenceBaseDelayMs     // Base delay in milliseconds
+	MinerConvergenceVariableDelayMs = config.DefaultMinerConvergenceVariableDelayMs // Maximum variable delay (2^8 for 8-bit hex suffix)
 
 	// Block propagation delay
 	// Time to wait after receiving a block before resuming mining
 	// Ensures block has propagated through network to prevent forks
-	BlockPropagationDelayMs = 2000 // 2 seconds
+	BlockPropagationDelayMs = config.DefaultBlockPropagationDelayMs // 2 seconds
 
 	// Verification timeout
 	// Maximum time to wait for block verification before forcing resume
 	// Enhanced for better timestamp validation
-	VerificationTimeoutMs = 5000 // 5 seconds
+	VerificationTimeoutMs = config.DefaultVerificationTimeoutMs // 5 seconds
 
 	// Network sync check interval
 	// Time to wait after mining a block before checking network state
-	NetworkSyncCheckDelayMs = 2000 // 2 seconds
+	NetworkSyncCheckDelayMs = config.DefaultNetworkSyncCheckDelayMs // 2 seconds
 
 	// Peer height polling interval
 	// How often to check peer network height during sync
-	PeerHeightPollIntervalMs = 1000 // 1 second
+	PeerHeightPollIntervalMs = config.DefaultPeerHeightPollIntervalMs // 1 second
 
 	// Difficulty adjustment tolerance
 	// Maximum allowed deviation from expected difficulty (10%)
@@ -54,55 +57,58 @@ const (
 
 	// Maximum transactions per block
 	// Limits block size for network efficiency
-	MaxTxPerBlockDefault = 100
+	MaxTxPerBlockDefault = config.DefaultMaxTransactionsPerBlock
 
 	// Mining interval
 	// How often to attempt mining (in continuous mining mode)
-	MiningIntervalSec = 1 // 1 second
-
-	// Peer discovery interval
-	// How often to discover new peers
-	PeerDiscoveryIntervalSec = 30 // 30 seconds
-
-	// Peer discovery timeout
-	// Timeout for individual peer discovery requests
-	PeerDiscoveryTimeoutSec = 10 // 10 seconds
+	MiningIntervalSec = config.DefaultMiningIntervalSec // 1 second
 
 	// Maximum peers to discover from single source
-	MaxPeersDiscoverPerRound = 3
+	MaxPeersDiscoverPerRound = config.DefaultMaxPeersPerDiscovery
 
 	// Block time target
 	// Economic equilibrium point for block production
-	TargetBlockTimeSec = 17 // 17 seconds
+	TargetBlockTimeSec = config.DefaultTargetBlockTime // 17 seconds
 
 	// Maximum block time drift
 	// Allowed timestamp deviation for blocks (2 hours for production)
 	// Enhanced timestamp validation for network stability
-	MaxBlockTimeDriftSec = 7200 // 2 hours
+	MaxBlockTimeDriftSec = config.DefaultMaxBlockTimeDrift // 2 hours
 
 	// Sync batch size
 	// Number of blocks to sync in single batch
-	SyncBatchSize = 100
+	SyncBatchSize = config.DefaultSyncBatchSize
 
 	// Fork detection threshold
 	// Maximum blocks to rollback during chain reorganization
-	MaxRollbackDepth = 20
+	MaxRollbackDepth = config.DefaultMaxRollbackDepth
 
 	// Long fork detection threshold
 	// Threshold for detecting and handling long chain forks
-	LongForkThreshold = 10
+	LongForkThreshold = config.DefaultLongForkThreshold
 
 	// Maximum sync range
 	// Maximum number of blocks to sync in one operation
-	MaxSyncRange = 500
+	MaxSyncRange = config.DefaultMaxSyncRange
 
 	// Connection limits
-	DefaultP2PMaxConnections = 200
+	DefaultP2PMaxConnections = config.DefaultP2PMaxConnections
 
 	// Scorer latency thresholds (milliseconds)
-	LatencyExcellentThresholdMs = 100
-	LatencyGoodThresholdMs      = 500
-	LatencyPoorThresholdMs      = 1000
+	LatencyExcellentThresholdMs = config.DefaultLatencyExcellentThresholdMs
+	LatencyGoodThresholdMs      = config.DefaultLatencyGoodThresholdMs
+	LatencyPoorThresholdMs      = config.DefaultLatencyPoorThresholdMs
+
+	// Peer scoring configuration
+	DefaultMaxPeers = config.DefaultP2PMaxPeers
+)
+
+// Peer discovery and NTP time synchronization (var instead of const due to non-constant expressions)
+var (
+	PeerDiscoveryIntervalSec = int(config.DefaultPeerDiscoveryInterval.Seconds()) // 30 seconds
+	PeerDiscoveryTimeoutSec  = int(config.DefaultPeerDiscoveryTimeout.Seconds())  // 10 seconds
+	NTPSyncIntervalSec       = int(config.DefaultNTPSyncInterval.Seconds())       // 10 minutes
+	NTPMaxDriftMs            = int(config.DefaultNTPMaxDrift.Milliseconds())      // 100 milliseconds
 )
 
 // EnvConfig holds all environment-variable-driven configuration
@@ -137,6 +143,16 @@ type EnvConfig struct {
 
 	// AI Auditor configuration (reserved for future use)
 	EnableAIAuditor bool
+
+	// NTP time synchronization configuration
+	NTPEnabled      bool
+	NTPServers      string
+	NTPSyncInterval time.Duration
+	NTPMaxDrift     time.Duration
+
+	// Fork resolution configuration
+	MaxReorgDepth    int
+	CoinbaseMaturity uint64
 }
 
 // LoadEnvConfig loads configuration from environment variables
@@ -172,6 +188,16 @@ func LoadEnvConfig() *EnvConfig {
 
 		// AI Auditor defaults
 		EnableAIAuditor: configEnvBool("ENABLE_AI_AUDITOR", false),
+
+		// NTP defaults
+		NTPEnabled:      configEnvBool("NTP_ENABLE", true),
+		NTPServers:      os.Getenv("NTP_SERVERS"),
+		NTPSyncInterval: configEnvDuration("NTP_SYNC_INTERVAL_MS", time.Duration(NTPSyncIntervalSec)*time.Second),
+		NTPMaxDrift:     configEnvDuration("NTP_MAX_DRIFT_MS", time.Duration(NTPMaxDriftMs)*time.Millisecond),
+
+		// Fork resolution defaults
+		MaxReorgDepth:    configEnvInt("MAX_REORG_DEPTH", config.DefaultMaxReorgDepth),
+		CoinbaseMaturity: configEnvUint64("COINBASE_MATURITY", config.DefaultCoinbaseMaturity),
 	}
 
 	// P2P enabled if peers are configured
@@ -194,6 +220,15 @@ func configEnvString(key, defaultVal string) string {
 func configEnvInt(key string, defaultVal int) int {
 	if v := os.Getenv(key); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
+	}
+	return defaultVal
+}
+
+func configEnvUint64(key string, defaultVal uint64) uint64 {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.ParseUint(v, 10, 64); err == nil {
 			return i
 		}
 	}

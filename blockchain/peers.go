@@ -17,17 +17,17 @@ import (
 )
 
 type PeerEntry struct {
-	Address      string
-	LastSuccess  time.Time
-	LastFailure  time.Time
-	FailCount    int
-	IsActive     bool
+	Address     string
+	LastSuccess time.Time
+	LastFailure time.Time
+	FailCount   int
+	IsActive    bool
 }
 
 type PeerManager struct {
-	peers      []string
-	peerMap    map[string]*PeerEntry
-	peersMu    sync.RWMutex
+	peers   []string
+	peerMap map[string]*PeerEntry
+	peersMu sync.RWMutex
 
 	client *http.Client
 
@@ -52,19 +52,19 @@ func ParsePeersEnv(peersEnv string) []string {
 
 func NewPeerManager(peers []string) *PeerManager {
 	pm := &PeerManager{
-		peers: make([]string, 0, len(peers)),
+		peers:   make([]string, 0, len(peers)),
 		peerMap: make(map[string]*PeerEntry),
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 		maxAncestorDepth: 256,
 	}
-	
+
 	// Initialize peer entries
 	for _, addr := range peers {
 		pm.addPeerInternal(addr)
 	}
-	
+
 	return pm
 }
 
@@ -73,12 +73,12 @@ func (pm *PeerManager) addPeerInternal(addr string) {
 	if addr == "" {
 		return
 	}
-	
+
 	// Check if already exists
 	if _, exists := pm.peerMap[addr]; exists {
 		return
 	}
-	
+
 	pm.peers = append(pm.peers, addr)
 	pm.peerMap[addr] = &PeerEntry{
 		Address:  addr,
@@ -89,7 +89,7 @@ func (pm *PeerManager) addPeerInternal(addr string) {
 func (pm *PeerManager) Peers() []string {
 	pm.peersMu.RLock()
 	defer pm.peersMu.RUnlock()
-	
+
 	// Return only active peers
 	activePeers := make([]string, 0, len(pm.peers))
 	for _, addr := range pm.peers {
@@ -103,7 +103,7 @@ func (pm *PeerManager) Peers() []string {
 func (pm *PeerManager) AddPeer(addr string) {
 	pm.peersMu.Lock()
 	defer pm.peersMu.Unlock()
-	
+
 	pm.addPeerInternal(addr)
 }
 
@@ -111,7 +111,7 @@ func (pm *PeerManager) AddPeer(addr string) {
 func (pm *PeerManager) RecordPeerSuccess(addr string) {
 	pm.peersMu.Lock()
 	defer pm.peersMu.Unlock()
-	
+
 	if entry, exists := pm.peerMap[addr]; exists {
 		entry.LastSuccess = time.Now()
 		entry.IsActive = true
@@ -123,11 +123,11 @@ func (pm *PeerManager) RecordPeerSuccess(addr string) {
 func (pm *PeerManager) RecordPeerFailure(addr string) {
 	pm.peersMu.Lock()
 	defer pm.peersMu.Unlock()
-	
+
 	if entry, exists := pm.peerMap[addr]; exists {
 		entry.LastFailure = time.Now()
 		entry.FailCount++
-		
+
 		// Mark peer as inactive after 5 consecutive failures
 		if entry.FailCount >= 5 {
 			entry.IsActive = false
@@ -140,10 +140,10 @@ func (pm *PeerManager) RecordPeerFailure(addr string) {
 func (pm *PeerManager) CleanupStalePeers() {
 	pm.peersMu.Lock()
 	defer pm.peersMu.Unlock()
-	
+
 	now := time.Now()
 	cleanupThreshold := 24 * time.Hour // Remove peers inactive for 24 hours
-	
+
 	for addr, entry := range pm.peerMap {
 		if !entry.IsActive && entry.LastFailure.Before(now.Add(-cleanupThreshold)) {
 			// Remove from peers list
@@ -163,7 +163,7 @@ func (pm *PeerManager) CleanupStalePeers() {
 func (pm *PeerManager) GetActivePeers() []string {
 	pm.peersMu.RLock()
 	defer pm.peersMu.RUnlock()
-	
+
 	activePeers := make([]string, 0, len(pm.peers))
 	for _, entry := range pm.peerMap {
 		if entry.IsActive {
@@ -184,19 +184,23 @@ type chainInfo struct {
 func (pm *PeerManager) FetchChainInfo(ctx context.Context, peer string) (*chainInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, peer+"/chain/info", nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create chain info request: %w", err)
 	}
 	resp, err := pm.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch chain info: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("peer manager: failed to close chain info response body: %v", closeErr)
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("chain/info status: %s", resp.Status)
 	}
 	var v chainInfo
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode chain info: %w", err)
 	}
 	return &v, nil
 }
@@ -205,19 +209,23 @@ func (pm *PeerManager) FetchHeadersFrom(ctx context.Context, peer string, fromHe
 	u := fmt.Sprintf("%s/headers/from/%d?count=%d", peer, fromHeight, count)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create headers request: %w", err)
 	}
 	resp, err := pm.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch headers: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("peer manager: failed to close headers response body: %v", closeErr)
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("headers status: %s", resp.Status)
 	}
 	var headers []BlockHeader
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&headers); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode headers: %w", err)
 	}
 	return headers, nil
 }
@@ -225,22 +233,26 @@ func (pm *PeerManager) FetchHeadersFrom(ctx context.Context, peer string, fromHe
 func (pm *PeerManager) FetchBlockByHash(ctx context.Context, peer, hashHex string) (*Block, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, peer+"/blocks/hash/"+hashHex, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create block request: %w", err)
 	}
 	resp, err := pm.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetch block: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("peer manager: failed to close block response body: %v", closeErr)
+		}
+	}()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, errors.New("not found")
+		return nil, ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("block status: %s", resp.Status)
 	}
 	var b Block
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&b); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode block: %w", err)
 	}
 	return &b, nil
 }
@@ -268,23 +280,33 @@ func (pm *PeerManager) BroadcastTransaction(ctx context.Context, tx Transaction,
 	}
 	b, err := json.Marshal(tx)
 	if err != nil {
+		log.Printf("peer manager: failed to marshal transaction: %v", err)
 		return
 	}
 	for _, peer := range pm.peers {
 		peer := peer
-		go func() {
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, peer+"/tx", bytes.NewReader(b))
+		go func(p string) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, p+"/tx", bytes.NewReader(b))
 			if err != nil {
+				log.Printf("peer manager: failed to create broadcast request to %s: %v", p, err)
 				return
 			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set(relayHopsHeader, strconv.Itoa(hops))
 			resp, err := pm.client.Do(req)
 			if err != nil {
+				log.Printf("peer manager: failed to broadcast transaction to %s: %v", p, err)
 				return
 			}
-			_ = resp.Body.Close()
-		}()
+			defer func() {
+				if closeErr := resp.Body.Close(); closeErr != nil {
+					log.Printf("peer manager: failed to close broadcast response body to %s: %v", p, closeErr)
+				}
+			}()
+			if resp.StatusCode != http.StatusOK {
+				log.Printf("peer manager: broadcast transaction to %s returned non-OK status: %d", p, resp.StatusCode)
+			}
+		}(peer)
 	}
 }
 
@@ -327,4 +349,28 @@ func (pm *PeerManager) EnsureAncestors(ctx context.Context, bc *Blockchain, miss
 		return err
 	}
 	return errors.New("max ancestor depth exceeded")
+}
+
+// getPeerHeight returns the maximum chain height among all peers
+func getPeerHeight(pm PeerAPI) uint64 {
+	if pm == nil {
+		return 0
+	}
+
+	var maxHeight uint64
+	var bestPeer string
+	for _, peer := range pm.Peers() {
+		info, err := pm.FetchChainInfo(context.Background(), peer)
+		if err != nil {
+			continue
+		}
+		if info.Height > maxHeight {
+			maxHeight = info.Height
+			bestPeer = peer
+		}
+	}
+	if maxHeight > 0 && bestPeer != "" {
+		log.Printf("miner: getPeerHeight returns height=%d from peer=%s (total peers=%d)", maxHeight, bestPeer, len(pm.Peers()))
+	}
+	return maxHeight
 }

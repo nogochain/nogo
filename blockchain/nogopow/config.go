@@ -16,7 +16,10 @@
 
 package nogopow
 
-import "fmt"
+import (
+	"fmt"
+	"github.com/nogochain/nogo/config"
+)
 
 type Mode uint
 
@@ -27,12 +30,14 @@ const (
 )
 
 // Difficulty constants - Production-grade configuration parameters
+// All values loaded from centralized config package
+// Configurable via genesis.json consensusParams
 const (
-	minimumDifficulty      = 1    // Minimum difficulty floor (ensures network liveness)
-	targetBlockTime        = 17   // Target block time in seconds (economic equilibrium point)
-	difficultyBoundDivisor = 2048 // Controls maximum adjustment magnitude (2048 = ~0.05% per second deviation)
-	lowDifficultyThreshold = 100  // Threshold for switching to high-precision calculation
-	adjustmentSensitivity  = 0.5  // PI controller damping coefficient (50% correction per block)
+	minimumDifficulty      = config.DefaultMinimumDifficulty      // Minimum difficulty floor (ensures network liveness)
+	targetBlockTime        = config.DefaultTargetBlockTime        // Target block time in seconds (economic equilibrium point)
+	difficultyBoundDivisor = config.DefaultDifficultyBoundDivisor // Controls maximum adjustment magnitude
+	lowDifficultyThreshold = config.DefaultLowDifficultyThreshold // Threshold for switching to high-precision calculation
+	adjustmentSensitivity  = config.DefaultAdjustmentSensitivity  // PI controller damping coefficient (50% correction per block)
 )
 
 type Config struct {

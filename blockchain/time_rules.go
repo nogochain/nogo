@@ -3,13 +3,15 @@ package main
 import (
 	"fmt"
 	"sort"
+
+	"github.com/nogochain/nogo/config"
 )
 
 // BlockTimeMaxDrift defines the maximum allowed time drift for blocks
-// Set to 72 hours (259200 seconds) for mainnet sync compatibility
-// This accounts for clock differences and testnet inaccuracies
-// Production mainnet should use 7200 (2 hours) after network stabilizes
-const BlockTimeMaxDrift = 259200 // 72 hours - temporary for initial sync
+// Loaded from config package (default: 7200 seconds = 2 hours for production)
+// Initial sync uses 259200 seconds (72 hours) for compatibility
+// Configurable via genesis.json: consensusParams.maxTimeDrift
+const BlockTimeMaxDrift = config.DefaultMaxBlockTimeDrift
 
 // validateBlockTime validates block timestamp using deterministic rules
 // Parameters:
@@ -21,6 +23,10 @@ const BlockTimeMaxDrift = 259200 // 72 hours - temporary for initial sync
 // 1. Timestamp must be strictly greater than parent timestamp
 // 2. Timestamp must be greater than Median Time Past (MTP)
 // 3. Timestamp must not exceed MTP + MaxTimeDrift (2 hours)
+//
+// SPECIAL CASE: For initial sync (height < 100), use more relaxed time drift
+// of 7 days to allow syncing from genesis when local clock differs from
+// genesis node clock.
 //
 // DETERMINISM GUARANTEE:
 // All validation uses only blockchain state (block timestamps),
@@ -51,12 +57,21 @@ func validateBlockTime(p ConsensusParams, path []*Block, idx int) error {
 			cur.Height, cur.TimestampUnix, mtp)
 	}
 
-	// Rule 3: Timestamp must not exceed MTP + MaxTimeDrift (2 hours)
+	// Rule 3: Timestamp must not exceed MTP + MaxTimeDrift
+	// SPECIAL CASE: For initial sync (height < 100), use more relaxed time drift
+	// of 7 days to allow syncing from genesis when local clock differs
+	// CRITICAL: This prevents sync failures when genesis node and sync node
+	// have different system times
+	maxDrift := int64(BlockTimeMaxDrift)
+	if cur.Height < 100 {
+		maxDrift = 7 * 24 * 3600 // 7 days for initial sync
+	}
+
 	// This is DETERMINISTIC - uses MTP as reference, NOT local clock
 	// This prevents future-dated blocks while allowing for network latency
-	if cur.TimestampUnix > mtp+BlockTimeMaxDrift {
+	if cur.TimestampUnix > mtp+maxDrift {
 		return fmt.Errorf("timestamp too far in future at height %d: current=%d, MTP+maxDrift=%d",
-			cur.Height, cur.TimestampUnix, mtp+BlockTimeMaxDrift)
+			cur.Height, cur.TimestampUnix, mtp+maxDrift)
 	}
 
 	return nil

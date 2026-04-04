@@ -17,8 +17,6 @@ import (
 const (
 	// PeerExpiryDuration is the duration after which a peer is considered stale
 	PeerExpiryDuration = 24 * time.Hour
-	// DefaultMaxPeers is the default maximum number of peers to maintain
-	DefaultMaxPeers = 1000
 	// CleanupInterval is the interval at which stale peers are cleaned up
 	CleanupInterval = 1 * time.Hour
 )
@@ -28,7 +26,7 @@ type P2PPeerManager struct {
 	mu             sync.RWMutex
 	peers          []string
 	peerTimestamps map[string]int64
-	peerFailCounts map[string]int  // Track consecutive connection failures
+	peerFailCounts map[string]int // Track consecutive connection failures
 	maxPeers       int
 	client         *P2PClient
 }
@@ -197,13 +195,13 @@ func validatePeerAddressFormat(addr string) error {
 	if err != nil {
 		return fmt.Errorf("invalid address format: %w", err)
 	}
-	
+
 	// Validate port
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 || port > 65535 {
 		return fmt.Errorf("invalid port: %s", portStr)
 	}
-	
+
 	// Validate host (IP or domain name)
 	ip := net.ParseIP(host)
 	if ip == nil {
@@ -218,7 +216,7 @@ func validatePeerAddressFormat(addr string) error {
 		// Domain resolved successfully, accept it
 		return nil
 	}
-	
+
 	// Valid IP format (including private IPs for local network)
 	return nil
 }
@@ -227,7 +225,7 @@ func validatePeerAddressFormat(addr string) error {
 func (pm *P2PPeerManager) RecordPeerSuccess(addr string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	
+
 	if _, exists := pm.peerFailCounts[addr]; exists {
 		pm.peerFailCounts[addr] = 0
 		pm.peerTimestamps[addr] = time.Now().Unix()
@@ -238,10 +236,10 @@ func (pm *P2PPeerManager) RecordPeerSuccess(addr string) {
 func (pm *P2PPeerManager) RecordPeerFailure(addr string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	
+
 	if failCount, exists := pm.peerFailCounts[addr]; exists {
 		pm.peerFailCounts[addr] = failCount + 1
-		
+
 		// Mark peer for removal after 10 consecutive failures
 		if pm.peerFailCounts[addr] >= 10 {
 			// Remove from peers list
@@ -360,7 +358,7 @@ func (pm *P2PPeerManager) FetchChainInfo(ctx context.Context, peer string) (*cha
 // DiscoverPeersFromPeer connects to a peer and requests their peer list via getaddr
 func (pm *P2PPeerManager) DiscoverPeersFromPeer(ctx context.Context, peer string) {
 	log.Printf("P2P peer discovery: requesting peer list from %s", peer)
-	
+
 	var addrResp struct {
 		Addresses []peerAddr `json:"addresses"`
 	}
@@ -368,7 +366,7 @@ func (pm *P2PPeerManager) DiscoverPeersFromPeer(ctx context.Context, peer string
 		log.Printf("P2P peer discovery: failed to get addresses from %s: %v", peer, err)
 		return
 	}
-	
+
 	addedCount := 0
 	for _, a := range addrResp.Addresses {
 		addr := fmt.Sprintf("%s:%d", a.IP, a.Port)

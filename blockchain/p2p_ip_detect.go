@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -88,7 +89,11 @@ func queryIPService(ctx context.Context, url string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("query IP service: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("p2p ip detect: failed to close IP service response body: %v", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("IP service returned status: %d", resp.StatusCode)

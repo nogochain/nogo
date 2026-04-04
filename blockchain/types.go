@@ -268,7 +268,23 @@ func (t Transaction) Verify() error {
 // VerifyForConsensus validates a transaction under the consensus rules active at the given height.
 // Height is the block height the transaction is being validated for (i.e. its containing block height
 // when validating blocks, or the next block height when validating a mempool submission).
-func (t Transaction) VerifyForConsensus(p ConsensusParams, height uint64) error {
+func (t Transaction) VerifyForConsensus(p ConsensusParams, height uint64, metrics ...*Metrics) error {
+	var m *Metrics
+	if len(metrics) > 0 && metrics[0] != nil {
+		m = metrics[0]
+	}
+	return t.VerifyForConsensusWithMetrics(p, height, m)
+}
+
+// VerifyForConsensusWithMetrics validates a transaction and records metrics if provided
+func (t Transaction) VerifyForConsensusWithMetrics(p ConsensusParams, height uint64, metrics *Metrics) error {
+	startTime := time.Now()
+	defer func() {
+		if metrics != nil {
+			metrics.ObserveTransactionVerification(time.Since(startTime))
+		}
+	}()
+
 	switch t.Type {
 	case TxCoinbase:
 		// Coinbase does not have a signature. Structural checks are the same across encodings.

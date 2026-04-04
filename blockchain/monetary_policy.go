@@ -23,13 +23,16 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+
+	"github.com/nogochain/nogo/config"
 )
 
 // NogoChain economic model constants
-// All values are configurable for future governance adjustments
+// All values are configurable via genesis.json for governance adjustments
+// Note: Changes to these parameters require hard fork coordination
 const (
 	// InitialBlockRewardNogo is the starting block reward in NOGO (8 NOGO)
-	// Production-grade: configurable via governance in future upgrades
+	// Production-grade: configurable via genesis.json monetaryPolicy.initialBlockReward
 	InitialBlockRewardNogo = 8
 
 	// AnnualReductionRateNumerator is the yearly reduction percentage numerator (9 = 90% of previous year)
@@ -45,10 +48,6 @@ const (
 
 	// MinimumBlockRewardDivisor is the divisor for minimum reward (10 = 0.1 NOGO)
 	MinimumBlockRewardDivisor = 10
-
-	// BlocksPerYear is the estimated number of blocks per year
-	// Based on 17-second block time: 365.25 * 24 * 60 * 60 / 17 ≈ 1,856,329
-	BlocksPerYear = 1856329
 
 	// Chain identity constants
 	// ChainID: 1 - NogoChain mainnet identifier
@@ -77,7 +76,8 @@ var (
 	)
 
 	// blocksPerYearBig is BlocksPerYear as *big.Int for calculations
-	blocksPerYearBig = big.NewInt(BlocksPerYear)
+	// Dynamically calculated based on target block time from config
+	blocksPerYearBig = big.NewInt(int64(config.GetBlocksPerYear()))
 )
 
 // MonetaryPolicy implements NogoChain's economic model
@@ -153,7 +153,8 @@ func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
 
 	// Calculate how many years have passed
 	// years = blockNumber / BlocksPerYear
-	years := height / BlocksPerYear
+	// Dynamically calculated from target block time
+	years := height / config.GetBlocksPerYear()
 
 	// Start with initial reward
 	reward := new(big.Int).SetUint64(p.InitialBlockReward)
@@ -385,6 +386,41 @@ func (p MonetaryPolicy) MinerFeeAmount(totalFees uint64) uint64 {
 	return totalFees * uint64(p.MinerFeeShare) / 100
 }
 
+// CalculateInflationRate calculates the current annual inflation rate at a given block height
+// Formula: (annual_emission / total_supply) * 100
+// Where:
+//   - annual_emission = blocks_per_year * block_reward_at_height
+//   - total_supply = cumulative block rewards + fees up to height
+//
+// This provides real-time inflation monitoring for economic analysis
+// Production-grade: uses big.Int for precision, no floating point for core calculations
+func (p MonetaryPolicy) CalculateInflationRate(currentHeight uint64, totalSupply uint64) float64 {
+	if totalSupply == 0 {
+		return 0.0
+	}
+
+	currentReward := p.BlockReward(currentHeight)
+	annualEmission := config.GetBlocksPerYear() * currentReward
+
+	inflationRate := float64(annualEmission) / float64(totalSupply) * 100.0
+	return inflationRate
+}
+
+// GetInflationRateAtHeight returns inflation rate at specific height with total supply calculation
+// This is a convenience method that calculates total supply internally
+func (p MonetaryPolicy) GetInflationRateAtHeight(currentHeight uint64) float64 {
+	totalSupply := uint64(0)
+	for h := uint64(0); h <= currentHeight; h++ {
+		totalSupply += p.BlockReward(h)
+	}
+
+	if totalSupply == 0 {
+		return 0.0
+	}
+
+	return p.CalculateInflationRate(currentHeight, totalSupply)
+}
+
 // ValidateEconomicParameters performs sanity checks on economic parameters
 // Returns true if all parameters are valid
 //
@@ -415,9 +451,10 @@ func (p MonetaryPolicy) Validate() error {
 		return errors.New("monetaryPolicy.annualReductionPercent must be <= 100")
 	}
 
-	// Check blocks per year is reasonable
-	if BlocksPerYear <= 1_000_000 || BlocksPerYear > 10_000_000 {
-		return errors.New("monetaryPolicy.blocksPerYear must be between 1M and 10M")
+	// Check blocks per year is reasonable (dynamically calculated)
+	blocksPerYear := config.GetBlocksPerYear()
+	if blocksPerYear <= 1_000_000 || blocksPerYear > 10_000_000 {
+		return fmt.Errorf("monetaryPolicy.blocksPerYear must be between 1M and 10M, got %d", blocksPerYear)
 	}
 
 	// Check uncle depth is reasonable
@@ -437,7 +474,7 @@ func (p MonetaryPolicy) Validate() error {
 	}
 
 	// Verify minimum floor works
-	veryOldBlock := uint64(BlocksPerYear) * 100
+	veryOldBlock := config.GetBlocksPerYear() * 100
 	minReward := p.BlockReward(veryOldBlock)
 	expectedMin := p.MinimumBlockReward
 	if expectedMin == 0 {
@@ -469,8 +506,9 @@ func ValidateEconomicParameters() bool {
 		return false
 	}
 
-	// Check blocks per year is reasonable
-	if BlocksPerYear <= 0 || BlocksPerYear > 10_000_000 {
+	// Check blocks per year is reasonable (dynamically calculated)
+	blocksPerYear := config.GetBlocksPerYear()
+	if blocksPerYear <= 0 || blocksPerYear > 10_000_000 {
 		return false
 	}
 
@@ -482,6 +520,7 @@ func ValidateEconomicParameters() bool {
 	}
 
 	// Verify minimum floor works
+	// Use blocksPerYearBig which is already calculated from config
 	veryOldBlock := new(big.Int).Mul(blocksPerYearBig, big.NewInt(100))
 	minReward := GetBlockReward(veryOldBlock)
 	if minReward == nil || minReward.Cmp(minimumBlockRewardWei) < 0 {
@@ -666,8 +705,10 @@ func init() {
 		panic("MinimumBlockRewardNogo must be positive")
 	}
 
-	if BlocksPerYear <= 0 {
-		panic("BlocksPerYear must be positive")
+	// Verify blocks per year calculation (dynamically calculated from target block time)
+	blocksPerYear := config.GetBlocksPerYear()
+	if blocksPerYear <= 0 {
+		panic("BlocksPerYear calculation failed: must be positive")
 	}
 
 	// Verify initial reward calculation

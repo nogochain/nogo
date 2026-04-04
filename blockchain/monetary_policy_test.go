@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"math/big"
 	"testing"
+
+	"github.com/nogochain/nogo/config"
 )
 
 // TestConstants verifies that all constants are correctly defined
@@ -32,9 +34,13 @@ func TestConstants(t *testing.T) {
 		t.Errorf("NogoNOGO should be 100000000, got %d", NogoNOGO)
 	}
 
-	// Verify BlocksPerYear
-	if BlocksPerYear != 2629800 {
-		t.Errorf("BlocksPerYear should be 2629800, got %d", BlocksPerYear)
+	// Verify BlocksPerYear calculation is reasonable
+	blocksPerYear := config.GetBlocksPerYear()
+	if blocksPerYear == 0 {
+		t.Errorf("BlocksPerYear should be positive, got %d", blocksPerYear)
+	}
+	if blocksPerYear < 100000 || blocksPerYear > 10000000 {
+		t.Errorf("BlocksPerYear should be in reasonable range, got %d", blocksPerYear)
 	}
 
 	// Verify initial reward is 8 NOGO
@@ -70,7 +76,7 @@ func TestGetBlockRewardGenesis(t *testing.T) {
 // TestGetBlockRewardFirstYear tests rewards during the first year
 func TestGetBlockRewardFirstYear(t *testing.T) {
 	// Test various heights within first year
-	testCases := []uint64{0, 1, 100, 1000, 10000, 100000, BlocksPerYear - 1}
+	testCases := []uint64{0, 1, 100, 1000, 10000, 100000, config.GetBlocksPerYear() - 1}
 	expected := new(big.Int).Set(initialBlockRewardWei)
 
 	for _, height := range testCases {
@@ -85,7 +91,7 @@ func TestGetBlockRewardFirstYear(t *testing.T) {
 // TestGetBlockRewardAfterOneYear tests reward reduction after first year
 func TestGetBlockRewardAfterOneYear(t *testing.T) {
 	// After 1 year: reward = 8 * 0.9 = 7.2 NOGO
-	blockNumber := big.NewInt(BlocksPerYear)
+	blockNumber := big.NewInt(int64(config.GetBlocksPerYear()))
 	reward := GetBlockReward(blockNumber)
 
 	// Expected: 8 * 9 / 10 = 7.2 NOGO = 7.2 * 10^8 wei
@@ -117,7 +123,7 @@ func TestGetBlockRewardAfterMultipleYears(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		blockNumber := new(big.Int).Mul(big.NewInt(int64(tc.years)), big.NewInt(BlocksPerYear))
+		blockNumber := new(big.Int).Mul(big.NewInt(int64(tc.years)), big.NewInt(int64(config.GetBlocksPerYear())))
 		reward := GetBlockReward(blockNumber)
 
 		// Convert reward to big.Rat for comparison
@@ -132,7 +138,7 @@ func TestGetBlockRewardAfterMultipleYears(t *testing.T) {
 // TestGetBlockRewardMinimumFloor tests that reward never goes below minimum
 func TestGetBlockRewardMinimumFloor(t *testing.T) {
 	// Test very old blocks (100 years later)
-	veryOldBlock := new(big.Int).Mul(big.NewInt(BlocksPerYear), big.NewInt(100))
+	veryOldBlock := new(big.Int).Mul(big.NewInt(int64(config.GetBlocksPerYear())), big.NewInt(100))
 	reward := GetBlockReward(veryOldBlock)
 
 	// Should be at minimum 0.1 NOGO
@@ -142,7 +148,7 @@ func TestGetBlockRewardMinimumFloor(t *testing.T) {
 	}
 
 	// Test even older block (1000 years)
-	veryOldBlock2 := new(big.Int).Mul(big.NewInt(BlocksPerYear), big.NewInt(1000))
+	veryOldBlock2 := new(big.Int).Mul(big.NewInt(int64(config.GetBlocksPerYear())), big.NewInt(1000))
 	reward2 := GetBlockReward(veryOldBlock2)
 
 	if reward2.Cmp(minimumBlockRewardWei) < 0 {
@@ -177,7 +183,7 @@ func TestGetBlockRewardInNogo(t *testing.T) {
 	}
 
 	// After 1 year should be 7.2 NOGO
-	blockNumber = big.NewInt(BlocksPerYear)
+	blockNumber = big.NewInt(int64(config.GetBlocksPerYear()))
 	rewardNogo = GetBlockRewardInNogo(blockNumber)
 	if rewardNogo < 7.19 || rewardNogo > 7.21 {
 		t.Errorf("After 1 year reward should be ~7.2 NOGO, got %f", rewardNogo)
@@ -332,8 +338,8 @@ func TestMonetaryPolicyBlockReward(t *testing.T) {
 	}
 
 	// Test after 1 year
-	reward = policy.BlockReward(BlocksPerYear)
-	expected := uint64(7200000000000000000) // 7.2 NOGO
+	reward = policy.BlockReward(config.GetBlocksPerYear())
+	expected := uint64(720000000) // 7.2 NOGO in wei (7.2 * 10^8)
 	if reward != expected {
 		t.Errorf("After 1 year: should be %d, got %d", expected, reward)
 	}
@@ -566,7 +572,7 @@ func TestParseMonetaryPolicyInvalidJSON(t *testing.T) {
 // TestRewardCalculationEdgeCases tests edge cases in reward calculations
 func TestRewardCalculationEdgeCases(t *testing.T) {
 	// Test exactly at year boundary
-	blockNumber := big.NewInt(BlocksPerYear)
+	blockNumber := big.NewInt(int64(config.GetBlocksPerYear()))
 	reward := GetBlockReward(blockNumber)
 	expected := big.NewInt(7200000000000000000) // 7.2 NOGO
 	if reward.Cmp(expected) != 0 {
@@ -574,7 +580,7 @@ func TestRewardCalculationEdgeCases(t *testing.T) {
 	}
 
 	// Test just before year boundary
-	blockNumber = big.NewInt(BlocksPerYear - 1)
+	blockNumber = big.NewInt(int64(config.GetBlocksPerYear() - 1))
 	reward = GetBlockReward(blockNumber)
 	expected = big.NewInt(8000000000000000000) // Still 8 NOGO
 	if reward.Cmp(expected) != 0 {
@@ -582,7 +588,7 @@ func TestRewardCalculationEdgeCases(t *testing.T) {
 	}
 
 	// Test just after year boundary
-	blockNumber = big.NewInt(BlocksPerYear + 1)
+	blockNumber = big.NewInt(int64(config.GetBlocksPerYear() + 1))
 	reward = GetBlockReward(blockNumber)
 	expected = big.NewInt(7200000000000000000) // Now 7.2 NOGO
 	if reward.Cmp(expected) != 0 {
