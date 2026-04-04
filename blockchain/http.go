@@ -174,6 +174,7 @@ func (s *Server) handleChainInfo(w http.ResponseWriter, r *http.Request) {
 		"minerAddress":                   s.bc.MinerAddress,
 		"peersCount":                     peersCount,
 		"chainWork":                      chainWork,
+		"work":                           chainWork, // For chainInfo struct compatibility
 		"totalSupply":                    totalSupply,
 		"currentReward":                  currentReward,
 		"nextHalvingHeight":              nextHalving,

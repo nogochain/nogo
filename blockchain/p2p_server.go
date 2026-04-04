@@ -309,6 +309,7 @@ func (s *P2PServer) writeChainInfo(w io.Writer) error {
 	if s.pm != nil {
 		peersCount = len(s.pm.Peers())
 	}
+	chainWork := s.bc.CanonicalWork()
 	out := map[string]any{
 		"chainId":              s.bc.ChainID,
 		"rulesHash":            s.bc.RulesHashHex(),
@@ -317,8 +318,9 @@ func (s *P2PServer) writeChainInfo(w io.Writer) error {
 		"genesisHash":          fmt.Sprintf("%x", genesis.Hash),
 		"genesisTimestampUnix": genesis.TimestampUnix,
 		"peersCount":           peersCount,
+		"work":                 chainWork.String(),
 	}
-	log.Printf("writeChainInfo: returning height=%d hash=%s", latest.Height, fmt.Sprintf("%x", latest.Hash))
+	log.Printf("writeChainInfo: returning height=%d hash=%s work=%s", latest.Height, fmt.Sprintf("%x", latest.Hash), chainWork.String())
 	return p2pWriteJSON(w, p2pEnvelope{Type: "chain_info", Payload: mustJSON(out)})
 }
 

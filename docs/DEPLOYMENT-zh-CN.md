@@ -1,544 +1,506 @@
 # NogoChain 部署指南
 
-本文档提供 NogoChain 主网和测试网节点的完整部署方案。
-
-## 📋 目录
-
-1. [系统要求](#系统要求)
-2. [主网同步节点部署](#主网同步节点部署)
-3. [主网挖矿节点部署](#主网挖矿节点部署)
-4. [测试网节点部署](#测试网节点部署)
-5. [Docker 部署](#docker-部署)
-6. [高级配置](#高级配置)
-7. [监控和运维](#监控和运维)
-8. [故障排查](#故障排查)
+**版本**: 1.0  
+**生成日期**: 2026-04-04  
+**适用系统**: Linux / macOS / Windows
 
 ---
 
-## 系统要求
+## 目录
 
-### 硬件要求
+1. [环境要求](#1-环境要求)
+2. [编译安装](#2-编译安装)
+3. [配置说明](#3-配置说明)
+4. [部署模式](#4-部署模式)
+5. [Docker 部署](#5-docker-部署)
+6. [生产环境配置](#6-生产环境配置)
+7. [故障排查](#7-故障排查)
 
-| 配置项 | 最低要求 | 推荐配置 | 生产环境 |
-|--------|---------|---------|---------|
-| CPU | 2 核心 | 4 核心 | 8 核心+ |
-| 内存 | 2GB | 4GB | 8GB+ |
-| 存储 | 10GB SSD | 50GB SSD | 100GB+ NVMe SSD |
-| 网络 | 10Mbps | 50Mbps | 100Mbps+ |
+---
 
-### 软件要求
+## 1. 环境要求
 
+### 1.1 硬件要求
+
+**最低配置**:
+- CPU: 2 核心
+- 内存：2 GB
+- 存储：50 GB SSD（剪枝模式）
+- 网络：10 Mbps
+
+**推荐配置**:
+- CPU: 4 核心+
+- 内存：8 GB+
+- 存储：500 GB NVMe SSD（完整模式）
+- 网络：100 Mbps+
+
+### 1.2 软件要求
+
+**必需**:
+- **Go**: 1.24.0 (精确版本)
 - **操作系统**: 
-  - Windows 10+ (64 位)
   - Linux (Ubuntu 20.04+, CentOS 8+)
-  - macOS 11+
-  
-- **Go 版本**: 1.21.5（精确版本，禁止使用 `latest` 或模糊版本）
+  - macOS (11.0+)
+  - Windows (Server 2019+, Windows 10+)
+- **Docker**: 20.10+ (可选，容器化部署)
 
-- **依赖项**:
-  - Git
-  - systemd (Linux)
-  - Docker 20.10+ (可选，容器化部署)
+**可选**:
+- Git: 2.30+ (源码编译)
+- Make: 4.0+ (使用 Makefile)
+
+### 1.3 操作系统兼容性
+
+| 操作系统 | 版本 | 状态 | 备注 |
+|---------|------|------|------|
+| Ubuntu | 20.04, 22.04 | ✅ 完全支持 | 推荐 |
+| CentOS | 8, 9 | ✅ 完全支持 | |
+| Debian | 11, 12 | ✅ 完全支持 | |
+| macOS | 11.0+ | ✅ 完全支持 | Apple Silicon 已验证 |
+| Windows | Server 2019+, 10+ | ✅ 完全支持 | PowerShell 环境 |
 
 ---
 
-## 主网同步节点部署
+## 2. 编译安装
 
-适用于：仅同步主网数据，不参与挖矿的节点。
+### 2.1 安装 Go
 
-### 步骤 1: 安装 Go
-
-**Linux**:
 ```bash
-# 下载 Go 1.21.5
-wget https://go.dev/dl/go1.21.5.linux-amd64.tar.gz
+# Linux/macOS
+wget https://go.dev/dl/go1.24.0.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz
+export PATH=$PATH:/usr/local/go/bin
 
-# 安装
-sudo tar -C /usr/local -xzf go1.21.5.linux-amd64.tar.gz
-
-# 配置环境变量
-echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
-source ~/.bashrc
-
-# 验证版本
-go version  # 应显示 go version go1.21.5
+# 验证安装
+go version
+# 输出：go version go1.24.0 ...
 ```
 
-**Windows**:
-1. 下载 Go 1.21.5: https://go.dev/dl/go1.21.5.windows-amd64.msi
-2. 运行安装程序
-3. 验证：`go version`
-
-### 步骤 2: 克隆代码
+### 2.2 克隆源码
 
 ```bash
 git clone https://github.com/nogochain/nogo.git
 cd nogo
 ```
 
-### 步骤 3: 编译
+### 2.3 编译二进制文件
 
 ```bash
-cd nogo/blockchain
+# 进入区块链目录
+cd blockchain
 
-# 生产环境编译（开启 race 检测、优化体积）
-go build -race -ldflags="-s -w" -o blockchain .
+# 编译（生产环境）
+go build -race -vet -ldflags="-s -w" -o blockchain .
 
-# 验证编译产物
-ls -lh blockchain
+# 验证编译
+./blockchain version
 ```
 
-### 步骤 4: 配置环境变量
-
-创建 `.env` 文件：
+### 2.4 安装到系统路径
 
 ```bash
-# 基本配置
-MINER_ADDRESS=NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c
-GENESIS_PATH=nogo/genesis/mainnet.json
-ADMIN_TOKEN=6M8BFbyqrEALjn0cw4SmNTUCdZJ7vlz1
+# Linux/macOS
+sudo cp blockchain /usr/local/bin/nogochain
+sudo chmod +x /usr/local/bin/nogochain
 
-# 网络配置（使用域名）
-HTTP_ADDR=0.0.0.0:8080
-P2P_LISTEN_ADDR=0.0.0.0:9090
-P2P_PEERS=main.nogochain.org:9090
-NODE_ID=sync-node-001
-
-# 同步节点配置
-AUTO_MINE=false
-SYNC_ENABLE=true
-
-# 可选：性能调优
-RATE_LIMIT_REQUESTS=100
-RATE_LIMIT_BURST=50
-TRUST_PROXY=true
+# 验证安装
+nogochain version
 ```
 
-### 步骤 5: 启动节点
+---
 
-**Windows PowerShell (推荐)**:
+## 3. 配置说明
 
-```powershell
-# 在项目根目录 (D:\NogoChain) 执行
-$env:ADMIN_TOKEN="test123"
-$env:AUTO_MINE="false"
-$env:GENESIS_PATH="nogo/genesis/mainnet.json"
-$env:P2P_PEERS="main.nogochain.org:9090"
-$env:SYNC_ENABLE="true"
-.\nogo\blockchain\nogo.exe server
-```
+### 3.1 环境变量配置
 
-**Linux (systemd)**:
-
-创建服务文件 `/etc/systemd/system/nogochain.service`:
-
-```ini
-[Unit]
-Description=NogoChain Node
-After=network.target
-
-[Service]
-Type=simple
-User=nogochain
-WorkingDirectory=/home/nogochain/nogo
-Environment="ADMIN_TOKEN=your_secure_token"
-Environment="GENESIS_PATH=nogo/genesis/mainnet.json"
-Environment="P2P_PEERS=main.nogochain.org:9090"
-Environment="AUTO_MINE=false"
-Environment="SYNC_ENABLE=true"
-ExecStart=/home/nogochain/nogo/nogo/blockchain/blockchain server
-Restart=always
-RestartSec=5
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-```
-
-启动服务：
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable nogochain
-sudo systemctl start nogochain
-sudo systemctl status nogochain
-```
-
-**Windows Batch**:
-
-创建 `start-node.bat`:
-```batch
-@echo off
-set ADMIN_TOKEN=test123
-set AUTO_MINE=false
-set GENESIS_PATH=nogo/genesis/mainnet.json
-set P2P_PEERS=main.nogochain.org:9090
-set SYNC_ENABLE=true
-
-nogo\blockchain\nogo.exe server
-```
-
-运行：
-```powershell
-.\start-node.bat
-```
-
-### 步骤 6: 验证同步状态
+创建 `.env` 文件或使用系统环境变量：
 
 ```bash
-# 检查健康状态
-curl http://localhost:8080/health
+# 节点身份
+export NODE_ID="my-node-001"
+export MINER_ADDRESS="NOGO00..."  # 矿工地址
 
-# 查看链信息
-curl http://localhost:8080/chain/info | jq
+# 网络配置
+export HTTP_ADDR="0.0.0.0:8080"
+export P2P_LISTEN_ADDR="0.0.0.0:9090"
+export P2P_PEERS="seed1.nogochain.org:9090,seed2.nogochain.org:9090"
 
-# 预期输出
+# 挖矿配置
+export AUTO_MINE="true"
+export MINING_THREADS="4"
+
+# 存储配置
+export DATA_DIR="/var/lib/nogochain"
+export SYNC_MODE="full"  # full, fast, light
+
+# 日志配置
+export LOG_LEVEL="info"
+export LOG_FORMAT="json"  # json, text
+```
+
+### 3.2 配置文件（可选）
+
+创建 `config.json`:
+
+```json
 {
-  "height": 105,
-  "difficultyBits": 11,
-  "rulesHash": "ea16ad1d4e569580dd495826412b0a89a3733bdc921f9ec6e88c6b44c55574f4",
-  "genesisHash": "bbba903f8a8c06e1f170d91aeab8eb11234a1ffa88a709d71323bfb41b31f3e2",
-  "peersCount": 1,
-  "chainWork": "379008"
+  "nodeId": "my-node-001",
+  "minerAddress": "NOGO00...",
+  "http": {
+    "addr": "0.0.0.0:8080",
+    "readTimeout": 30,
+    "writeTimeout": 30
+  },
+  "p2p": {
+    "listenAddr": "0.0.0.0:9090",
+    "peers": ["seed1.nogochain.org:9090"],
+    "maxPeers": 50
+  },
+  "storage": {
+    "dataDir": "/var/lib/nogochain",
+    "syncMode": "full"
+  }
 }
 ```
 
 ---
 
-## 主网挖矿节点部署
+## 4. 部署模式
 
-适用于：参与主网挖矿，获取区块奖励的节点。
+### 4.1 单节点部署（开发/测试）
 
-### 步骤 1-4: 同同步节点
-
-完成上述"主网同步节点部署"的步骤 1-4。
-
-### 步骤 5: 启用挖矿
-
-在 `.env` 文件中添加：
+适用于：本地开发、测试网络
 
 ```bash
-# 启用自动挖矿
-AUTO_MINE=true
-MINE_INTERVAL_MS=1000
-MINE_FORCE_EMPTY_BLOCKS=true
+# 使用默认配置启动
+./blockchain server
+
+# 或指定配置
+export DATA_DIR="./data"
+export AUTO_MINE="true"
+./blockchain server
 ```
 
-### 步骤 6: 启动挖矿节点
+**访问**:
+- HTTP API: http://localhost:8080
+- Metrics: http://localhost:9100/metrics
+
+### 4.2 多节点部署（生产环境）
+
+适用于：生产网络、高可用部署
+
+#### 节点 1（种子节点）
 
 ```bash
-# Linux
-sudo systemctl restart nogochain
-
-# Windows
-.\start-node.bat
+export NODE_ID="seed-node-001"
+export P2P_ADVERTISE_SELF="true"
+export P2P_PEERS=""  # 种子节点无上游
+./blockchain server
 ```
 
-### 步骤 7: 监控挖矿收益
+#### 节点 2+（普通节点）
 
 ```bash
-# 查看当前难度
-curl http://localhost:8080/chain/info | jq '.difficultyBits'
-
-# 查看矿工地址余额
-curl http://localhost:8080/balance/NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c | jq
-
-# 查看最新区块（确认是否挖到新区块）
-curl http://localhost:8080/block/height/latest | jq '.minerAddress'
+export NODE_ID="node-002"
+export P2P_PEERS="seed-node-001:9090"
+./blockchain server
 ```
 
----
+### 4.3 仅同步节点
 
-## 测试网节点部署
-
-适用于：开发和测试环境。
-
-### 使用测试网配置
+适用于：区块浏览器、数据分析
 
 ```bash
-# 修改 .env 文件
-GENESIS_PATH=nogo/genesis/testnet.json
-CHAIN_ID=3
-
-# 可选：禁用难度调整（固定难度，便于测试）
-DIFFICULTY_ENABLE=false
-
-# 启动节点
+export AUTO_MINE="false"
+export SYNC_MODE="full"
+export P2P_PEERS="main.nogochain.org:9090"
 ./blockchain server
 ```
 
 ---
 
-## Docker 部署
+## 5. Docker 部署
 
-### 步骤 1: 构建镜像
-
-```bash
-cd nogo/blockchain
-
-# 构建生产镜像
-docker build -t nogochain/node:latest .
-
-# 验证镜像
-docker images | grep nogochain
-```
-
-### 步骤 2: 运行容器
+### 5.1 构建 Docker 镜像
 
 ```bash
-docker run -d \
-  --name nogochain \
-  -p 8080:8080 \
-  -p 9090:9090 \
-  -e MINER_ADDRESS="NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c" \
-  -e GENESIS_PATH="nogo/blockchain/genesis/mainnet.json" \
-  -e ADMIN_TOKEN="6M8BFbyqrEALjn0cw4SmNTUCdZJ7vlz1" \
-  -e HTTP_ADDR="0.0.0.0:8080" \
-  -e P2P_LISTEN_ADDR="0.0.0.0:9090" \
-  -e P2P_PEERS="223.254.144.158:9090" \
-  -e NODE_ID="docker-node-001" \
-  -v nogochain-data:/data \
-  --restart unless-stopped \
-  nogochain/node:latest
+cd blockchain
+docker build -t nogochain/nogo:latest .
 ```
 
-### 步骤 3: 查看日志
+### 5.2 使用 Docker Compose 部署
 
-```bash
-# 实时日志
-docker logs -f nogochain
-
-# 查看容器状态
-docker ps | grep nogochain
-```
-
-### 步骤 4: 停止/删除
-
-```bash
-# 停止
-docker stop nogochain
-
-# 删除容器（数据卷保留）
-docker rm nogochain
-
-# 删除数据卷（谨慎操作）
-docker volume rm nogochain-data
-```
-
----
-
-## 高级配置
-
-### 性能调优
-
-```bash
-# 增加文件描述符限制（Linux）
-ulimit -n 65535
-
-# 配置 systemd
-# 在 /etc/systemd/system/nogochain.service 中添加：
-LimitNOFILE=65535
-LimitNPROC=65535
-```
-
-### 网络优化
-
-```bash
-# 配置防火墙（Linux）
-sudo ufw allow 8080/tcp  # HTTP API
-sudo ufw allow 9090/tcp  # P2P
-
-# 配置 Windows 防火墙
-netsh advfirewall firewall add rule name="NogoChain HTTP" dir=in action=allow protocol=TCP localport=8080
-netsh advfirewall firewall add rule name="NogoChain P2P" dir=in action=allow protocol=TCP localport=9090
-```
-
-### 数据备份
-
-```bash
-# 备份区块数据
-tar -czf blockchain-backup-$(date +%Y%m%d).tar.gz ./data/
-
-# 备份钱包文件
-cp ./wallet.dat ./wallet.dat.backup
-
-# 定期备份（crontab）
-0 2 * * * tar -czf /backup/blockchain-$(date +\%Y\%m\%d).tar.gz /home/nogochain/nogo/data/
-```
-
----
-
-## 监控和运维
-
-### Prometheus 监控
-
-配置 `prometheus.yml`:
+创建 `docker-compose.yml`:
 
 ```yaml
+version: '3.8'
+
+services:
+  node1:
+    image: nogochain/nogo:latest
+    container_name: nogo-node1
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+      - "9100:9100"
+    volumes:
+      - ./data/node1:/var/lib/nogochain
+      - ./logs/node1:/var/log/nogochain
+    environment:
+      - NODE_ID=node1
+      - MINER_ADDRESS=NOGO00...
+      - P2P_PEERS=node2:9090
+      - LOG_LEVEL=info
+    restart: unless-stopped
+
+  node2:
+    image: nogochain/nogo:latest
+    container_name: nogo-node2
+    ports:
+      - "8081:8080"
+      - "9091:9090"
+    volumes:
+      - ./data/node2:/var/lib/nogochain
+    environment:
+      - NODE_ID=node2
+      - P2P_PEERS=node1:9090
+    depends_on:
+      - node1
+    restart: unless-stopped
+```
+
+启动：
+
+```bash
+docker-compose up -d
+```
+
+### 5.3 查看日志
+
+```bash
+docker-compose logs -f node1
+```
+
+### 5.4 停止和清理
+
+```bash
+# 停止所有节点
+docker-compose down
+
+# 停止并删除数据
+docker-compose down -v
+```
+
+---
+
+## 6. 生产环境配置
+
+### 6.1 安全加固
+
+#### 防火墙配置
+
+```bash
+# UFW (Ubuntu)
+sudo ufw allow 8080/tcp    # HTTP API
+sudo ufw allow 9090/tcp    # P2P
+sudo ufw allow 9100/tcp    # Metrics (可选，内网)
+sudo ufw enable
+
+# firewalld (CentOS)
+sudo firewall-cmd --permanent --add-port=8080/tcp
+sudo firewall-cmd --permanent --add-port=9090/tcp
+sudo firewall-cmd --reload
+```
+
+#### TLS 配置
+
+生成自签名证书：
+
+```bash
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout server.key -out server.crt \
+  -subj "/CN=nogochain.example.com"
+```
+
+配置 HTTPS：
+
+```bash
+export HTTPS_CERT_PATH="/etc/nogochain/server.crt"
+export HTTPS_KEY_PATH="/etc/nogochain/server.key"
+export HTTP_ADDR="0.0.0.0:443"
+```
+
+### 6.2 系统优化
+
+#### 文件描述符限制
+
+```bash
+# /etc/security/limits.conf
+nogochain soft nofile 65536
+nogochain hard nofile 65536
+```
+
+#### 内存优化
+
+```bash
+# 调整 Go GC 参数
+export GOGC=100
+export GOMAXPROCS=0  # 自动检测 CPU 核心数
+```
+
+### 6.3 监控配置
+
+#### Prometheus 配置
+
+`prometheus.yml`:
+
+```yaml
+global:
+  scrape_interval: 15s
+
 scrape_configs:
   - job_name: 'nogochain'
     static_configs:
-      - targets: ['localhost:8080']
-    metrics_path: '/metrics'
+      - targets: ['localhost:9100']
 ```
 
-关键指标：
-- `nogochain_block_height` - 区块高度
-- `nogochain_peer_count` - 连接节点数
-- `nogochain_mempool_size` - 内存池大小
-- `nogochain_difficulty` - 当前难度
+#### Grafana 仪表板
 
-### Grafana 仪表盘
+导入预配置的仪表板（ID: TBD）或自定义：
 
-导入 Grafana 仪表盘模板（待提供），可视化监控：
-- 区块高度趋势
-- 交易数量
-- 网络延迟
-- 系统资源使用率
+- 链高和交易数
+- P2P 连接状态
+- HTTP 请求延迟
+- 内存使用率
+- 磁盘使用率
 
-### 日志管理
+### 6.4 日志管理
 
-```bash
-# 查看 systemd 日志
-journalctl -u nogochain -f
+#### 日志轮转
 
-# 日志轮转（/etc/logrotate.d/nogochain）
+`/etc/logrotate.d/nogochain`:
+
+```
 /var/log/nogochain/*.log {
     daily
     rotate 30
     compress
     delaycompress
+    missingok
     notifempty
     create 0640 nogochain nogochain
+    postrotate
+        systemctl reload nogochain
+    endscript
 }
 ```
 
 ---
 
-## 故障排查
+## 7. 故障排查
 
-### 1. 节点无法启动
+### 7.1 常见问题
 
-**检查**:
+#### 问题 1: 无法启动节点
+
+**症状**: 启动时立即退出
+
+**排查步骤**:
 ```bash
-# 查看日志
-journalctl -u nogochain -n 100
+# 查看详细日志
+./blockchain server 2>&1 | tee startup.log
 
 # 检查端口占用
-netstat -tlnp | grep 8080
-netstat -tlnp | grep 9090
+netstat -tuln | grep -E '8080|9090'
 
-# 检查 Go 版本
-go version
+# 检查数据目录权限
+ls -la /var/lib/nogochain
 ```
 
-**解决**:
+**解决方案**:
+- 确保端口未被占用
+- 确保数据目录有写权限
+- 检查配置文件语法
+
+#### 问题 2: 无法连接 P2P 网络
+
+**症状**: 节点数为 0，不同步区块
+
+**排查步骤**:
 ```bash
-# 停止占用端口的进程
-sudo fuser -k 8080/tcp
-sudo fuser -k 9090/tcp
+# 检查 P2P 连接
+curl http://localhost:8080/api/v1/admin/peers | jq
 
-# 重新编译
-go clean
-go build -race -ldflags="-s -w" -o blockchain .
-```
-
-### 2. 同步停止
-
-**检查**:
-```bash
-# 查看链信息
-curl http://localhost:8080/chain/info | jq
-
-# 检查连接数
-curl http://localhost:8080/chain/info | jq '.peersCount'
-
-# 查看日志
-journalctl -u nogochain | grep "sync:"
-```
-
-**解决**:
-```bash
-# 删除本地区块数据，重新同步
-sudo systemctl stop nogochain
-rm -rf ./data/
-sudo systemctl start nogochain
-```
-
-### 3. P2P 连接失败
-
-**检查**:
-```bash
-# 测试主网节点连通性
-ping main.nogochain.org
-telnet 223.254.144.158 9090
-
-# 查看 P2P 日志
-journalctl -u nogochain | grep "P2P"
-```
-
-**解决**:
-```bash
 # 检查防火墙
 sudo ufw status
-sudo ufw allow 9090/tcp
 
-# 重启 P2P 管理器
-sudo systemctl restart nogochain
+# 测试种子节点连通性
+telnet seed1.nogochain.org 9090
 ```
 
-### 4. RulesHash 不匹配
+**解决方案**:
+- 开放 9090 端口
+- 更新种子节点列表
+- 检查 NAT 配置
 
-**错误**: `consensus params mismatch`
+#### 问题 3: 同步缓慢
 
-**解决**:
+**症状**: 区块高度增长慢
+
+**排查步骤**:
 ```bash
-# 使用正确的创世文件
-export GENESIS_PATH="nogo/blockchain/genesis/mainnet.json"
+# 检查网络带宽
+iftop -P -p 9090
 
-# 删除旧数据
-rm -rf ./data/
+# 检查磁盘 I/O
+iostat -x 1
 
-# 重新启动
-./blockchain server
+# 检查同步状态
+curl http://localhost:8080/api/v1/sync/status | jq
+```
+
+**解决方案**:
+- 增加 P2P 连接数
+- 使用 SSD 存储
+- 增加带宽
+
+### 7.2 获取帮助
+
+- **文档**: https://docs.nogochain.org
+- **GitHub Issues**: https://github.com/nogochain/nogo/issues
+- **社区**: Discord / Telegram
+
+---
+
+## 附录 A: 快速部署脚本
+
+### A.1 Linux 一键部署
+
+```bash
+#!/bin/bash
+set -e
+
+# 安装 Go
+wget -q https://go.dev/dl/go1.24.0.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz
+export PATH=$PATH:/usr/local/go/bin
+
+# 克隆和编译
+git clone https://github.com/nogochain/nogo.git
+cd nogo/blockchain
+go build -o /usr/local/bin/nogochain .
+
+# 创建数据目录
+sudo mkdir -p /var/lib/nogochain
+sudo chown $USER:$USER /var/lib/nogochain
+
+# 启动节点
+export DATA_DIR="/var/lib/nogochain"
+export MINER_ADDRESS="YOUR_ADDRESS_HERE"
+nogochain server
 ```
 
 ---
 
-## 安全建议
-
-1. **使用非 root 用户运行节点**
-   ```bash
-   sudo useradd -m nogochain
-   sudo chown -R nogochain:nogochain /home/nogochain/nogo
-   ```
-
-2. **配置防火墙，仅开放必要端口**
-   ```bash
-   sudo ufw allow 8080/tcp  # HTTP API
-   sudo ufw allow 9090/tcp  # P2P
-   sudo ufw enable
-   ```
-
-3. **定期备份数据**
-   ```bash
-   # 添加到 crontab
-   0 2 * * * tar -czf /backup/blockchain-$(date +\%Y\%m\%d).tar.gz /home/nogochain/nogo/data/
-   ```
-
-4. **使用强 ADMIN_TOKEN**
-   ```bash
-   # 生成随机 token
-   openssl rand -hex 32
-   ```
-
-5. **监控异常登录**
-   ```bash
-   # 查看访问日志
-   tail -f /var/log/nogochain/access.log
-   ```
-
----
-
-**最后更新**: 2026-04-01  
-**文档版本**: 1.1.0  
-**维护者**: NogoChain 开发团队
+**文档维护**: NogoChain 开发团队  
+**最后更新**: 2026-04-04  
+**反馈**: 请提交 issue 到 GitHub 仓库

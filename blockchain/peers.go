@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -174,11 +175,41 @@ func (pm *PeerManager) GetActivePeers() []string {
 }
 
 type chainInfo struct {
-	ChainID     uint64 `json:"chainId"`
-	Height      uint64 `json:"height"`
-	LatestHash  string `json:"latestHash"`
-	RulesHash   string `json:"rulesHash"`
-	GenesisHash string `json:"genesisHash"`
+	ChainID     uint64   `json:"chainId"`
+	Height      uint64   `json:"height"`
+	LatestHash  string   `json:"latestHash"`
+	RulesHash   string   `json:"rulesHash"`
+	GenesisHash string   `json:"genesisHash"`
+	Work        *big.Int `json:"-"` // Ignore in automatic decoding
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for chainInfo
+// This is needed to properly decode big.Int from string
+func (ci *chainInfo) UnmarshalJSON(data []byte) error {
+	// Use alias to avoid infinite recursion
+	type chainInfoAlias chainInfo
+	aux := &struct {
+		WorkStr string `json:"work"`
+		*chainInfoAlias
+	}{
+		chainInfoAlias: (*chainInfoAlias)(ci),
+	}
+
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	// Decode work from string to big.Int
+	if aux.WorkStr != "" {
+		ci.Work = new(big.Int)
+		if _, ok := ci.Work.SetString(aux.WorkStr, 10); !ok {
+			return fmt.Errorf("invalid work value: %s", aux.WorkStr)
+		}
+	} else {
+		ci.Work = big.NewInt(0)
+	}
+
+	return nil
 }
 
 func (pm *PeerManager) FetchChainInfo(ctx context.Context, peer string) (*chainInfo, error) {

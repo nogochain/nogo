@@ -1,0 +1,25 @@
+{
+  "chainId": 1,
+  "consensusParams": {
+    "difficultyEnable": true,
+    "targetBlockTime": 15000000000,
+    "difficultyWindow": 20,
+    "difficultyMaxStep": 2,
+    "minDifficultyBits": 1,
+    "maxDifficultyBits": 200,
+    "genesisDifficultyBits": 18,
+    "medianTimePastWindow": 11,
+    "maxTimeDrift": 7200,
+    "maxBlockSize": 1000000,
+    "merkleEnable": true,
+    "merkleActivationHeight": 100,
+    "binaryEncodingEnable": true,
+    "binaryEncodingActivationHeight": 50,
+    "monetaryPolicy": {
+      "initialBlockReward": 5000000000,
+      "halvingInterval": 210000,
+      "minerFeeShare": 100,
+      "tailEmission": 0
+    }
+  }
+}

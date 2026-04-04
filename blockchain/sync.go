@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"time"
 )
@@ -72,14 +73,6 @@ func (s *SyncLoop) Run(ctx context.Context) {
 }
 
 func (s *SyncLoop) SyncOnce(ctx context.Context) {
-	// Mark sync as started
-	s.isSyncing = true
-
-	defer func() {
-		// Mark sync as completed
-		s.isSyncing = false
-		s.lastSync = time.Now()
-	}()
 	if s.pm == nil {
 		return
 	}
@@ -102,9 +95,10 @@ func (s *SyncLoop) SyncOnce(ctx context.Context) {
 	peers := s.pm.Peers()
 	log.Printf("sync: starting sync round, localHeight=%d, peers=%d", localHeight, len(peers))
 
-	// CRITICAL: Calculate network height to detect if we're behind
+	// CRITICAL: Calculate network height and work to detect if we're behind
 	// This helps identify when we need to sync even if individual peers report lower heights
 	var networkHeight uint64
+	var networkWork *big.Int
 	for _, peer := range peers {
 		info, err := s.pm.FetchChainInfo(ctx, peer)
 		if err != nil {
@@ -112,13 +106,34 @@ func (s *SyncLoop) SyncOnce(ctx context.Context) {
 		}
 		if info.Height > networkHeight {
 			networkHeight = info.Height
+			networkWork = info.Work
 		}
 	}
-	if networkHeight > localHeight {
-		log.Printf("sync: network has advanced (local=%d, network=%d), will attempt to sync", localHeight, networkHeight)
 
-		// CRITICAL: If network is significantly ahead, we may be on a fork
-		// Proactively rollback to find common ancestor
+	localWork := s.bc.CanonicalWork()
+
+	// CRITICAL FIX: Only mark as syncing if we actually need to sync
+	// This allows mining to proceed when network is not ahead
+	if networkWork == nil || networkWork.Cmp(localWork) <= 0 {
+		// Network does not have more work, no need to sync
+		// Update lastSync time to indicate we're healthy
+		s.lastSync = time.Now()
+		log.Printf("sync: network work not ahead (local=%v, network=%v), allowing mining", localWork, networkWork)
+		return
+	}
+
+	// Network has more work, mark as syncing and proceed
+	s.isSyncing = true
+	defer func() {
+		s.isSyncing = false
+		s.lastSync = time.Now()
+	}()
+
+	log.Printf("sync: network has more work (local=%v, network=%v), will attempt to sync", localWork, networkWork)
+
+	// CRITICAL: If network has significantly more work, we may be on a fork
+	// Proactively rollback to find common ancestor
+	if networkHeight > localHeight {
 		heightDiff := networkHeight - localHeight
 
 		// LONG FORK DETECTION: Alert if fork is unusually long
@@ -202,10 +217,29 @@ func (s *SyncLoop) SyncOnce(ctx context.Context) {
 			log.Printf("sync: peer %s genesisHash mismatch: local=%s, peer=%s", peer, localGenesisHash, info.GenesisHash)
 			continue
 		}
-		if info.Height <= localHeight {
-			log.Printf("sync: peer %s height not ahead: local=%d, peer=%d", peer, localHeight, info.Height)
+
+		// CRITICAL FIX: Use cumulative work instead of just height for sync decision
+		// This ensures we sync to the chain with most work, not just highest block count
+		localWork := s.bc.CanonicalWork()
+		needToSync := false
+		syncReason := ""
+
+		if info.Height > localHeight {
+			// Peer has higher height - likely needs sync
+			needToSync = true
+			syncReason = fmt.Sprintf("peer height ahead (local=%d, peer=%d)", localHeight, info.Height)
+		} else if info.Height == localHeight && info.Work.Cmp(localWork) > 0 {
+			// Same height but peer has more work - we're on a weaker fork
+			needToSync = true
+			syncReason = fmt.Sprintf("peer has more work at same height (localWork=%v, peerWork=%v)", localWork, info.Work)
+		}
+
+		if !needToSync {
+			log.Printf("sync: peer %s does not need sync - %s", peer, syncReason)
 			continue
 		}
+
+		log.Printf("sync: peer %s needs sync - %s", peer, syncReason)
 
 		var from uint64
 		var limit int
