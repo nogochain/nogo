@@ -331,7 +331,7 @@ func (c *Config) IsWSEnabled() bool {
 }
 
 // DefaultTargetBlockTime is the default target block time in seconds
-const DefaultTargetBlockTime = int64(15)
+const DefaultTargetBlockTime = int64(17)
 
 // GetBlocksPerYear calculates blocks per year based on target block time
 func GetBlocksPerYear() uint64 {
@@ -348,22 +348,22 @@ func GetTargetBlockTime() int64 {
 // Production-grade: provides access to consensus configuration
 func GetConsensusParams() ConsensusParams {
 	return ConsensusParams{
-		ChainID:                      1,
-		DifficultyEnable:             true,
-		BlockTimeTargetSeconds:       DefaultTargetBlockTime,
-		DifficultyAdjustmentInterval: 100,
-		MaxBlockTimeDriftSeconds:     7200,
-		MinDifficultyBits:            0x1d00ffff,
-		MaxDifficultyBits:            0x1f7fffff,
-		MaxDifficultyChangePercent:   50,
-		MedianTimePastWindow:         11,
-		MerkleEnable:                 true,
-		MerkleActivationHeight:       0,
-		BinaryEncodingEnable:         false,
+		ChainID:                        1,
+		DifficultyEnable:               true,
+		BlockTimeTargetSeconds:         DefaultTargetBlockTime,
+		DifficultyAdjustmentInterval:   100,
+		MaxBlockTimeDriftSeconds:       7200,
+		MinDifficultyBits:              0x1d00ffff,
+		MaxDifficultyBits:              0x1f7fffff,
+		MaxDifficultyChangePercent:     50,
+		MedianTimePastWindow:           11,
+		MerkleEnable:                   true,
+		MerkleActivationHeight:         0,
+		BinaryEncodingEnable:           false,
 		BinaryEncodingActivationHeight: 0,
-		GenesisDifficultyBits:        0x1d00ffff,
-		MaxBlockSize:                 1024 * 1024,
-		MaxTransactionsPerBlock:      1000,
+		GenesisDifficultyBits:          0x1d00ffff,
+		MaxBlockSize:                   1024 * 1024,
+		MaxTransactionsPerBlock:        1000,
 		MonetaryPolicy: MonetaryPolicy{
 			InitialBlockReward:     800000000,
 			AnnualReductionPercent: 10,
