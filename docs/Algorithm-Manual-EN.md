@@ -169,14 +169,14 @@ new_difficulty = parent_difficulty × (1 + Kp × error + Ki × integral)
 **Parameters**:
 - Kp (Proportional Gain): 0.5 (default)
 - Ki (Integral Gain): 0.1 (fixed)
-- Target Block Time: 10 seconds
+- Target Block Time: 17 seconds (Mainnet) / 15 seconds (Testnet)
 
 ### 2.2 Algorithm Flow
 
 #### Step 1: Calculate Time Deviation
 ```
 time_diff = current_time - parent_time
-target_time = 10 seconds
+target_time = 17 seconds (Mainnet) or 15 seconds (Testnet)
 error = (target_time - time_diff) / target_time
 ```
 

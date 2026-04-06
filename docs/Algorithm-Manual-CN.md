@@ -169,14 +169,14 @@ new_difficulty = parent_difficulty × (1 + Kp × error + Ki × integral)
 **参数**:
 - Kp (比例增益): 0.5（默认）
 - Ki (积分增益): 0.1（固定）
-- 目标区块时间：10 秒
+- 目标区块时间：17 秒（主网）/ 15 秒（测试网）
 
 ### 2.2 算法流程
 
 #### 步骤 1: 计算时间偏差
 ```
 time_diff = current_time - parent_time
-target_time = 10 秒
+target_time = 17 秒（主网）或 15 秒（测试网）
 error = (target_time - time_diff) / target_time
 ```
 
