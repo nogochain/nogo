@@ -21,12 +21,12 @@ type BlockProvider interface {
 // Production-grade: implements heaviest chain rule with automatic reorg
 // Thread-safe: uses mutex for internal state management
 type ChainSelector struct {
-	mu               sync.RWMutex
-	chain            *Chain
-	blockProvider    BlockProvider
-	workCalculator   *WorkCalculator
-	reorgInProgress  bool
-	reorgMutex       sync.Mutex
+	mu              sync.RWMutex
+	chain           *Chain
+	blockProvider   BlockProvider
+	workCalculator  *WorkCalculator
+	reorgInProgress bool
+	reorgMutex      sync.Mutex
 }
 
 // NewChainSelector creates a new chain selector

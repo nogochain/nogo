@@ -18,6 +18,7 @@ package core
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -90,7 +91,7 @@ type AddressTxEntry struct {
 
 // applyBlockToState applies a block to the state
 // Production-grade: validates and updates account balances
-func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) error {
+func applyBlockToState(p ConsensusParams, mp MonetaryPolicy, state map[string]Account, b *Block, genesisAddress string, genesisTimestamp int64) error {
 	if p.MaxBlockSize > 0 {
 		size, err := blockSizeForConsensus(b)
 		if err != nil {
@@ -125,10 +126,50 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 		if cb.ToAddress != b.MinerAddress {
 			return errors.New("coinbase toAddress must match minerAddress")
 		}
-		policy := p.MonetaryPolicy
-		expected := policy.BlockReward(b.Height) + policy.MinerFeeAmount(fees)
+		policy := mp
+		// Miner receives 96% of block reward + 100% of fees (fees are burned, not distributed)
+		expected := policy.BlockReward(b.Height) * uint64(policy.MinerRewardShare) / 100 + policy.MinerFeeAmount(fees)
 		if cb.Amount != expected {
 			return fmt.Errorf("bad coinbase amount: expected %d got %d", expected, cb.Amount)
+		}
+
+		// Distribute block rewards according to economic model
+		// Contract addresses are generated using genesis timestamp (fixed for all blocks)
+		blockReward := policy.BlockReward(b.Height)
+
+		// 1. Community Fund (2%) - to governance contract address (fixed at genesis)
+		communityFund := blockReward * uint64(policy.CommunityFundShare) / 100
+		if communityFund > 0 {
+			communityAddr := generateContractAddress(cb.ChainID, genesisTimestamp, "COMMUNITY_FUND_GOVERNANCE")
+			acct := state[communityAddr]
+			if acct.Balance+communityFund < acct.Balance {
+				return errors.New("community fund balance overflow")
+			}
+			acct.Balance += communityFund
+			state[communityAddr] = acct
+		}
+
+		// 2. Genesis Address (1%) - to preset genesis miner address
+		genesisReward := blockReward * uint64(policy.GenesisShare) / 100
+		if genesisReward > 0 {
+			acct := state[genesisAddress]
+			if acct.Balance+genesisReward < acct.Balance {
+				return errors.New("genesis address balance overflow")
+			}
+			acct.Balance += genesisReward
+			state[genesisAddress] = acct
+		}
+
+		// 3. Integrity Pool (1%) - to reward contract address (fixed at genesis)
+		integrityPool := blockReward * uint64(policy.IntegrityPoolShare) / 100
+		if integrityPool > 0 {
+			integrityAddr := generateContractAddress(cb.ChainID, genesisTimestamp, "INTEGRITY_REWARD_CONTRACT")
+			acct := state[integrityAddr]
+			if acct.Balance+integrityPool < acct.Balance {
+				return errors.New("integrity pool balance overflow")
+			}
+			acct.Balance += integrityPool
+			state[integrityAddr] = acct
 		}
 	}
 
@@ -187,10 +228,13 @@ type Chain struct {
 	mu sync.RWMutex
 
 	// Chain metadata
-	chainID      uint64
-	minerAddress string
-	consensus    ConsensusParams
-	rulesHash    [32]byte
+	chainID          uint64
+	minerAddress     string
+	genesisAddress   string // Preset genesis miner address for 1% reward
+	genesisTimestamp int64  // Genesis block timestamp for contract address generation
+	consensus        ConsensusParams
+	monetaryPolicy   MonetaryPolicy
+	rulesHash        [32]byte
 
 	// Chain state
 	blocks        []*Block           // Canonical chain
@@ -212,6 +256,14 @@ type Chain struct {
 	// References for coordination
 	syncLoop       *SyncLoop
 	peerBlockchain *peerRef
+
+	// Integrity reward system
+	integrityManager     *NodeIntegrityManager
+	integrityDistributor *IntegrityRewardDistributor
+	scoreCalculator      *ScoreCalculator
+
+	// Contract management
+	contractManager *ContractManager
 }
 
 // ChainConfig holds chain configuration
@@ -251,15 +303,32 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 	}
 
 	chain := &Chain{
-		chainID:       cfg.ChainID,
-		minerAddress:  cfg.MinerAddress,
-		consensus:     genesisCfg.ConsensusParams,
-		state:         make(map[string]Account),
-		store:         cfg.Store,
-		blocksByHash:  make(map[string]*Block),
-		txIndex:       make(map[string]TxLocation),
-		addressIndex:  make(map[string][]AddressTxEntry),
-		canonicalWork: big.NewInt(0),
+		chainID:          cfg.ChainID,
+		minerAddress:     cfg.MinerAddress,
+		genesisAddress:   genesisCfg.GenesisMinerAddress,
+		genesisTimestamp: genesisCfg.Timestamp,
+		consensus:        genesisCfg.ConsensusParams,
+		monetaryPolicy:   genesisCfg.MonetaryPolicy,
+		state:            make(map[string]Account),
+		store:            cfg.Store,
+		blocksByHash:     make(map[string]*Block),
+		txIndex:          make(map[string]TxLocation),
+		addressIndex:     make(map[string][]AddressTxEntry),
+		canonicalWork:    big.NewInt(0),
+		// Initialize integrity reward system
+		integrityManager:     NewNodeIntegrityManager(),
+		integrityDistributor: NewIntegrityRewardDistributor(),
+		scoreCalculator:      NewScoreCalculator(),
+		// Initialize contract manager
+		contractManager: NewContractManager(),
+	}
+
+	// Initialize contracts at genesis
+	if err := chain.contractManager.InitializeContracts(
+		genesisCfg.CommunityFundAddress,
+		genesisCfg.IntegrityPoolAddress,
+	); err != nil {
+		return nil, fmt.Errorf("initialize contracts: %w", err)
 	}
 
 	// Initialize rules hash for consensus validation
@@ -457,7 +526,7 @@ func (c *Chain) AppendBlock(block *Block) error {
 	}
 
 	// Apply block to state
-	if err := applyBlockToState(c.consensus, c.state, block); err != nil {
+	if err := applyBlockToState(c.consensus, c.monetaryPolicy, c.state, block, c.genesisAddress, c.genesisTimestamp); err != nil {
 		return fmt.Errorf("apply block to state: %w", err)
 	}
 
@@ -764,9 +833,9 @@ func (c *Chain) validateCoinbaseLocked(block *Block) error {
 			}
 		}
 
-		// Calculate expected reward
-		policy := c.consensus.MonetaryPolicy
-		expectedReward := policy.BlockReward(block.Height) + policy.MinerFeeAmount(totalFees)
+		// Calculate expected reward (miner receives 96% of block reward)
+		policy := c.monetaryPolicy
+		expectedReward := policy.BlockReward(block.Height)*uint64(policy.MinerRewardShare)/100 + policy.MinerFeeAmount(totalFees)
 
 		if coinbase.Amount != expectedReward {
 			return fmt.Errorf("bad coinbase amount: expected %d got %d", expectedReward, coinbase.Amount)
@@ -1148,6 +1217,25 @@ func (c *Chain) Balance(addr string) (Account, bool) {
 	return acct, true
 }
 
+// HasTransaction checks if a transaction exists in the blockchain
+func (c *Chain) HasTransaction(txHash []byte) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	txHashStr := hex.EncodeToString(txHash)
+
+	// Search in all blocks
+	for _, block := range c.blocks {
+		for _, tx := range block.Transactions {
+			if hash, err := tx.SigningHash(); err == nil && hex.EncodeToString(hash) == txHashStr {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // addToIndexLocked adds block to indexes
 // Concurrency safety: assumes lock is held
 func (c *Chain) addToIndexLocked(block *Block) {
@@ -1252,7 +1340,7 @@ func (c *Chain) reindexAllAddressTxsLocked() {
 func (c *Chain) recomputeStateLocked() error {
 	c.state = make(map[string]Account)
 	for _, block := range c.blocks {
-		if err := applyBlockToState(c.consensus, c.state, block); err != nil {
+		if err := applyBlockToState(c.consensus, c.monetaryPolicy, c.state, block, c.genesisAddress, c.genesisTimestamp); err != nil {
 			return fmt.Errorf("apply block %d: %w", block.Height, err)
 		}
 	}
@@ -1552,7 +1640,7 @@ func (c *Chain) validateStateLocked() error {
 	recomputedState := make(map[string]Account)
 
 	for _, block := range c.blocks {
-		if err := applyBlockToState(c.consensus, recomputedState, block); err != nil {
+		if err := applyBlockToState(c.consensus, c.monetaryPolicy, recomputedState, block, c.genesisAddress, c.genesisTimestamp); err != nil {
 			return fmt.Errorf("block %d state application failed: %w", block.Height, err)
 		}
 	}
@@ -1693,6 +1781,25 @@ func (c *Chain) updateIndexesForBlock(block *Block, height uint64) {
 	}
 }
 
+// generateContractAddress generates a contract address matching the wallet address format
+// Format: NOGO + version(1) + hash(32) + checksum(4) = 78 characters
+func generateContractAddress(chainID uint64, timestamp int64, purpose string) string {
+	data := []byte(fmt.Sprintf("%d-%d-%s", chainID, timestamp, purpose))
+	hash := sha256.Sum256(data)
+
+	// Build address: version byte (0x00) + 32-byte hash
+	addressData := make([]byte, 1+32)
+	addressData[0] = 0x00 // Version byte
+	copy(addressData[1:], hash[:32])
+
+	// Calculate 4-byte checksum
+	checksumHash := sha256.Sum256(addressData)
+	addressData = append(addressData, checksumHash[:4]...)
+
+	// Encode to hex and add prefix
+	return "NOGO" + hex.EncodeToString(addressData)
+}
+
 // GetCanonicalBlocks returns a copy of all blocks on canonical chain
 // Concurrency safety: returns copy to prevent external modification
 func (c *Chain) GetCanonicalBlocks() []*Block {
@@ -1704,6 +1811,11 @@ func (c *Chain) GetCanonicalBlocks() []*Block {
 		result[i] = block
 	}
 	return result
+}
+
+// GetContractManager returns the contract manager
+func (c *Chain) GetContractManager() *ContractManager {
+	return c.contractManager
 }
 
 // GetBlockByHashHex returns block by hash hex string

@@ -151,7 +151,7 @@ func (n *Node) initializeComponents() error {
 	mpSize := config.DefaultMempoolMax
 	n.mempool = mempool.NewMempool(
 		mpSize,
-		1000,
+		core.MinFeePerByte,
 		24*time.Hour,
 		nil,
 		n.config.ChainID,

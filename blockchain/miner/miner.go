@@ -488,6 +488,8 @@ func (m *Miner) checkNetworkWork(ctx context.Context, block *core.Block) {
 	}
 
 	logf(colorBrightGreen, "✅ ", "Local chain has most work, continuing mining")
+	// Resume mining to ensure continuous block production
+	m.ResumeMining()
 }
 
 // getNetworkMaxWork gets the maximum work from all peers
@@ -582,12 +584,6 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 	}
 
 	logf(colorBrightGreen, "✅ ", "Block mined - height=%d, hash=%x", b.Height, b.Hash)
-
-	if b.TimestampUnix <= parentCopy.TimestampUnix {
-		oldTs := b.TimestampUnix
-		b.TimestampUnix = parentCopy.TimestampUnix + 1
-		logf(colorCyan, "ℹ️ ", "Adjusted timestamp from %d to %d", oldTs, b.TimestampUnix)
-	}
 
 	if err := validateBlockPoW(m.bc.GetConsensus(), b, parentCopy); err != nil {
 		logf(colorRed, "❌ ", "POW validation failed: %v", err)
@@ -742,8 +738,10 @@ func CreateCoinbaseTx(minerAddress string, height uint64, totalFees uint64, chai
 	}
 
 	blockReward := consensus.MonetaryPolicy.BlockReward(height)
+	// Miner receives 96% of block reward, fees are burned (miner gets 100% of fees as incentive)
+	minerReward := blockReward * uint64(consensus.MonetaryPolicy.MinerRewardShare) / 100
 	minerFee := consensus.MonetaryPolicy.MinerFeeAmount(totalFees)
-	totalAmount := blockReward + minerFee
+	totalAmount := minerReward + minerFee
 
 	if totalAmount > math.MaxUint64 {
 		return nil, errors.New("coinbase amount overflow")

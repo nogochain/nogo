@@ -501,8 +501,10 @@ func (m *Mempool) validateTransaction(tx core.Transaction, p config.ConsensusPar
 		return fmt.Errorf("signature verification: %w", err)
 	}
 
-	if tx.Fee < m.minFeeRate {
-		return fmt.Errorf("fee too low: %d < %d", tx.Fee, m.minFeeRate)
+	// Validate transaction fee using FeeChecker (consistent with mining validation)
+	feeChecker := core.NewFeeChecker(core.MinFee, core.MinFeePerByte)
+	if err := feeChecker.ValidateFee(&tx); err != nil {
+		return err
 	}
 
 	if tx.Nonce == 0 {
@@ -719,6 +721,50 @@ func (m *Mempool) GetStats() MempoolStats {
 		MaxFee:       maxFee,
 		MaxSize:      m.maxSize,
 		MaxTotalSize: m.maxTotalSize,
+	}
+}
+
+// GetFeeStats returns mempool fee statistics with percentiles
+func (m *Mempool) GetFeeStats() core.FeeStats {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if len(m.entries) == 0 {
+		return core.FeeStats{}
+	}
+
+	// Collect all fees
+	fees := make([]uint64, 0, len(m.entries))
+	var totalFees uint64
+	var maxFee uint64
+
+	for _, e := range m.entries {
+		fees = append(fees, e.tx.Fee)
+		totalFees += e.tx.Fee
+		if e.tx.Fee > maxFee {
+			maxFee = e.tx.Fee
+		}
+	}
+
+	// Sort fees for percentile calculation
+	sort.Slice(fees, func(i, j int) bool {
+		return fees[i] < fees[j]
+	})
+
+	minFee := fees[0]
+	avgFee := totalFees / uint64(len(fees))
+	medianFee := fees[len(fees)/2]
+	p25Fee := fees[len(fees)*25/100]
+	p75Fee := fees[len(fees)*75/100]
+
+	return core.FeeStats{
+		MinFee:    minFee,
+		MaxFee:    maxFee,
+		AvgFee:    avgFee,
+		MedianFee: medianFee,
+		P25Fee:    p25Fee,
+		P75Fee:    p75Fee,
+		TxCount:   len(m.entries),
 	}
 }
 

@@ -72,6 +72,18 @@ type MonetaryPolicy struct {
 	// MinerFeeShare is the percentage of transaction fees allocated to miner (0-100)
 	MinerFeeShare uint8 `json:"minerFeeShare"`
 
+	// MinerRewardShare is the percentage of block reward allocated to miner (0-100)
+	MinerRewardShare uint8 `json:"minerRewardShare"`
+
+	// CommunityFundShare is the percentage of block reward for community development (0-100)
+	CommunityFundShare uint8 `json:"communityFundShare"`
+
+	// GenesisShare is the percentage of block reward for genesis address (0-100)
+	GenesisShare uint8 `json:"genesisShare"`
+
+	// IntegrityPoolShare is the percentage of block reward for integrity node rewards (0-100)
+	IntegrityPoolShare uint8 `json:"integrityPoolShare"`
+
 	// TailEmission is a legacy field kept for compatibility
 	TailEmission uint64 `json:"tailEmission"`
 }

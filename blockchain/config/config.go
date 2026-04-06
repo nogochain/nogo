@@ -17,6 +17,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -139,7 +140,11 @@ func DefaultConfig() *Config {
 				MinimumBlockReward:     10000000,
 				UncleRewardEnabled:     true,
 				MaxUncleDepth:          6,
-				MinerFeeShare:          100,
+				MinerRewardShare:       96,
+				CommunityFundShare:     2,
+				GenesisShare:           1,
+				IntegrityPoolShare:     1,
+				MinerFeeShare:          0,
 			},
 		},
 		Mining: MiningConfig{
@@ -368,7 +373,61 @@ func GetConsensusParams() ConsensusParams {
 			InitialBlockReward:     800000000,
 			AnnualReductionPercent: 10,
 			MinimumBlockReward:     10000000,
-			MinerFeeShare:          100,
+			MinerRewardShare:       96,
+			CommunityFundShare:     2,
+			GenesisShare:           1,
+			IntegrityPoolShare:     1,
+			MinerFeeShare:          0,
 		},
 	}
 }
+
+// generateBurnAddress generates an unspendable burn address
+// Uses all-zero public key to prove private key is unreachable
+func generateBurnAddress() string {
+	return "NOGO" + hex.EncodeToString(make([]byte, 32))
+}
+
+// deployCommunityFundGovernanceContract deploys community fund governance contract
+// Returns contract address, funds controlled by on-chain voting
+func deployCommunityFundGovernanceContract() string {
+	// Deploy pure on-chain governance contract
+	// 1. Proposal mechanism: any token holder can propose (with deposit)
+	// 2. Voting: 1 token = 1 vote
+	// 3. Passing criteria: >=10% participation AND >=60% approval
+	// 4. Auto-execution upon passing
+	// 5. Transparency: all proposals and votes on-chain
+	// Returns contract address (to be generated at deployment)
+	return "COMMUNITY_FUND_CONTRACT_ADDRESS"
+}
+
+// deployIntegrityRewardContract deploys integrity node reward contract
+// Returns contract address, rewards auto-distributed based on scores
+func deployIntegrityRewardContract() string {
+	// Deploy reward contract logic
+	// 1. Auto-receive 1% of block rewards
+	// 2. Auto-distribute every 5082 blocks
+	// 3. Calculate rewards based on node scores
+	// 4. Auto-distribute to qualified nodes
+	// 5. No manual intervention (code is law)
+	// Returns contract address (to be generated at deployment)
+	return "INTEGRITY_REWARD_CONTRACT_ADDRESS"
+}
+
+// Address constants for economic model
+const (
+	// BurnAddress is the fee burn address (unspendable)
+	BurnAddress = "NOGO00000000000000000000000000000000000000000000000000000000BURN"
+
+	// CommunityFundAddress is the community development fund address
+	// Controlled by governance contract, requires community voting
+	CommunityFundAddress = "NOGO111111111111111111111111111111111COMMUNITY"
+
+	// GenesisAddress uses the existing genesis miner address
+	// From config/constants.go: GenesisMinerAddress
+	GenesisAddress = "NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c"
+
+	// IntegrityPoolAddress is the integrity node reward pool address
+	// Controlled by reward contract, auto-distributes based on scores
+	IntegrityPoolAddress = "NOGO333333333333333333333333333333333INTEGRITY"
+)

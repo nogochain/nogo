@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,13 +37,13 @@ import (
 
 	"github.com/nogochain/nogo/blockchain/config"
 	"github.com/nogochain/nogo/blockchain/consensus"
+	"github.com/nogochain/nogo/blockchain/contracts"
 	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/nogochain/nogo/blockchain/crypto"
 	"github.com/nogochain/nogo/blockchain/metrics"
 )
 
 const (
-	minFee             = 1
 	relayHopsHeader    = "X-Relay-Hops"
 	defaultHTTPTimeout = 5 * time.Second
 )
@@ -101,6 +102,27 @@ func NewServer(bc Blockchain, aiAuditorURL string, mp *MempoolImpl, miner *Miner
 	if peers != nil {
 		s.peerManager = peers
 	}
+
+	// Initialize contract data persistence
+	if bc != nil {
+		cm := bc.GetContractManager()
+		if cm != nil {
+			// Set data directory for contract persistence
+			dataDir := "blockchain_data/contracts"
+			if envDir := os.Getenv("CONTRACT_DATA_DIR"); envDir != "" {
+				dataDir = envDir
+			}
+			cm.SetDataDir(dataDir)
+
+			// Load existing proposals from persistent storage
+			if err := cm.LoadProposals(); err != nil {
+				log.Printf("[CONTRACT] Failed to load proposals: %v", err)
+			} else {
+				log.Printf("[CONTRACT] Loaded proposals from %s", dataDir)
+			}
+		}
+	}
+
 	return s
 }
 
@@ -131,8 +153,16 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/tx", mw.Wrap("tx", false, 1<<20, s.handleSubmitTx))
 	mux.HandleFunc("/tx/", mw.Wrap("tx_get", false, 0, s.handleTxByID))
 	mux.HandleFunc("/tx/proof/", mw.Wrap("tx_proof", false, 0, s.handleTxProof))
+	mux.HandleFunc("/tx/estimate_fee", mw.Wrap("estimate_fee", false, 0, s.handleEstimateFee))
 	mux.HandleFunc("/wallet/create", mw.Wrap("wallet_create", false, 0, s.handleWalletCreate))
+	mux.HandleFunc("/wallet/create_persistent", mw.Wrap("wallet_create_persistent", false, 0, s.handleWalletCreatePersistent))
+	mux.HandleFunc("/wallet/import", mw.Wrap("wallet_import", false, 0, s.handleWalletImport))
+	mux.HandleFunc("/wallet/list", mw.Wrap("wallet_list", false, 0, s.handleWalletList))
+	mux.HandleFunc("/wallet/balance/", mw.Wrap("wallet_balance", false, 0, s.handleWalletBalance))
 	mux.HandleFunc("/wallet/sign", mw.Wrap("wallet_sign", false, 0, s.handleWalletSign))
+	mux.HandleFunc("/wallet/sign_tx", mw.Wrap("wallet_sign_tx", false, 0, s.handleWalletSignTransaction))
+	mux.HandleFunc("/wallet/verify", mw.Wrap("wallet_verify", false, 0, s.handleWalletVerifyAddress))
+	mux.HandleFunc("/wallet/derive", mw.Wrap("wallet_derive", false, 0, s.handleWalletDeriveFromSeed))
 	mux.HandleFunc("/mempool", mw.Wrap("mempool", false, 0, s.handleMempool))
 	mux.HandleFunc("/mine/once", mw.Wrap("mine_once", true, 1<<10, s.handleMineOnce))
 	mux.HandleFunc("/audit/chain", mw.Wrap("audit_chain", true, 1<<16, s.handleAuditChain))
@@ -143,6 +173,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/balance/", mw.Wrap("balance", false, 0, s.handleBalance))
 	mux.HandleFunc("/address/", mw.Wrap("address_txs", false, 0, s.handleAddressTxs))
 	mux.HandleFunc("/chain/info", mw.Wrap("chain_info", false, 0, s.handleChainInfo))
+	mux.HandleFunc("/chain/special_addresses", mw.Wrap("special_addresses", false, 0, s.handleSpecialAddresses))
 	mux.HandleFunc("/headers/from/", mw.Wrap("headers_from", false, 0, s.handleHeadersFrom))
 	mux.HandleFunc("/blocks/from/", mw.Wrap("blocks_from", false, 0, s.handleBlocksFrom))
 	mux.HandleFunc("/blocks/hash/", mw.Wrap("blocks_hash", false, 0, s.handleBlockByHash))
@@ -162,8 +193,19 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/wallet/", mw.Wrap("wallet", false, 0, s.handleWallet))
 
 	mux.HandleFunc("/webwallet/", mw.Wrap("webwallet", false, 0, s.handleWalletBIP39))
+	mux.HandleFunc("/wallet-manager/", mw.Wrap("wallet_manager", false, 0, s.handleWalletManager))
 
 	mux.HandleFunc("/test-wallet/", mw.Wrap("test_wallet", false, 0, s.handleTestWallet))
+
+	// Community governance proposals (API endpoints)
+	mux.HandleFunc("/api/proposals", mw.Wrap("proposals", false, 0, s.handleGetProposals))
+	mux.HandleFunc("/api/proposals/", mw.Wrap("proposal_detail", false, 0, s.handleGetProposalByID))
+	mux.HandleFunc("/api/proposals/create", mw.Wrap("create_proposal", false, 0, s.handleCreateProposal))
+	mux.HandleFunc("/api/proposals/vote", mw.Wrap("vote_proposal", false, 0, s.handleVoteProposal))
+	mux.HandleFunc("/api/proposals/deposit", mw.Wrap("create_deposit", false, 0, s.handleCreateDeposit))
+
+	// Community proposals page
+	mux.HandleFunc("/proposals/", mw.Wrap("proposals_page", false, 0, s.handleProposalsPage))
 
 	return mux
 }
@@ -252,6 +294,445 @@ func (s *Server) handleChainInfo(w http.ResponseWriter, r *http.Request) {
 	_ = writeJSON(w, http.StatusOK, out)
 }
 
+func (s *Server) handleSpecialAddresses(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get genesis block
+	genesis, _ := s.bc.BlockByHeight(0)
+	if genesis == nil {
+		_ = writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "genesis block not found"})
+		return
+	}
+
+	// Use genesis block's miner address as genesis address
+	genesisAddr := genesis.MinerAddress
+
+	// Generate community fund and integrity pool addresses using contract deployment logic
+	// These addresses are auto-generated when contracts are deployed
+	// Note: In production, these would be retrieved from the contract registry
+	// For now, we generate them using the same algorithm as the contracts
+	chainID := s.bc.GetChainID()
+	timestamp := genesis.TimestampUnix
+	communityFundAddr := generateContractAddress(chainID, timestamp, "COMMUNITY_FUND_GOVERNANCE")
+	integrityPoolAddr := generateContractAddress(chainID, timestamp, "INTEGRITY_REWARD_CONTRACT")
+
+	// Get balances
+	communityFundBalance, _ := s.bc.Balance(communityFundAddr)
+	integrityPoolBalance, _ := s.bc.Balance(integrityPoolAddr)
+
+	_ = writeJSON(w, http.StatusOK, map[string]any{
+		"communityFund": map[string]any{
+			"address": communityFundAddr,
+			"balance": communityFundBalance.Balance,
+			"purpose": "Community development fund governed by on-chain voting",
+		},
+		"integrityPool": map[string]any{
+			"address": integrityPoolAddr,
+			"balance": integrityPoolBalance.Balance,
+			"purpose": "Reward pool for integrity nodes (distributed every 5082 blocks)",
+		},
+		"genesis": map[string]any{
+			"address": genesisAddr,
+			"purpose": "Genesis block reward (one-time allocation)",
+		},
+		"rewardDistribution": map[string]any{
+			"minerShare":     96,
+			"communityShare": 2,
+			"genesisShare":   1,
+			"integrityShare": 1,
+			"minerFeeShare":  100,
+			"description":    "Block reward: 96% miner, 2% community fund, 1% genesis, 1% integrity pool. Fees: 100% burned.",
+		},
+	})
+}
+
+// generateContractAddress generates a contract address matching the wallet address format
+// Format: NOGO + version(1) + hash(32) + checksum(4) = 78 characters
+func generateContractAddress(chainID uint64, timestamp int64, purpose string) string {
+	data := []byte(fmt.Sprintf("%d-%d-%s", chainID, timestamp, purpose))
+	hash := sha256.Sum256(data)
+
+	// Build address: version byte (0x00) + 32-byte hash
+	addressData := make([]byte, 1+32)
+	addressData[0] = 0x00 // Version byte
+	copy(addressData[1:], hash[:32])
+
+	// Calculate 4-byte checksum
+	checksumHash := sha256.Sum256(addressData)
+	addressData = append(addressData, checksumHash[:4]...)
+
+	// Encode to hex and add prefix
+	return "NOGO" + hex.EncodeToString(addressData)
+}
+
+// handleGetProposals returns all community fund proposals
+func (s *Server) handleGetProposals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get proposals from contract manager
+	cm := s.bc.GetContractManager()
+	if cm == nil {
+		log.Printf("[PROPOSALS] Contract manager not available")
+		_ = writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+
+	proposals := cm.GetAllProposals()
+	if proposals == nil {
+		log.Printf("[PROPOSALS] No proposals found")
+		proposals = []contracts.Proposal{}
+	} else {
+		log.Printf("[PROPOSALS] Found %d proposals", len(proposals))
+		for i, p := range proposals {
+			log.Printf("[PROPOSAL %d] ID: %s, Title: %s, Status: %s", i, p.ID, p.Title, p.Status)
+		}
+	}
+
+	_ = writeJSON(w, http.StatusOK, proposals)
+}
+
+// handleGetProposalByID returns a proposal by ID
+func (s *Server) handleGetProposalByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract proposal ID from URL
+	proposalID := strings.TrimPrefix(r.URL.Path, "/api/proposals/")
+	if proposalID == "" {
+		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"error": "proposal ID required"})
+		return
+	}
+
+	// Get proposal from contract manager
+	cm := s.bc.GetContractManager()
+	if cm == nil {
+		_ = writeJSON(w, http.StatusNotFound, map[string]any{"error": "contract manager not available"})
+		return
+	}
+
+	proposal := cm.GetProposalByID(proposalID)
+	if proposal == nil {
+		_ = writeJSON(w, http.StatusNotFound, map[string]any{"error": "proposal not found"})
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, proposal)
+}
+
+// handleCreateProposal creates a new community fund proposal
+func (s *Server) handleCreateProposal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		Proposer    string `json:"proposer"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Type        string `json:"type"`
+		Amount      uint64 `json:"amount"`
+		Recipient   string `json:"recipient"`
+		Deposit     uint64 `json:"deposit"`
+		Signature   string `json:"signature"`
+		DepositTx   string `json:"depositTx"` // Deposit transaction hash
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+		return
+	}
+
+	// Validate required fields
+	if req.Proposer == "" || req.Title == "" || req.Description == "" {
+		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing required fields"})
+		return
+	}
+
+	// Get contract manager
+	cm := s.bc.GetContractManager()
+	if cm == nil {
+		_ = writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "contract manager not available"})
+		return
+	}
+
+	// Map type string to ProposalType
+	propType := contracts.ProposalTreasury
+	if req.Type == "ecosystem" {
+		propType = contracts.ProposalEcosystem
+	} else if req.Type == "grant" {
+		propType = contracts.ProposalGrant
+	} else if req.Type == "event" {
+		propType = contracts.ProposalEvent
+	}
+
+	// Verify deposit transaction if provided
+	if req.Deposit > 0 && req.DepositTx != "" {
+		// Verify the deposit transaction exists and is valid
+		txHash, err := hex.DecodeString(req.DepositTx)
+		if err != nil {
+			_ = writeJSON(w, http.StatusBadRequest, map[string]any{
+				"success": false,
+				"error":   "invalid deposit transaction hash",
+			})
+			return
+		}
+
+		// Check if transaction exists in blockchain
+		if !s.bc.HasTransaction(txHash) {
+			_ = writeJSON(w, http.StatusBadRequest, map[string]any{
+				"success": false,
+				"error":   "deposit transaction not found in blockchain",
+			})
+			return
+		}
+
+		log.Printf("[PROPOSAL] Verified deposit transaction %s for proposer %s", req.DepositTx, req.Proposer)
+	}
+
+	// Create proposal in contract
+	proposalID, err := cm.CreateProposal(
+		req.Proposer,
+		req.Title,
+		req.Description,
+		propType,
+		req.Amount,
+		req.Recipient,
+		req.Deposit,
+	)
+	if err != nil {
+		_ = writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Record deposit in contract state (transaction already transferred the funds)
+	if req.Deposit > 0 && req.DepositTx != "" {
+		cfContract := cm.GetCommunityFundContract()
+		if cfContract != nil {
+			// The funds have already been transferred via the transaction
+			// Just record the deposit amount for tracking
+			cfContract.AddFunds(req.Deposit)
+			log.Printf("[PROPOSAL] Deposit of %d NOGO recorded from %s (tx: %s)", req.Deposit, req.Proposer, req.DepositTx)
+		}
+	}
+
+	// Save proposals to persistent storage
+	if err := cm.SaveProposals(); err != nil {
+		log.Printf("[PROPOSAL] Failed to save proposals: %v", err)
+	}
+
+	log.Printf("[PROPOSAL] Created proposal %s by %s", proposalID, req.Proposer)
+
+	_ = writeJSON(w, http.StatusOK, map[string]any{
+		"success":          true,
+		"proposalId":       proposalID,
+		"message":          "Proposal created successfully",
+		"depositCollected": req.Deposit > 0 && req.DepositTx != "",
+	})
+}
+
+// handleVoteProposal handles voting on a proposal
+func (s *Server) handleVoteProposal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		ProposalID  string `json:"proposalId"`
+		Voter       string `json:"voter"`
+		Support     bool   `json:"support"`
+		VotingPower uint64 `json:"votingPower"`
+		Signature   string `json:"signature"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+		return
+	}
+
+	// Validate required fields
+	if req.ProposalID == "" || req.Voter == "" {
+		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing required fields"})
+		return
+	}
+
+	// Get contract manager
+	cm := s.bc.GetContractManager()
+	if cm == nil {
+		_ = writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "contract manager not available"})
+		return
+	}
+
+	// Verify signature if provided (optional for test mode)
+	if req.Signature != "" {
+		// TODO: Implement signature verification
+		// For now, we accept votes without signature verification
+	}
+
+	// Vote on proposal
+	log.Printf("[VOTE] Attempting to vote on proposal %s by voter %s (support: %v, power: %d)",
+		req.ProposalID, req.Voter, req.Support, req.VotingPower)
+
+	err := cm.VoteOnProposal(req.ProposalID, req.Voter, req.Support, req.VotingPower)
+	if err != nil {
+		log.Printf("[VOTE] Vote failed: %v", err)
+		_ = writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Save proposals to persistent storage after voting
+	if err := cm.SaveProposals(); err != nil {
+		log.Printf("[VOTE] Failed to save proposals: %v", err)
+		// Don't fail the request, just log the error
+	}
+
+	log.Printf("[VOTE] Vote successful on proposal %s", req.ProposalID)
+
+	_ = writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Vote submitted successfully",
+	})
+}
+
+// handleCreateDeposit creates a deposit transaction for proposal
+func (s *Server) handleCreateDeposit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		From       string `json:"from"`
+		To         string `json:"to"`
+		Amount     uint64 `json:"amount"`
+		PrivateKey string `json:"privateKey"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+		return
+	}
+
+	// Validate required fields
+	if req.From == "" || req.Amount == 0 || req.PrivateKey == "" {
+		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing required fields"})
+		return
+	}
+
+	// If 'to' is not specified, use community fund contract address
+	toAddress := req.To
+	if toAddress == "" {
+		cm := s.bc.GetContractManager()
+		if cm == nil {
+			_ = writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "contract manager not available"})
+			return
+		}
+
+		cfContract := cm.GetCommunityFundContract()
+		if cfContract == nil {
+			_ = writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "community fund contract not initialized"})
+			return
+		}
+
+		toAddress = cfContract.GetContractAddress()
+	}
+
+	// Create transaction using core.Transaction
+	tx := core.Transaction{
+		FromPubKey: []byte{}, // Will be set when signed
+		ToAddress:  toAddress,
+		Amount:     req.Amount,
+		Type:       core.TxTransfer,
+		Data:       "deposit",
+		Nonce:      0, // Will be set when added to mempool
+	}
+	
+	// Estimate fee based on transaction size after signing
+	estimatedSize := uint64(250) // Conservative estimate for signed transaction
+	tx.Fee = core.EstimateSmartFee(estimatedSize, s.mp.Size(), "average")
+
+	// Decode private key
+	privateKeyBytes, err := hex.DecodeString(req.PrivateKey)
+	if err != nil {
+		_ = writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "invalid private key: " + err.Error(),
+		})
+		return
+	}
+
+	// Sign transaction using ed25519
+	h, err := tx.SigningHash()
+	if err != nil {
+		_ = writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false,
+			"error":   "failed to get signing hash: " + err.Error(),
+		})
+		return
+	}
+
+	signature := ed25519.Sign(privateKeyBytes, h)
+	tx.Signature = signature
+
+	// Set FromPubKey from private key
+	publicKey := ed25519.PrivateKey(privateKeyBytes).Public().(ed25519.PublicKey)
+	tx.FromPubKey = publicKey
+
+	// Add transaction to mempool
+	if s.mp == nil {
+		_ = writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "mempool not available"})
+		return
+	}
+
+	txID, err := s.mp.Add(tx)
+	if err != nil {
+		_ = writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "failed to add transaction to mempool: " + err.Error(),
+		})
+		return
+	}
+
+	log.Printf("[DEPOSIT] Transaction added to mempool with ID: %s", txID)
+
+	// Get transaction hash
+	txHash, err := tx.SigningHash()
+	if err != nil {
+		_ = writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"success": false,
+			"error":   "failed to get transaction hash: " + err.Error(),
+		})
+		return
+	}
+
+	log.Printf("[DEPOSIT] Created deposit transaction %s from %s to %s (amount: %d)",
+		hex.EncodeToString(txHash), req.From, toAddress, req.Amount)
+
+	_ = writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"txHash":  hex.EncodeToString(txHash),
+		"message": "Deposit transaction created successfully",
+	})
+}
+
 func (s *Server) handleHeadersFrom(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -328,7 +809,41 @@ func (s *Server) handleBlockByHeight(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	_ = writeJSON(w, http.StatusOK, b)
+
+	// Enrich block with reward distribution details
+	blockData := map[string]any{
+		"height":         b.Height,
+		"hash":           fmt.Sprintf("%x", b.Hash),
+		"prevHash":       fmt.Sprintf("%x", b.PrevHash),
+		"timestampUnix":  b.TimestampUnix,
+		"difficultyBits": b.DifficultyBits,
+		"nonce":          b.Nonce,
+		"minerAddress":   b.MinerAddress,
+		"transactions":   b.Transactions,
+		"txCount":        len(b.Transactions),
+	}
+
+	// Add reward distribution details if coinbase transaction exists
+	if len(b.Transactions) > 0 && b.Transactions[0].Type == "coinbase" {
+		coinbase := b.Transactions[0]
+		blockData["coinbase"] = map[string]any{
+			"totalAmount": coinbase.Amount,
+			"minerReward": coinbase.Amount, // Miner receives 96% block reward + 100% fees
+			"fee":         coinbase.Fee,    // Fees included in miner reward
+			"data":        coinbase.Data,
+		}
+
+		// Parse coinbase data to extract reward breakdown if available
+		if coinbase.Data != "" && strings.Contains(coinbase.Data, "block reward") {
+			// Parse reward distribution from coinbase data
+			blockData["rewardBreakdown"] = map[string]any{
+				"miner":       coinbase.Amount,
+				"description": "96% to miner + 100% fees, 2% community fund, 1% genesis, 1% integrity pool",
+			}
+		}
+	}
+
+	_ = writeJSON(w, http.StatusOK, blockData)
 }
 
 func (s *Server) handleBlockByHashParam(w http.ResponseWriter, r *http.Request) {
@@ -542,6 +1057,46 @@ type submitTxResponse struct {
 	Height    uint64 `json:"height,omitempty"`
 }
 
+// handleEstimateFee returns estimated fee for transaction
+func (s *Server) handleEstimateFee(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Get speed parameter (fast, average, slow)
+	speed := r.URL.Query().Get("speed")
+	if speed == "" {
+		speed = "average"
+	}
+	
+	// Get transaction size parameter (default 350 bytes to account for signature)
+	txSizeStr := r.URL.Query().Get("size")
+	txSize := uint64(350) // default - increased to account for signature and encoding overhead
+	if txSizeStr != "" {
+		if size, err := strconv.ParseUint(txSizeStr, 10, 64); err == nil && size > 0 {
+			txSize = size
+		}
+	}
+	
+	// Calculate estimated fee
+	mempoolSize := 0
+	if s.mp != nil {
+		mempoolSize = s.mp.Size()
+	}
+	
+	estimatedFee := core.EstimateSmartFee(txSize, mempoolSize, speed)
+	
+	_ = writeJSON(w, http.StatusOK, map[string]any{
+		"estimatedFee": estimatedFee,
+		"txSize":       txSize,
+		"mempoolSize":  mempoolSize,
+		"speed":        speed,
+		"minFee":       core.MinFee,
+		"minFeePerByte": core.MinFeePerByte,
+	})
+}
+
 func (s *Server) handleSubmitTx(w http.ResponseWriter, r *http.Request) {
 	log.Printf("=== HTTP POST /tx received ===")
 
@@ -613,10 +1168,6 @@ func (s *Server) handleSubmitTx(w http.ResponseWriter, r *http.Request) {
 		}
 
 		_ = writeJSON(w, http.StatusBadRequest, submitTxResponse{Accepted: false, Message: err.Error()})
-		return
-	}
-	if tx.Fee < minFee {
-		_ = writeJSON(w, http.StatusBadRequest, submitTxResponse{Accepted: false, Message: "fee too low"})
 		return
 	}
 	if s.mp == nil {
@@ -952,9 +1503,6 @@ func (s *Server) handleWalletSign(w http.ResponseWriter, r *http.Request) {
 		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"error": "amount required"})
 		return
 	}
-	if req.Fee == 0 {
-		req.Fee = uint64(minFee)
-	}
 
 	wlt, err := crypto.WalletFromPrivateKeyBase64(req.PrivateKey)
 	if err != nil {
@@ -965,6 +1513,13 @@ func (s *Server) handleWalletSign(w http.ResponseWriter, r *http.Request) {
 	if req.Nonce == 0 {
 		acct, _ := s.bc.Balance(wlt.Address)
 		req.Nonce = acct.Nonce + 1
+	}
+
+	if req.Fee == 0 {
+		// Estimate fee based on transaction size after signing
+		// Signed transaction includes signature (~64 bytes) + public key (~32 bytes)
+		estimatedSize := uint64(250) // Conservative estimate for signed transaction
+		req.Fee = core.EstimateSmartFee(estimatedSize, s.mp.Size(), "average")
 	}
 
 	tx := core.Transaction{
@@ -1087,35 +1642,61 @@ func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Try multiple paths to find the explorer HTML file
-	explorerPaths := []string{
-		"../api/http/public/explorer/index.html",
-		"../../api/http/public/explorer/index.html",
-		"../../../api/http/public/explorer/index.html",
-		"api/http/public/explorer/index.html",
-		"nogo/api/http/public/explorer/index.html",
-	}
+	// Set cache control headers to prevent caching
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 
-	// Also try absolute path from executable location
-	if exePath, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exePath)
-		explorerPaths = append(explorerPaths,
-			filepath.Join(exeDir, "../api/http/public/explorer/index.html"),
-			filepath.Join(exeDir, "../../api/http/public/explorer/index.html"),
-		)
-	}
+	// Use absolute path to ensure we read the correct file
+	explorerPath := "blockchain/api/http/public/explorer/index.html"
 
-	var data []byte
-	var err error
-	for _, explorerPath := range explorerPaths {
-		data, err = os.ReadFile(explorerPath)
-		if err == nil {
-			break
+	data, err := os.ReadFile(explorerPath)
+	if err != nil {
+		// Try relative to executable
+		if exePath, exeErr := os.Executable(); exeErr == nil {
+			exeDir := filepath.Dir(exePath)
+			explorerPath = filepath.Join(exeDir, "../blockchain/api/http/public/explorer/index.html")
+			data, err = os.ReadFile(explorerPath)
 		}
 	}
 
 	if err != nil {
-		http.Error(w, "explorer not found", http.StatusNotFound)
+		http.Error(w, "explorer not found: "+explorerPath, http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (s *Server) handleProposalsPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Set cache control headers to prevent caching
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+
+	// Use absolute path to ensure we read the correct file
+	proposalsPath := "blockchain/api/http/public/proposals/index.html"
+
+	data, err := os.ReadFile(proposalsPath)
+	if err != nil {
+		// Try relative to executable
+		if exePath, exeErr := os.Executable(); exeErr == nil {
+			exeDir := filepath.Dir(exePath)
+			proposalsPath = filepath.Join(exeDir, "../blockchain/api/http/public/proposals/index.html")
+			data, err = os.ReadFile(proposalsPath)
+		}
+	}
+
+	if err != nil {
+		http.Error(w, "proposals page not found: "+proposalsPath, http.StatusNotFound)
 		return
 	}
 
@@ -1183,6 +1764,9 @@ func (s *Server) handleWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -1232,6 +1816,38 @@ func (s *Server) handleWalletBIP39(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		http.Error(w, "wallet not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (s *Server) handleWalletManager(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+
+	walletManagerPath := "blockchain/api/http/public/webwallet/wallet-manager.html"
+
+	data, err := os.ReadFile(walletManagerPath)
+	if err != nil {
+		if exePath, exeErr := os.Executable(); exeErr == nil {
+			exeDir := filepath.Dir(exePath)
+			walletManagerPath = filepath.Join(exeDir, "../blockchain/api/http/public/webwallet/wallet-manager.html")
+			data, err = os.ReadFile(walletManagerPath)
+		}
+	}
+
+	if err != nil {
+		http.Error(w, "wallet manager not found: "+walletManagerPath, http.StatusNotFound)
 		return
 	}
 

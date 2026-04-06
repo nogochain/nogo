@@ -60,6 +60,10 @@ type BlockchainInterface interface {
 	TxByID(txid string) (*core.Transaction, *core.TxLocation, bool)
 	AddressTxs(addr string, limit, cursor int) ([]core.AddressTxEntry, int, bool)
 	Balance(addr string) (core.Account, bool)
+	HasTransaction(txHash []byte) bool
+
+	// Contract management
+	GetContractManager() *core.ContractManager
 
 	// Sync loop coordination
 	SyncLoop() SyncLoopInterface

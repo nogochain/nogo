@@ -116,8 +116,10 @@ const (
 	difficultyAdjustmentInterval = uint64(100)
 	// powVerifyProbabilityThreshold is the threshold for PoW verification
 	powVerifyProbabilityThreshold = uint8(26)
-	// minFee is the minimum transaction fee in wei
-	minFee = uint64(1)
+	// MinFee is the minimum transaction fee in wei (increased from 1 to 10000)
+	MinFee = uint64(10000)
+	// MinFeePerByte is the fee per byte in wei
+	MinFeePerByte = uint64(100)
 	// MaxBlockTimeDriftSec is the maximum allowed block time drift in seconds
 	MaxBlockTimeDriftSec = 7200 // 2 hours
 	// DifficultyTolerancePercent is the tolerance percentage for difficulty adjustment
@@ -499,9 +501,9 @@ func (t Transaction) GetNonce() uint64 {
 // GetTimestamp returns the transaction timestamp
 // Design: In NogoChain, transactions do not carry explicit timestamps.
 // Transaction ordering is determined by:
-//   1. Block height (transactions are ordered by inclusion height)
-//   2. Transaction index within block (deterministic ordering)
-//   3. Nonce (per-account sequential ordering)
+//  1. Block height (transactions are ordered by inclusion height)
+//  2. Transaction index within block (deterministic ordering)
+//  3. Nonce (per-account sequential ordering)
 //
 // This design choice:
 // - Reduces transaction size (no timestamp field)
@@ -509,8 +511,9 @@ func (t Transaction) GetNonce() uint64 {
 // - Simplifies consensus (no timestamp validation rules)
 //
 // If timestamp is needed, use the parent block's timestamp:
-//   block := chain.GetBlockByTxID(txid)
-//   timestamp := block.TimestampUnix
+//
+//	block := chain.GetBlockByTxID(txid)
+//	timestamp := block.TimestampUnix
 func (t Transaction) GetTimestamp() int64 {
 	// Transactions don't have timestamps - return 0 to indicate "not available"
 	// Use block timestamp for temporal ordering instead
@@ -595,11 +598,11 @@ func (t Transaction) verifyTransfer() error {
 func (b *Block) MarshalJSON() ([]byte, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	
+
 	// Build transaction list
 	txs := make([]Transaction, len(b.Transactions))
 	copy(txs, b.Transactions)
-	
+
 	// Build response with all fields exposed
 	response := map[string]interface{}{
 		"version":        b.Version,
@@ -614,7 +617,7 @@ func (b *Block) MarshalJSON() ([]byte, error) {
 		"coinbaseTx":     b.CoinbaseTx,
 		"totalWork":      b.TotalWork,
 	}
-	
+
 	return json.Marshal(response)
 }
 
@@ -748,6 +751,15 @@ type MonetaryPolicy struct {
 	MinerFeeShare          uint8  `json:"minerFeeShare"`
 	UncleRewardEnabled     bool   `json:"uncleRewardEnabled"`
 	MaxUncleDepth          uint8  `json:"maxUncleDepth"`
+	// Reward distribution shares (must sum to 100)
+	MinerRewardShare   uint8 `json:"minerRewardShare"`
+	CommunityFundShare uint8 `json:"communityFundShare"`
+	GenesisShare       uint8 `json:"genesisShare"`
+	IntegrityPoolShare uint8 `json:"integrityPoolShare"`
+	// Legacy fields for compatibility
+	HalvingInterval uint64 `json:"halvingInterval"`
+	MaxSupply       uint64 `json:"maxSupply"`
+	TailEmission    uint64 `json:"tailEmission"`
 }
 
 // BlockReward calculates the block reward for a given height

@@ -27,29 +27,29 @@ const (
 
 // ForkEvent represents a fork detection event
 type ForkEvent struct {
-	Type           ForkType
-	DetectedAt     time.Time
-	LocalHeight    uint64
-	LocalHash      string
-	RemoteHeight   uint64
-	RemoteHash     string
-	Depth          uint64
-	LocalWork      *big.Int
-	RemoteWork     *big.Int
-	PeerID         string
-	AlertLevel     string
+	Type         ForkType
+	DetectedAt   time.Time
+	LocalHeight  uint64
+	LocalHash    string
+	RemoteHeight uint64
+	RemoteHash   string
+	Depth        uint64
+	LocalWork    *big.Int
+	RemoteWork   *big.Int
+	PeerID       string
+	AlertLevel   string
 }
 
 // ForkDetector monitors chain state for forks
 // Production-grade: real-time fork detection with alerting
 // Thread-safe: uses mutex for event management
 type ForkDetector struct {
-	mu               sync.RWMutex
-	events           []ForkEvent
-	maxEvents        int
-	alertCallback    func(ForkEvent)
-	lastAlert        time.Time
-	alertCooldown    time.Duration
+	mu                sync.RWMutex
+	events            []ForkEvent
+	maxEvents         int
+	alertCallback     func(ForkEvent)
+	lastAlert         time.Time
+	alertCooldown     time.Duration
 	deepForkThreshold uint64
 }
 
@@ -219,13 +219,13 @@ func (fd *ForkDetector) GetForkStats() map[string]interface{} {
 	defer fd.mu.RUnlock()
 
 	stats := map[string]interface{}{
-		"total_forks":        len(fd.events),
-		"persistent_forks":   0,
-		"deep_forks":         0,
-		"last_fork_time":     nil,
-		"max_fork_depth":     0,
-		"avg_fork_depth":     0.0,
-		"critical_alerts":    0,
+		"total_forks":      len(fd.events),
+		"persistent_forks": 0,
+		"deep_forks":       0,
+		"last_fork_time":   nil,
+		"max_fork_depth":   0,
+		"avg_fork_depth":   0.0,
+		"critical_alerts":  0,
 	}
 
 	if len(fd.events) == 0 {

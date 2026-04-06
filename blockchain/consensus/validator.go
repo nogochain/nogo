@@ -353,7 +353,8 @@ func (v *BlockValidator) validateCoinbaseEconomics(block *Block) error {
 	}
 
 	policy := v.consensus.MonetaryPolicy
-	expectedAmount := policy.BlockReward(block.Height) + policy.MinerFeeAmount(totalFees)
+	// Miner receives 96% of block reward + 100% of fees (fees are burned)
+	expectedAmount := policy.BlockReward(block.Height) * uint64(policy.MinerRewardShare) / 100 + policy.MinerFeeAmount(totalFees)
 
 	coinbase := block.Transactions[0]
 	if coinbase.ToAddress != block.MinerAddress {
@@ -592,7 +593,8 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 			return errors.New("coinbase toAddress must match minerAddress")
 		}
 		policy := p.MonetaryPolicy
-		expected := policy.BlockReward(b.Height) + policy.MinerFeeAmount(fees)
+		// Miner receives 96% of block reward + 100% of fees (fees are burned)
+		expected := policy.BlockReward(b.Height) * uint64(policy.MinerRewardShare) / 100 + policy.MinerFeeAmount(fees)
 		if cb.Amount != expected {
 			return fmt.Errorf("bad coinbase amount: expected %d got %d", expected, cb.Amount)
 		}

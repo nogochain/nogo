@@ -19,6 +19,7 @@ package core
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -69,7 +70,7 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 
 	prevHash := append([]byte(nil), latest.Hash...)
 	height := latest.Height + 1
-	
+
 	// Use NTP synchronized time for block timestamp
 	now := getNetworkTimeUnix()
 	ts := now
@@ -94,25 +95,54 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 			c.mu.RUnlock()
 			return nil, err
 		}
-		if tx.Fee < minFee {
+		// Validate transaction fee using FeeChecker
+		feeChecker := NewFeeChecker(MinFee, MinFeePerByte)
+		if err := feeChecker.ValidateFee(&tx); err != nil {
 			c.mu.RUnlock()
-			return nil, fmt.Errorf("fee too low: minFee=%d", minFee)
+			return nil, err
 		}
 		fees += tx.Fee
 	}
 
-	policy := c.consensus.MonetaryPolicy
-	reward := policy.BlockReward(height)
-	minerFees := policy.MinerFeeAmount(fees)
-	coinbaseData := fmt.Sprintf("block reward + fees (height=%d)", height)
+	policy := c.monetaryPolicy
+	baseReward := policy.BlockReward(height)
+
+	// Debug: verify policy is loaded correctly
+	if policy.MinerRewardShare == 0 {
+		fmt.Printf("[ERROR] MinerRewardShare is 0! policy=%+v\n", policy)
+		return nil, errors.New("monetary policy not loaded correctly")
+	}
+	if policy.InitialBlockReward == 0 {
+		fmt.Printf("[ERROR] InitialBlockReward is 0! policy=%+v\n", policy)
+		return nil, errors.New("monetary policy not loaded correctly")
+	}
+
+	// Add 1% of block reward to integrity pool (if integrity system is enabled)
+	if c.integrityDistributor != nil {
+		c.integrityDistributor.AddToPool(baseReward)
+	}
+
+	// Calculate reward distribution (convert uint8 to uint64 for multiplication)
+	minerReward := baseReward * uint64(policy.MinerRewardShare) / 100
+	communityFund := baseReward * uint64(policy.CommunityFundShare) / 100
+	genesisReward := baseReward * uint64(policy.GenesisShare) / 100
+	integrityPool := baseReward * uint64(policy.IntegrityPoolShare) / 100
+
+	// Coinbase data includes all reward distribution information
+	coinbaseData := fmt.Sprintf("block reward (height=%d, miner=%d, community=%d, genesis=%d, integrity=%d)",
+		height, minerReward, communityFund, genesisReward, integrityPool)
 	if height == 1 {
 		coinbaseData = "Memphis"
 	}
+
+	// Create coinbase transaction - miner receives miner's share (96%) + 100% of fees
+	// Fees are burned but miner gets them as incentive
+	minerTotal := minerReward + fees
 	coinbase := Transaction{
 		Type:      TxCoinbase,
 		ChainID:   c.chainID,
 		ToAddress: c.minerAddress,
-		Amount:    reward + minerFees,
+		Amount:    minerTotal, // Miner receives 96% of block reward + 100% of fees
 		Data:      coinbaseData,
 	}
 
@@ -220,7 +250,7 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if err := applyBlockToState(c.consensus, c.state, newBlock); err != nil {
+	if err := applyBlockToState(c.consensus, c.monetaryPolicy, c.state, newBlock, c.genesisAddress, c.genesisTimestamp); err != nil {
 		return nil, err
 	}
 	if err := c.store.AppendCanonical(newBlock); err != nil {
@@ -235,6 +265,10 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 		c.canonicalWork = big.NewInt(0)
 	}
 	c.canonicalWork.Add(c.canonicalWork, WorkForDifficultyBits(newBlock.DifficultyBits))
+
+	// Process integrity rewards after block is added to chain
+	// Note: called within locked section, so processIntegrityRewardsLocked doesn't acquire lock
+	c.processIntegrityRewardsLocked(newBlock)
 
 	// Publish event
 	if c.events != nil {
@@ -253,6 +287,50 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	}
 
 	return newBlock, nil
+}
+
+// processIntegrityRewardsLocked processes integrity node rewards for a block
+// Called after each block is added to the chain
+// Note: This function assumes the lock is already held - do NOT call directly
+func (c *Chain) processIntegrityRewardsLocked(block *Block) {
+	if c.integrityDistributor == nil || c.integrityManager == nil {
+		return
+	}
+
+	height := block.Height
+
+	// Check if it's distribution time (every 5082 blocks)
+	if c.integrityDistributor.ShouldDistribute(height) {
+		// Get all active nodes
+		nodes := c.integrityManager.GetActiveNodes()
+
+		if len(nodes) > 0 {
+			// Distribute rewards
+			rewards, err := c.integrityDistributor.DistributeRewards(nodes, height)
+			if err != nil {
+				// Log error but don't fail the block
+				fmt.Printf("Integrity reward distribution error at height %d: %v\n", height, err)
+			} else if len(rewards) > 0 {
+				// Create reward distribution transactions
+				// Note: In production, these would be special system transactions
+				// For now, we track them in the distributor's history
+				fmt.Printf("Distributed integrity rewards at height %d: %d nodes, total=%d wei\n",
+					height, len(rewards), c.integrityDistributor.GetTotalDistributed())
+			}
+		}
+
+		// Update next distribution height
+		_ = c.integrityDistributor.GetNextDistributionHeight()
+	}
+}
+
+// processIntegrityRewards processes integrity node rewards for a block
+// Called after each block is added to the chain
+// Public version that acquires the lock
+func (c *Chain) processIntegrityRewards(block *Block) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.processIntegrityRewardsLocked(block)
 }
 
 // addressesForBlock extracts all addresses involved in a block

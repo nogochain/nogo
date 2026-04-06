@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>NogoChain Block Explorer</title>
 <link rel="icon" type="image/x-icon" href="favicon.ico">
 <style>
@@ -428,8 +431,9 @@ body {
   font-size: 13px; 
   transition: all 0.2s; 
   display: inline-flex; 
-  align-items: center; 
+  align-items: center;
   justify-content: center;
+  position: relative;
 }
 .copy-btn:hover { 
   background: var(--accent-green); 
@@ -437,6 +441,42 @@ body {
   color: white; 
   transform: translateY(-2px);
   box-shadow: 0 4px 12px rgba(63, 185, 80, 0.3);
+}
+.copy-btn:hover::before {
+  content: 'Click to copy';
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--text-primary);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+  margin-bottom: 6px;
+  z-index: 1000;
+}
+.copy-btn:hover::after {
+  content: '';
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: var(--border-color);
+  margin-bottom: -12px;
+  z-index: 1001;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.copy-btn:hover::before,
+.copy-btn:hover::after {
+  opacity: 1;
 }
 .copy-btn.copied { 
   background: var(--accent-green); 
@@ -513,6 +553,7 @@ body {
       <a href="#" onclick="showBlocks(); return false;">Blocks</a>
       <a href="#" onclick="showMempool(); return false;">Mempool</a>
       <a href="#" onclick="showPeers(); return false;">Peers</a>
+      <a href="/proposals/" onclick="window.location.href='/proposals/'; return false;">Proposals</a>
     </nav>
   </div>
 </header>
@@ -540,6 +581,20 @@ body {
       <div class="stat-label">Connected Peers</div>
       <div class="stat-value" id="peers">-</div>
       <div class="stat-subtext">Network nodes</div>
+    </div>
+  </div>
+  
+  <!-- Special Addresses -->
+  <div class="stats-grid" id="specialAddresses" style="margin-top: 30px;">
+    <div class="stat-card" style="grid-column: span 2;">
+      <div class="stat-label">🏛️ Community Fund</div>
+      <div class="stat-value" id="communityFundBalance" style="font-size: 16px;">-</div>
+      <div class="stat-subtext" id="communityFundAddr">-</div>
+    </div>
+    <div class="stat-card" style="grid-column: span 2;">
+      <div class="stat-label">🎯 Integrity Pool</div>
+      <div class="stat-value" id="integrityPoolBalance" style="font-size: 16px;">-</div>
+      <div class="stat-subtext" id="integrityPoolAddr">-</div>
     </div>
   </div>
   
@@ -710,7 +765,7 @@ function createBlockRow(height, block) {
   const row = document.createElement('tr');
   const time = block.timestampUnix ? new Date(block.timestampUnix * 1000).toLocaleTimeString() : '-';
   const txs = block.transactions ? block.transactions.length : 0;
-  const hashHex = block.hash ? base64ToHex(block.hash) : '-';
+  const hashHex = block.hash || '-';
   const hashShort = hashHex !== '-' ? hashHex.substring(0, 16) : '-';
   const miner = block.minerAddress ? block.minerAddress.substring(0, 16) + '...' : '-';
   
@@ -738,6 +793,9 @@ async function loadStats() {
   document.getElementById('difficulty').textContent = info.difficultyBits?.toLocaleString() || '-';
   document.getElementById('peers').textContent = (info.peersCount || 0).toLocaleString();
   
+  // Load special addresses
+  loadSpecialAddresses();
+  
   const tbody = document.getElementById('blocksBody');
   
   if (isInitialLoad) {
@@ -758,6 +816,32 @@ async function loadStats() {
     }
     
     isInitialLoad = false;
+  }
+}
+
+// Load special addresses (community fund and integrity pool)
+async function loadSpecialAddresses() {
+  const special = await api('/chain/special_addresses');
+  if (!special) return;
+  
+  if (special.communityFund) {
+    const cfBalance = ((special.communityFund.balance || 0) / 1e8).toFixed(8);
+    const cfAddr = special.communityFund.address || '-';
+    document.getElementById('communityFundBalance').textContent = cfBalance + ' NOGO';
+    document.getElementById('communityFundAddr').textContent = cfAddr;
+    window.communityFundAddr = cfAddr;
+  }
+  
+  if (special.integrityPool) {
+    const ipBalance = ((special.integrityPool.balance || 0) / 1e8).toFixed(8);
+    const ipAddr = special.integrityPool.address || '-';
+    document.getElementById('integrityPoolBalance').textContent = ipBalance + ' NOGO';
+    document.getElementById('integrityPoolAddr').textContent = ipAddr;
+    window.integrityPoolAddr = ipAddr;
+  }
+  
+  if (special.genesis) {
+    window.genesisAddr = special.genesis.address || '-';
   }
 }
 
@@ -814,6 +898,9 @@ async function checkForNewBlocks() {
     document.getElementById('supply').textContent = ((info.totalSupply || 0) / 1e8).toFixed(8) + ' NOGO';
     document.getElementById('difficulty').textContent = info.difficultyBits?.toLocaleString() || '-';
     document.getElementById('peers').textContent = (info.peersCount || 0).toLocaleString();
+    
+    // Refresh special addresses balances (real-time update)
+    loadSpecialAddresses();
     
     // Incrementally add new blocks from lastKnownHeight + 1 to currentHeight
     for (let h = lastKnownHeight + 1; h <= currentHeight; h++) {
@@ -937,11 +1024,12 @@ async function showBlock(height) {
   
   addressDetail.classList.remove('show');
   
-  const hashHex = block.hash ? base64ToHex(block.hash) : '-';
-  const prevHashHex = block.prevHash ? base64ToHex(block.prevHash) : '-';
+  const hashHex = block.hash || '-';
+  const prevHashHex = block.prevHash || '-';
   const minerAddress = block.minerAddress || '-';
   
-  info.innerHTML = `
+  // Build block info with reward distribution details
+  let blockInfoHTML = `
     <div class="detail-row"><span class="detail-label">Height</span><span class="detail-value">${height.toLocaleString()}</span></div>
     <div class="detail-row"><span class="detail-label">Hash</span><span class="detail-value">${hashHex} <button class="copy-btn" onclick="copyToClipboard('${hashHex}', 'Hash')">📋</button></span></div>
     <div class="detail-row"><span class="detail-label">Timestamp</span><span class="detail-value">${block.timestampUnix ? new Date(block.timestampUnix * 1000).toLocaleString() : '-'}</span></div>
@@ -950,6 +1038,47 @@ async function showBlock(height) {
     <div class="detail-row"><span class="detail-label">Previous Hash</span><span class="detail-value">${prevHashHex} <button class="copy-btn" onclick="copyToClipboard('${prevHashHex}', 'Prev Hash')">📋</button></span></div>
     <div class="detail-row"><span class="detail-label">Miner Address</span><span class="detail-value">${minerAddress} <button class="copy-btn" onclick="copyToClipboard('${minerAddress}', 'Miner Address')">📋</button></span></div>
   `;
+  
+  // Add coinbase/reward details if available
+  if (block.coinbase) {
+    const minerReward = (block.coinbase.minerReward || 0) / 1e8;
+    const fee = (block.coinbase.fee || 0) / 1e8;
+    
+    // Get special addresses (will be loaded when page loads)
+    const communityAddr = window.communityFundAddr || 'NOGO_COMMUNITY_FUND';
+    const integrityAddr = window.integrityPoolAddr || 'NOGO_INTEGRITY_POOL';
+    const genesisAddr = window.genesisAddr || 'NOGO_GENESIS';
+    
+    // Parse coinbase data to extract reward amounts
+    let communityAmount = 0;
+    let genesisAmount = 0;
+    let integrityAmount = 0;
+    if (block.coinbase.data && block.coinbase.data.includes('block reward')) {
+      const match = block.coinbase.data.match(/community=(\d+), genesis=(\d+), integrity=(\d+)/);
+      if (match) {
+        communityAmount = parseInt(match[1]) / 1e8;
+        genesisAmount = parseInt(match[2]) / 1e8;
+        integrityAmount = parseInt(match[3]) / 1e8;
+      }
+    }
+    
+    // Total coinbase = miner reward + community + genesis + integrity (100% of block reward)
+    const totalCoinbase = minerReward + communityAmount + genesisAmount + integrityAmount;
+    
+    blockInfoHTML += `
+      <div class="detail-row" style="background: var(--bg-tertiary); margin: 10px -15px; padding: 15px;">
+        <span class="detail-label" style="color: var(--accent-purple); font-weight: 600;">💰 Block Reward Distribution</span>
+      </div>
+      <div class="detail-row"><span class="detail-label">Total Block Reward</span><span class="detail-value" style="color: var(--accent-green);">${totalCoinbase.toFixed(8)} NOGO</span></div>
+      <div class="detail-row"><span class="detail-label">Miner Reward (96%)</span><span class="detail-value">${minerReward.toFixed(8)} NOGO</span></div>
+      <div class="detail-row"><span class="detail-label">Fees Burned (100%)</span><span class="detail-value">${fee.toFixed(8)} NOGO</span></div>
+      <div class="detail-row"><span class="detail-label">Community Fund (2%)</span><span class="detail-value">${communityAmount.toFixed(8)} NOGO → ${communityAddr}</span></div>
+      <div class="detail-row"><span class="detail-label">Genesis (1%)</span><span class="detail-value">${genesisAmount.toFixed(8)} NOGO → ${genesisAddr}</span></div>
+      <div class="detail-row"><span class="detail-label">Integrity Pool (1%)</span><span class="detail-value">${integrityAmount.toFixed(8)} NOGO → ${integrityAddr}</span></div>
+    `;
+  }
+  
+  info.innerHTML = blockInfoHTML;
   
   txList.innerHTML = '<h4 style="color:var(--text-secondary);margin:25px 0 15px;font-size:16px;">Transactions (' + (block.transactions?.length || 0) + ')</h4>';
   const txs = block.transactions || [];
@@ -1088,28 +1217,24 @@ async function search() {
   
   // Search by hash (block or transaction)
   if (/^[0-9a-fA-F]{64}$/.test(q)) {
-    hideError(); // Clear any previous errors
+    hideError();
     
-    // Try to find block first (blocks are more common than transactions)
     const block = await api('/block/hash/' + q, true);
     if (block && block.height !== undefined && block.height !== null) { 
       showBlock(block.height); 
       return; 
     }
     
-    // Block not found, try transaction
     const txResult = await api('/tx/' + q, true);
     if (txResult && txResult.transaction) {
       showTransactionDetails(txResult);
       return;
     }
     
-    // Not found as transaction or block - this is normal for previous hashes of future blocks
-    // Don't show error, just do nothing
     return;
   }
   
-  showError('Invalid search format');
+  showError('Invalid search format: expected block height, address (NOGO...), or 64-character hex hash');
 }
 
 // Event listeners

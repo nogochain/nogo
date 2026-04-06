@@ -377,6 +377,16 @@ func (w *networkChainWrapper) Balance(addr string) (core.Account, bool) {
 	return w.chain.Balance(addr)
 }
 
+// HasTransaction checks if a transaction exists in the blockchain
+func (w *networkChainWrapper) HasTransaction(txHash []byte) bool {
+	return w.chain.HasTransaction(txHash)
+}
+
+// GetContractManager returns the contract manager
+func (w *networkChainWrapper) GetContractManager() *core.ContractManager {
+	return w.chain.GetContractManager()
+}
+
 // GetConsensus returns consensus parameters
 func (w *networkChainWrapper) GetConsensus() config.ConsensusParams {
 	return w.chain.GetConsensus()
