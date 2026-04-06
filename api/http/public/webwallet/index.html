@@ -3,6 +3,9 @@
 <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+        <meta http-equiv="Pragma" content="no-cache">
+        <meta http-equiv="Expires" content="0">
         <title>NogoChain Web Wallet (BIP39)</title>
         <link rel="icon" type="image/x-icon" href="../explorer/favicon.ico">
     <!-- BIP39 Implementation (inline for browser compatibility) -->
@@ -1192,15 +1195,9 @@ body {
                 // Derive public key from private key using @noble/ed25519
                 const publicKeyBytes = await window.nobleEd25519.getPublicKey(privateKeyBytes);
                 
-                console.log('Private key (hex):', arrayBufferToHex(privateKeyBytes.buffer));
-                console.log('Public key (hex):', arrayBufferToHex(publicKeyBytes.buffer));
-                console.log('Public key (base64):', arrayBufferToBase64(publicKeyBytes.buffer));
-                
                 // Generate address: SHA256(public key) with version and checksum
                 const hashBuffer2 = await window.crypto.subtle.digest('SHA-256', publicKeyBytes);
                 const hashArray = new Uint8Array(hashBuffer2);
-                
-                console.log('SHA256(pubkey) hash:', arrayBufferToHex(hashBuffer2));
                 
                 // Build address with version byte (0x00) and 4-byte checksum
                 const addressData = new Uint8Array(1 + 32 + 4);
@@ -1212,12 +1209,8 @@ body {
                 const checksumBytes = new Uint8Array(checksumHash.slice(0, 4));
                 addressData.set(checksumBytes, 33); // 4-byte checksum
                 
-                console.log('Address data (with checksum):', arrayBufferToHex(addressData.buffer));
-                
                 // Convert to hex and add prefix
                 const address = 'NOGO' + Array.from(addressData).map(b => b.toString(16).padStart(2, '0')).join('');
-                
-                console.log('Generated address:', address);
                 
                 // Convert to Base64
                 const privateKeyBase64 = arrayBufferToBase64(privateKeyBytes.buffer);
@@ -1246,7 +1239,6 @@ body {
                 
             } catch (e) {
                 showToast('❌ Generation failed: ' + e.message);
-                console.error(e);
             }
         }
         
@@ -1450,7 +1442,6 @@ body {
         async function importFromMnemonic(mnemonic) {
             // Check if libraries are loaded
             if (!window.bip39 || !window.bip39.validateMnemonic) {
-                console.error('BIP39 library not available:', window.bip39);
                 showToast('❌ BIP39 library not loaded. Please refresh the page.');
                 return;
             }
@@ -1528,7 +1519,6 @@ body {
                     currentWallet = encrypted;
                     showToast('✅ Wallet imported and encrypted successfully!');
                 } catch (e) {
-                    console.error('Failed to encrypt wallet:', e);
                     showToast('❌ Failed to encrypt wallet. Please try again.');
                     return;
                 }
@@ -1636,16 +1626,9 @@ body {
         }
         
         async function loadWalletInfo() {
-            console.log('=== loadWalletInfo called ===');
-            console.log('currentWallet:', currentWallet);
-            
             if (!currentWallet) {
-                console.log('No wallet loaded, returning');
                 return;
             }
-            
-            console.log('currentWallet.address:', currentWallet.address);
-            console.log('currentWallet.publicKey:', currentWallet.publicKey);
             
             // Set basic info
             document.getElementById('walletAddress').textContent = currentWallet.address;
@@ -1664,14 +1647,11 @@ body {
             addressData.set(checksumBytes, 33);
             const verifiedAddress = 'NOGO' + Array.from(addressData).map(b => b.toString(16).padStart(2, '0')).join('');
             
-            console.log('=== Address Verification ===');
-            console.log('Public key (base64):', currentWallet.publicKey);
-            console.log('Public key (hex):', arrayBufferToHex(pubKeyBytes.buffer));
-            console.log('SHA256(pubkey):', arrayBufferToHex(hashBuffer));
-            console.log('Address data:', arrayBufferToHex(addressData.buffer));
-            console.log('Verified address:', verifiedAddress);
-            console.log('Stored address:', currentWallet.address);
-            console.log('Address match:', verifiedAddress === currentWallet.address ? '✓ YES' : '✗ NO');
+            // Silent address verification for security
+            if (verifiedAddress !== currentWallet.address) {
+                showToast('⚠️ Address verification failed');
+                return;
+            }
             
             // Generate QR code for receive address
             await generateQRCode(currentWallet.address);
@@ -1682,7 +1662,6 @@ body {
                 document.getElementById('walletBalance').textContent = (data.balance / 100000000).toFixed(8);
                 document.getElementById('walletNonce').textContent = data.nonce || 0;
             } catch (e) {
-                console.error('Failed to load balance:', e);
                 showToast('⚠️ Failed to load balance');
             }
             
@@ -1798,7 +1777,6 @@ body {
                 container.innerHTML = html;
                 
             } catch (e) {
-                console.error('Failed to load transactions:', e);
                 container.innerHTML = `
                     <div style="text-align: center; padding: 30px; color: var(--text-secondary);">
                         Failed to load transactions
@@ -1811,7 +1789,6 @@ body {
             navigator.clipboard.writeText(text).then(() => {
                 showToast('✅ ' + label + ' copied to clipboard!');
             }).catch(err => {
-                console.error('Failed to copy:', err);
                 showToast('❌ Failed to copy');
             });
         }
@@ -1880,7 +1857,16 @@ body {
             }, 3000);
         }
         
+        // Track if a transaction is being sent
+        let isSendingTx = false;
+        
         async function sendTransaction() {
+            // Prevent duplicate sends
+            if (isSendingTx) {
+                showToast('⏳ Transaction already sending...');
+                return;
+            }
+            
             const toAddress = document.getElementById('sendAddress').value.trim();
             const amountNOGO = parseFloat(document.getElementById('sendAmount').value);
             
@@ -1898,6 +1884,8 @@ body {
             }
             
             try {
+                isSendingTx = true;
+                
                 // Check if wallet is encrypted - need password to send
                 const saved = localStorage.getItem('nogoWallet');
                 const walletData = saved ? JSON.parse(saved) : null;
@@ -1914,7 +1902,6 @@ body {
                     try {
                         const decrypted = await decryptWalletData(walletData, password);
                         currentWallet = decrypted;
-                        console.log('Wallet decrypted for transaction');
                     } catch (e) {
                         showToast('❌ Wrong password');
                         return;
@@ -1931,49 +1918,58 @@ body {
                 const balanceResp = await fetch(`${API_BASE}/balance/${currentWallet.address}`);
                 const balanceData = await balanceResp.json();
                 const balance = balanceData.balance || 0;
-                let nonce = balanceData.nonce || 0;
+                let chainNonce = balanceData.nonce || 0;
+                let nonce = chainNonce;
                 let fee = 1000; // Minimum fee
+                
+                console.log(`[Nonce Debug] Chain nonce: ${chainNonce}`);
                 
                 // Calculate next nonce considering pending transactions in mempool
                 // First check mempool for pending transactions
                 try {
                     const mempoolResp = await fetch(`${API_BASE}/mempool`);
                     const mempoolData = await mempoolResp.json();
-                    console.log('Mempool data:', mempoolData);
                     const pendingTxs = mempoolData.txs || [];
-                    console.log('Pending transactions:', pendingTxs);
+                    
+                    console.log(`[Nonce Debug] Mempool size: ${pendingTxs.length}`);
                     
                     // Find pending txs from this address
                     const pendingFromThisAddress = pendingTxs.filter(tx => 
                         tx.fromAddr === currentWallet.address
                     );
-                    console.log('Pending from this address:', pendingFromThisAddress);
+                    
+                    console.log(`[Nonce Debug] Pending txs from this address: ${pendingFromThisAddress.length}`);
+                    pendingFromThisAddress.forEach(tx => {
+                        console.log(`[Nonce Debug]   Pending tx: nonce=${tx.nonce}, txId=${tx.txId}`);
+                    });
                     
                     if (pendingFromThisAddress.length > 0) {
                         // Find the highest nonce in pending transactions
                         const maxPendingNonce = Math.max(...pendingFromThisAddress.map(tx => tx.nonce));
                         // Next transaction should use nonce = maxPendingNonce + 1
                         nonce = maxPendingNonce + 1;
-                        console.log('Found pending txs, next nonce should be', nonce);
+                        console.log(`[Nonce Debug] Using max pending nonce + 1: ${nonce}`);
                         
                         // Check if we're replacing a specific nonce
                         const pendingTx = pendingFromThisAddress.find(tx => tx.nonce === nonce - 1);
                         if (pendingTx) {
                             // Need to replace pending tx with higher fee (10% increase)
                             fee = Math.floor(pendingTx.fee * 1.1) + 1;
-                            console.log('Replacing pending tx with nonce', nonce - 1, 'fee increased from', pendingTx.fee, 'to', fee);
                             showToast('⚠️ Replacing pending tx, increasing fee to ' + fee);
                         }
                     } else {
-                        // No pending transactions, use balance nonce + 1
-                        nonce = nonce + 1;
-                        console.log('No pending txs, using balance nonce + 1 =', nonce);
+                        // No pending transactions, use chain nonce + 1
+                        nonce = chainNonce + 1;
+                        console.log(`[Nonce Debug] Using chain nonce + 1: ${nonce}`);
                     }
                 } catch (e) {
                     console.error('Failed to check mempool:', e);
-                    // Fallback: use balance nonce + 1
-                    nonce = nonce + 1;
+                    // Fallback: use chain nonce + 1
+                    nonce = chainNonce + 1;
+                    console.log(`[Nonce Debug] Fallback to chain nonce + 1: ${nonce}`);
                 }
+                
+                console.log(`[Nonce Debug] Final nonce for new tx: ${nonce}`);
                 
                 const amount = Math.floor(amountNOGO * 1e8); // Convert to smallest unit
                 
@@ -1994,97 +1990,67 @@ body {
                     data: ''
                 };
                 
-                // Create signing hash using binary encoding (matches Go's txSigningPreimageBinaryV1)
-                // Binary encoding format:
-                // - version (1 byte): 0x01
-                // - txType (1 byte): 0x01 for transfer
-                // - chainId (8 bytes): little-endian uint64
-                // - fromPubKey (32 bytes)
-                // - toAddress (32 bytes, decoded from NOGO address)
-                // - amount (8 bytes): little-endian uint64
-                // - nonce (8 bytes): little-endian uint64
-                // - fee (8 bytes): little-endian uint64
-                // - dataLength (ULEB128)
-                // - data (variable)
-                
-                // Decode NOGO address to 32-byte hash
-                function decodeNogoAddress(addr) {
-                    if (!addr.startsWith('NOGO')) throw new Error('Invalid address prefix');
-                    const hex = addr.slice(4);
-                    const bytes = hexToUint8Array(hex);
-                    // Skip version (1 byte) and checksum (4 bytes), return 32-byte hash
-                    if (bytes.length !== 37) throw new Error('Invalid address length');
-                    return bytes.slice(1, 33);
+                // Compute fromAddr from public key (matches Go's FromAddress method)
+                async function computeFromAddress(pubKeyBase64) {
+                    const pubKeyBytes = base64ToUint8Array(pubKeyBase64);
+                    const pubKeyHash = await crypto.subtle.digest('SHA-256', pubKeyBytes);
+                    const pubKeyHashBytes = new Uint8Array(pubKeyHash);
+                    
+                    // Build address: version(1) + hash(32) + checksum(4)
+                    const addressData = new Uint8Array(1 + 32);
+                    addressData[0] = 0x00; // version
+                    addressData.set(pubKeyHashBytes.slice(0, 32), 1);
+                    
+                    const checksumHash = await crypto.subtle.digest('SHA-256', addressData);
+                    const checksumBytes = new Uint8Array(checksumHash);
+                    
+                    const fullAddress = new Uint8Array(1 + 32 + 4);
+                    fullAddress.set(addressData, 0);
+                    fullAddress.set(checksumBytes.slice(0, 4), 1 + 32);
+                    
+                    return 'NOGO' + arrayBufferToHex(fullAddress.buffer);
                 }
                 
-                // Write ULEB128 encoded number
-                function writeULEB128(value) {
-                    const bytes = [];
-                    while (true) {
-                        let b = value & 0x7F;
-                        value >>= 7;
-                        if (value !== 0) {
-                            b |= 0x80;
-                        }
-                        bytes.push(b);
-                        if (value === 0) break;
-                    }
-                    return new Uint8Array(bytes);
-                }
+                // Create signing hash using Legacy JSON encoding (matches Go's txSigningHashLegacyJSON)
+                // Legacy JSON format:
+                // {
+                //   "type": "transfer",
+                //   "chainId": 1,
+                //   "fromAddr": "NOGO...",  // derived from public key
+                //   "toAddress": "...",
+                //   "amount": 100000000,
+                //   "fee": 1000,
+                //   "nonce": 1,
+                //   "data": ""
+                // }
                 
-                // Write uint64 as little-endian
-                function writeUint64LE(value) {
-                    const bytes = new Uint8Array(8);
-                    for (let i = 0; i < 8; i++) {
-                        bytes[i] = value & 0xFF;
-                        value = Math.floor(value / 256);
-                    }
-                    return bytes;
-                }
+                const fromAddr = await computeFromAddress(currentWallet.publicKey);
                 
-                // Build binary preimage
-                const fromPubKeyBytes = base64ToUint8Array(currentWallet.publicKey);
-                const toAddressBytes = decodeNogoAddress(toAddress);
-                const dataBytes = new TextEncoder().encode('');
+                const legacyJsonObj = {
+                    type: 'transfer',
+                    chainId: 1,
+                    fromAddr: fromAddr,
+                    toAddress: toAddress,
+                    amount: amount,
+                    fee: fee,
+                    nonce: nonce
+                    // Note: data field omitted when empty (matches Go's omitempty)
+                };
                 
-                const preimageParts = [
-                    new Uint8Array([0x01]), // version
-                    new Uint8Array([0x01]), // txType (transfer)
-                    writeUint64LE(1), // chainId
-                    fromPubKeyBytes, // 32 bytes
-                    toAddressBytes, // 32 bytes
-                    writeUint64LE(amount), // amount
-                    writeUint64LE(nonce), // nonce
-                    writeUint64LE(fee), // fee
-                    writeULEB128(dataBytes.length), // data length
-                    dataBytes // data
-                ];
+                const legacyJsonStr = JSON.stringify(legacyJsonObj);
                 
-                const totalLength = preimageParts.reduce((sum, part) => sum + part.length, 0);
-                const preimage = new Uint8Array(totalLength);
-                let offset = 0;
-                for (const part of preimageParts) {
-                    preimage.set(part, offset);
-                    offset += part.length;
-                }
-                
-                console.log('Binary preimage (hex):', arrayBufferToHex(preimage.buffer));
+                const encoder = new TextEncoder();
+                const preimage = encoder.encode(legacyJsonStr);
                 
                 const msgHash = await crypto.subtle.digest('SHA-256', preimage);
-                console.log('Signing hash (hex):', arrayBufferToHex(msgHash));
                 
                 // Sign with private key
                 const privateKeyBytes = base64ToUint8Array(currentWallet.privateKey);
-                console.log('Private key (hex):', arrayBufferToHex(privateKeyBytes.buffer));
                 
                 const signature = await window.nobleEd25519.sign(new Uint8Array(msgHash), privateKeyBytes);
-                console.log('Signature (hex):', arrayBufferToHex(signature.buffer));
-                console.log('Signature (base64):', arrayBufferToBase64(signature.buffer));
                 
                 // Add signature to transaction
                 tx.signature = arrayBufferToBase64(signature.buffer);
-                
-                console.log('Transaction object:', JSON.stringify(tx, null, 2));
                 
                 // Submit transaction
                 const submitResp = await fetch(`${API_BASE}/tx`, {
@@ -2093,15 +2059,26 @@ body {
                     body: JSON.stringify(tx)
                 });
                 
-                const result = await submitResp.json();
+                console.log('Transaction submit response status:', submitResp.status);
+                console.log('Transaction submit response ok:', submitResp.ok);
+                
+                // Clone response to allow reading twice (for error case)
+                const clone = submitResp.clone();
+                let result;
+                try {
+                    result = await submitResp.json();
+                } catch (e) {
+                    console.error('Failed to parse JSON response:', e);
+                    const textResp = await clone.text();
+                    console.error('Response text:', textResp);
+                    throw new Error('Invalid response format: ' + textResp);
+                }
                 
                 console.log('Transaction submit response:', result);
-                console.log('Response status:', submitResp.status);
                 
                 if (!submitResp.ok) {
                     console.error('HTTP Error:', submitResp.status, submitResp.statusText);
-                    const respText = await submitResp.text();
-                    console.error('Response body:', respText);
+                    console.error('Response body:', result);
                 }
                 
                 // Check for success (case-insensitive)
@@ -2129,6 +2106,9 @@ body {
             } catch (e) {
                 console.error('Send transaction failed:', e);
                 showToast('❌ Send failed: ' + e.message);
+            } finally {
+                // Reset sending flag
+                isSendingTx = false;
             }
         }
         

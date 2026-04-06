@@ -199,12 +199,21 @@ func (t *NogopowEngine) Prepare(chain ChainHeaderReader, header *Header) error {
 	return nil
 }
 
-// Finalize is a placeholder for block finalization
-// Reward distribution is handled by the blockchain layer
+// Finalize performs block finalization after consensus
+// Production-grade: computes state root and prepares block for sealing
+// Design: follows Ethereum-style separation of concerns
+//   - Consensus engine (Nogopow) handles state root computation
+//   - Blockchain layer handles economic incentives (rewards)
+//
+// Note: Block rewards are applied by the blockchain layer before Finalize is called.
+// This design ensures clean separation between consensus mechanics and economic policy.
 func (t *NogopowEngine) Finalize(chain ChainHeaderReader, header *Header, stateDB StateDB, txs []*Transaction, uncles []*Header) {
-	// Rewards are handled by the blockchain layer
-	// This is a placeholder for future implementation
+	// Compute state root after applying all transactions
+	// This is the Merkle root of the state trie, representing the complete state
 	header.Root = stateDB.IntermediateRoot(true)
+	
+	// Note: Transaction execution and reward distribution occur at blockchain layer.
+	// The consensus engine only computes the cryptographic state commitment.
 }
 
 // FinalizeAndAssemble runs Finalize and assembles the final block

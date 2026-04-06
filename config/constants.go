@@ -157,18 +157,22 @@ const (
 // =============================================================================
 
 const (
-	// DefaultMinerConvergenceBaseDelayMs prevents mining competition
-	// Base delay in milliseconds for deterministic mining
-	// Configurable via: MINER_CONVERGENCE_BASE_DELAY_MS
-	DefaultMinerConvergenceBaseDelayMs = 200
+	// DefaultMinerConvergenceBaseDelayMs is set to ZERO for fair PoW competition
+	// All nodes mine simultaneously without artificial delays
+	// Mining competition is resolved by PoW, not by timing manipulation
+	// This ensures decentralization: no node has timing advantage
+	// Configurable via: MINER_CONVERGENCE_BASE_DELAY_MS (default: 0)
+	DefaultMinerConvergenceBaseDelayMs = 0
 
-	// DefaultMinerConvergenceVariableDelayMs is the maximum variable delay
-	// 256 = 2^8 for 8-bit hex suffix
-	// Configurable via: MINER_CONVERGENCE_VARIABLE_DELAY_MS
-	DefaultMinerConvergenceVariableDelayMs = 256
+	// DefaultMinerConvergenceVariableDelayMs is ZERO for deterministic mining
+	// Variable delay would create unfair advantage based on address hash
+	// Bitcoin principle: pure PoW competition, no timing games
+	// Configurable via: MINER_CONVERGENCE_VARIABLE_DELAY_MS (default: 0)
+	DefaultMinerConvergenceVariableDelayMs = 0
 
 	// DefaultBlockPropagationDelayMs ensures network propagation
 	// Time to wait after receiving a block before resuming mining
+	// This allows network to propagate blocks naturally
 	// Configurable via: BLOCK_PROPAGATION_DELAY_MS
 	DefaultBlockPropagationDelayMs = 2000
 
@@ -181,8 +185,10 @@ const (
 	DefaultNetworkSyncCheckDelayMs = 2000
 
 	// DefaultMiningIntervalSec is the mining attempt interval
+	// Aligned with DefaultTargetBlockTime (17 seconds) for fair mining
+	// All nodes use the same interval for decentralized mining
 	// Configurable via: MINING_INTERVAL_SEC
-	DefaultMiningIntervalSec = 1
+	DefaultMiningIntervalSec = 17
 
 	// DefaultPeerHeightPollIntervalMs is the peer height polling interval
 	DefaultPeerHeightPollIntervalMs = 1000
@@ -278,17 +284,83 @@ const (
 )
 
 // =============================================================================
+// ORPHAN POOL PARAMETERS (configured via environment variables)
+// =============================================================================
+
+const (
+	// DefaultOrphanPoolSize is the maximum number of orphan blocks to keep in memory
+	// Prevents memory exhaustion from orphan block accumulation
+	// Configurable via: NOGO_ORPHAN_POOL_MAX_SIZE
+	// Production recommendation: 1000 blocks
+	DefaultOrphanPoolSize = 1000
+
+	// DefaultOrphanTTL is the time to live for orphaned blocks in the pool
+	// Orphans older than this are evicted to prevent memory leaks
+	// Configurable via: NOGO_ORPHAN_POOL_TTL
+	// Production recommendation: 24 hours
+	DefaultOrphanTTL = 24 * time.Hour
+)
+
+// =============================================================================
+// SYNC PARAMETERS (configured via environment variables)
+// =============================================================================
+
+const (
+	// DefaultSyncHeartbeatInterval is the heartbeat interval for sync loop
+	// Ensures sync process is alive and makes progress
+	// Configurable via: NOGO_SYNC_HEARTBEAT_INTERVAL
+	// Production recommendation: 10 seconds
+	DefaultSyncHeartbeatInterval = 10 * time.Second
+
+	// DefaultSyncWorkers is the number of parallel download workers
+	// Higher values increase sync speed but consume more resources
+	// Configurable via: NOGO_SYNC_WORKERS
+	// Production recommendation: 8 workers
+	DefaultSyncWorkers = 8
+
+	// DefaultSyncMaxPendingBlocks is the maximum pending blocks to process
+	// Prevents memory exhaustion during fast sync
+	// Configurable via: NOGO_SYNC_MAX_PENDING_BLOCKS
+	// Production recommendation: 1000 blocks
+	DefaultSyncMaxPendingBlocks = 1000
+)
+
+// =============================================================================
+// MINING STABILITY PARAMETERS (configured via environment variables)
+// =============================================================================
+
+const (
+	// DefaultMiningStabilityWait is the wait time after sync before mining
+	// Ensures chain is stable before starting mining operations
+	// Configurable via: NOGO_MINING_STABILITY_WAIT
+	// Production recommendation: 10 seconds
+	DefaultMiningStabilityWait = 10 * time.Second
+
+	// DefaultMiningSyncPause indicates if mining should pause during sync
+	// Prevents mining on stale chain tips during synchronization
+	// Configurable via: NOGO_MINING_SYNC_PAUSE
+	// Production recommendation: true
+	DefaultMiningSyncPause = true
+)
+
+// =============================================================================
+// WORK CALCULATION PARAMETERS (configured via environment variables)
+// =============================================================================
+
+const (
+	// MaxReorgDepth is the maximum reorganization depth to prevent long-range attacks
+	// If a reorg requires rolling back more than this many blocks, it is rejected
+	// This is a critical security parameter for chain stability
+	// Configurable via: MAX_REORG_DEPTH
+	// Production recommendation: 100 blocks (~28 minutes at 17s block time)
+	MaxReorgDepth = 100
+)
+
+// =============================================================================
 // FORK RESOLUTION PARAMETERS (configured via environment variables)
 // =============================================================================
 
 const (
-	// DefaultMaxReorgDepth is the maximum allowed chain reorganization depth
-	// This is a SECURITY parameter to prevent long-range attacks
-	// If a reorg requires rolling back more than this many blocks, it is rejected
-	// Configurable via: MAX_REORG_DEPTH
-	// Production recommendation: 100 blocks (~28 minutes at 17s block time)
-	DefaultMaxReorgDepth = 100
-
 	// DefaultCoinbaseMaturity is the number of blocks before coinbase rewards can be spent
 	// This is an ECONOMIC parameter to prevent double-spend attacks on coinbase
 	// Configurable via: COINBASE_MATURITY
@@ -775,5 +847,132 @@ func init() {
 	blocksPerYear := GetBlocksPerYear()
 	if blocksPerYear < 100000 || blocksPerYear > 10000000 {
 		panic(fmt.Sprintf("BlocksPerYear calculation invalid: %d", blocksPerYear))
+	}
+}
+
+// =============================================================================
+// MAINNET GENESIS CONFIGURATION (hardcoded for security)
+// All mainnet consensus parameters defined here - no JSON file required
+// =============================================================================
+
+// MainnetGenesisConfig provides the complete mainnet genesis configuration
+// This is hardcoded to prevent accidental configuration changes
+var MainnetGenesisConfig = GenesisConfiguration{
+	Network:             "nogochain-mainnet",
+	ChainID:             1,
+	Timestamp:           1775044800, // 2026-04-01 12:00:00 UTC
+	GenesisMinerAddress: "NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c",
+	InitialSupply:       1, // Genesis block coinbase amount (1 wei)
+	GenesisMessage:      "NogoChain Mainnet Launch - A new era of decentralized finance - 2026-04-01 12:00:00 UTC",
+	MonetaryPolicy: MonetaryPolicy{
+		InitialBlockReward:     800000000, // 8 NOGO in wei (1 NOGO = 10^8 wei)
+		MinimumBlockReward:     10000000,  // 0.1 NOGO minimum reward
+		AnnualReductionPercent: 10,        // 10% annual reduction
+		MinerFeeShare:          100,       // 100% of fees to miner
+	},
+	ConsensusParams: ConsensusParams{
+		DifficultyEnable:               true,
+		TargetBlockTime:                17 * time.Second,
+		DifficultyWindow:               10,
+		DifficultyMaxStep:              2,
+		MinDifficultyBits:              1,
+		MaxDifficultyBits:              40,
+		GenesisDifficultyBits:          1,
+		MedianTimePastWindow:           11,
+		MaxTimeDrift:                   7200,
+		MaxBlockSize:                   4000000, // 4MB
+		MerkleEnable:                   true,
+		MerkleActivationHeight:         0,
+		BinaryEncodingEnable:           false,
+		BinaryEncodingActivationHeight: 0,
+	},
+}
+
+// TestnetGenesisConfig provides the complete testnet genesis configuration
+// This is hardcoded to prevent accidental configuration changes
+var TestnetGenesisConfig = GenesisConfiguration{
+	Network:             "nogochain-testnet",
+	ChainID:             2,
+	Timestamp:           1735689600, // 2025-01-01 00:00:00 UTC
+	GenesisMinerAddress: "NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c",
+	InitialSupply:       10000000000000, // 10 trillion initial supply
+	GenesisMessage:      "Follow the white rabbit - NogoChain Testnet",
+	MonetaryPolicy: MonetaryPolicy{
+		InitialBlockReward:     5000000000, // 50 NOGO initial reward
+		MinimumBlockReward:     10000000,   // 0.1 NOGO minimum reward
+		AnnualReductionPercent: 10,         // 10% annual reduction
+		MinerFeeShare:          100,        // 100% of fees to miner
+	},
+	ConsensusParams: ConsensusParams{
+		DifficultyEnable:               true,
+		TargetBlockTime:                15 * time.Second, // 15 seconds for testnet
+		DifficultyWindow:               20,
+		DifficultyMaxStep:              1,
+		MinDifficultyBits:              1,
+		MaxDifficultyBits:              255,
+		GenesisDifficultyBits:          8,
+		MedianTimePastWindow:           11,
+		MaxTimeDrift:                   7200,
+		MaxBlockSize:                   1000000, // 1MB for testnet
+		MerkleEnable:                   true,
+		MerkleActivationHeight:         0,
+		BinaryEncodingEnable:           false,
+		BinaryEncodingActivationHeight: 0,
+	},
+}
+
+// GenesisConfiguration represents the complete genesis configuration
+type GenesisConfiguration struct {
+	Network             string
+	ChainID             uint64
+	Timestamp           int64
+	GenesisMinerAddress string
+	InitialSupply       uint64
+	GenesisMessage      string
+	MonetaryPolicy      MonetaryPolicy
+	ConsensusParams     ConsensusParams
+}
+
+// MonetaryPolicy defines the token emission schedule
+type MonetaryPolicy struct {
+	InitialBlockReward     uint64
+	MinimumBlockReward     uint64
+	AnnualReductionPercent uint8
+	MinerFeeShare          uint8
+}
+
+// ConsensusParams defines blockchain consensus parameters
+type ConsensusParams struct {
+	DifficultyEnable               bool
+	TargetBlockTime                time.Duration
+	DifficultyWindow               int
+	DifficultyMaxStep              uint32
+	MinDifficultyBits              uint32
+	MaxDifficultyBits              uint32
+	GenesisDifficultyBits          uint32
+	MedianTimePastWindow           int
+	MaxTimeDrift                   int64
+	MaxBlockSize                   uint64
+	MerkleEnable                   bool
+	MerkleActivationHeight         uint64
+	BinaryEncodingEnable           bool
+	BinaryEncodingActivationHeight uint64
+}
+
+// GetGenesisConfig returns the genesis configuration for the specified chain ID
+// For mainnet (chainID=1) and testnet (chainID=2), returns hardcoded configuration
+// For custom networks, loads from JSON file (not yet implemented)
+func GetGenesisConfig(chainID uint64, genesisPath string) (*GenesisConfiguration, error) {
+	// Return hardcoded config for known networks
+	switch chainID {
+	case 1:
+		cfg := MainnetGenesisConfig
+		return &cfg, nil
+	case 2:
+		cfg := TestnetGenesisConfig
+		return &cfg, nil
+	default:
+		// For custom networks, would load from JSON file
+		return nil, fmt.Errorf("custom chainID %d not supported, only mainnet (1) and testnet (2) are available", chainID)
 	}
 }

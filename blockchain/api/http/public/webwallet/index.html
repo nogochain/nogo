@@ -1,0 +1,2132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+        <meta http-equiv="Pragma" content="no-cache">
+        <meta http-equiv="Expires" content="0">
+        <title>NogoChain Web Wallet (BIP39)</title>
+        <link rel="icon" type="image/x-icon" href="../explorer/favicon.ico">
+    <!-- BIP39 Implementation (inline for browser compatibility) -->
+    <script>
+        // BIP39 Wordlist (English - first 2048 words)
+        const BIP39_WORDLIST = ['abandon','ability','able','about','above','absent','absorb','abstract','absurd','abuse','access','accident','account','accuse','achieve','acid','acoustic','acquire','across','act','action','actor','actress','actual','adapt','add','addict','address','adjust','admit','adult','advance','advice','aerobic','affair','afford','afraid','again','age','agent','agree','ahead','aim','air','airport','aisle','alarm','album','alcohol','alert','alien','all','alley','allow','almost','alone','alpha','already','also','alter','always','amateur','amazing','among','amount','amused','analyst','anchor','ancient','anger','angle','angry','animal','ankle','announce','annual','another','answer','antenna','antique','anxiety','any','apart','apology','appear','apple','approve','april','arch','arctic','area','arena','argue','arm','armed','armor','army','around','arrange','arrest','arrive','arrow','art','artefact','artist','artwork','ask','aspect','assault','asset','assist','assume','asthma','athlete','atom','attack','attend','attitude','attract','auction','audit','august','aunt','author','auto','autumn','average','avocado','avoid','awake','aware','away','awesome','awful','awkward','axis','baby','bachelor','bacon','badge','bag','balance','balcony','ball','bamboo','banana','banner','bar','barely','bargain','barrel','base','basic','basket','battle','beach','bean','beauty','because','become','beef','before','begin','behave','behind','believe','below','belt','bench','benefit','best','betray','better','between','beyond','bicycle','bid','bike','bind','biology','bird','birth','bitter','black','blade','blame','blanket','blast','bleak','bless','blind','blood','blossom','blouse','blue','blur','blush','board','boat','body','boil','bomb','bone','bonus','book','boost','border','boring','borrow','boss','bottom','bounce','box','boy','bracket','brain','brand','brass','brave','bread','breeze','brick','bridge','brief','bright','bring','brisk','broccoli','broken','bronze','broom','brother','brown','brush','bubble','buddy','budget','buffalo','build','bulb','bulk','bullet','bundle','bunker','burden','burger','burst','bus','business','busy','butter','buyer','buzz','cabbage','cabin','cable','cactus','cage','cake','call','calm','camera','camp','can','canal','cancel','candy','cannon','canoe','canvas','canyon','capable','capital','captain','car','carbon','card','cargo','carpet','carry','cart','case','cash','casino','castle','casual','cat','catalog','catch','category','cattle','caught','cause','caution','cave','ceiling','celery','cement','census','century','cereal','certain','chair','chalk','champion','change','chaos','chapter','charge','chase','chat','cheap','check','cheese','chef','cherry','chest','chicken','chief','child','chimney','choice','choose','chronic','chuckle','chunk','churn','cigar','cinnamon','circle','citizen','city','civil','claim','clap','clarify','claw','clay','clean','clerk','clever','click','client','cliff','climb','clinic','clip','clock','clog','close','cloth','cloud','clown','club','clump','cluster','clutch','coach','coast','coconut','code','coffee','coil','coin','collect','color','column','combine','come','comfort','comic','common','company','concert','conduct','confirm','congress','connect','consider','control','convince','cook','cool','copper','copy','coral','core','corn','correct','cost','cotton','couch','country','couple','course','cousin','cover','coyote','crack','cradle','craft','cram','crane','crash','crater','crawl','crazy','cream','credit','creek','crew','cricket','crime','crisp','critic','crop','cross','crouch','crowd','crucial','cruel','cruise','crumble','crunch','crush','cry','crystal','cube','culture','cup','cupboard','curious','current','curtain','curve','cushion','custom','cute','cycle','dad','damage','damp','dance','danger','daring','dash','daughter','dawn','day','deal','debate','debris','decade','december','decide','decline','decorate','decrease','deer','defense','define','defy','degree','delay','deliver','demand','demise','denial','dentist','deny','depart','depend','deposit','depth','deputy','derive','describe','desert','design','desk','despair','destroy','detect','develop','device','devote','diagram','dial','diamond','diary','dice','diesel','diet','differ','digital','dignity','dilemma','dinner','dinosaur','direct','dirt','disagree','discover','disease','dish','dismiss','disorder','display','distance','divert','divide','divorce','dizzy','doctor','document','dog','doll','dolphin','domain','donate','donkey','donor','door','dose','double','dove','draft','dragon','drama','draw','dream','dress','drift','drill','drink','drip','drive','drop','drum','dry','duck','dumb','dune','during','dust','dutch','duty','dwarf','dynamic','eager','eagle','early','earn','earth','easily','east','easy','echo','ecology','economy','edge','edit','educate','effort','egg','eight','either','elbow','elder','electric','elegant','element','elephant','elevator','elite','else','embark','embody','embrace','emerge','emotion','employ','empower','empty','enable','enact','end','endless','endorse','enemy','energy','enforce','engage','engine','enhance','enjoy','enlist','enough','enrich','enroll','ensure','enter','entire','entry','envelope','episode','equal','equip','era','erase','erode','erosion','error','erupt','escape','essay','essence','estate','eternal','ethics','evidence','evil','evoke','evolve','exact','example','excess','exchange','excite','exclude','excuse','execute','exercise','exhaust','exhibit','exile','exist','exit','exotic','expand','expect','expire','explain','expose','express','extend','extra','eye','eyebrow','fabric','face','faculty','fade','faint','faith','fall','false','fame','family','famous','fan','fancy','fantasy','farm','fashion','fat','fatal','father','fatigue','fault','favorite','feature','february','federal','fee','feed','feel','female','fence','festival','fetch','fever','few','fiber','fiction','field','figure','file','film','filter','final','find','fine','finger','finish','fire','firm','first','fiscal','fish','fit','fitness','fix','flag','flame','flash','flat','flavor','flee','flight','flip','float','flock','floor','flower','fluid','flush','fly','foam','focus','fog','foil','fold','follow','food','foot','force','forest','forget','fork','fortune','forum','forward','fossil','foster','found','fox','fragile','frame','frequent','fresh','friend','fringe','frog','front','frost','frown','frozen','fruit','fuel','fun','funny','furnace','fury','future','gadget','gain','galaxy','gallery','game','gap','garage','garbage','garden','garlic','garment','gas','gasp','gate','gather','gauge','gaze','general','genius','genre','gentle','genuine','gesture','ghost','giant','gift','giggle','ginger','giraffe','girl','give','glad','glance','glare','glass','glide','glimpse','globe','gloom','glory','glove','glow','glue','goat','goddess','gold','good','goose','gorilla','gospel','gossip','govern','gown','grab','grace','grain','grant','grape','grass','gravity','great','green','grid','grief','grit','grocery','group','grow','grunt','guard','guess','guide','guilt','guitar','gun','gym','habit','hair','half','hammer','hamster','hand','handle','hang','happen','happy','harbor','hard','harsh','harvest','hat','have','hawk','hazard','head','health','heart','heavy','hedgehog','height','hello','helmet','help','hen','hero','hidden','high','hill','hint','hip','hire','history','hobby','hockey','hold','hole','holiday','hollow','home','honey','hood','hope','horn','horror','horse','hospital','host','hotel','hour','hover','hub','huge','human','humble','humor','hundred','hungry','hunt','hurdle','hurry','hurt','husband','hybrid','ice','icon','idea','identify','idle','ignore','ill','illegal','illness','image','imitate','immense','immune','impact','impose','improve','impulse','inch','include','income','increase','index','indicate','indoor','industry','infant','inflict','inform','inhale','inherit','initial','inject','injury','inmate','inner','innocent','input','inquiry','insane','insect','inside','inspire','install','intact','interest','into','invest','invite','involve','iron','island','isolate','issue','item','ivory','jacket','jaguar','jar','jazz','jealous','jeans','jelly','jewel','job','join','joke','journey','joy','judge','juice','jump','jungle','junior','junk','just','kangaroo','keen','keep','ketchup','key','kick','kid','kidney','kind','kingdom','kiss','kit','kitchen','kite','kitten','kiwi','knee','knife','knock','know','lab','label','labor','ladder','lady','lake','lamp','language','laptop','large','later','latin','laugh','laundry','lava','law','lawn','lawsuit','layer','lazy','leader','leaf','learn','leave','lecture','left','leg','legal','legend','leisure','lemon','lend','length','lens','leopard','lesson','letter','level','liar','liberty','library','license','life','lift','light','like','limb','limit','link','lion','liquid','list','little','live','lizard','load','loan','lobster','local','lock','logic','lonely','long','loop','lottery','loud','lounge','love','loyal','lucky','luggage','lumber','lunar','lunch','luxury','lyrics','machine','mad','magic','magnet','maid','mail','main','major','make','mammal','man','manage','mandate','mango','mansion','manual','maple','marble','march','margin','marine','market','marriage','mask','mass','master','match','material','math','matrix','matter','maximum','maze','meadow','mean','measure','meat','mechanic','medal','media','melody','melt','member','memory','mention','menu','mercy','merge','merit','merry','mesh','message','metal','method','middle','midnight','milk','million','mimic','mind','minimum','minor','minute','miracle','mirror','misery','miss','mistake','mix','mixed','mixture','mobile','model','modify','mom','moment','monitor','monkey','monster','month','moon','moral','more','morning','mosquito','mother','motion','motor','mountain','mouse','move','movie','much','muffin','mule','multiply','muscle','museum','mushroom','music','must','mutual','myself','mystery','myth','naive','name','napkin','narrow','nasty','nation','nature','near','neck','need','negative','neglect','neither','nephew','nerve','nest','net','network','neutral','never','news','next','nice','night','noble','noise','nominee','noodle','normal','north','nose','notable','note','nothing','notice','novel','now','nuclear','number','nurse','nut','oak','obey','object','oblige','obscure','observe','obtain','obvious','occur','ocean','october','odor','off','offer','office','often','oil','okay','old','olive','olympic','omit','once','one','onion','online','only','open','opera','opinion','oppose','option','orange','orbit','orchard','order','ordinary','organ','orient','original','orphan','ostrich','other','outdoor','outer','output','outside','oval','oven','over','own','owner','oxygen','oyster','ozone','pact','paddle','page','pair','palace','palm','panda','panel','panic','panther','paper','parade','parent','park','parrot','party','pass','patch','path','patient','patrol','pattern','pause','pave','payment','peace','peanut','pear','peasant','pelican','pen','penalty','pencil','people','pepper','perfect','permit','person','pet','phone','photo','phrase','physical','piano','picnic','picture','piece','pig','pigeon','pilot','pine','pink','pipe','pistol','pitch','pizza','place','planet','plastic','plate','play','please','pledge','pluck','plug','plunge','poem','poet','point','polar','pole','police','pond','pony','pool','popular','portion','position','possible','post','potato','pottery','poverty','powder','power','practice','praise','predict','prefer','prepare','present','pretty','prevent','price','pride','primary','print','priority','prison','private','prize','problem','process','produce','profit','program','project','promote','proof','property','prosper','protect','proud','provide','public','pudding','pull','pulp','pulse','pumpkin','punch','pupil','puppy','purchase','purity','purpose','purse','push','put','puzzle','pyramid','quality','quantum','quarter','question','quick','quit','quiz','quote','rabbit','raccoon','race','rack','radar','radio','rail','rain','raise','rally','ramp','ranch','random','range','rapid','rare','rate','rather','raven','raw','razor','ready','real','reason','rebel','rebuild','recall','receive','recipe','record','recycle','reduce','reflect','reform','refuse','region','regret','regular','reject','relax','release','relief','rely','remain','remember','remind','remove','render','renew','rent','reopen','repair','repeat','replace','report','require','rescue','resemble','resist','resource','response','result','retire','retreat','return','reunion','reveal','review','reward','rhythm','rib','ribbon','rice','rich','ride','ridge','rifle','right','rigid','ring','riot','ripple','risk','ritual','rival','river','road','roast','robot','robust','rocket','romance','roof','rookie','room','rose','rotate','rough','round','route','royal','rubber','rude','rug','rule','run','runway','rural','sad','saddle','sadness','safe','sail','salad','salmon','salon','salt','salute','same','sample','sand','satisfy','satoshi','sauce','sausage','save','say','scale','scan','scare','scatter','scene','scheme','school','science','scissors','scorpion','scout','scrap','screen','script','scrub','sea','search','season','seat','second','secret','section','security','seed','seek','segment','select','sell','seminar','senior','sense','sentence','series','service','session','settle','setup','seven','shadow','shaft','shallow','share','shed','shell','sheriff','shield','shift','shine','ship','shiver','shock','shoe','shoot','shop','short','shoulder','shove','shrimp','shrug','shuffle','shy','sibling','sick','side','siege','sight','sign','silent','silk','silly','silver','similar','simple','since','sing','siren','sister','sit','situation','six','size','skate','sketch','ski','skill','skin','skirt','skull','slab','slam','sleep','slender','slice','slide','slight','slim','slogan','slot','slow','slush','small','smart','smile','smoke','smooth','snack','snake','snap','sniff','snow','soap','soccer','social','sock','soda','soft','solar','soldier','solid','solution','solve','someone','song','soon','sorry','sort','soul','sound','soup','source','south','space','spare','spatial','spawn','speak','special','speed','spell','spend','sphere','spice','spider','spike','spin','spirit','split','spoil','sponsor','spoon','sport','spot','spray','spread','spring','spy','square','squeeze','squirrel','stable','stadium','staff','stage','stairs','stamp','stand','start','state','stay','steak','steel','stem','step','stereo','stick','still','sting','stock','stomach','stone','stool','story','stove','strategy','street','strike','strong','struggle','student','stuff','stumble','style','subject','submit','subway','success','such','sudden','suffer','sugar','suggest','suit','summer','sun','sunny','sunset','super','supply','supreme','sure','surface','surge','surprise','surround','survey','suspect','sustain','swallow','swamp','swap','swarm','swear','sweet','swift','swim','swing','switch','sword','symbol','symptom','syrup','system','table','tackle','tag','tail','talent','talk','tank','tape','target','task','taste','tattoo','taxi','teach','team','tell','ten','tenant','tennis','tent','term','test','text','thank','that','theme','then','theory','there','they','thing','this','thought','three','thrive','throw','thumb','thunder','ticket','tide','tiger','tilt','timber','time','tiny','tip','tired','tissue','title','toast','tobacco','today','toddler','toe','together','toilet','token','tomato','tomorrow','tone','tongue','tonight','tool','tooth','top','topic','topple','torch','tornado','tortoise','toss','total','tourist','toward','tower','town','toy','track','trade','traffic','tragic','train','transfer','trap','trash','travel','tray','treat','tree','trend','trial','tribe','trick','trigger','trim','trip','trophy','trouble','truck','true','truly','trumpet','trust','truth','try','tube','tuition','tumble','tuna','tunnel','turkey','turn','turtle','twelve','twenty','twice','twin','twist','two','type','typical','ugly','umbrella','unable','unaware','uncle','uncover','under','undo','unfair','unfold','unhappy','uniform','unique','unit','universe','unknown','unlock','until','unusual','unveil','update','upgrade','uphold','upon','upper','upset','urban','urge','usage','use','used','useful','useless','usual','utility','vacant','vacuum','vague','valid','valley','valve','van','vanish','vapor','various','veast','vector','vehicle','velvet','vendor','venture','venue','verb','verify','version','very','vessel','veteran','viable','vibrant','vicious','victory','video','view','village','vintage','violin','virtual','virus','visa','visit','visual','vital','vivid','vocal','voice','void','volcano','volume','vote','voyage','wage','wagon','wait','walk','wall','walnut','want','warfare','warm','warrior','wash','wasp','waste','water','wave','way','wealth','weapon','wear','weasel','weather','web','wedding','weekend','weird','welcome','west','wet','whale','what','wheat','wheel','when','where','whip','whisper','wide','width','wife','wild','will','win','window','wine','wing','wink','winner','winter','wire','wisdom','wise','wish','witness','wolf','woman','wonder','wood','wool','word','work','world','worry','worth','wrap','wreck','wrestle','wrist','write','wrong','yard','year','yellow','you','young','youth','zebra','zero','zone','zoo'];
+
+        // PBKDF2-HMAC-SHA512 implementation using Web Crypto API
+        async function pbkdf2HmacSha512(password, salt, iterations) {
+            const enc = new TextEncoder();
+            const keyMaterial = await window.crypto.subtle.importKey(
+                'raw',
+                enc.encode(password),
+                { name: 'PBKDF2' },
+                false,
+                ['deriveBits']
+            );
+            
+            const derivedBits = await window.crypto.subtle.deriveBits(
+                {
+                    name: 'PBKDF2',
+                    hash: 'SHA-512',
+                    salt: enc.encode(salt),
+                    iterations: iterations
+                },
+                keyMaterial,
+                512
+            );
+            
+            return new Uint8Array(derivedBits);
+        }
+
+        // BIP39 implementation
+        window.bip39 = {
+            generateMnemonic: function() {
+                const words = [];
+                const randomBytes = new Uint8Array(16);
+                window.crypto.getRandomValues(randomBytes);
+                
+                for (let i = 0; i < 12; i++) {
+                    const index = randomBytes[i] % 2048;
+                    words.push(BIP39_WORDLIST[index]);
+                }
+                
+                return words.join(' ');
+            },
+            
+            mnemonicToSeedSync: function(mnemonic) {
+                // This is async in reality, but we'll make it sync-compatible
+                // For production use, you should use the async version
+                console.warn('mnemonicToSeedSync called - using async PBKDF2');
+                throw new Error('Please use mnemonicToSeed (async) instead');
+            },
+            
+            validateMnemonic: function(mnemonic) {
+                const words = mnemonic.toLowerCase().split(' ');
+                if (words.length !== 12) return false;
+                return words.every(word => BIP39_WORDLIST.includes(word));
+            }
+        };
+
+        // Async version for actual use
+        window.bip39Async = {
+            mnemonicToSeed: async function(mnemonic) {
+                const salt = 'mnemonic' + mnemonic;
+                return await pbkdf2HmacSha512(mnemonic, salt, 2048);
+            }
+        };
+
+        console.log('BIP39 inline implementation loaded');
+        console.log('BIP39 ready:', true);
+    </script>
+    <!-- Import @noble/ed25519 (ES module for browser) -->
+    <script type="module">
+        import { getPublicKey, sign } from 'https://cdn.jsdelivr.net/npm/@noble/ed25519@1.7.3/+esm';
+        window.nobleEd25519 = { getPublicKey, sign };
+        window.librariesLoaded = true;
+        console.log('Ed25519 loaded:', !!window.nobleEd25519);
+    </script>
+    <script>
+        // Wait for libraries to load
+        let bip39Ready = typeof window.bip39 !== 'undefined';
+        let bip39AsyncReady = typeof window.bip39Async !== 'undefined';
+        
+        function waitForLibraries(callback, maxAttempts = 50) {
+            let attempts = 0;
+            const check = () => {
+                const ready = bip39Ready && window.librariesLoaded;
+                if (ready) {
+                    callback();
+                } else if (attempts < maxAttempts) {
+                    attempts++;
+                    setTimeout(check, 100);
+                } else {
+                    console.error('Libraries failed to load after', maxAttempts, 'attempts');
+                    console.log('bip39Ready:', bip39Ready, 'librariesLoaded:', window.librariesLoaded);
+                }
+            };
+            check();
+        }
+    </script>
+    <style>
+/* ==================== Global Styles ==================== */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #21262d;
+  --border-color: #30363d;
+  --text-primary: #c9d1d9;
+  --text-secondary: #8b949e;
+  --accent-blue: #58a6ff;
+  --accent-green: #3fb950;
+  --accent-purple: #bc8cff;
+  --accent-yellow: #d29922;
+  --accent-red: #f85149;
+}
+
+/* Text utility classes */
+.text-green { color: var(--accent-green) !important; }
+.text-red { color: var(--accent-red) !important; }
+body { 
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; 
+  background: var(--bg-primary); 
+  color: var(--text-primary); 
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+/* ==================== Header ==================== */
+.header { 
+  background: var(--bg-secondary); 
+  border-bottom: 1px solid var(--border-color);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  backdrop-filter: blur(10px);
+}
+.header .container { 
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 15px 30px;
+  display: flex; 
+  align-items: center; 
+  justify-content: space-between;
+  gap: 30px;
+}
+.logo { 
+  font-size: 24px; 
+  font-weight: 700; 
+  color: var(--accent-blue);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.logo::before {
+  content: '🔐';
+  font-size: 28px;
+}
+.nav { 
+  display: flex; 
+  gap: 25px; 
+}
+.nav a { 
+  color: var(--text-secondary); 
+  text-decoration: none; 
+  font-size: 14px; 
+  font-weight: 500;
+  padding: 8px 12px;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+.nav a:hover { 
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+/* ==================== Main Container ==================== */
+.main-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 30px;
+}
+
+/* ==================== Welcome Section ==================== */
+.welcome-section {
+  text-align: center;
+  padding: 60px 20px;
+}
+.welcome-section h1 {
+  font-size: 36px;
+  margin-bottom: 15px;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.welcome-section p {
+  font-size: 16px;
+  color: var(--text-secondary);
+  margin-bottom: 40px;
+}
+.welcome-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 25px;
+  margin-top: 40px;
+}
+.welcome-card {
+  background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 30px;
+  transition: all 0.3s;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+.welcome-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+}
+.welcome-card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 10px 30px rgba(88, 166, 255, 0.15);
+  border-color: var(--accent-blue);
+}
+.welcome-card h3 {
+  font-size: 22px;
+  margin-bottom: 10px;
+  color: var(--text-primary);
+}
+.welcome-card p {
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+}
+.welcome-card .icon {
+  font-size: 48px;
+  margin-bottom: 15px;
+}
+
+/* ==================== Tabs ==================== */
+.tabs { 
+  display: flex; 
+  gap: 10px; 
+  padding: 20px; 
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+.tab { 
+  flex: 1;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  cursor: pointer;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  transition: all 0.2s;
+}
+.tab:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+}
+.tab.active { 
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  color: white;
+  border-color: transparent;
+}
+
+/* ==================== Tab Content ==================== */
+.tab-content { 
+  display: none; 
+  padding: 30px;
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+}
+.tab-content.active { 
+  display: block; 
+}
+
+/* Custom scrollbar for transactions list */
+#transactionsList {
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent-blue) var(--bg-tertiary);
+}
+
+#transactionsList::-webkit-scrollbar {
+  width: 8px;
+}
+
+#transactionsList::-webkit-scrollbar-track {
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+}
+
+#transactionsList::-webkit-scrollbar-thumb {
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  border-radius: 4px;
+}
+
+#transactionsList::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-blue);
+}
+
+/* ==================== Buttons ==================== */
+.btn {
+  padding: 12px 30px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s;
+  margin: 5px;
+}
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  color: white;
+}
+.btn-primary:hover {
+  opacity: 0.9;
+  transform: translateY(-2px);
+  box-shadow: 0 5px 15px rgba(88, 166, 255, 0.3);
+}
+.btn-success { 
+  background: var(--accent-green); 
+  color: white; 
+}
+.btn-success:hover {
+  opacity: 0.9;
+  transform: translateY(-2px);
+}
+.btn-danger { 
+  background: var(--accent-red); 
+  color: white; 
+}
+.btn-danger:hover {
+  opacity: 0.9;
+}
+
+/* ==================== Form Groups ==================== */
+.form-group { 
+  margin: 20px 0; 
+}
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.form-group input, 
+.form-group textarea {
+  width: 100%;
+  padding: 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  transition: all 0.2s;
+}
+.form-group input:focus, 
+.form-group textarea:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.1);
+}
+.form-group textarea {
+  resize: vertical;
+  min-height: 100px;
+}
+
+/* ==================== Wallet Info Cards ==================== */
+.wallet-info {
+  background: var(--bg-tertiary);
+  padding: 20px;
+  border-radius: 8px;
+  margin: 20px 0;
+  border: 1px solid var(--border-color);
+}
+.wallet-info h3 {
+  color: var(--accent-blue);
+  margin-bottom: 15px;
+  font-size: 18px;
+}
+.wallet-info p {
+  margin: 10px 0;
+  word-break: break-all;
+  font-size: 14px;
+}
+.wallet-info .info-label {
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-right: 10px;
+}
+.wallet-info .info-value {
+  font-family: 'Consolas', 'Monaco', monospace;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  padding: 8px 12px;
+  border-radius: 4px;
+  display: inline-block;
+}
+
+/* ==================== Alerts ==================== */
+.alert {
+  padding: 15px;
+  border-radius: 6px;
+  margin: 20px 0;
+  border-left: 4px solid;
+}
+.alert-info {
+  background: rgba(88, 166, 255, 0.1);
+  border-left-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+.alert-warning {
+  background: rgba(210, 153, 22, 0.1);
+  border-left-color: var(--accent-yellow);
+  color: var(--accent-yellow);
+}
+.alert-success {
+  background: rgba(63, 185, 80, 0.1);
+  border-left-color: var(--accent-green);
+  color: var(--accent-green);
+}
+.alert strong {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 16px;
+}
+.alert ol, .alert ul {
+  margin-left: 20px;
+  margin-top: 10px;
+}
+.alert li {
+  margin: 5px 0;
+}
+
+/* ==================== Balance Display ==================== */
+.balance-display {
+  background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 30px;
+  text-align: center;
+  margin: 20px 0;
+}
+.balance-display .balance-label {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+.balance-display .balance-amount {
+  font-size: 42px;
+  font-weight: 700;
+  color: var(--accent-green);
+  letter-spacing: 2px;
+}
+.balance-display .balance-currency {
+  font-size: 20px;
+  color: var(--text-secondary);
+  margin-left: 10px;
+}
+
+/* ==================== Copy Button ==================== */
+.copy-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  color: var(--accent-blue);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+  margin-left: 10px;
+}
+.copy-btn:hover {
+  background: var(--accent-blue);
+  color: white;
+  border-color: var(--accent-blue);
+}
+.copy-btn.copied {
+  background: var(--accent-green);
+  color: white;
+  border-color: var(--accent-green);
+}
+
+/* ==================== Toast Notification ==================== */
+.toast {
+  position: fixed;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%) translateY(100px);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  padding: 12px 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  z-index: 1000;
+  opacity: 0;
+  transition: all 0.3s;
+  font-weight: 500;
+}
+.toast.show {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+}
+
+/* ==================== Hidden ==================== */
+.hidden { 
+  display: none !important; 
+}
+
+/* ==================== Responsive ==================== */
+@media (max-width: 768px) {
+  .header .container {
+    flex-direction: column;
+    padding: 15px;
+  }
+  .nav {
+    width: 100%;
+    justify-content: center;
+  }
+  .main-container {
+    padding: 15px;
+  }
+  .welcome-section h1 {
+    font-size: 28px;
+  }
+  .welcome-cards {
+    grid-template-columns: 1fr;
+  }
+  .balance-display .balance-amount {
+    font-size: 32px;
+  }
+}
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <div class="logo">NogoChain Wallet</div>
+            <nav class="nav">
+                <a href="../explorer/" target="_blank">Explorer</a>
+                <a href="../" target="_blank">API</a>
+            </nav>
+        </div>
+    </header>
+    
+    <!-- Main Content -->
+    <div class="main-container">
+        
+        <!-- Welcome Section -->
+        <div id="welcomeSection" class="welcome-section">
+            <h1>🔐 NogoChain Web Wallet</h1>
+            <p>Secure & Decentralized Digital Asset Management - Your keys stay in your browser</p>
+            
+            <div class="welcome-cards">
+                <div class="welcome-card" onclick="showTab('createTab')">
+                    <div class="icon">✨</div>
+                    <h3>Create New Wallet</h3>
+                    <p>Generate a new secure wallet with BIP39 mnemonic phrase</p>
+                </div>
+                
+                <div class="welcome-card" onclick="showTab('importTab')">
+                    <div class="icon">📥</div>
+                    <h3>Import Wallet</h3>
+                    <p>Restore existing wallet using mnemonic or private key</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Create Wallet Tab -->
+        <div id="createTab" class="tab-content">
+            <div class="tabs">
+                <button class="tab active" onclick="switchCreateTab('step1')">Create Wallet</button>
+                <button class="tab" onclick="showWelcome()">Back to Welcome</button>
+            </div>
+            
+            <div id="createStep1">
+                <div class="alert alert-info">
+                    <strong>🎯 Generate New Wallet</strong>
+                    Creating a new wallet with BIP39 standard mnemonic phrase and Ed25519 key pair
+                </div>
+                <button class="btn btn-primary" onclick="generateWallet()" style="padding: 15px 40px; font-size: 16px;">
+                    ✨ Generate Wallet
+                </button>
+            </div>
+            
+            <div id="createStep2" class="hidden">
+                <div class="alert alert-success">
+                    <strong>✅ Wallet Generated Successfully!</strong>
+                    Please backup your mnemonic phrase and private key securely.
+                </div>
+                
+                <div class="wallet-info">
+                    <h3>📝 Mnemonic Phrase (Write it down)</h3>
+                    <div class="info-value" style="font-size: 16px; padding: 15px; width: 100%; display: block; margin-bottom: 15px; letter-spacing: 1px;">
+                        <span id="mnemonicPhrase"></span>
+                    </div>
+                    <button class="btn btn-primary" onclick="copyToClipboard('mnemonicPhrase', 'Mnemonic')">
+                        📋 Copy Mnemonic
+                    </button>
+                    
+                    <div class="alert alert-warning" style="margin-top: 20px;">
+                        <strong>⚠️ Important Security Notes:</strong>
+                        <ul>
+                            <li>Write down the mnemonic phrase <strong>in order</strong> on paper</li>
+                            <li>Store it in a secure place (safe, safety deposit box, etc.)</li>
+                            <li><strong>Do NOT</strong> screenshot, email, or send via messaging apps</li>
+                            <li>Losing mnemonic = permanently losing access to your assets</li>
+                            <li>Anyone with access to your mnemonic can steal your funds</li>
+                        </ul>
+                    </div>
+                </div>
+                
+                <div class="wallet-info">
+                    <h3>📍 Wallet Details</h3>
+                    <p>
+                        <span class="info-label">Address:</span>
+                        <span class="info-value" id="newAddress"></span>
+                        <button class="copy-btn" onclick="copyToClipboard('newAddress', 'Address')">📋</button>
+                    </p>
+                    <p>
+                        <span class="info-label">Public Key:</span>
+                        <span class="info-value" id="newPublicKey"></span>
+                        <button class="copy-btn" onclick="copyToClipboard('newPublicKey', 'Public Key')">📋</button>
+                    </p>
+                    <p>
+                        <span class="info-label">Private Key:</span>
+                        <span class="info-value" id="newPrivateKey"></span>
+                        <button class="copy-btn" onclick="copyToClipboard('newPrivateKey', 'Private Key')">📋</button>
+                    </p>
+                </div>
+                
+                <div class="wallet-info" style="border:2px solid var(--accent-blue);">
+                    <h3>🔐 Set Wallet Password</h3>
+                    <div class="form-group">
+                        <label for="walletPassword1">Password:</label>
+                        <input type="password" id="walletPassword1" placeholder="Enter a strong password" style="width:100%;padding:12px;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:6px;color:var(--text-primary);font-size:14px;">
+                    </div>
+                    <div class="form-group">
+                        <label for="walletPassword2">Confirm Password:</label>
+                        <input type="password" id="walletPassword2" placeholder="Confirm your password" style="width:100%;padding:12px;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:6px;color:var(--text-primary);font-size:14px;">
+                    </div>
+                    <p id="passwordMatchError" style="color:var(--accent-red);font-size:13px;display:none;margin-top:10px;">Passwords do not match!</p>
+                </div>
+                
+                <button class="btn btn-success" onclick="saveWalletWithPassword()" style="padding: 15px 40px; font-size: 16px;">
+                    ✅ I've Backed Up - Set Password & Start Using
+                </button>
+            </div>
+        </div>
+        
+        <!-- Import Wallet Tab -->
+        <div id="importTab" class="tab-content">
+            <div class="tabs">
+                <button class="tab active" onclick="switchImportTab('import')">Import Wallet</button>
+                <button class="tab" onclick="showWelcome()">Back to Welcome</button>
+            </div>
+            
+            <div class="alert alert-info">
+                <strong>🔑 Import Methods:</strong>
+                Choose one of the following methods to restore your wallet
+            </div>
+            
+            <div class="alert alert-warning" style="margin-bottom: 20px;">
+                <strong>⚠️ Forgot Password?</strong>
+                If you forgot your password, you can use your mnemonic phrase or private key to import your wallet and set a new password.
+                <br><strong>Your funds are safe - you just need your backup phrase!</strong>
+            </div>
+            
+            <div class="form-group">
+                <label for="importMnemonic">Mnemonic Phrase (12 words, space-separated):</label>
+                <textarea id="importMnemonic" placeholder="abandon ability able about above absent absorb abstract absurd abuse access accident"></textarea>
+            </div>
+            
+            <div style="text-align: center; margin: 20px 0; color: var(--text-secondary);">
+                <span>— OR —</span>
+            </div>
+            
+            <div class="form-group">
+                <label for="importPrivateKey">Private Key (Base64 format):</label>
+                <textarea id="importPrivateKey" placeholder="Enter your private key in Base64 format..."></textarea>
+            </div>
+            
+            <div class="wallet-info" style="border:2px solid var(--accent-blue); margin-top: 20px;">
+                <h3>🔐 Set New Password</h3>
+                <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 15px;">
+                    Optional but recommended. Leave empty if you don't want to encrypt your wallet.
+                </p>
+                <div class="form-group">
+                    <label for="importPassword1">Password:</label>
+                    <input type="password" id="importPassword1" placeholder="Enter a strong password" style="width:100%;padding:12px;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:6px;color:var(--text-primary);font-size:14px;">
+                </div>
+                <div class="form-group">
+                    <label for="importPassword2">Confirm Password:</label>
+                    <input type="password" id="importPassword2" placeholder="Confirm your password" style="width:100%;padding:12px;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:6px;color:var(--text-primary);font-size:14px;">
+                </div>
+                <p id="importPasswordError" style="color:var(--accent-red);font-size:13px;display:none;margin-top:10px;"></p>
+            </div>
+            
+            <button class="btn btn-primary" onclick="importWallet()" style="padding: 15px 40px; font-size: 16px; margin-top: 15px;">
+                📥 Import Wallet
+            </button>
+        </div>
+        
+        <!-- Wallet Dashboard Tab -->
+        <div id="walletDashboardTab" class="tab-content">
+            <div class="tabs">
+                <button class="tab active" onclick="switchWalletTab('send')">Send</button>
+                <button class="tab" onclick="switchWalletTab('receive')">Receive</button>
+                <button class="tab" onclick="switchWalletTab('transactions')">Transactions</button>
+                <button class="tab" onclick="switchWalletTab('info')">Wallet Info</button>
+                <button class="tab" onclick="lockWallet()">🔒 Lock</button>
+                <button class="tab" onclick="logout()">Logout</button>
+            </div>
+            
+            <!-- Balance Display -->
+            <div class="balance-display">
+                <div class="balance-label">Available Balance</div>
+                <div>
+                    <span class="balance-amount" id="walletBalance">0.00000000</span>
+                    <span class="balance-currency">NOGO</span>
+                </div>
+            </div>
+            
+            <!-- Send Tab -->
+            <div id="sendTab">
+                <h2 style="margin-bottom: 20px;">Send NOGO</h2>
+                <div class="form-group">
+                    <label for="sendAddress">Recipient Address:</label>
+                    <input type="text" id="sendAddress" placeholder="NOGO...">
+                </div>
+                <div class="form-group">
+                    <label for="sendAmount">Amount (NOGO):</label>
+                    <input type="number" id="sendAmount" step="0.00000001" placeholder="0.00000001" min="0.00000001">
+                </div>
+                <button class="btn btn-primary" onclick="sendTransaction()">
+                    🚀 Send Transaction
+                </button>
+            </div>
+            
+            <!-- Receive Tab -->
+            <div id="receiveTab" class="hidden">
+                <h2 style="margin-bottom: 20px;">Receive NOGO</h2>
+                <div class="wallet-info">
+                    <p style="margin-bottom: 15px;"><strong>Your Receiving Address:</strong></p>
+                    <p>
+                        <span class="info-value" id="receiveAddress" style="font-size: 14px; width: 100%; display: block;"></span>
+                    </p>
+                    <div id="qrCodeContainer" style="margin: 20px 0; text-align: center;"></div>
+                    <button class="btn btn-primary" onclick="copyToClipboard('receiveAddress', 'Address')">
+                        📋 Copy Address
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Info Tab -->
+            <div id="infoTab" class="hidden">
+                <h2 style="margin-bottom: 20px;">Wallet Information</h2>
+                <div class="wallet-info">
+                    <p>
+                        <span class="info-label">Address:</span>
+                        <span class="info-value" id="walletAddress"></span>
+                        <button class="copy-btn" onclick="copyToClipboard('walletAddress', 'Address')">📋</button>
+                    </p>
+                    <p>
+                        <span class="info-label">Public Key:</span>
+                        <span class="info-value" id="walletPublicKey"></span>
+                        <button class="copy-btn" onclick="copyToClipboard('walletPublicKey', 'Public Key')">📋</button>
+                    </p>
+                    <p>
+                        <span class="info-label">Nonce:</span>
+                        <span class="info-value" id="walletNonce">0</span>
+                    </p>
+                </div>
+            </div>
+            
+            <!-- Transactions Tab -->
+            <div id="transactionsTab" class="hidden">
+                <h2 style="margin-bottom: 20px;">Transaction History</h2>
+                <div id="transactionsList" style="max-height: 600px; overflow-y: auto; padding-right: 10px;">
+                    <div style="text-align: center; padding: 30px; color: var(--text-secondary);">
+                        Loading transactions...
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+    </div>
+    
+    <!-- Toast Notification -->
+    <div id="toast" class="toast"></div>
+    
+    <!-- Password Modal -->
+    <div id="passwordModal" class="modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:9999;justify-content:center;align-items:center;">
+        <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:12px;padding:30px;max-width:400px;width:90%;box-shadow:0 10px 40px rgba(0,0,0,0.5);">
+            <h3 style="color:var(--text-primary);margin-bottom:20px;font-size:20px;">🔐 Wallet Password</h3>
+            <div class="form-group">
+                <label for="walletPassword" style="color:var(--text-secondary);font-size:14px;">Enter your password to unlock wallet:</label>
+                <input type="password" id="walletPassword" placeholder="Enter password..." style="width:100%;padding:12px;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:6px;color:var(--text-primary);font-size:14px;margin-top:10px;">
+            </div>
+            <div style="display:flex;gap:10px;margin-top:20px;">
+                <button class="btn btn-primary" onclick="unlockWallet()" style="flex:1;">Unlock</button>
+                <button class="btn btn-danger" onclick="closePasswordModal()" style="flex:1;">Cancel</button>
+            </div>
+            <p id="passwordError" style="color:var(--accent-red);font-size:13px;margin-top:15px;display:none;"></p>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = 'http://localhost:8080';
+        let currentWallet = null;
+        let isWalletLocked = false;
+        let passwordAttempts = 0;
+        const MAX_PASSWORD_ATTEMPTS = 5;
+        
+        // AES-GCM encryption functions
+        async function encryptWalletData(data, password) {
+            const enc = new TextEncoder();
+            const salt = window.crypto.getRandomValues(new Uint8Array(16));
+            const iv = window.crypto.getRandomValues(new Uint8Array(12));
+            
+            // Derive key from password using PBKDF2
+            const keyMaterial = await window.crypto.subtle.importKey(
+                'raw',
+                enc.encode(password),
+                { name: 'PBKDF2' },
+                false,
+                ['deriveKey']
+            );
+            
+            const key = await window.crypto.subtle.deriveKey(
+                {
+                    name: 'PBKDF2',
+                    salt: salt,
+                    iterations: 100000,
+                    hash: 'SHA-256'
+                },
+                keyMaterial,
+                { name: 'AES-GCM', length: 256 },
+                false,
+                ['encrypt']
+            );
+            
+            // Only encrypt sensitive data (privateKey), keep address/publicKey in plaintext
+            const sensitiveData = {
+                privateKey: data.privateKey
+            };
+            const encodedData = enc.encode(JSON.stringify(sensitiveData));
+            const encrypted = await window.crypto.subtle.encrypt(
+                { name: 'AES-GCM', iv: iv },
+                key,
+                encodedData
+            );
+            
+            // Return encrypted data with salt and IV, plus plaintext address/publicKey
+            return {
+                encrypted: arrayBufferToBase64(encrypted),
+                salt: arrayBufferToBase64(salt),
+                iv: arrayBufferToBase64(iv),
+                version: 1,
+                address: data.address,
+                publicKey: data.publicKey
+            };
+        }
+        
+        async function decryptWalletData(encryptedData, password) {
+            try {
+                const enc = new TextEncoder();
+                
+                // Validate encrypted data structure
+                if (!encryptedData.encrypted || !encryptedData.salt || !encryptedData.iv) {
+                    throw new Error('Invalid encrypted wallet data structure');
+                }
+                
+                const salt = base64ToUint8Array(encryptedData.salt);
+                const iv = base64ToUint8Array(encryptedData.iv);
+                const encrypted = base64ToUint8Array(encryptedData.encrypted);
+                
+                console.log('Decrypting with:', {
+                    saltLength: salt.length,
+                    ivLength: iv.length,
+                    encryptedLength: encrypted.length
+                });
+                
+                // Derive key from password
+                const keyMaterial = await window.crypto.subtle.importKey(
+                    'raw',
+                    enc.encode(password),
+                    { name: 'PBKDF2' },
+                    false,
+                    ['deriveKey']
+                );
+                
+                const key = await window.crypto.subtle.deriveKey(
+                    {
+                        name: 'PBKDF2',
+                        salt: salt,
+                        iterations: 100000,
+                        hash: 'SHA-256'
+                    },
+                    keyMaterial,
+                    { name: 'AES-GCM', length: 256 },
+                    false,
+                    ['decrypt']
+                );
+                
+                // Decrypt data
+                const decrypted = await window.crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv: iv },
+                    key,
+                    encrypted
+                );
+                
+                const dec = new TextDecoder();
+                const sensitiveData = JSON.parse(dec.decode(decrypted));
+                
+                // Reconstruct full wallet data with plaintext address/publicKey
+                const walletData = {
+                    address: encryptedData.address,
+                    publicKey: encryptedData.publicKey,
+                    privateKey: sensitiveData.privateKey,
+                    encrypted: true
+                };
+                
+                console.log('Successfully decrypted wallet data');
+                return walletData;
+            } catch (e) {
+                console.error('Decryption error:', e);
+                if (e.name === 'InvalidAccessError' || e.name === 'OperationFailed') {
+                    throw new Error('Wrong password or corrupted data');
+                }
+                throw new Error(`Decryption failed: ${e.message}`);
+            }
+        }
+        
+        // Global error handler
+        window.addEventListener('error', (e) => {
+            console.error('Global error:', e.error);
+            // Show error on page
+            const errorDiv = document.createElement('div');
+            errorDiv.style.cssText = 'position:fixed;top:10px;right:10px;background:#f85149;color:white;padding:15px;border-radius:6px;z-index:9999;max-width:400px;';
+            errorDiv.innerHTML = '<strong>❌ Error:</strong><br>' + e.message;
+            document.body.appendChild(errorDiv);
+            setTimeout(() => errorDiv.remove(), 5000);
+        });
+        
+        // Check for saved wallet on page load
+        window.addEventListener('load', async () => {
+            console.log('=== Page Load ===');
+            const saved = localStorage.getItem('nogoWallet');
+            console.log('Saved wallet data:', saved);
+            
+            if (saved) {
+                try {
+                    const parsed = JSON.parse(saved);
+                    console.log('Parsed wallet:', parsed);
+                    console.log('Has encrypted field:', parsed.encrypted);
+                    console.log('Has address field:', parsed.address);
+                    console.log('Has publicKey field:', parsed.publicKey);
+                    
+                    if (parsed.encrypted) {
+                        // Check if encrypted wallet has required plaintext fields
+                        if (!parsed.address || !parsed.publicKey) {
+                            console.error('Encrypted wallet missing address or publicKey!');
+                            console.log('This is an old encrypted wallet. Please re-import.');
+                            showWelcome();
+                            return;
+                        }
+                        
+                        // Wallet is encrypted - but DON'T show password modal
+                        // Address and publicKey are in plaintext, can use directly for viewing
+                        currentWallet = parsed;
+                        isWalletLocked = false; // Consider as unlocked for viewing
+                        console.log('Encrypted wallet loaded');
+                        console.log('currentWallet.address:', currentWallet.address);
+                        console.log('currentWallet.publicKey:', currentWallet.publicKey);
+                        
+                        // Restore last active tab or default to dashboard
+                        const lastTab = sessionStorage.getItem('currentWalletTab') || 'walletDashboardTab';
+                        console.log('Restoring tab:', lastTab);
+                        showTab(lastTab);
+                        // Don't call loadWalletInfo() here, it's called by showTab()
+                    } else {
+                        // Old unencrypted wallet
+                        console.log('Unencrypted wallet, loading directly');
+                        currentWallet = parsed;
+                        isWalletLocked = false;
+                        
+                        // Restore last active tab or default to dashboard
+                        const lastTab = sessionStorage.getItem('currentWalletTab') || 'walletDashboardTab';
+                        console.log('Restoring tab:', lastTab);
+                        showTab(lastTab);
+                        // Don't call loadWalletInfo() here, it's called by showTab()
+                    }
+                } catch (e) {
+                    console.error('Failed to parse saved wallet:', e);
+                    showWelcome();
+                }
+            } else {
+                console.log('No wallet found, showing welcome');
+                showWelcome();
+            }
+        });
+        
+        function showWelcome() {
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.getElementById('welcomeSection').classList.remove('hidden');
+        }
+        
+        function showTab(tabId) {
+            try {
+                console.log('showTab called with:', tabId);
+                
+                // Hide all tab-content sections
+                document.querySelectorAll('.tab-content').forEach(tab => {
+                    tab.classList.remove('active');
+                });
+                
+                // Hide welcome section
+                document.getElementById('welcomeSection').classList.add('hidden');
+                
+                // Show the requested tab
+                const tabElement = document.getElementById(tabId);
+                if (tabElement) {
+                    tabElement.classList.add('active');
+                    console.log('Tab element found and activated:', tabId);
+                } else {
+                    console.error('Tab element not found:', tabId);
+                    alert('Tab element not found: ' + tabId);
+                    return;
+                }
+                
+                // If showing wallet dashboard, also show the correct sub-tab
+                if (tabId === 'walletDashboardTab') {
+                    console.log('Showing wallet dashboard...');
+                    
+                    // Hide all sub-tabs first
+                    ['sendTab', 'receiveTab', 'infoTab', 'transactionsTab'].forEach(t => {
+                        const el = document.getElementById(t);
+                        if (el) {
+                            el.classList.add('hidden');
+                            console.log('Hidden:', t);
+                        }
+                    });
+                    
+                    // Get last active sub-tab from sessionStorage or default to sendTab
+                    const lastSubTab = sessionStorage.getItem('currentWalletSubTab');
+                    console.log('Last sub-tab from sessionStorage:', lastSubTab);
+                    
+                    let subTabToShow = 'sendTab';
+                    
+                    // Check if lastSubTab is valid
+                    if (lastSubTab && ['sendTab', 'receiveTab', 'infoTab', 'transactionsTab'].includes(lastSubTab)) {
+                        subTabToShow = lastSubTab;
+                    }
+                    
+                    console.log('Sub-tab to show:', subTabToShow);
+                    
+                    // Show the sub-tab
+                    const subTabElement = document.getElementById(subTabToShow);
+                    if (subTabElement) {
+                        subTabElement.classList.remove('hidden');
+                        console.log('Shown sub-tab:', subTabToShow);
+                    } else {
+                        console.error('Sub-tab element not found:', subTabToShow);
+                    }
+                    
+                    // Load wallet info
+                    console.log('Calling loadWalletInfo...');
+                    loadWalletInfo();
+                }
+                
+            } catch (e) {
+                console.error('Error in showTab:', e);
+                alert('Error in showTab: ' + e.message);
+            }
+        }
+        
+        function switchCreateTab(step) {
+            document.querySelectorAll('#createTab .tab').forEach((tab, index) => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            if (step === 'step1') {
+                document.getElementById('createStep1').classList.remove('hidden');
+                document.getElementById('createStep2').classList.add('hidden');
+            }
+        }
+        
+        function switchImportTab(mode) {
+            document.querySelectorAll('#importTab .tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            // Clear password fields when switching
+            document.getElementById('importPassword1').value = '';
+            document.getElementById('importPassword2').value = '';
+            document.getElementById('importPasswordError').style.display = 'none';
+        }
+        
+        function switchWalletTab(tab) {
+            document.querySelectorAll('#walletDashboardTab .tab').forEach(t => {
+                t.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            ['sendTab', 'receiveTab', 'infoTab', 'transactionsTab'].forEach(t => {
+                document.getElementById(t).classList.add('hidden');
+            });
+            document.getElementById(tab + 'Tab').classList.remove('hidden');
+            
+            // Save current sub-tab to sessionStorage for persistence
+            sessionStorage.setItem('currentWalletSubTab', tab + 'Tab');
+            
+            // Load transactions when switching to transactions tab
+            if (tab === 'transactions') {
+                loadTransactions();
+            }
+        }
+        
+        async function generateWallet() {
+            try {
+                // Wait for ES modules to load if needed
+                if (!window.librariesLoaded) {
+                    showToast('⏳ Loading libraries...');
+                    await new Promise((resolve, reject) => {
+                        let attempts = 0;
+                        const check = () => {
+                            if (window.librariesLoaded) {
+                                resolve();
+                            } else if (attempts < 50) {
+                                attempts++;
+                                setTimeout(check, 100);
+                            } else {
+                                reject(new Error('Libraries failed to load'));
+                            }
+                        };
+                        check();
+                    });
+                }
+                
+                // Check if libraries are loaded
+                if (!window.bip39 || !window.bip39.generateMnemonic) {
+                    console.error('BIP39 library not available:', window.bip39);
+                    showToast('❌ BIP39 library not loaded. Please refresh the page.');
+                    return;
+                }
+                if (!window.nobleEd25519 || !window.nobleEd25519.getPublicKey) {
+                    console.error('Ed25519 library not available:', window.nobleEd25519);
+                    showToast('❌ Ed25519 library not loaded. Please refresh the page.');
+                    return;
+                }
+                
+                // Generate mnemonic using BIP39 standard
+                const mnemonic = window.bip39.generateMnemonic();
+                
+                // Derive seed from mnemonic (BIP39 standard: PBKDF2-HMAC-SHA512, 2048 iterations)
+                // Using async version since PBKDF2 requires Web Crypto API
+                const seed = await window.bip39Async.mnemonicToSeed(mnemonic);
+                const seedBytes = new Uint8Array(seed);
+                
+                // Derive private key from seed using SHA-256 (32 bytes)
+                const hashBuffer = await window.crypto.subtle.digest('SHA-256', seedBytes);
+                const privateKeyBytes = new Uint8Array(hashBuffer);
+                
+                // Derive public key from private key using @noble/ed25519
+                const publicKeyBytes = await window.nobleEd25519.getPublicKey(privateKeyBytes);
+                
+                // Generate address: SHA256(public key) with version and checksum
+                const hashBuffer2 = await window.crypto.subtle.digest('SHA-256', publicKeyBytes);
+                const hashArray = new Uint8Array(hashBuffer2);
+                
+                // Build address with version byte (0x00) and 4-byte checksum
+                const addressData = new Uint8Array(1 + 32 + 4);
+                addressData[0] = 0x00; // Version byte
+                addressData.set(hashArray, 1); // 32-byte hash
+                
+                // Calculate checksum: first 4 bytes of SHA256(addressData without checksum)
+                const checksumHash = await window.crypto.subtle.digest('SHA-256', addressData.slice(0, 33));
+                const checksumBytes = new Uint8Array(checksumHash.slice(0, 4));
+                addressData.set(checksumBytes, 33); // 4-byte checksum
+                
+                // Convert to hex and add prefix
+                const address = 'NOGO' + Array.from(addressData).map(b => b.toString(16).padStart(2, '0')).join('');
+                
+                // Convert to Base64
+                const privateKeyBase64 = arrayBufferToBase64(privateKeyBytes.buffer);
+                const publicKeyBase64 = arrayBufferToBase64(publicKeyBytes.buffer);
+                
+                // Display wallet info
+                document.getElementById('mnemonicPhrase').textContent = mnemonic;
+                document.getElementById('newAddress').textContent = address;
+                document.getElementById('newPublicKey').textContent = publicKeyBase64;
+                document.getElementById('newPrivateKey').textContent = privateKeyBase64;
+                
+                // Show step 2
+                document.getElementById('createStep1').classList.add('hidden');
+                document.getElementById('createStep2').classList.remove('hidden');
+                
+                // Temporarily save
+                currentWallet = {
+                    address: address,
+                    publicKey: publicKeyBase64,
+                    privateKey: privateKeyBase64,
+                    mnemonic: mnemonic,
+                    seedHex: arrayBufferToHex(seedBytes.buffer)
+                };
+                
+                showToast('✅ Wallet generated successfully!');
+                
+            } catch (e) {
+                showToast('❌ Generation failed: ' + e.message);
+            }
+        }
+        
+        function saveWallet() {
+            localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
+            showToast('✅ Wallet saved successfully!');
+            showTab('walletDashboardTab');
+            loadWalletInfo();
+        }
+        
+        function lockWallet() {
+            isWalletLocked = true;
+            currentWallet = null;
+            showToast('🔒 Wallet locked');
+        }
+        
+        function logout() {
+            if (confirm('Are you sure you want to logout? You will need to re-enter your password or import your wallet again.')) {
+                localStorage.removeItem('nogoWallet');
+                currentWallet = null;
+                isWalletLocked = true;
+                
+                // Clear all session state
+                sessionStorage.removeItem('currentWalletTab');
+                
+                showWelcome();
+                showToast('👋 Logged out successfully!');
+            }
+        }
+        
+        // Password modal functions
+        function showPasswordModal() {
+            document.getElementById('passwordModal').style.display = 'flex';
+            document.getElementById('walletPassword').value = '';
+            document.getElementById('passwordError').style.display = 'none';
+            document.getElementById('walletPassword').focus();
+        }
+        
+        // Show a password prompt for transaction signing
+        function showPasswordPrompt(message) {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('passwordModal');
+                const title = modal.querySelector('h3');
+                const label = modal.querySelector('label');
+                const input = document.getElementById('walletPassword');
+                const error = document.getElementById('passwordError');
+                
+                // Save original text
+                const originalTitle = title.textContent;
+                const originalLabel = label.textContent;
+                
+                // Modify for transaction prompt
+                title.textContent = '🔐 Transaction Authorization';
+                label.textContent = message;
+                error.style.display = 'none';
+                input.value = '';
+                
+                // Show modal
+                modal.style.display = 'flex';
+                input.focus();
+                
+                // Create one-time unlock function
+                const originalUnlock = window.unlockWallet;
+                
+                window.unlockWallet = async function() {
+                    const password = input.value;
+                    if (!password) {
+                        error.textContent = 'Please enter password';
+                        error.style.display = 'block';
+                        return;
+                    }
+                    
+                    // Close modal and resolve with password
+                    modal.style.display = 'none';
+                    resolve(password);
+                    
+                    // Restore original function and UI after delay
+                    setTimeout(() => {
+                        window.unlockWallet = originalUnlock;
+                        title.textContent = originalTitle;
+                        label.textContent = originalLabel;
+                    }, 1000);
+                };
+                
+                // Handle cancel - restore original function
+                const cancelBtn = modal.querySelector('.btn-danger');
+                const originalCancel = cancelBtn.onclick;
+                cancelBtn.onclick = function() {
+                    modal.style.display = 'none';
+                    resolve(null); // User cancelled
+                    setTimeout(() => {
+                        window.unlockWallet = originalUnlock;
+                        title.textContent = originalTitle;
+                        label.textContent = originalLabel;
+                        cancelBtn.onclick = originalCancel;
+                    }, 1000);
+                };
+            });
+        }
+        
+        function closePasswordModal() {
+            console.log('Closing password modal');
+            const modal = document.getElementById('passwordModal');
+            if (modal) {
+                modal.style.display = 'none';
+                console.log('Modal display set to none');
+            }
+        }
+        
+        async function unlockWallet() {
+            const password = document.getElementById('walletPassword').value;
+            if (!password) {
+                document.getElementById('passwordError').textContent = 'Please enter password';
+                document.getElementById('passwordError').style.display = 'block';
+                return;
+            }
+            
+            try {
+                const decrypted = await decryptWalletData(currentWallet, password);
+                currentWallet = decrypted;
+                isWalletLocked = false;
+                
+                closePasswordModal();
+                
+                const lastTab = sessionStorage.getItem('currentWalletTab') || 'walletDashboardTab';
+                showTab(lastTab);
+                loadWalletInfo();
+                
+                showToast('✅ Wallet unlocked successfully!');
+            } catch (e) {
+                console.error('Unlock failed:', e);
+                passwordAttempts++;
+                if (passwordAttempts >= MAX_PASSWORD_ATTEMPTS) {
+                    document.getElementById('passwordError').textContent = 'Too many failed attempts. Please refresh the page.';
+                    document.getElementById('passwordError').style.display = 'block';
+                    document.getElementById('walletPassword').disabled = true;
+                } else {
+                    document.getElementById('passwordError').textContent = `Invalid password (${passwordAttempts}/${MAX_PASSWORD_ATTEMPTS}) - ${e.message}`;
+                    document.getElementById('passwordError').style.display = 'block';
+                }
+            }
+        }
+        
+        // Add password to wallet creation
+        async function saveWalletWithPassword() {
+            const password1 = document.getElementById('walletPassword1').value;
+            const password2 = document.getElementById('walletPassword2').value;
+            
+            if (!password1 || !password2) {
+                document.getElementById('passwordMatchError').textContent = 'Please enter both password fields';
+                document.getElementById('passwordMatchError').style.display = 'block';
+                return;
+            }
+            
+            if (password1 !== password2) {
+                document.getElementById('passwordMatchError').textContent = 'Passwords do not match!';
+                document.getElementById('passwordMatchError').style.display = 'block';
+                return;
+            }
+            
+            if (password1.length < 8) {
+                document.getElementById('passwordMatchError').textContent = 'Password must be at least 8 characters';
+                document.getElementById('passwordMatchError').style.display = 'block';
+                return;
+            }
+            
+            try {
+                // Encrypt wallet data with password
+                const encrypted = await encryptWalletData(currentWallet, password1);
+                localStorage.setItem('nogoWallet', JSON.stringify(encrypted));
+                currentWallet = encrypted;
+                isWalletLocked = false;
+                showToast('✅ Wallet encrypted and saved successfully!');
+                showTab('walletDashboardTab');
+                loadWalletInfo();
+            } catch (e) {
+                console.error('Failed to encrypt wallet:', e);
+                showToast('❌ Failed to encrypt wallet. Please try again.');
+            }
+        }
+        
+        async function importWallet() {
+            const mnemonic = document.getElementById('importMnemonic').value.trim();
+            const privateKeyBase64 = document.getElementById('importPrivateKey').value.trim();
+            
+            try {
+                if (mnemonic) {
+                    await importFromMnemonic(mnemonic);
+                } else if (privateKeyBase64) {
+                    await importFromPrivateKey(privateKeyBase64);
+                } else {
+                    showToast('❌ Please enter mnemonic phrase or private key');
+                    return;
+                }
+            } catch (e) {
+                showToast('❌ Import failed: ' + e.message);
+                console.error(e);
+            }
+        }
+        
+        async function importFromMnemonic(mnemonic) {
+            // Check if libraries are loaded
+            if (!window.bip39 || !window.bip39.validateMnemonic) {
+                showToast('❌ BIP39 library not loaded. Please refresh the page.');
+                return;
+            }
+            
+            // Validate mnemonic
+            if (!window.bip39.validateMnemonic(mnemonic)) {
+                showToast('❌ Invalid mnemonic phrase');
+                return;
+            }
+            
+            // Derive seed from mnemonic (async PBKDF2-HMAC-SHA512, 2048 iterations)
+            const seed = await window.bip39Async.mnemonicToSeed(mnemonic);
+            const seedBytes = new Uint8Array(seed);
+            
+            // Derive private key and public key
+            const hashBuffer = await window.crypto.subtle.digest('SHA-256', seedBytes);
+            const privateKeyBytes = new Uint8Array(hashBuffer);
+            const publicKeyBytes = await window.nobleEd25519.getPublicKey(privateKeyBytes);
+            
+            // Generate address with version and checksum
+            const hashBuffer2 = await window.crypto.subtle.digest('SHA-256', publicKeyBytes);
+            const hashArray = new Uint8Array(hashBuffer2);
+            
+            // Build address with version byte (0x00) and 4-byte checksum
+            const addressData = new Uint8Array(1 + 32 + 4);
+            addressData[0] = 0x00; // Version byte
+            addressData.set(hashArray, 1); // 32-byte hash
+            
+            // Calculate checksum: first 4 bytes of SHA256(addressData without checksum)
+            const checksumHash = await window.crypto.subtle.digest('SHA-256', addressData.slice(0, 33));
+            const checksumBytes = new Uint8Array(checksumHash.slice(0, 4));
+            addressData.set(checksumBytes, 33); // 4-byte checksum
+            
+            // Convert to hex and add prefix
+            const address = 'NOGO' + Array.from(addressData).map(b => b.toString(16).padStart(2, '0')).join('');
+            
+            // Save wallet
+            currentWallet = {
+                address: address,
+                publicKey: arrayBufferToBase64(publicKeyBytes.buffer),
+                privateKey: arrayBufferToBase64(privateKeyBytes.buffer),
+                mnemonic: mnemonic,
+                seedHex: arrayBufferToHex(seedBytes.buffer),
+                imported: true
+            };
+            
+            // Check if password is set
+            const password1 = document.getElementById('importPassword1').value;
+            const password2 = document.getElementById('importPassword2').value;
+            
+            if (password1 || password2) {
+                // Validate passwords
+                if (!password1 || !password2) {
+                    document.getElementById('importPasswordError').textContent = 'Please fill both password fields or leave both empty';
+                    document.getElementById('importPasswordError').style.display = 'block';
+                    return;
+                }
+                
+                if (password1 !== password2) {
+                    document.getElementById('importPasswordError').textContent = 'Passwords do not match!';
+                    document.getElementById('importPasswordError').style.display = 'block';
+                    return;
+                }
+                
+                if (password1.length < 8) {
+                    document.getElementById('importPasswordError').textContent = 'Password must be at least 8 characters';
+                    document.getElementById('importPasswordError').style.display = 'block';
+                    return;
+                }
+                
+                // Encrypt and save wallet
+                try {
+                    const encrypted = await encryptWalletData(currentWallet, password1);
+                    localStorage.setItem('nogoWallet', JSON.stringify(encrypted));
+                    currentWallet = encrypted;
+                    showToast('✅ Wallet imported and encrypted successfully!');
+                } catch (e) {
+                    showToast('❌ Failed to encrypt wallet. Please try again.');
+                    return;
+                }
+            } else {
+                // Save without encryption
+                localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
+                showToast('✅ Mnemonic import successful! (Not encrypted)');
+            }
+            
+            showTab('walletDashboardTab');
+            loadWalletInfo();
+        }
+        
+        async function importFromPrivateKey(privateKeyBase64) {
+            try {
+                // Convert Base64 to Uint8Array
+                const privateKeyBytes = base64ToUint8Array(privateKeyBase64);
+                
+                if (privateKeyBytes.byteLength !== 32) {
+                    showToast('❌ Invalid private key length (should be 32 bytes)');
+                    return;
+                }
+                
+                // Derive public key from private key using @noble/ed25519
+                const publicKeyBytes = await window.nobleEd25519.getPublicKey(privateKeyBytes);
+                
+                // Generate address with version and checksum
+                const hashBuffer = await window.crypto.subtle.digest('SHA-256', publicKeyBytes);
+                const hashArray = new Uint8Array(hashBuffer);
+                
+                console.log('Import - Public key (hex):', arrayBufferToHex(publicKeyBytes.buffer));
+                console.log('Import - SHA256(pubkey):', arrayBufferToHex(hashBuffer));
+                
+                // Build address with version byte (0x00) and 4-byte checksum
+                const addressData = new Uint8Array(1 + 32 + 4);
+                addressData[0] = 0x00; // Version byte
+                addressData.set(hashArray, 1); // 32-byte hash
+                
+                // Calculate checksum: first 4 bytes of SHA256(addressData without checksum)
+                const checksumHash = await window.crypto.subtle.digest('SHA-256', addressData.slice(0, 33));
+                const checksumBytes = new Uint8Array(checksumHash.slice(0, 4));
+                addressData.set(checksumBytes, 33); // 4-byte checksum
+                
+                const address = 'NOGO' + Array.from(addressData).map(b => b.toString(16).padStart(2, '0')).join('');
+                
+                console.log('Import - Generated address:', address);
+                console.log('Import - Address data:', arrayBufferToHex(addressData.buffer));
+                
+                // Save wallet
+                currentWallet = {
+                    address: address,
+                    publicKey: arrayBufferToBase64(publicKeyBytes.buffer),
+                    privateKey: privateKeyBase64,
+                    imported: true
+                };
+                
+                // Check if password is set
+                const password1 = document.getElementById('importPassword1').value;
+                const password2 = document.getElementById('importPassword2').value;
+                
+                if (password1 || password2) {
+                    // Validate passwords
+                    if (!password1 || !password2) {
+                        document.getElementById('importPasswordError').textContent = 'Please fill both password fields or leave both empty';
+                        document.getElementById('importPasswordError').style.display = 'block';
+                        return;
+                    }
+                    
+                    if (password1 !== password2) {
+                        document.getElementById('importPasswordError').textContent = 'Passwords do not match!';
+                        document.getElementById('importPasswordError').style.display = 'block';
+                        return;
+                    }
+                    
+                    if (password1.length < 8) {
+                        document.getElementById('importPasswordError').textContent = 'Password must be at least 8 characters';
+                        document.getElementById('importPasswordError').style.display = 'block';
+                        return;
+                    }
+                    
+                    // Encrypt and save wallet
+                    try {
+                        const encrypted = await encryptWalletData(currentWallet, password1);
+                        localStorage.setItem('nogoWallet', JSON.stringify(encrypted));
+                        currentWallet = encrypted;
+                        showToast('✅ Private key import and encryption successful!');
+                    } catch (e) {
+                        console.error('Failed to encrypt wallet:', e);
+                        showToast('❌ Failed to encrypt wallet. Please try again.');
+                        return;
+                    }
+                } else {
+                    // Save without encryption
+                    localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
+                    showToast('✅ Private key import successful! (Not encrypted)');
+                }
+                
+                showTab('walletDashboardTab');
+                loadWalletInfo();
+                
+            } catch (e) {
+                showToast('❌ Invalid private key: ' + e.message);
+                console.error(e);
+            }
+        }
+        
+        async function loadWalletInfo() {
+            if (!currentWallet) {
+                return;
+            }
+            
+            // Set basic info
+            document.getElementById('walletAddress').textContent = currentWallet.address;
+            document.getElementById('walletPublicKey').textContent = currentWallet.publicKey;
+            document.getElementById('receiveAddress').textContent = currentWallet.address;
+            
+            // Verify address generation from public key
+            const pubKeyBytes = base64ToUint8Array(currentWallet.publicKey);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', pubKeyBytes);
+            const hashArray = new Uint8Array(hashBuffer);
+            const addressData = new Uint8Array(1 + 32 + 4);
+            addressData[0] = 0x00;
+            addressData.set(hashArray, 1);
+            const checksumHash = await crypto.subtle.digest('SHA-256', addressData.slice(0, 33));
+            const checksumBytes = new Uint8Array(checksumHash.slice(0, 4));
+            addressData.set(checksumBytes, 33);
+            const verifiedAddress = 'NOGO' + Array.from(addressData).map(b => b.toString(16).padStart(2, '0')).join('');
+            
+            // Silent address verification for security
+            if (verifiedAddress !== currentWallet.address) {
+                showToast('⚠️ Address verification failed');
+                return;
+            }
+            
+            // Generate QR code for receive address
+            await generateQRCode(currentWallet.address);
+            
+            try {
+                const response = await fetch(`${API_BASE}/balance/${currentWallet.address}`);
+                const data = await response.json();
+                document.getElementById('walletBalance').textContent = (data.balance / 100000000).toFixed(8);
+                document.getElementById('walletNonce').textContent = data.nonce || 0;
+            } catch (e) {
+                showToast('⚠️ Failed to load balance');
+            }
+            
+            // Load transactions if tab is visible
+            if (!document.getElementById('transactionsTab').classList.contains('hidden')) {
+                await loadTransactions();
+            }
+        }
+        
+        async function loadTransactions() {
+            const container = document.getElementById('transactionsList');
+            if (!container || !currentWallet) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/address/${currentWallet.address}/txs`);
+                const data = await response.json();
+                const txs = data.txs || [];
+                
+                // Debug: log API response
+                console.log('=== Transaction API Response ===');
+                console.log('Full response:', data);
+                console.log('Transactions array:', txs);
+                if (txs.length > 0) {
+                    console.log('First transaction:', txs[0]);
+                    console.log('First tx type:', txs[0].type);
+                    console.log('First tx txId:', txs[0].txId);
+                    console.log('First tx location:', txs[0].location);
+                    console.log('First tx timestamp:', txs[0].timestamp);
+                }
+                
+                if (txs.length === 0) {
+                    container.innerHTML = `
+                        <div style="text-align: center; padding: 30px; color: var(--text-secondary);">
+                            No transactions yet
+                        </div>
+                    `;
+                    return;
+                }
+                
+                // Sort transactions by nonce (newest first)
+                txs.sort((a, b) => b.nonce - a.nonce);
+                
+                let html = '';
+                for (const tx of txs) {
+                    const amount = (tx.amount || 0) / 1e8;
+                    const fee = (tx.fee || 0) / 1e8;
+                    const isCoinbase = tx.type === 'coinbase';
+                    
+                    // Display block time or transaction time
+                    let timestamp = 'N/A';
+                    if (tx.blockTime) {
+                        timestamp = new Date(tx.blockTime * 1000).toLocaleString();
+                    } else if (tx.timestamp) {
+                        timestamp = new Date(tx.timestamp * 1000).toLocaleString();
+                    } else if (tx.time) {
+                        timestamp = new Date(tx.time * 1000).toLocaleString();
+                    } else if (tx.location && tx.location.height) {
+                        // Use block height to estimate time (assuming ~1 second block time)
+                        // This is a fallback when exact time is not available
+                        timestamp = `Block #${tx.location.height}`;
+                    }
+                    
+                    // Calculate transaction hash
+                    const txHash = tx.txId || tx.hash || 'N/A';
+                    
+                    // Determine if this is incoming or outgoing
+                    const isIncoming = tx.toAddress === currentWallet.address;
+                    const direction = isIncoming ? 'IN' : 'OUT';
+                    const amountClass = isIncoming ? 'text-green' : 'text-red';
+                    
+                    // Determine confirmation status - check if tx has location (block height and hash)
+                    const isConfirmed = tx.location && tx.location.height && tx.location.blockHashHex;
+                    const statusDisplay = isConfirmed ? '✅ Confirmed' : '⏳ Pending';
+                    
+                    html += `
+                        <div class="tx-card" style="background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px; padding: 15px; margin-bottom: 15px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border-color);">
+                                <span style="color: var(--accent-blue); font-family: 'Courier New', monospace; font-size: 13px;">${txHash.substring(0, 16)}...${txHash.substring(txHash.length - 16)}</span>
+                                <button class="copy-btn" onclick="copyText('${txHash}', 'Transaction Hash')" style="background: none; border: none; color: var(--accent-blue); cursor: pointer; font-size: 16px;">📋</button>
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                                <div>
+                                    <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">Type</div>
+                                    <div style="color: var(--text-primary); font-size: 13px;">${isCoinbase ? '🪙 Coinbase' : '💸 Transfer'} ${isIncoming ? '⬇️' : '⬆️'}</div>
+                                </div>
+                                <div>
+                                    <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">Status</div>
+                                    <div style="color: var(--text-primary); font-size: 13px;">${statusDisplay}</div>
+                                </div>
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                                <div>
+                                    <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">From</div>
+                                    <div style="color: var(--accent-blue); font-family: 'Courier New', monospace; font-size: 12px; word-break: break-all;">${isCoinbase ? 'COINBASE' : (tx.fromAddr || 'N/A').substring(0, 20)}...</div>
+                                </div>
+                                <div>
+                                    <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">To</div>
+                                    <div style="color: var(--accent-blue); font-family: 'Courier New', monospace; font-size: 12px; word-break: break-all;">${tx.toAddress ? tx.toAddress.substring(0, 20) + '...' : 'N/A'}</div>
+                                </div>
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                                <div>
+                                    <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">Amount</div>
+                                    <div style="color: ${amountClass}; font-family: 'Courier New', monospace; font-size: 16px; font-weight: bold;">${isIncoming ? '+' : '-'}${amount.toFixed(8)} NOGO</div>
+                                </div>
+                                <div>
+                                    <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">Fee</div>
+                                    <div style="color: var(--text-secondary); font-family: 'Courier New', monospace; font-size: 13px;">${fee.toFixed(8)} NOGO</div>
+                                </div>
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                                <div>
+                                    <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">Nonce</div>
+                                    <div style="color: var(--text-secondary); font-family: 'Courier New', monospace; font-size: 13px;">${tx.nonce || 'N/A'}</div>
+                                </div>
+                                <div>
+                                    <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">Time</div>
+                                    <div style="color: var(--text-primary); font-family: 'Courier New', monospace; font-size: 13px;">${timestamp}</div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                container.innerHTML = html;
+                
+            } catch (e) {
+                container.innerHTML = `
+                    <div style="text-align: center; padding: 30px; color: var(--text-secondary);">
+                        Failed to load transactions
+                    </div>
+                `;
+            }
+        }
+        
+        function copyText(text, label) {
+            navigator.clipboard.writeText(text).then(() => {
+                showToast('✅ ' + label + ' copied to clipboard!');
+            }).catch(err => {
+                showToast('❌ Failed to copy');
+            });
+        }
+        
+        async function generateQRCode(address) {
+            const container = document.getElementById('qrCodeContainer');
+            if (!container) return;
+            
+            try {
+                // Clear previous QR code
+                container.innerHTML = '';
+                
+                // Use Google Charts API to generate QR code (simple and reliable)
+                const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(address)}&color=3fb950&bgcolor=0d1117&margin=10`;
+                
+                const img = document.createElement('img');
+                img.src = qrUrl;
+                img.alt = 'Address QR Code';
+                img.style.borderRadius = '8px';
+                img.style.border = '2px solid #30363d';
+                img.style.padding = '10px';
+                img.style.background = '#0d1117';
+                img.style.maxWidth = '100%';
+                
+                container.appendChild(img);
+                
+                // Add label
+                const label = document.createElement('p');
+                label.style.marginTop = '15px';
+                label.style.color = '#8b949e';
+                label.style.fontSize = '12px';
+                label.textContent = 'Scan to receive NOGO';
+                container.appendChild(label);
+                
+            } catch (e) {
+                console.error('Failed to generate QR code:', e);
+                container.innerHTML = '<p style="color: #f85149;">Failed to generate QR code</p>';
+            }
+        }
+        
+        async function copyToClipboard(elementId, label) {
+            const element = document.getElementById(elementId);
+            const text = element.textContent;
+            
+            try {
+                await navigator.clipboard.writeText(text);
+                showToast('✓ ' + label + ' copied to clipboard!');
+            } catch (err) {
+                // Fallback
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                showToast('✓ ' + label + ' copied!');
+            }
+        }
+        
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+        
+        async function sendTransaction() {
+            const toAddress = document.getElementById('sendAddress').value.trim();
+            const amountNOGO = parseFloat(document.getElementById('sendAmount').value);
+            
+            if (!toAddress || !toAddress.startsWith('NOGO')) {
+                showToast('❌ Invalid recipient address');
+                return;
+            }
+            if (!amountNOGO || amountNOGO <= 0) {
+                showToast('❌ Invalid amount');
+                return;
+            }
+            if (!currentWallet) {
+                showToast('❌ Wallet not loaded');
+                return;
+            }
+            
+            try {
+                // Check if wallet is encrypted - need password to send
+                const saved = localStorage.getItem('nogoWallet');
+                const walletData = saved ? JSON.parse(saved) : null;
+                
+                if (walletData && walletData.encrypted) {
+                    // Wallet is encrypted, need password to sign transaction
+                    const password = await showPasswordPrompt('Enter your password to sign this transaction:');
+                    if (!password) {
+                        showToast('❌ Transaction cancelled');
+                        return;
+                    }
+                    
+                    // Decrypt wallet temporarily to get private key
+                    try {
+                        const decrypted = await decryptWalletData(walletData, password);
+                        currentWallet = decrypted;
+                    } catch (e) {
+                        showToast('❌ Wrong password');
+                        return;
+                    }
+                } else if (!currentWallet.privateKey) {
+                    // Unencrypted wallet but no private key
+                    showToast('❌ Wallet not loaded properly');
+                    return;
+                }
+                
+                showToast('⏳ Creating transaction...');
+                
+                // Get current balance and nonce
+                const balanceResp = await fetch(`${API_BASE}/balance/${currentWallet.address}`);
+                const balanceData = await balanceResp.json();
+                const balance = balanceData.balance || 0;
+                let nonce = balanceData.nonce || 0;
+                let fee = 1000; // Minimum fee
+                
+                // Calculate next nonce considering pending transactions in mempool
+                // First check mempool for pending transactions
+                try {
+                    const mempoolResp = await fetch(`${API_BASE}/mempool`);
+                    const mempoolData = await mempoolResp.json();
+                    const pendingTxs = mempoolData.txs || [];
+                    
+                    // Find pending txs from this address
+                    const pendingFromThisAddress = pendingTxs.filter(tx => 
+                        tx.fromAddr === currentWallet.address
+                    );
+                    
+                    if (pendingFromThisAddress.length > 0) {
+                        // Find the highest nonce in pending transactions
+                        const maxPendingNonce = Math.max(...pendingFromThisAddress.map(tx => tx.nonce));
+                        // Next transaction should use nonce = maxPendingNonce + 1
+                        nonce = maxPendingNonce + 1;
+                        
+                        // Check if we're replacing a specific nonce
+                        const pendingTx = pendingFromThisAddress.find(tx => tx.nonce === nonce - 1);
+                        if (pendingTx) {
+                            // Need to replace pending tx with higher fee (10% increase)
+                            fee = Math.floor(pendingTx.fee * 1.1) + 1;
+                            showToast('⚠️ Replacing pending tx, increasing fee to ' + fee);
+                        }
+                    } else {
+                        // No pending transactions, use balance nonce + 1
+                        nonce = nonce + 1;
+                    }
+                } catch (e) {
+                    console.error('Failed to check mempool:', e);
+                    // Fallback: use balance nonce + 1
+                    nonce = nonce + 1;
+                }
+                
+                const amount = Math.floor(amountNOGO * 1e8); // Convert to smallest unit
+                
+                if (balance < amount + fee) {
+                    showToast('❌ Insufficient balance');
+                    return;
+                }
+                
+                // Create transaction object matching Go struct
+                const tx = {
+                    type: 'transfer',
+                    chainId: 1,
+                    fromPubKey: currentWallet.publicKey,  // Use publicKey (base64)
+                    toAddress: toAddress,
+                    amount: amount,
+                    fee: fee,
+                    nonce: nonce,
+                    data: ''
+                };
+                
+                // Compute fromAddr from public key (matches Go's FromAddress method)
+                async function computeFromAddress(pubKeyBase64) {
+                    const pubKeyBytes = base64ToUint8Array(pubKeyBase64);
+                    const pubKeyHash = await crypto.subtle.digest('SHA-256', pubKeyBytes);
+                    const pubKeyHashBytes = new Uint8Array(pubKeyHash);
+                    
+                    // Build address: version(1) + hash(32) + checksum(4)
+                    const addressData = new Uint8Array(1 + 32);
+                    addressData[0] = 0x00; // version
+                    addressData.set(pubKeyHashBytes.slice(0, 32), 1);
+                    
+                    const checksumHash = await crypto.subtle.digest('SHA-256', addressData);
+                    const checksumBytes = new Uint8Array(checksumHash);
+                    
+                    const fullAddress = new Uint8Array(1 + 32 + 4);
+                    fullAddress.set(addressData, 0);
+                    fullAddress.set(checksumBytes.slice(0, 4), 1 + 32);
+                    
+                    return 'NOGO' + arrayBufferToHex(fullAddress.buffer);
+                }
+                
+                // Create signing hash using Legacy JSON encoding (matches Go's txSigningHashLegacyJSON)
+                // Legacy JSON format:
+                // {
+                //   "type": "transfer",
+                //   "chainId": 1,
+                //   "fromAddr": "NOGO...",  // derived from public key
+                //   "toAddress": "...",
+                //   "amount": 100000000,
+                //   "fee": 1000,
+                //   "nonce": 1,
+                //   "data": ""
+                // }
+                
+                const fromAddr = await computeFromAddress(currentWallet.publicKey);
+                
+                const legacyJsonObj = {
+                    type: 'transfer',
+                    chainId: 1,
+                    fromAddr: fromAddr,
+                    toAddress: toAddress,
+                    amount: amount,
+                    fee: fee,
+                    nonce: nonce
+                    // Note: data field omitted when empty (matches Go's omitempty)
+                };
+                
+                const legacyJsonStr = JSON.stringify(legacyJsonObj);
+                
+                const encoder = new TextEncoder();
+                const preimage = encoder.encode(legacyJsonStr);
+                
+                const msgHash = await crypto.subtle.digest('SHA-256', preimage);
+                
+                // Sign with private key
+                const privateKeyBytes = base64ToUint8Array(currentWallet.privateKey);
+                
+                const signature = await window.nobleEd25519.sign(new Uint8Array(msgHash), privateKeyBytes);
+                
+                // Add signature to transaction
+                tx.signature = arrayBufferToBase64(signature.buffer);
+                
+                // Submit transaction
+                const submitResp = await fetch(`${API_BASE}/tx`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(tx)
+                });
+                
+                console.log('Transaction submit response status:', submitResp.status);
+                console.log('Transaction submit response ok:', submitResp.ok);
+                
+                // Clone response to allow reading twice (for error case)
+                const clone = submitResp.clone();
+                let result;
+                try {
+                    result = await submitResp.json();
+                } catch (e) {
+                    console.error('Failed to parse JSON response:', e);
+                    const textResp = await clone.text();
+                    console.error('Response text:', textResp);
+                    throw new Error('Invalid response format: ' + textResp);
+                }
+                
+                console.log('Transaction submit response:', result);
+                
+                if (!submitResp.ok) {
+                    console.error('HTTP Error:', submitResp.status, submitResp.statusText);
+                    console.error('Response body:', result);
+                }
+                
+                // Check for success (case-insensitive)
+                const accepted = result.accepted || result.Accepted;
+                const txid = result.txId || result.TxID || result.txid;
+                const message = result.message || result.Message;
+                
+                if (accepted) {
+                    showToast('✅ Transaction sent successfully! TxID: ' + txid);
+                    document.getElementById('sendAddress').value = '';
+                    document.getElementById('sendAmount').value = '';
+                    await loadWalletInfo();
+                } else {
+                    const errorMsg = message || result.error || 'Unknown error';
+                    console.error('Transaction rejected:', errorMsg);
+                    
+                    // Handle replacement fee error
+                    if (errorMsg.includes('replacement fee')) {
+                        showToast('⚠️ Pending transaction exists. Please wait or use higher fee.');
+                    } else {
+                        showToast('❌ Transaction rejected: ' + errorMsg);
+                    }
+                }
+                
+            } catch (e) {
+                console.error('Send transaction failed:', e);
+                showToast('❌ Send failed: ' + e.message);
+            }
+        }
+        
+        function hexToUint8Array(hex) {
+            if (hex.length % 2 !== 0) throw new Error('Invalid hex string');
+            const bytes = new Uint8Array(hex.length / 2);
+            for (let i = 0; i < hex.length; i += 2) {
+                bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+            }
+            return bytes;
+        }
+        
+        function arrayBufferToBase64(buffer) {
+            let binary = '';
+            const bytes = new Uint8Array(buffer);
+            for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return window.btoa(binary);
+        }
+        
+        function base64ToUint8Array(base64) {
+            const binary_string = window.atob(base64);
+            const len = binary_string.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binary_string.charCodeAt(i);
+            }
+            return bytes;
+        }
+        
+        function arrayBufferToHex(buffer) {
+            const bytes = new Uint8Array(buffer);
+            return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+    </script>
+</body>
+</html>

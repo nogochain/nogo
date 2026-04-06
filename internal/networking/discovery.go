@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+// Security Note: math/rand is used here for non-cryptographic purposes only.
+// The random shuffling in GetPeers is for load balancing and peer selection diversity,
+// not for security-critical operations. Using crypto/rand would be unnecessarily expensive
+// for this use case.
+
 type DNSSeed struct {
 	Hostname string
 	Port     uint16

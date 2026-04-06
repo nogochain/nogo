@@ -310,3 +310,85 @@ func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	}
 	return defaultVal
 }
+
+// =============================================================================
+// ENVIRONMENT VARIABLE LOADING FUNCTIONS FOR SYNC CONFIGURATION
+// =============================================================================
+
+// LoadOrphanPoolConfig loads orphan pool configuration from environment variables
+// Returns configured values with defaults from constants.go
+func LoadOrphanPoolConfig() (maxSize int, ttl time.Duration) {
+	maxSize = DefaultOrphanPoolSize
+	if v := os.Getenv("NOGO_ORPHAN_POOL_MAX_SIZE"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			maxSize = i
+		}
+	}
+
+	ttl = DefaultOrphanTTL
+	if v := os.Getenv("NOGO_ORPHAN_POOL_TTL"); v != "" {
+		if hours, err := strconv.Atoi(v); err == nil && hours > 0 {
+			ttl = time.Duration(hours) * time.Hour
+		}
+	}
+
+	return maxSize, ttl
+}
+
+// LoadSyncConfig loads sync configuration from environment variables
+// Returns configured values with defaults from constants.go
+func LoadSyncConfig() (heartbeatInterval time.Duration, workers, maxPendingBlocks int) {
+	heartbeatInterval = DefaultSyncHeartbeatInterval
+	if v := os.Getenv("NOGO_SYNC_HEARTBEAT_INTERVAL"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			heartbeatInterval = time.Duration(secs) * time.Second
+		}
+	}
+
+	workers = DefaultSyncWorkers
+	if v := os.Getenv("NOGO_SYNC_WORKERS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			workers = i
+		}
+	}
+
+	maxPendingBlocks = DefaultSyncMaxPendingBlocks
+	if v := os.Getenv("NOGO_SYNC_MAX_PENDING_BLOCKS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			maxPendingBlocks = i
+		}
+	}
+
+	return heartbeatInterval, workers, maxPendingBlocks
+}
+
+// LoadMiningConfig loads mining configuration from environment variables
+// Returns configured values with defaults from constants.go
+func LoadMiningConfig() (stabilityWait time.Duration, syncPause bool) {
+	stabilityWait = DefaultMiningStabilityWait
+	if v := os.Getenv("NOGO_MINING_STABILITY_WAIT"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
+			stabilityWait = time.Duration(secs) * time.Second
+		}
+	}
+
+	syncPause = DefaultMiningSyncPause
+	if v := os.Getenv("NOGO_MINING_SYNC_PAUSE"); v != "" {
+		syncPause = v == "true" || v == "1" || strings.EqualFold(v, "yes")
+	}
+
+	return stabilityWait, syncPause
+}
+
+// LoadWorkCalculationConfig loads work calculation configuration from environment variables
+// Returns configured values with defaults from constants.go
+func LoadWorkCalculationConfig() (maxReorgDepth int) {
+	maxReorgDepth = MaxReorgDepth
+	if v := os.Getenv("MAX_REORG_DEPTH"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			maxReorgDepth = i
+		}
+	}
+
+	return maxReorgDepth
+}

@@ -17,12 +17,11 @@
 package nogopow
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
-	"reflect"
 	"runtime"
 	"sync"
-	"unsafe"
 
 	"golang.org/x/crypto/sha3"
 )
@@ -61,6 +60,10 @@ type denseMatrix struct {
 func (m *denseMatrix) Reset(rows, cols int) {
 	if rows > m.rows || cols > m.cols {
 		m.data = make([]int64, rows*cols)
+	} else {
+		// Clear old data to prevent dirty data from being reused
+		// Matrix pool recycling - zero out data before reuse
+		clear(m.data[:rows*cols])
 	}
 	m.rows = rows
 	m.cols = cols
@@ -236,14 +239,16 @@ func mulMatrixWithPool(headerHash []byte, cache []uint32, matA, matB, matRes *de
 		}
 	}
 
-	header := *(*reflect.SliceHeader)(unsafe.Pointer(&ui32data))
-	header.Len *= 4
-	header.Cap *= 4
-	i8data := *(*[]int8)(unsafe.Pointer(&header))
+	// Convert []uint32 to []byte for fixed-point arithmetic
+	// Security: Use binary.LittleEndian for safe type conversion instead of unsafe.Pointer
+	byteData := make([]byte, len(ui32data)*4)
+	for i, v := range ui32data {
+		binary.LittleEndian.PutUint32(byteData[i*4:i*4+4], v)
+	}
 
 	fixedData := make([]int64, matNum*matSize*matSize)
 	for i := 0; i < matNum*matSize*matSize; i++ {
-		fixedData[i] = toFixed(float64(i8data[i]))
+		fixedData[i] = toFixed(float64(int8(byteData[i])))
 	}
 
 	dataIdentity := make([]int64, matSize*matSize)
@@ -328,14 +333,15 @@ func mulMatrix(headerHash []byte, cache []uint32) []uint8 {
 		}
 	}
 
-	header := *(*reflect.SliceHeader)(unsafe.Pointer(&ui32data))
-	header.Len *= 4
-	header.Cap *= 4
-	i8data := *(*[]int8)(unsafe.Pointer(&header))
+	// Security: Use binary.LittleEndian for safe type conversion instead of unsafe.Pointer
+	byteData := make([]byte, len(ui32data)*4)
+	for i, v := range ui32data {
+		binary.LittleEndian.PutUint32(byteData[i*4:i*4+4], v)
+	}
 
 	fixedData := make([]int64, matNum*matSize*matSize)
 	for i := 0; i < matNum*matSize*matSize; i++ {
-		fixedData[i] = toFixed(float64(i8data[i]))
+		fixedData[i] = toFixed(float64(int8(byteData[i])))
 	}
 
 	dataIdentity := make([]int64, matSize*matSize)
@@ -442,10 +448,11 @@ func hashMatrix(result []uint8) [32]byte {
 		ui32data = append(ui32data, mat32[0][i])
 	}
 
-	header := *(*reflect.SliceHeader)(unsafe.Pointer(&ui32data))
-	header.Len *= 4
-	header.Cap *= 4
-	dataBytes := *(*[]byte)(unsafe.Pointer(&header))
+	// Security: Use binary.LittleEndian for safe type conversion instead of unsafe.Pointer
+	dataBytes := make([]byte, len(ui32data)*4)
+	for i, v := range ui32data {
+		binary.LittleEndian.PutUint32(dataBytes[i*4:i*4+4], v)
+	}
 
 	var h [32]byte
 	hasher := sha3.NewLegacyKeccak256()

@@ -488,23 +488,29 @@ func compressPoint(x, y *big.Int) []byte {
 	return result
 }
 
-func generateRandomScalars(count int) []*big.Int {
+// generateRandomScalars generates cryptographically secure random big.Int scalars.
+// Security: Returns error on crypto/rand failure instead of falling back to deterministic sequence.
+// A deterministic fallback would compromise security in cryptographic operations.
+func generateRandomScalars(count int) ([]*big.Int, error) {
+	if count <= 0 {
+		return nil, fmt.Errorf("count must be positive, got %d", count)
+	}
+
 	scalars := make([]*big.Int, count)
 	randomBytes := make([]byte, count*64)
 
+	// Security: Use crypto/rand for cryptographically secure random numbers
 	_, err := rand.Read(randomBytes)
 	if err != nil {
-		for i := 0; i < count; i++ {
-			scalars[i] = big.NewInt(int64(i + 1))
-		}
-		return scalars
+		// Security: Return error on crypto failure - never use deterministic fallback
+		return nil, fmt.Errorf("failed to generate random scalars: %w", err)
 	}
 
 	for i := 0; i < count; i++ {
 		scalars[i] = new(big.Int).SetBytes(randomBytes[i*64 : (i+1)*64])
 	}
 
-	return scalars
+	return scalars, nil
 }
 
 func VerifyBatchSimple(pubKeys []PublicKey, messages [][]byte, signatures [][]byte) []bool {

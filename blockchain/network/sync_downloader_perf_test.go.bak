@@ -1,0 +1,285 @@
+// Copyright 2026 NogoChain Team
+// This file is part of the NogoChain library.
+//
+// The NogoChain library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The NogoChain library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the NogoChain library. If not, see <http://www.org/licenses/>.
+
+package network
+
+import (
+	"context"
+	"crypto/rand"
+	"testing"
+	"time"
+
+	"github.com/nogochain/nogo/blockchain/core"
+	"github.com/nogochain/nogo/blockchain/metrics"
+)
+
+func generateTestBlock(height uint64) *core.Block {
+	hash := make([]byte, 32)
+	rand.Read(hash)
+	prevHash := make([]byte, 32)
+	rand.Read(prevHash)
+
+	return &core.Block{
+		Height: height,
+		Hash:   hash,
+		Header: core.BlockHeader{
+			PrevHash: prevHash,
+		},
+	}
+}
+
+type mockPeerAPIWithBlocks struct {
+	blocks map[uint64]*core.Block
+}
+
+func (m *mockPeerAPIWithBlocks) FetchHeadersFrom(ctx context.Context, peer string, from uint64, count uint64) ([]core.BlockHeader, error) {
+	headers := make([]core.BlockHeader, count)
+	for i := uint64(0); i < count; i++ {
+		height := from + i
+		if block, exists := m.blocks[height]; exists {
+			headers[i] = block.Header
+		} else {
+			headers[i] = core.BlockHeader{
+				PrevHash: make([]byte, 32),
+			}
+		}
+	}
+	return headers, nil
+}
+
+func (m *mockPeerAPIWithBlocks) FetchBlockByHash(ctx context.Context, peer string, hashHex string) (*core.Block, error) {
+	for _, block := range m.blocks {
+		if len(block.Hash) > 0 {
+			return block, nil
+		}
+	}
+	return generateTestBlock(1), nil
+}
+
+func (m *mockPeerAPIWithBlocks) AddPeer(peerID string) {}
+
+func BenchmarkBlockDownloader_BatchDownloadBlocks(b *testing.B) {
+	blocks := make(map[uint64]*core.Block)
+	for i := uint64(1); i <= 1000; i++ {
+		blocks[i] = generateTestBlock(i)
+	}
+
+	pm := &mockPeerAPIWithBlocks{blocks: blocks}
+	bc := &mockBlockchain{height: 0}
+	validator := &mockValidator{validateDelay: 0}
+	m := &metrics.Metrics{}
+
+	downloader := NewBlockDownloader(pm, bc, validator, m)
+	ctx := context.Background()
+	progressChan := make(chan DownloadProgress, 100)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		blocks, err := downloader.BatchDownloadBlocks(ctx, "peer1", 1, 100, progressChan)
+		if err != nil {
+			b.Fatalf("download failed: %v", err)
+		}
+		if len(blocks) != 100 {
+			b.Errorf("expected 100 blocks, got %d", len(blocks))
+		}
+	}
+}
+
+func BenchmarkBlockDownloader_ConcurrentDownloads(b *testing.B) {
+	blocks := make(map[uint64]*core.Block)
+	for i := uint64(1); i <= 5000; i++ {
+		blocks[i] = generateTestBlock(i)
+	}
+
+	pm := &mockPeerAPIWithBlocks{blocks: blocks}
+	bc := &mockBlockchain{height: 0}
+	validator := &mockValidator{validateDelay: 1 * time.Millisecond}
+	m := &metrics.Metrics{}
+
+	downloader := NewBlockDownloader(pm, bc, validator, m)
+	downloader.UpdateConfig(DownloaderConfig{
+		BatchSize:     500,
+		MaxConcurrent: 8,
+	})
+
+	ctx := context.Background()
+	progressChan := make(chan DownloadProgress, 100)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		blocks, err := downloader.BatchDownloadBlocks(ctx, "peer1", 1, 500, progressChan)
+		if err != nil {
+			b.Fatalf("download failed: %v", err)
+		}
+		if len(blocks) == 0 {
+			b.Errorf("expected blocks, got 0")
+		}
+	}
+}
+
+func BenchmarkBatchProcessor_VerifyBatchBlocks(b *testing.B) {
+	validator := &mockValidator{validateDelay: 0}
+	store := &mockChainStore{}
+	m := &metrics.Metrics{}
+
+	processor := NewBatchProcessor(validator, store, m)
+
+	blocks := make([]*core.Block, 100)
+	for i := 0; i < 100; i++ {
+		blocks[i] = generateTestBlock(uint64(i))
+	}
+
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		results, err := processor.VerifyBatchBlocks(ctx, blocks)
+		if err != nil {
+			b.Fatalf("verification failed: %v", err)
+		}
+		if len(results) != 100 {
+			b.Errorf("expected 100 results, got %d", len(results))
+		}
+	}
+}
+
+func BenchmarkBatchProcessor_StoreBatchBlocks(b *testing.B) {
+	validator := &mockValidator{}
+	store := &mockChainStore{}
+	m := &metrics.Metrics{}
+
+	processor := NewBatchProcessor(validator, store, m)
+
+	blocks := make([]*core.Block, 100)
+	for i := 0; i < 100; i++ {
+		blocks[i] = generateTestBlock(uint64(i))
+	}
+
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result, err := processor.StoreBatchBlocks(ctx, blocks)
+		if err != nil {
+			b.Fatalf("store failed: %v", err)
+		}
+		if result.BlocksStored != 100 {
+			b.Errorf("expected 100 blocks stored, got %d", result.BlocksStored)
+		}
+	}
+}
+
+func TestBlockDownloader_Throughput(t *testing.T) {
+	blocks := make(map[uint64]*core.Block)
+	totalBlocks := 1000
+	for i := uint64(1); i <= uint64(totalBlocks); i++ {
+		blocks[i] = generateTestBlock(i)
+	}
+
+	pm := &mockPeerAPIWithBlocks{blocks: blocks}
+	bc := &mockBlockchain{height: 0}
+	validator := &mockValidator{validateDelay: 1 * time.Millisecond}
+	m := &metrics.Metrics{}
+
+	downloader := NewBlockDownloader(pm, bc, validator, m)
+	downloader.UpdateConfig(DownloaderConfig{
+		BatchSize:     500,
+		MaxConcurrent: 8,
+	})
+
+	ctx := context.Background()
+	progressChan := make(chan DownloadProgress, 100)
+
+	startTime := time.Now()
+	downloadedBlocks, err := downloader.BatchDownloadBlocks(ctx, "peer1", 1, uint64(totalBlocks), progressChan)
+	elapsed := time.Since(startTime)
+
+	if err != nil {
+		t.Fatalf("download failed: %v", err)
+	}
+
+	blocksPerSecond := float64(len(downloadedBlocks)) / elapsed.Seconds()
+	t.Logf("Downloaded %d blocks in %v (%.2f blocks/sec)",
+		len(downloadedBlocks), elapsed, blocksPerSecond)
+
+	if blocksPerSecond < 50 {
+		t.Errorf("expected at least 50 blocks/sec, got %.2f", blocksPerSecond)
+	}
+}
+
+func TestBatchProcessor_LargeBatch(t *testing.T) {
+	validator := &mockValidator{validateDelay: 1 * time.Millisecond}
+	store := &mockChainStore{}
+	m := &metrics.Metrics{}
+
+	processor := NewBatchProcessor(validator, store, m)
+	processor.UpdateConfig(BatchProcessorConfig{
+		VerifyWorkers:  4,
+		StoreBatchSize: 100,
+	})
+
+	totalBlocks := 500
+	blocks := make([]*core.Block, totalBlocks)
+	for i := 0; i < totalBlocks; i++ {
+		blocks[i] = generateTestBlock(uint64(i))
+	}
+
+	ctx := context.Background()
+	startTime := time.Now()
+
+	result, err := processor.ProcessAndStoreBatch(ctx, blocks)
+	elapsed := time.Since(startTime)
+
+	if err != nil {
+		t.Fatalf("processing failed: %v", err)
+	}
+
+	t.Logf("Processed %d blocks in %v", result.BlocksStored, elapsed)
+
+	if result.BlocksStored != totalBlocks {
+		t.Errorf("expected %d blocks stored, got %d", totalBlocks, result.BlocksStored)
+	}
+}
+
+func TestBlockDownloader_MemoryPressure(t *testing.T) {
+	blocks := make(map[uint64]*core.Block)
+	for i := uint64(1); i <= 100; i++ {
+		blocks[i] = generateTestBlock(i)
+	}
+
+	pm := &mockPeerAPIWithBlocks{blocks: blocks}
+	bc := &mockBlockchain{height: 0}
+	validator := &mockValidator{}
+	m := &metrics.Metrics{}
+
+	downloader := NewBlockDownloader(pm, bc, validator, m)
+	downloader.UpdateConfig(DownloaderConfig{
+		BatchSize:       50,
+		MaxConcurrent:   4,
+		MemoryThreshold: 100 * 1024 * 1024,
+	})
+
+	ctx := context.Background()
+	progressChan := make(chan DownloadProgress, 10)
+
+	_, err := downloader.BatchDownloadBlocks(ctx, "peer1", 1, 100, progressChan)
+	if err != nil {
+		t.Fatalf("download failed: %v", err)
+	}
+
+	stats := downloader.GetStats()
+	t.Logf("Download stats: %v", stats)
+}

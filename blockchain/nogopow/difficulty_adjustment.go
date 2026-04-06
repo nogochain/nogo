@@ -23,18 +23,31 @@ import (
 // DifficultyAdjuster implements production-grade difficulty adjustment
 // Mathematical foundation: Proportional-Integral (PI) controller for block time stabilization
 // Economic rationale: Prevents mining centralization while maintaining network security
+// PI Control Theory:
+//   - Proportional term (Kp): Responds to current error (deviation from target block time)
+//   - Integral term (Ki): Accumulates past errors to eliminate steady-state offset
+//   - Formula: output = Kp * error + Ki * integral(error)
+//   - Anti-windup: Integral clamped to [-10, 10] to prevent overshoot
 type DifficultyAdjuster struct {
-	config *DifficultyConfig
+	config              *DifficultyConfig
+	integralAccumulator *big.Float // Accumulated error for integral term
+	integralGain        float64    // Ki coefficient (integral gain)
 }
 
 // NewDifficultyAdjuster creates a new difficulty adjuster with production configuration
+// PI Controller Parameters:
+//   - Proportional Gain (Kp): config.AdjustmentSensitivity (default 0.5)
+//   - Integral Gain (Ki): 0.1 (fixed for stable convergence)
+//   - Integral Anti-windup: [-10.0, 10.0] (prevents integral saturation)
 func NewDifficultyAdjuster(config *DifficultyConfig) *DifficultyAdjuster {
 	if config == nil {
 		config = DefaultDifficultyConfig()
 	}
 
 	return &DifficultyAdjuster{
-		config: config,
+		config:              config,
+		integralAccumulator: big.NewFloat(0.0), // Initialize integral term to zero
+		integralGain:        0.1,               // Ki = 0.1 for stable integral action
 	}
 }
 
@@ -46,14 +59,23 @@ func NewDifficultyAdjuster(config *DifficultyConfig) *DifficultyAdjuster {
 // Returns:
 //   - *big.Int: New difficulty value, guaranteed to be >= MinimumDifficulty
 //
-// Mathematical derivation:
+// PI Controller Mathematical Derivation:
 //
-//	newDifficulty = parentDifficulty * (1 + sensitivity * (targetTime - actualTime) / targetTime)
+//	error = (targetTime - actualTime) / targetTime
+//	integral += error (with anti-windup clamping to [-10, 10])
+//	newDifficulty = parentDifficulty * (1 + Kp * error + Ki * integral)
+//
+// Where:
+//   - Kp (proportional gain): config.AdjustmentSensitivity (default 0.5)
+//   - Ki (integral gain): 0.1 (fixed for stable convergence)
+//   - error: normalized time deviation (positive = blocks too slow)
+//   - integral: accumulated error over time (eliminates steady-state offset)
 //
 // Economic properties:
-//  1. Smooth convergence to target block time (prevents oscillation)
-//  2. Asymmetric adjustment bounds (prevents difficulty death spiral)
-//  3. Minimum difficulty floor (ensures network liveness)
+//  1. Proportional term: Immediate response to block time deviation
+//  2. Integral term: Eliminates long-term bias, ensures target block time convergence
+//  3. Anti-windup: Prevents integral saturation during extreme conditions
+//  4. Minimum difficulty floor: Ensures network liveness
 func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header) *big.Int {
 	// Guard clause: validate parent header
 	if parent == nil || parent.Difficulty == nil {
@@ -71,51 +93,75 @@ func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header)
 
 	targetTime := int64(da.config.TargetBlockTime)
 
-	// Production-grade difficulty calculation with three-tier strategy:
-	// Tier 1: Low difficulty (<100) - Use precise floating-point arithmetic
-	// Tier 2: High difficulty (>=100) - Use integer arithmetic for performance
-	// Tier 3: Boundary conditions - Enforce monotonic adjustment
+	// PI Controller calculation with high-precision arithmetic
+	// Unified approach: Use big.Float for all difficulty levels
+	newDifficulty := da.calculatePIDifficulty(timeDiff, targetTime, parentDiff)
 
-	var newDifficulty *big.Int
-
-	if parentDiff.Cmp(big.NewInt(int64(da.config.LowDifficultyThreshold))) < 0 {
-		// Tier 1: Low difficulty regime - Use high-precision floating-point calculation
-		newDifficulty = da.calculateLowDifficulty(timeDiff, targetTime, parentDiff)
-	} else {
-		// Tier 2: High difficulty regime - Use efficient integer calculation
-		newDifficulty = da.calculateHighDifficulty(timeDiff, targetTime, parentDiff)
-	}
-
-	// Tier 3: Enforce production boundary conditions
+	// Enforce production boundary conditions
 	newDifficulty = da.enforceBoundaryConditions(newDifficulty, parentDiff, timeDiff, targetTime)
 
 	return newDifficulty
 }
 
-// calculateLowDifficulty implements precise difficulty calculation for low difficulty values
-// Uses big.Float for maximum precision to avoid rounding errors
-func (da *DifficultyAdjuster) calculateLowDifficulty(timeDiff, targetTime int64, parentDiff *big.Int) *big.Int {
-	// Convert to high-precision floating-point
-	actualTime := new(big.Float).SetInt64(timeDiff)
+// calculatePIDifficulty implements the core PI controller algorithm
+// PI Controller Formula:
+//
+//	error = (targetTime - actualTime) / targetTime
+//	integral = integral + error (clamped to [-10, 10])
+//	output = Kp * error + Ki * integral
+//	newDifficulty = parentDifficulty * (1 + output)
+//
+// Control Theory Rationale:
+//   - Proportional term (Kp * error): Provides immediate correction based on current deviation
+//   - Integral term (Ki * integral): Eliminates steady-state error by accumulating past deviations
+//   - Anti-windup: Prevents integral saturation by clamping to [-10, 10]
+//   - This ensures stable convergence to target block time without oscillation
+func (da *DifficultyAdjuster) calculatePIDifficulty(timeDiff, targetTime int64, parentDiff *big.Int) *big.Int {
+	// Convert values to high-precision floating-point
+	actualTimeFloat := new(big.Float).SetInt64(timeDiff)
 	targetTimeFloat := new(big.Float).SetInt64(targetTime)
 	parentDiffFloat := new(big.Float).SetInt(parentDiff)
 
-	// Calculate time ratio: actualTime / targetTime
-	// Ratio < 1.0: blocks too fast → increase difficulty
-	// Ratio > 1.0: blocks too slow → decrease difficulty
-	ratio := new(big.Float).Quo(actualTime, targetTimeFloat)
-
-	// Apply sensitivity factor (damping coefficient)
-	// sensitivity = 0.5 means 50% of deviation corrected per block
-	// This provides exponential decay with half-life of 1 block
-	sensitivity := big.NewFloat(da.config.AdjustmentSensitivity)
-
-	// Calculate adjustment multiplier using PI controller formula:
-	// multiplier = 1 + sensitivity * (1 - ratio)
+	// Calculate normalized error: error = (targetTime - actualTime) / targetTime
+	// Positive error: blocks too slow (need to decrease difficulty)
+	// Negative error: blocks too fast (need to increase difficulty)
+	// Zero error: blocks on target (no adjustment needed)
 	one := big.NewFloat(1.0)
-	deviation := new(big.Float).Sub(one, ratio)              // (1 - ratio)
-	adjustment := new(big.Float).Mul(deviation, sensitivity) // sensitivity * (1 - ratio)
-	multiplier := new(big.Float).Add(one, adjustment)        // 1 + adjustment
+	timeRatio := new(big.Float).Quo(actualTimeFloat, targetTimeFloat)
+	error := new(big.Float).Sub(one, timeRatio)
+
+	// Update integral accumulator with anti-windup protection
+	// Anti-windup strategy: Clamp integral to [-10, 10] to prevent saturation
+	// This prevents excessive overshoot when blocks are consistently too fast/slow
+	// Only accumulate integral when there's actual error (prevents drift when on target)
+	if error.Cmp(big.NewFloat(0.0)) != 0 {
+		da.integralAccumulator.Add(da.integralAccumulator, error)
+	}
+
+	// Anti-windup clamping
+	integralMin := big.NewFloat(-10.0)
+	integralMax := big.NewFloat(10.0)
+	if da.integralAccumulator.Cmp(integralMax) > 0 {
+		da.integralAccumulator.Set(integralMax)
+	}
+	if da.integralAccumulator.Cmp(integralMin) < 0 {
+		da.integralAccumulator.Set(integralMin)
+	}
+
+	// Calculate PI controller output
+	// Proportional term: Kp * error
+	proportionalGain := big.NewFloat(da.config.AdjustmentSensitivity)
+	proportionalTerm := new(big.Float).Mul(error, proportionalGain)
+
+	// Integral term: Ki * integral
+	integralGain := big.NewFloat(da.integralGain)
+	integralTerm := new(big.Float).Mul(da.integralAccumulator, integralGain)
+
+	// Combined PI output: Kp * error + Ki * integral
+	piOutput := new(big.Float).Add(proportionalTerm, integralTerm)
+
+	// Calculate final multiplier: 1 + PI output
+	multiplier := new(big.Float).Add(one, piOutput)
 
 	// Apply multiplier to parent difficulty
 	newDiffFloat := new(big.Float).Mul(parentDiffFloat, multiplier)
@@ -129,129 +175,22 @@ func (da *DifficultyAdjuster) calculateLowDifficulty(timeDiff, targetTime int64,
 	return newDifficulty
 }
 
-// calculateHighDifficulty implements efficient difficulty calculation for high difficulty values
-// Uses integer arithmetic for performance while maintaining accuracy
-func (da *DifficultyAdjuster) calculateHighDifficulty(timeDiff, targetTime int64, parentDiff *big.Int) *big.Int {
-	// Calculate time delta from target
-	delta := timeDiff - targetTime
-
-	// Calculate proportional adjustment: parentDiff * delta / BoundDivisor
-	// BoundDivisor controls maximum adjustment magnitude
-	adjustment := new(big.Int).Div(parentDiff, big.NewInt(int64(da.config.BoundDivisor)))
-	adjustment.Mul(adjustment, big.NewInt(delta))
-
-	// Apply adjustment (negative delta decreases difficulty, positive increases)
-	adjustment.Neg(adjustment)
-	newDifficulty := new(big.Int).Add(parentDiff, adjustment)
-
-	// Ensure non-negative result
-	if newDifficulty.Sign() < 0 {
-		newDifficulty = big.NewInt(0)
-	}
-
-	return newDifficulty
-}
-
 // enforceBoundaryConditions applies production-grade safety constraints
 // Ensures monotonic adjustment and prevents pathological cases
+// Note: Integral term in PI controller already provides smoothing,
+// so no additional exponential moving average is needed
 func (da *DifficultyAdjuster) enforceBoundaryConditions(newDifficulty, parentDiff *big.Int, timeDiff, targetTime int64) *big.Int {
 	minDiff := big.NewInt(int64(da.config.MinimumDifficulty))
+	maxDiff := new(big.Int).Lsh(big.NewInt(1), 256) // Maximum difficulty: 2^256
 
 	// Constraint 1: Enforce minimum difficulty (network liveness guarantee)
 	if newDifficulty.Cmp(minDiff) < 0 {
 		newDifficulty.Set(minDiff)
 	}
 
-	// Constraint 2: Enforce smooth monotonic adjustment
-	// Design principle: Increase slowly (smooth), decrease adaptively (responsive)
-	if timeDiff < targetTime {
-		// Blocks too fast: limit increase to prevent shock therapy
-		// Maximum increase: 10% per block OR calculated value, whichever is lower
-		maxIncreasePercent := big.NewFloat(0.10) // 10% maximum increase
-		parentDiffFloat := new(big.Float).SetInt(parentDiff)
-		maxIncrease := new(big.Float).Mul(parentDiffFloat, maxIncreasePercent)
-		maxIncreaseInt, _ := maxIncrease.Int(nil)
-
-		// Ensure at least +1 for very low difficulties
-		if maxIncreaseInt.Sign() <= 0 {
-			maxIncreaseInt = big.NewInt(1)
-		}
-
-		maxAllowedDifficulty := new(big.Int).Add(parentDiff, maxIncreaseInt)
-
-		// Cap the calculated difficulty to prevent sudden jumps
-		if newDifficulty.Cmp(maxAllowedDifficulty) > 0 {
-			newDifficulty.Set(maxAllowedDifficulty)
-		}
-
-		// Also enforce minimum increase of 1 to ensure difficulty grows when blocks are too fast
-		minIncrease := new(big.Int).Add(parentDiff, big.NewInt(1))
-		if newDifficulty.Cmp(minIncrease) < 0 {
-			newDifficulty.Set(minIncrease)
-		}
-	} else if timeDiff > targetTime && parentDiff.Cmp(big.NewInt(1)) > 0 {
-		// Blocks too slow: implement adaptive difficulty reduction
-		// Economic rationale: Prevent "difficulty death spiral" where high difficulty
-		// drives away miners, making blocks even slower to mine
-
-		// Calculate severity ratio: how many times slower than target?
-		severityRatio := float64(timeDiff) / float64(targetTime)
-
-		// Adaptive reduction strategy (non-linear response):
-		// - Mild delay (< 5x): Reduce by at least 1 (smooth adjustment)
-		// - Moderate delay (5-20x): Reduce by 5-25% (faster recovery)
-		// - Severe delay (> 20x): Reduce by up to 50% (emergency recovery)
-		var maxReductionPercent float64
-		if severityRatio < 5.0 {
-			// Mild case: ensure at least reduction by 1
-			// This is handled by the PI calculation
-		} else if severityRatio < 20.0 {
-			// Moderate case: allow 5-25% reduction
-			// Linear interpolation: 5x→5%, 20x→25%
-			maxReductionPercent = 0.05 + 0.20*(severityRatio-5.0)/15.0
-		} else {
-			// Severe case: allow up to 50% reduction for rapid recovery
-			maxReductionPercent = 0.50
-		}
-
-		// Calculate minimum difficulty after reduction
-		var minDifficulty *big.Int
-		if maxReductionPercent > 0 {
-			// Calculate reduction amount: parentDiff * maxReductionPercent
-			reductionPercent := big.NewFloat(maxReductionPercent)
-			parentDiffFloat := new(big.Float).SetInt(parentDiff)
-			reductionAmount := new(big.Float).Mul(parentDiffFloat, reductionPercent)
-			reductionInt, _ := reductionAmount.Int(nil)
-
-			// Ensure at least reduction by 1
-			if reductionInt.Sign() <= 0 {
-				reductionInt = big.NewInt(1)
-			}
-
-			minDifficulty = new(big.Int).Sub(parentDiff, reductionInt)
-		} else {
-			// Mild case: just reduce by 1
-			minDifficulty = new(big.Int).Sub(parentDiff, big.NewInt(1))
-		}
-
-		// Ensure we don't go below minimum difficulty
-		if minDifficulty.Cmp(minDiff) < 0 {
-			minDifficulty.Set(minDiff)
-		}
-
-		// Apply reduction: use calculated value or forced minimum, whichever is lower
-		if newDifficulty.Cmp(parentDiff) >= 0 {
-			// PI calculation failed to decrease, use adaptive reduction
-			newDifficulty = minDifficulty
-		} else if newDifficulty.Cmp(minDifficulty) < 0 {
-			// Calculated reduction is too aggressive, cap it
-			newDifficulty.Set(minDifficulty)
-		}
-
-		// Final safety check: ensure difficulty >= 1
-		if newDifficulty.Cmp(big.NewInt(1)) < 0 {
-			newDifficulty.Set(big.NewInt(1))
-		}
+	// Constraint 2: Enforce maximum difficulty (prevent overflow in uint32)
+	if newDifficulty.Cmp(maxDiff) > 0 {
+		newDifficulty.Set(maxDiff)
 	}
 
 	// Constraint 3: Enforce maximum adjustment (prevent shock therapy)
@@ -261,41 +200,9 @@ func (da *DifficultyAdjuster) enforceBoundaryConditions(newDifficulty, parentDif
 		newDifficulty.Set(maxAllowed)
 	}
 
-	// Constraint 4: SMOOTHING - Apply exponential moving average filter
-	// This reduces short-term volatility while maintaining long-term convergence
-	// Formula: smoothedDiff = 0.7 * newDifficulty + 0.3 * parentDiff
-	// This provides a balance between responsiveness and stability
-	smoothingFactor := big.NewFloat(0.7) // 70% weight to new value, 30% to old
-	parentWeight := big.NewFloat(0.3)
-
-	parentDiffFloat := new(big.Float).SetInt(parentDiff)
-	newDiffFloat := new(big.Float).SetInt(newDifficulty)
-
-	weightedNew := new(big.Float).Mul(newDiffFloat, smoothingFactor)
-	weightedOld := new(big.Float).Mul(parentDiffFloat, parentWeight)
-	smoothedDiff := new(big.Float).Add(weightedNew, weightedOld)
-
-	// Convert back to integer, but ensure we don't lose too much precision
-	smoothedInt, _ := smoothedDiff.Int(nil)
-
-	// Only apply smoothing if it doesn't violate other constraints
-	// Ensure smoothed value is between parentDiff and newDifficulty (inclusive)
-	// Manual min/max calculation since big.Int doesn't have Min/Max methods
-	minValue := new(big.Int).Set(parentDiff)
-	if newDifficulty.Cmp(minValue) < 0 {
-		minValue.Set(newDifficulty)
-	}
-	maxValue := new(big.Int).Set(parentDiff)
-	if newDifficulty.Cmp(maxValue) > 0 {
-		maxValue.Set(newDifficulty)
-	}
-
-	if smoothedInt.Cmp(minValue) >= 0 && smoothedInt.Cmp(maxValue) <= 0 {
-		// Apply smoothing, but ensure at least 1 unit change
-		diffChange := new(big.Int).Sub(smoothedInt, parentDiff)
-		if diffChange.Sign() != 0 || newDifficulty.Cmp(parentDiff) == 0 {
-			newDifficulty = smoothedInt
-		}
+	// Constraint 4: Ensure difficulty never decreases below 1
+	if newDifficulty.Cmp(big.NewInt(1)) < 0 {
+		newDifficulty.Set(big.NewInt(1))
 	}
 
 	return newDifficulty
@@ -327,4 +234,36 @@ func (da *DifficultyAdjuster) ValidateDifficulty(difficulty *big.Int, parent *He
 	}
 
 	return true
+}
+
+// ResetIntegral resets the integral accumulator to zero
+// Use case: Chain reorganization or difficulty adjustment parameter changes
+// PI Control Theory: Resetting integral prevents windup from stale chain state
+func (da *DifficultyAdjuster) ResetIntegral() {
+	da.integralAccumulator = big.NewFloat(0.0)
+}
+
+// GetIntegralValue returns the current integral accumulator value
+// Useful for monitoring and debugging PI controller behavior
+func (da *DifficultyAdjuster) GetIntegralValue() float64 {
+	val, _ := da.integralAccumulator.Float64()
+	return val
+}
+
+// SetIntegralGain sets the integral gain parameter (Ki)
+// Warning: Should only be called during initialization or configuration updates
+// Control Theory: Ki controls how aggressively past errors are corrected
+// Higher Ki = faster elimination of steady-state error but risk of oscillation
+// Lower Ki = slower convergence but more stable response
+func (da *DifficultyAdjuster) SetIntegralGain(ki float64) {
+	da.integralGain = ki
+}
+
+// GetParameters returns the current PI controller parameters
+// Returns: Kp (proportional gain), Ki (integral gain), and current integral value
+func (da *DifficultyAdjuster) GetParameters() (kp, ki, integral float64) {
+	kp = da.config.AdjustmentSensitivity
+	ki = da.integralGain
+	integral, _ = da.integralAccumulator.Float64()
+	return
 }

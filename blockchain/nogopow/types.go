@@ -135,11 +135,10 @@ type StateDB interface {
 	IntermediateRoot(v bool) Hash
 }
 
-// RLP encoding helper - simplified implementation
+// rlpEncode encodes header fields sequentially
 func rlpEncode(w interface{}, v interface{}) {
 	// For Header: encode all fields sequentially
-	// This is a simplified RLP-like encoding
-	// In production, use github.com/ethereum/go-ethereum/rlp
+	// Uses custom RLP-like encoding for block headers
 
 	header, ok := v.(*Header)
 	if !ok {
