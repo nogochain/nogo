@@ -169,6 +169,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/block", mw.Wrap("block_submit", true, 4<<20, s.handleAddBlock))
 	mux.HandleFunc("/block/height/", mw.Wrap("block_height", false, 0, s.handleBlockByHeight))
 	mux.HandleFunc("/block/hash/", mw.Wrap("block_hash", false, 0, s.handleBlockByHashParam))
+	
+	// Mining API endpoints (for pool miners) - MUST be registered before /block/
+	mux.HandleFunc("/block/template", mw.Wrap("block_template", false, 0, s.handleGetBlockTemplate))
+	mux.HandleFunc("/mining/submit", mw.Wrap("mining_submit", false, 0, s.handleSubmitWork))
+	mux.HandleFunc("/mining/info", mw.Wrap("mining_info", false, 0, s.handleGetMiningInfo))
 
 	mux.HandleFunc("/balance/", mw.Wrap("balance", false, 0, s.handleBalance))
 	mux.HandleFunc("/address/", mw.Wrap("address_txs", false, 0, s.handleAddressTxs))

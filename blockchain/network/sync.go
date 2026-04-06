@@ -122,10 +122,48 @@ func (s *SyncLoop) IsSyncing() bool {
 }
 
 // IsSynced returns whether sync is complete
+// Returns true if:
+// 1. Not syncing AND sync progress >= 1.0, OR
+// 2. No active peers available AND local chain height > 0 (isolated mode - we are the only chain)
 func (s *SyncLoop) IsSynced() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return !s.isSyncing && s.syncProgress >= 1.0
+	
+	// Standard case: sync completed
+	if !s.isSyncing && s.syncProgress >= 1.0 {
+		return true
+	}
+	
+	// Isolated mode: no active peers and we have blocks
+	// In this case, we are the only chain, so consider ourselves synced
+	if !s.isSyncing && s.syncProgress < 1.0 {
+		// Check if we have no active peers (peers that are actually connected)
+		if s.pm != nil {
+			activePeers := s.pm.GetActivePeers()
+			localHeight := s.getLocalHeight()
+			
+			// If we have blocks and no active peers, we're synced (isolated mode)
+			// Note: GetActivePeers() returns only peers that are actually connected,
+			// not just known peers that may have failed to connect
+			if localHeight > 0 && len(activePeers) == 0 {
+				return true
+			}
+		}
+	}
+	
+	return false
+}
+
+// getLocalHeight returns the local blockchain height
+func (s *SyncLoop) getLocalHeight() uint64 {
+	if s.bc == nil {
+		return 0
+	}
+	tip := s.bc.LatestBlock()
+	if tip == nil {
+		return 0
+	}
+	return tip.Height
 }
 
 // TriggerBlockEvent triggers a block event for miner coordination

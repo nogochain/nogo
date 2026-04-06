@@ -22,7 +22,7 @@ import (
 
 // TestFeeChecker_ValidateFee_LowFee tests fee validation with too low fee
 func TestFeeChecker_ValidateFee_LowFee(t *testing.T) {
-	checker := NewFeeChecker(minFee, MinFeePerByte)
+	checker := NewFeeChecker(MinFee, MinFeePerByte)
 
 	tx := &Transaction{
 		Type:    TxTransfer,
@@ -58,7 +58,7 @@ func findSubstring(s, substr string) bool {
 
 // TestFeeChecker_ValidateFee_HighFee tests fee validation with unusually high fee
 func TestFeeChecker_ValidateFee_HighFee(t *testing.T) {
-	checker := NewFeeChecker(minFee, MinFeePerByte)
+	checker := NewFeeChecker(MinFee, MinFeePerByte)
 
 	tx := &Transaction{
 		Type:    TxTransfer,
@@ -80,7 +80,7 @@ func TestFeeChecker_ValidateFee_HighFee(t *testing.T) {
 
 // TestFeeChecker_ValidateFee_Valid tests fee validation with valid fee
 func TestFeeChecker_ValidateFee_Valid(t *testing.T) {
-	checker := NewFeeChecker(minFee, MinFeePerByte)
+	checker := NewFeeChecker(MinFee, MinFeePerByte)
 
 	// Set mempool size to 0 to avoid congestion adjustment
 	checker.UpdateMempoolSize(0)
@@ -101,7 +101,7 @@ func TestFeeChecker_ValidateFee_Valid(t *testing.T) {
 
 // TestFeeChecker_CongestionAdjustment tests fee calculation with mempool congestion
 func TestFeeChecker_CongestionAdjustment(t *testing.T) {
-	checker := NewFeeChecker(minFee, MinFeePerByte)
+	checker := NewFeeChecker(MinFee, MinFeePerByte)
 
 	// Normal mempool size
 	checker.UpdateMempoolSize(5000)
@@ -129,7 +129,7 @@ func TestFeeChecker_CongestionAdjustment(t *testing.T) {
 
 // TestFeeChecker_HistoryAdjustment tests fee calculation with historical fees
 func TestFeeChecker_HistoryAdjustment(t *testing.T) {
-	checker := NewFeeChecker(minFee, MinFeePerByte)
+	checker := NewFeeChecker(MinFee, MinFeePerByte)
 
 	// Add historical fees
 	for i := 0; i < 100; i++ {
@@ -155,7 +155,7 @@ func TestFeeChecker_HistoryAdjustment(t *testing.T) {
 func TestCalculateMinFee(t *testing.T) {
 	// Normal conditions
 	fee := CalculateMinFee(100, 5000)
-	expectedFee := minFee + 100*MinFeePerByte
+	expectedFee := MinFee + 100*MinFeePerByte
 	if fee != expectedFee {
 		t.Errorf("Expected fee %d, got %d", expectedFee, fee)
 	}
@@ -170,7 +170,7 @@ func TestCalculateMinFee(t *testing.T) {
 
 // TestFeeChecker_ThreadSafety tests concurrent access safety
 func TestFeeChecker_ThreadSafety(t *testing.T) {
-	checker := NewFeeChecker(minFee, MinFeePerByte)
+	checker := NewFeeChecker(MinFee, MinFeePerByte)
 
 	done := make(chan bool)
 

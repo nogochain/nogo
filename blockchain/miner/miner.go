@@ -568,28 +568,20 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		return nil, errors.New("no parent block")
 	}
 
-	parentCopy := &core.Block{
-		Height:         parentAtMineTime.Height,
-		Hash:           append([]byte(nil), parentAtMineTime.Hash...),
-		PrevHash:       append([]byte(nil), parentAtMineTime.PrevHash...),
-		TimestampUnix:  parentAtMineTime.TimestampUnix,
-		DifficultyBits: parentAtMineTime.DifficultyBits,
-		MinerAddress:   parentAtMineTime.MinerAddress,
-	}
-
+	fmt.Printf("[DEBUG] miner.go: Calling MineTransfers with %d transactions\n", len(selected))
 	b, err := m.bc.MineTransfers(selected)
 	if err != nil {
+		fmt.Printf("[ERROR] miner.go: MineTransfers failed: %v\n", err)
 		logf(colorRed, "❌ ", "Mine failed: %v", err)
 		return nil, err
 	}
-
+	fmt.Printf("[DEBUG] miner.go: MineTransfers returned block %d, hash=%x\n", b.Height, b.Hash)
 	logf(colorBrightGreen, "✅ ", "Block mined - height=%d, hash=%x", b.Height, b.Hash)
 
-	if err := validateBlockPoW(m.bc.GetConsensus(), b, parentCopy); err != nil {
-		logf(colorRed, "❌ ", "POW validation failed: %v", err)
-		return nil, nil
-	}
-
+	// 冗余 POW 验证已删除，原因：
+	// 1. POW 已在 Seal 时由 NogoPow 引擎验证
+	// 2. validateBlockLocked 会在 MineTransfers 中再次验证 POW
+	// 3. 此处验证是冗余的且验证不完整
 	latest := m.bc.LatestBlock()
 	if latest == nil || latest.Hash == nil || string(latest.Hash) != string(b.Hash) {
 		logf(colorYellow, "⚠️ ", "Mined block was not added to chain")

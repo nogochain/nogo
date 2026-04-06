@@ -189,6 +189,32 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	parentHash := nogopow.Hash{}
 	copy(parentHash[:], newBlock.PrevHash)
 
+	// Compute merkle root from transactions
+	fmt.Printf("[DEBUG] Computing merkle root for %d transactions\n", len(newBlock.Transactions))
+	leaves := make([][]byte, 0, len(newBlock.Transactions))
+	for i, tx := range newBlock.Transactions {
+		th, err := txSigningHashForConsensus(tx, c.consensus, height)
+		if err != nil {
+			fmt.Printf("[ERROR] Failed to compute tx hash for tx %d: %v\n", i, err)
+			c.mu.RUnlock()
+			return nil, fmt.Errorf("compute tx hash: %w", err)
+		}
+		leaves = append(leaves, th)
+		fmt.Printf("[DEBUG] Tx %d hash: %x\n", i, th)
+	}
+
+	merkleRoot, err := MerkleRoot(leaves)
+	if err != nil {
+		fmt.Printf("[ERROR] Failed to compute merkle root: %v\n", err)
+		c.mu.RUnlock()
+		return nil, fmt.Errorf("compute merkle root: %w", err)
+	}
+	fmt.Printf("[DEBUG] Computed merkle root: %x\n", merkleRoot)
+
+	// Set merkle root in block header
+	newBlock.Header.MerkleRoot = merkleRoot
+	fmt.Printf("[DEBUG] Set block merkle root: %x\n", newBlock.Header.MerkleRoot)
+
 	// Prepare coinbase address for POW header
 	var powCoinbase nogopow.Address
 	minerAddr := c.minerAddress
@@ -232,8 +258,11 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	}()
 
 	// Wait for result (no timeout for production-grade implementation)
+	fmt.Printf("[DEBUG] Waiting for Seal result...\n")
 	result, ok := <-resultCh
+	fmt.Printf("[DEBUG] Seal result received: ok=%v, result=%v\n", ok, result != nil)
 	if !ok {
+		fmt.Printf("[ERROR] Mining result channel closed\n")
 		close(stop)
 		c.mu.RUnlock()
 		return nil, fmt.Errorf("mining failed: channel closed")
@@ -241,15 +270,40 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 
 	// Extract nonce and hash from sealed header
 	sealedHeader := result.Header()
+	fmt.Printf("[DEBUG] Extracting nonce and hash from sealed header\n")
 	newBlock.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
 	newBlock.Header.Nonce = newBlock.Nonce
 	newBlock.Hash = sealedHeader.Hash().Bytes()
+	fmt.Printf("[DEBUG] Sealed block: height=%d, hash=%x, nonce=%d\n", newBlock.Height, newBlock.Hash, newBlock.Nonce)
 
-	// Apply block to state
+	// Release read lock and acquire write lock for state modification
+	fmt.Printf("[DEBUG] Releasing read lock and acquiring write lock\n")
 	c.mu.RUnlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	fmt.Printf("[DEBUG] Write lock acquired, starting validation\n")
 
+	// Get parent block for validation (validateBlockLocked requires parent in blocksByHash)
+	// Note: We already hold the lock, so access c.blocks directly instead of calling GetTip()
+	fmt.Printf("[DEBUG] Getting parent block from c.blocks (len=%d)\n", len(c.blocks))
+	var parent *Block
+	if len(c.blocks) == 0 {
+		fmt.Printf("[ERROR] No parent block in c.blocks\n")
+		return nil, errors.New("no parent block")
+	}
+	parent = c.blocks[len(c.blocks)-1]
+	fmt.Printf("[DEBUG] Parent block for validation: height=%d, hash=%x\n", parent.Height, parent.Hash)
+
+	// Full block validation (same as AppendBlock)
+	// This ensures the mined block meets all consensus rules before applying to state
+	fmt.Printf("[DEBUG] Starting validateBlockLocked for block %d\n", newBlock.Height)
+	if err := c.validateBlockLocked(newBlock); err != nil {
+		fmt.Printf("[ERROR] validateBlockLocked failed for block %d: %v\n", newBlock.Height, err)
+		return nil, fmt.Errorf("validate mined block: %w", err)
+	}
+	fmt.Printf("[DEBUG] validateBlockLocked passed for block %d\n", newBlock.Height)
+
+	// Apply block to state after successful validation
 	if err := applyBlockToState(c.consensus, c.monetaryPolicy, c.state, newBlock, c.genesisAddress, c.genesisTimestamp); err != nil {
 		return nil, err
 	}
