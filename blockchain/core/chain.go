@@ -1989,6 +1989,16 @@ func (c *Chain) addCanonicalBlockLocked(block *Block, hashHex string) (bool, err
 		}
 	}
 
+	// Apply block to state after successful persistence
+	// This is critical for reward distribution
+	if err := applyBlockToState(c.consensus, c.monetaryPolicy, c.state, block, c.genesisAddress, c.genesisTimestamp); err != nil {
+		log.Printf("[Chain] ERROR: Failed to apply block %d to state: %v", block.Height, err)
+		// Rollback in-memory changes
+		c.blocks = c.blocks[:len(c.blocks)-1]
+		delete(c.blocksByHash, hashHex)
+		return false, fmt.Errorf("apply block to state: %w", err)
+	}
+
 	log.Printf("[Chain] Block %d added to canonical chain (height: %d, hash: %s)", block.Height, height, hashHex[:16])
 	return true, nil
 }

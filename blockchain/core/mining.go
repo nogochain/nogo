@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 	"math/big"
 	"os"
 
@@ -152,21 +151,13 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 		coinbaseData = "Memphis"
 	}
 
-	// Create coinbase transaction - miner receives miner's share (96%) + 100% of fees
-	// Fees are burned but miner gets them as incentive
-	// Overflow check: ensure minerReward + fees doesn't overflow
-	var minerTotal uint64
-	if fees > math.MaxUint64-minerReward {
-		log.Printf("WARNING: miner reward overflow detected, capping at MaxUint64")
-		minerTotal = math.MaxUint64
-	} else {
-		minerTotal = minerReward + fees
-	}
+	// Create coinbase transaction - miner receives miner's share (96%) only
+	// Transaction fees are 100% burned (not distributed to anyone)
 	coinbase := Transaction{
 		Type:      TxCoinbase,
 		ChainID:   c.chainID,
 		ToAddress: c.minerAddress,
-		Amount:    minerTotal, // Miner receives 96% of block reward + 100% of fees
+		Amount:    minerReward, // Miner receives 96% of block reward only (fees burned)
 		Data:      coinbaseData,
 	}
 
