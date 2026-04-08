@@ -250,6 +250,12 @@ type SyncConfig struct {
 	// MaxSyncRange is the maximum blocks to sync in one operation
 	MaxSyncRange int `json:"maxSyncRange"`
 
+	// MaxConcurrentDownloads is the maximum concurrent download workers
+	MaxConcurrentDownloads int `json:"maxConcurrentDownloads"`
+
+	// MemoryThresholdMB is the memory pressure threshold in MB
+	MemoryThresholdMB uint64 `json:"memoryThresholdMB"`
+
 	// PeerHeightPollIntervalMs is the polling interval for peer height
 	PeerHeightPollIntervalMs int64 `json:"peerHeightPollIntervalMs"`
 
@@ -342,6 +348,21 @@ type APIConfig struct {
 
 	// CORS is the list of allowed CORS origins
 	CORS []string `json:"cors"`
+}
+
+// MempoolConfig defines mempool configuration parameters
+type MempoolConfig struct {
+	// MaxTransactions is the maximum number of transactions in mempool
+	MaxTransactions int `json:"maxTransactions"`
+
+	// MaxMemoryMB is the maximum memory usage in megabytes
+	MaxMemoryMB uint64 `json:"maxMemoryMB"`
+
+	// MinFeeRate is the minimum fee rate in wei per byte
+	MinFeeRate uint64 `json:"minFeeRate"`
+
+	// TTL is the time-to-live for transactions in mempool
+	TTL time.Duration `json:"ttl"`
 }
 
 // BlockReader defines a minimal interface for block time validation

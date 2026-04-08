@@ -11,6 +11,10 @@ type p2pBlockByHashReq struct {
 	HashHex string `json:"hashHex"`
 }
 
+type p2pBlockByHeightReq struct {
+	Height uint64 `json:"height"`
+}
+
 type p2pTransactionReq struct {
 	TxHex string `json:"txHex"`
 }
@@ -25,6 +29,16 @@ type p2pBlockBroadcast struct {
 
 type p2pBlockReq struct {
 	HashHex string `json:"hashHex"`
+}
+
+// p2pPing represents a ping message for connection keepalive
+type p2pPing struct {
+	Timestamp int64 `json:"timestamp"`
+}
+
+// p2pPong represents a pong response to a ping
+type p2pPong struct {
+	Timestamp int64 `json:"timestamp"`
 }
 
 // p2pAuthChallenge reserved for future use //nolint:unused

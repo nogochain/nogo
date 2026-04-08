@@ -26,21 +26,19 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nogochain/nogo/blockchain/config"
 	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/nogochain/nogo/blockchain/metrics"
 )
 
 const (
-	DefaultBatchSize        = 500
-	MinBatchSize            = 50
-	MaxBatchSize            = 2000
-	DefaultMaxConcurrent    = 8
-	MinMaxConcurrent        = 1
-	MaxMaxConcurrent        = 32
-	MemoryPressureThreshold = 1500 * 1024 * 1024
-	HighLatencyThreshold    = 500 * time.Millisecond
-	LowLatencyThreshold     = 100 * time.Millisecond
-	ProgressUpdateInterval  = 1 * time.Second
+	MinBatchSize           = 50
+	MaxBatchSize           = 2000
+	MinMaxConcurrent       = 1
+	MaxMaxConcurrent       = 32
+	HighLatencyThreshold   = 500 * time.Millisecond
+	LowLatencyThreshold    = 100 * time.Millisecond
+	ProgressUpdateInterval = 1 * time.Second
 )
 
 type DownloadProgress struct {
@@ -87,11 +85,27 @@ type BlockValidator interface {
 	ValidateBlockFast(block *core.Block) error
 }
 
-func NewBlockDownloader(pm PeerAPI, bc BlockchainInterface, validator BlockValidator, metrics *metrics.Metrics) *BlockDownloader {
+func NewBlockDownloader(pm PeerAPI, bc BlockchainInterface, validator BlockValidator, metrics *metrics.Metrics, syncConfig config.SyncConfig) *BlockDownloader {
+	batchSize := syncConfig.BatchSize
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	
+	maxConcurrent := syncConfig.MaxConcurrentDownloads
+	if maxConcurrent <= 0 {
+		maxConcurrent = 8
+	}
+	
+	memoryThreshold := syncConfig.MemoryThresholdMB
+	if memoryThreshold == 0 {
+		memoryThreshold = 1500
+	}
+	memoryThresholdBytes := memoryThreshold * 1024 * 1024
+
 	cfg := DownloaderConfig{
-		BatchSize:       DefaultBatchSize,
-		MaxConcurrent:   DefaultMaxConcurrent,
-		MemoryThreshold: MemoryPressureThreshold,
+		BatchSize:       batchSize,
+		MaxConcurrent:   maxConcurrent,
+		MemoryThreshold: memoryThresholdBytes,
 	}
 
 	downloader := &BlockDownloader{

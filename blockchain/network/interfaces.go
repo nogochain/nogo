@@ -18,8 +18,11 @@ package network
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +50,11 @@ type BlockchainInterface interface {
 	// Block operations
 	AddBlock(block *core.Block) (bool, error)
 
+	// Block retrieval (for fork resolution - matches core.BlockProvider)
+	GetBlockByHash(hash []byte) (*core.Block, bool)
+	GetBlockByHashBytes(hash []byte) (*core.Block, bool)
+	GetAllBlocks() ([]*core.Block, error)
+
 	// Mempool operations
 	SelectMempoolTxs(mp Mempool, maxTxPerBlock int) ([]core.Transaction, []string, error)
 
@@ -60,6 +68,10 @@ type BlockchainInterface interface {
 	TxByID(txid string) (*core.Transaction, *core.TxLocation, bool)
 	AddressTxs(addr string, limit, cursor int) ([]core.AddressTxEntry, int, bool)
 	Balance(addr string) (core.Account, bool)
+	HasTransaction(txHash []byte) bool
+
+	// Contract management
+	GetContractManager() *core.ContractManager
 
 	// Sync loop coordination
 	SyncLoop() SyncLoopInterface
@@ -116,9 +128,78 @@ type PeerManagerInterface interface {
 
 // ChainInfo represents peer chain information
 type ChainInfo struct {
-	Height uint64
-	Work   *big.Int
-	Hash   string
+	ChainID              uint64   `json:"chainId"`
+	RulesHash            string   `json:"rulesHash"`
+	Height               uint64   `json:"height"`
+	LatestHash           string   `json:"latestHash"`
+	GenesisHash          string   `json:"genesisHash"`
+	GenesisTimestampUnix int64    `json:"genesisTimestampUnix"`
+	PeersCount           int      `json:"peersCount"`
+	Work                 *big.Int `json:"work"`
+}
+
+// chainInfoJSON is an intermediate struct for JSON parsing
+// Handles both string and number formats for Work field
+type chainInfoJSON struct {
+	ChainID              uint64 `json:"chainId"`
+	RulesHash            string `json:"rulesHash"`
+	Height               uint64 `json:"height"`
+	LatestHash           string `json:"latestHash"`
+	GenesisHash          string `json:"genesisHash"`
+	GenesisTimestampUnix int64  `json:"genesisTimestampUnix"`
+	PeersCount           int    `json:"peersCount"`
+	Work                 string `json:"work"`
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for ChainInfo
+// Supports both string and numeric work values
+func (c *ChainInfo) UnmarshalJSON(data []byte) error {
+	var tmp chainInfoJSON
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return err
+	}
+
+	c.ChainID = tmp.ChainID
+	c.RulesHash = tmp.RulesHash
+	c.Height = tmp.Height
+	c.LatestHash = tmp.LatestHash
+	c.GenesisHash = tmp.GenesisHash
+	c.GenesisTimestampUnix = tmp.GenesisTimestampUnix
+	c.PeersCount = tmp.PeersCount
+
+	// Parse Work field - handle both string and number formats
+	if tmp.Work != "" {
+		// Remove quotes if present (handles "\"22\"" -> "22")
+		workStr := strings.Trim(tmp.Work, "\"")
+		var ok bool
+		c.Work, ok = new(big.Int).SetString(workStr, 10)
+		if !ok {
+			return fmt.Errorf("invalid work value: %s", tmp.Work)
+		}
+	} else {
+		c.Work = big.NewInt(0)
+	}
+
+	return nil
+}
+
+// MarshalJSON implements custom JSON marshaling for ChainInfo
+func (c *ChainInfo) MarshalJSON() ([]byte, error) {
+	workStr := "0"
+	if c.Work != nil {
+		workStr = c.Work.String()
+	}
+
+	return json.Marshal(&chainInfoJSON{
+		ChainID:              c.ChainID,
+		RulesHash:            c.RulesHash,
+		Height:               c.Height,
+		LatestHash:           c.LatestHash,
+		GenesisHash:          c.GenesisHash,
+		GenesisTimestampUnix: c.GenesisTimestampUnix,
+		PeersCount:           c.PeersCount,
+		Work:                 workStr,
+	})
 }
 
 // RateLimiterConfig holds rate limiter configuration

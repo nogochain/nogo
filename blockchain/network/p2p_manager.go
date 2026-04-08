@@ -246,29 +246,49 @@ func (pm *P2PPeerManager) RecordPeerSuccess(addr string) {
 	}
 }
 
-// RecordPeerFailure records a failed connection to a peer
+// RecordPeerFailure records a failed connection to a peer.
+// Implements exponential backoff and peer removal after threshold.
+// Thread-safe implementation.
 func (pm *P2PPeerManager) RecordPeerFailure(addr string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	if failCount, exists := pm.peerFailCounts[addr]; exists {
-		pm.peerFailCounts[addr] = failCount + 1
+	// Get current count or default to 0
+	failCount := pm.peerFailCounts[addr]
 
-		// Mark peer for removal after 10 consecutive failures
-		if pm.peerFailCounts[addr] >= 10 {
-			// Remove from peers list
-			for i, p := range pm.peers {
-				if p == addr {
-					pm.peers = append(pm.peers[:i], pm.peers[i+1:]...)
-					break
-				}
+	// Increment failure count
+	newCount := failCount + 1
+	pm.peerFailCounts[addr] = newCount
+
+	// Log current failure count
+	log.Printf("P2P peer manager: peer %s connection failed (count=%d)", addr, newCount)
+
+	// Remove peer after MaxConsecutiveFailures consecutive failures
+	if newCount >= MaxConsecutiveFailures {
+		// Remove from peers list
+		for i, p := range pm.peers {
+			if p == addr {
+				pm.peers = append(pm.peers[:i], pm.peers[i+1:]...)
+				break
 			}
-			delete(pm.peerTimestamps, addr)
-			delete(pm.peerFailCounts, addr)
-			log.Printf("P2P peer manager: removed peer %s after %d consecutive failures", addr, pm.peerFailCounts[addr]+1)
-		} else {
-			log.Printf("P2P peer manager: peer %s connection failed (count=%d)", addr, pm.peerFailCounts[addr])
 		}
+		delete(pm.peerTimestamps, addr)
+		delete(pm.peerFailCounts, addr) // Delete BEFORE logging to avoid panic
+		log.Printf("P2P peer manager: removed peer %s after %d consecutive failures",
+			addr, newCount)
+	}
+}
+
+// ResetPeerFailureCount resets the failure count for a peer after successful connection.
+// Call this when a peer successfully reconnects.
+func (pm *P2PPeerManager) ResetPeerFailureCount(addr string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if _, exists := pm.peerFailCounts[addr]; exists {
+		pm.peerFailCounts[addr] = 0
+		pm.peerTimestamps[addr] = time.Now().Unix()
+		log.Printf("P2P peer manager: reset failure count for peer %s", addr)
 	}
 }
 
@@ -414,6 +434,19 @@ func (pm *P2PPeerManager) FetchBlockByHash(ctx context.Context, peer string, has
 	return &out, nil
 }
 
+// FetchBlockByHeight fetches a block by its height from a specific peer
+func (pm *P2PPeerManager) FetchBlockByHeight(ctx context.Context, peer string, height uint64) (*core.Block, error) {
+	var out core.Block
+	err := pm.client.do(ctx, peer, "block_by_height_req", p2pBlockByHeightReq{Height: height}, &out, "block")
+	if err != nil {
+		if err.Error() == "not found" {
+			return nil, errors.New("not found")
+		}
+		return nil, err
+	}
+	return &out, nil
+}
+
 // FetchAnyBlockByHash attempts to fetch a block from any available peer
 func (pm *P2PPeerManager) FetchAnyBlockByHash(ctx context.Context, hashHex string) (*core.Block, string, error) {
 	// Use active peers only for block fetching
@@ -477,7 +510,7 @@ func (pm *P2PPeerManager) BroadcastBlock(ctx context.Context, block *core.Block)
 		wg.Add(1)
 		go func(p string) {
 			defer wg.Done()
-			log.Printf("P2P peer manager: broadcasting block height=%d to peer %s", block.Height, p)
+			log.Printf("P2P: sending block_broadcast to peer %s", p)
 			_, err := pm.client.BroadcastBlock(ctx, p, block)
 			if err != nil {
 				log.Printf("p2p broadcast block to %s failed: %v", p, err)

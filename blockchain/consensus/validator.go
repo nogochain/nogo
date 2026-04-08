@@ -44,10 +44,10 @@ const (
 
 // Type aliases for convenience
 type (
-	Transaction        = core.Transaction
-	TransactionType    = core.TransactionType
-	MetricsCollector   = core.MetricsCollector
-	NoopMetrics        = core.NoopMetrics
+	Transaction      = core.Transaction
+	TransactionType  = core.TransactionType
+	MetricsCollector = core.MetricsCollector
+	NoopMetrics      = core.NoopMetrics
 )
 
 const (
@@ -191,8 +191,9 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
 	}
 
 	if v.consensus.DifficultyEnable {
-		cfg := nogopow.DefaultDifficultyConfig()
-		adjuster := nogopow.NewDifficultyAdjuster(cfg)
+		// Use the same consensus parameters as mining to ensure consistency
+		// This matches the parameters used in core/mining.go MineTransfers()
+		adjuster := nogopow.NewDifficultyAdjuster(&v.consensus)
 
 		var parentHash nogopow.Hash
 		if len(parent.Hash) > 0 {
@@ -353,7 +354,8 @@ func (v *BlockValidator) validateCoinbaseEconomics(block *Block) error {
 	}
 
 	policy := v.consensus.MonetaryPolicy
-	expectedAmount := policy.BlockReward(block.Height) + policy.MinerFeeAmount(totalFees)
+	// Miner receives 96% of block reward + 100% of fees (fees are burned)
+	expectedAmount := policy.BlockReward(block.Height)*uint64(policy.MinerRewardShare)/100 + policy.MinerFeeAmount(totalFees)
 
 	coinbase := block.Transactions[0]
 	if coinbase.ToAddress != block.MinerAddress {
@@ -406,16 +408,11 @@ func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Bl
 	var parentHash nogopow.Hash
 	copy(parentHash[:], parent.Hash)
 
-	var powCoinbase nogopow.Address
-	minerAddr := block.MinerAddress
-	start := 0
-	if len(minerAddr) >= 4 && minerAddr[:4] == "NOGO" {
-		start = 4
-	}
-	for i := 0; i < 20 && start+i*2+2 <= len(minerAddr); i++ {
-		var byteVal byte
-		fmt.Sscanf(minerAddr[start+i*2:start+i*2+2], "%02x", &byteVal)
-		powCoinbase[i] = byteVal
+	// Convert miner address string to nogopow.Address using reusable function
+	// This ensures consistent address conversion across the codebase
+	powCoinbase, err := core.StringToAddress(block.MinerAddress)
+	if err != nil {
+		return fmt.Errorf("invalid miner address: %w", err)
 	}
 
 	header := &nogopow.Header{
@@ -592,7 +589,8 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 			return errors.New("coinbase toAddress must match minerAddress")
 		}
 		policy := p.MonetaryPolicy
-		expected := policy.BlockReward(b.Height) + policy.MinerFeeAmount(fees)
+		// Miner receives 96% of block reward + 100% of fees (fees are burned)
+		expected := policy.BlockReward(b.Height)*uint64(policy.MinerRewardShare)/100 + policy.MinerFeeAmount(fees)
 		if cb.Amount != expected {
 			return fmt.Errorf("bad coinbase amount: expected %d got %d", expected, cb.Amount)
 		}

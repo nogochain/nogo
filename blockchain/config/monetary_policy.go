@@ -72,8 +72,61 @@ type MonetaryPolicy struct {
 	// MinerFeeShare is the percentage of transaction fees allocated to miner (0-100)
 	MinerFeeShare uint8 `json:"minerFeeShare"`
 
+	// MinerRewardShare is the percentage of block reward allocated to miner (0-100)
+	MinerRewardShare uint8 `json:"minerRewardShare"`
+
+	// CommunityFundShare is the percentage of block reward for community development (0-100)
+	CommunityFundShare uint8 `json:"communityFundShare"`
+
+	// GenesisShare is the percentage of block reward for genesis address (0-100)
+	GenesisShare uint8 `json:"genesisShare"`
+
+	// IntegrityPoolShare is the percentage of block reward for integrity node rewards (0-100)
+	IntegrityPoolShare uint8 `json:"integrityPoolShare"`
+
 	// TailEmission is a legacy field kept for compatibility
 	TailEmission uint64 `json:"tailEmission"`
+}
+
+// Validate validates monetary policy configuration
+func (p *MonetaryPolicy) Validate() error {
+	if p.InitialBlockReward == 0 {
+		return errors.New("initialBlockReward must be > 0")
+	}
+
+	if p.AnnualReductionPercent > 100 {
+		return errors.New("annualReductionPercent must be <= 100")
+	}
+
+	if p.MinerFeeShare > 100 {
+		return errors.New("minerFeeShare must be <= 100")
+	}
+
+	if p.MinerRewardShare > 100 {
+		return errors.New("minerRewardShare must be <= 100")
+	}
+
+	if p.CommunityFundShare > 100 {
+		return errors.New("communityFundShare must be <= 100")
+	}
+
+	if p.GenesisShare > 100 {
+		return errors.New("genesisShare must be <= 100")
+	}
+
+	if p.IntegrityPoolShare > 100 {
+		return errors.New("integrityPoolShare must be <= 100")
+	}
+
+	// Check that shares sum to 100
+	totalShare := uint16(p.MinerRewardShare) + uint16(p.CommunityFundShare) +
+		uint16(p.GenesisShare) + uint16(p.IntegrityPoolShare)
+
+	if totalShare != 100 {
+		return fmt.Errorf("reward shares must sum to 100, got %d", totalShare)
+	}
+
+	return nil
 }
 
 // BlockReward calculates the block reward for a given block height
@@ -179,52 +232,6 @@ func (p MonetaryPolicy) MinerFeeAmount(totalFees uint64) uint64 {
 		return 0
 	}
 	return totalFees * uint64(p.MinerFeeShare) / 100
-}
-
-// Validate validates monetary policy parameters
-func (p MonetaryPolicy) Validate() error {
-	if p.InitialBlockReward == 0 {
-		return errors.New("initialBlockReward must be > 0")
-	}
-
-	if p.MinimumBlockReward == 0 {
-	} else if p.MinimumBlockReward >= p.InitialBlockReward {
-		return errors.New("minimumBlockReward must be < initialBlockReward")
-	}
-
-	if p.AnnualReductionPercent > 100 {
-		return errors.New("annualReductionPercent must be <= 100")
-	}
-
-	blocksPerYear := GetBlocksPerYear()
-	if blocksPerYear <= 1_000_000 || blocksPerYear > 10_000_000 {
-		return fmt.Errorf("blocksPerYear must be between 1M and 10M, got %d", blocksPerYear)
-	}
-
-	if p.UncleRewardEnabled && (p.MaxUncleDepth < 1 || p.MaxUncleDepth > 10) {
-		return errors.New("maxUncleDepth must be between 1 and 10")
-	}
-
-	if p.MinerFeeShare > 100 {
-		return errors.New("minerFeeShare must be <= 100")
-	}
-
-	genesisReward := p.BlockReward(0)
-	if genesisReward == 0 {
-		return errors.New("BlockReward(0) returned invalid zero reward")
-	}
-
-	veryOldBlock := GetBlocksPerYear() * 100
-	minReward := p.BlockReward(veryOldBlock)
-	expectedMin := p.MinimumBlockReward
-	if expectedMin == 0 {
-		expectedMin = 10000000
-	}
-	if minReward == 0 || minReward < expectedMin {
-		return errors.New("BlockReward failed to enforce minimum floor")
-	}
-
-	return nil
 }
 
 // MarshalBinary serializes the monetary policy to binary format

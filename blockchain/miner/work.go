@@ -230,25 +230,24 @@ func AdjustDifficulty(
 	// Use the new PI controller from nogopow package
 	parentBlock := lastBlocks[len(lastBlocks)-1]
 	currentTime := uint64(time.Now().Unix())
-	
-	// Create difficulty config
-	cfg := &nogopow.DifficultyConfig{
-		MinimumDifficulty: uint64(minDifficulty),
-		TargetBlockTime: uint64(targetBlockTime.Seconds()),
-		AdjustmentSensitivity: config.DefaultAdjustmentSensitivity,
-		BoundDivisor: config.DefaultDifficultyBoundDivisor,
+
+	// Create consensus params for difficulty calculation
+	consensusParams := &config.ConsensusParams{
+		BlockTimeTargetSeconds:     int64(targetBlockTime.Seconds()),
+		MaxDifficultyChangePercent: 20,
+		MinDifficulty:              uint32(minDifficulty),
 	}
-	
+
 	// Create a temporary adjuster for this calculation
-	adjuster := nogopow.NewDifficultyAdjuster(cfg)
-	
+	adjuster := nogopow.NewDifficultyAdjuster(consensusParams)
+
 	// Create a header from the parent block
 	parentHeader := &nogopow.Header{
 		Number:     new(big.Int).SetUint64(parentBlock.Height),
 		Difficulty: new(big.Int).SetUint64(uint64(parentBlock.Header.DifficultyBits)),
 		Time:       uint64(parentBlock.TimestampUnix),
 	}
-	
+
 	newDifficulty := adjuster.CalcDifficulty(currentTime, parentHeader)
 	return DifficultyToBits(newDifficulty)
 }

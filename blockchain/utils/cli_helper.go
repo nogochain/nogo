@@ -92,7 +92,10 @@ func fetchChainInfo(server string) (*chainInfoView, error) {
 		return nil, errors.New("cannot determine chain info: set CHAIN_ID or provide server_url")
 	}
 
-	req, _ := http.NewRequest(http.MethodGet, server+"/chain/info", nil)
+	req, err := http.NewRequest(http.MethodGet, server+"/chain/info", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create chain info request: %w", err)
+	}
 	addAdminAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
@@ -123,7 +126,10 @@ type accountView struct {
 }
 
 func fetchAccount(server, addr string) (*accountView, error) {
-	req, _ := http.NewRequest(http.MethodGet, server+"/account/"+addr, nil)
+	req, err := http.NewRequest(http.MethodGet, server+"/account/"+addr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create account request: %w", err)
+	}
 	addAdminAuth(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {

@@ -19,12 +19,26 @@ package nogopow
 import (
 	"math/big"
 	"testing"
+
+	"github.com/nogochain/nogo/blockchain/config"
 )
+
+// defaultTestConsensusParams returns default consensus params for testing
+func defaultTestConsensusParams() *config.ConsensusParams {
+	return &config.ConsensusParams{
+		ChainID:                      1,
+		DifficultyEnable:             true,
+		BlockTimeTargetSeconds:       17,
+		MinDifficulty:                1,
+		MaxDifficultyChangePercent:   50,
+		DifficultyAdjustmentInterval: 1,
+	}
+}
 
 // TestPIControllerBasic tests basic PI controller functionality
 func TestPIControllerBasic(t *testing.T) {
-	config := DefaultDifficultyConfig()
-	adjuster := NewDifficultyAdjuster(config)
+	consensusParams := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(consensusParams)
 
 	parent := &Header{
 		Difficulty: big.NewInt(1000),
@@ -33,12 +47,12 @@ func TestPIControllerBasic(t *testing.T) {
 
 	t.Run("OnTargetBlockTime", func(t *testing.T) {
 		adjuster.ResetIntegral()
-		
+
 		newDiff := adjuster.CalcDifficulty(1017, parent)
-		
+
 		diffChange := new(big.Int).Abs(new(big.Int).Sub(newDiff, big.NewInt(1000)))
 		maxAllowedChange := big.NewInt(100)
-		
+
 		if diffChange.Cmp(maxAllowedChange) > 0 {
 			t.Errorf("Expected difficulty to stay near 1000 when on target, got %d (change: %d)", newDiff, diffChange)
 		}
@@ -65,8 +79,8 @@ func TestPIControllerBasic(t *testing.T) {
 
 // TestPIControllerIntegralAccumulation tests integral term accumulation
 func TestPIControllerIntegralAccumulation(t *testing.T) {
-	config := DefaultDifficultyConfig()
-	adjuster := NewDifficultyAdjuster(config)
+	consensusParams := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(consensusParams)
 	adjuster.ResetIntegral()
 
 	parent := &Header{
@@ -95,8 +109,8 @@ func TestPIControllerIntegralAccumulation(t *testing.T) {
 
 // TestPIControllerAntiWindup tests integral anti-windup protection
 func TestPIControllerAntiWindup(t *testing.T) {
-	config := DefaultDifficultyConfig()
-	adjuster := NewDifficultyAdjuster(config)
+	consensusParams := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(consensusParams)
 	adjuster.ResetIntegral()
 
 	parent := &Header{
@@ -124,8 +138,8 @@ func TestPIControllerAntiWindup(t *testing.T) {
 
 // TestPIControllerConvergence tests convergence to target block time
 func TestPIControllerConvergence(t *testing.T) {
-	config := DefaultDifficultyConfig()
-	adjuster := NewDifficultyAdjuster(config)
+	consensusParams := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(consensusParams)
 	adjuster.ResetIntegral()
 
 	parent := &Header{
@@ -133,7 +147,7 @@ func TestPIControllerConvergence(t *testing.T) {
 		Time:       1000,
 	}
 
-	targetTime := int64(config.TargetBlockTime)
+	targetTime := consensusParams.BlockTimeTargetSeconds
 	var difficulties []*big.Int
 
 	for i := 0; i < 20; i++ {
@@ -160,13 +174,15 @@ func TestPIControllerConvergence(t *testing.T) {
 
 // TestPIControllerParameters tests PI controller parameter access
 func TestPIControllerParameters(t *testing.T) {
-	config := DefaultDifficultyConfig()
-	adjuster := NewDifficultyAdjuster(config)
+	consensusParams := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(consensusParams)
 
 	kp, ki, integral := adjuster.GetParameters()
 
-	if kp != config.AdjustmentSensitivity {
-		t.Errorf("Expected Kp to be %f, got %f", config.AdjustmentSensitivity, kp)
+	// Kp should be MaxDifficultyChangePercent / 100
+	expectedKp := float64(consensusParams.MaxDifficultyChangePercent) / 100.0
+	if kp != expectedKp {
+		t.Errorf("Expected Kp to be %f, got %f", expectedKp, kp)
 	}
 
 	if ki != 0.1 {
@@ -186,8 +202,8 @@ func TestPIControllerParameters(t *testing.T) {
 
 // TestPIControllerBoundaryConditions tests boundary condition enforcement
 func TestPIControllerBoundaryConditions(t *testing.T) {
-	config := DefaultDifficultyConfig()
-	adjuster := NewDifficultyAdjuster(config)
+	consensusParams := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(consensusParams)
 	adjuster.ResetIntegral()
 
 	t.Run("MinimumDifficulty", func(t *testing.T) {
@@ -197,7 +213,7 @@ func TestPIControllerBoundaryConditions(t *testing.T) {
 		}
 
 		newDiff := adjuster.CalcDifficulty(1050, parent)
-		if newDiff.Cmp(big.NewInt(int64(config.MinimumDifficulty))) < 0 {
+		if newDiff.Cmp(big.NewInt(int64(consensusParams.MinDifficulty))) < 0 {
 			t.Errorf("Expected difficulty >= minimum, got %d", newDiff)
 		}
 	})
@@ -232,8 +248,8 @@ func TestPIControllerBoundaryConditions(t *testing.T) {
 
 // TestPIControllerReset tests integral reset functionality
 func TestPIControllerReset(t *testing.T) {
-	config := DefaultDifficultyConfig()
-	adjuster := NewDifficultyAdjuster(config)
+	consensusParams := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(consensusParams)
 	adjuster.ResetIntegral()
 
 	parent := &Header{
@@ -263,8 +279,8 @@ func TestPIControllerReset(t *testing.T) {
 
 // TestPIControllerValidation tests difficulty validation
 func TestPIControllerValidation(t *testing.T) {
-	config := DefaultDifficultyConfig()
-	adjuster := NewDifficultyAdjuster(config)
+	consensusParams := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(consensusParams)
 
 	parent := &Header{
 		Difficulty: big.NewInt(1000),
@@ -293,7 +309,7 @@ func TestPIControllerValidation(t *testing.T) {
 	})
 
 	t.Run("BelowMinimum", func(t *testing.T) {
-		valid := adjuster.ValidateDifficulty(big.NewInt(int64(config.MinimumDifficulty)-1), parent)
+		valid := adjuster.ValidateDifficulty(big.NewInt(int64(consensusParams.MinDifficulty)-1), parent)
 		if valid {
 			t.Error("Expected below-minimum difficulty to fail validation")
 		}

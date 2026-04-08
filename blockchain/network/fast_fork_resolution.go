@@ -26,6 +26,16 @@ type ForkResolutionEngine struct {
 	fastResolutionTime time.Duration
 }
 
+// GetChainSelector returns the chain selector (for sharing)
+func (fre *ForkResolutionEngine) GetChainSelector() *core.ChainSelector {
+	return fre.chainSelector
+}
+
+// GetForkDetector returns the fork detector (for sharing)
+func (fre *ForkResolutionEngine) GetForkDetector() *core.ForkDetector {
+	return fre.forkDetector
+}
+
 // ResolutionRequest represents a fork resolution request
 type ResolutionRequest struct {
 	LocalTip     *core.Block

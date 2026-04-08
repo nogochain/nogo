@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NogoChain 钱包管理 - MetaMask 风格</title>
+    <link rel="icon" type="image/x-icon" href="../explorer/favicon.ico">
+    <style>
+        :root {
+            --bg-primary: #ffffff;
+            --bg-secondary: #f7f9fa;
+            --bg-tertiary: #eef0f2;
+            --border-color: #dfe3e5;
+            --text-primary: #24272a;
+            --text-secondary: #6a737d;
+            --accent-blue: #0376c9;
+            --accent-green: #12b85f;
+            --accent-red: #d73a49;
+            --accent-yellow: #b08800;
+            --mm-orange: #f6851b;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+            background: #ffffff;
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+
+        /* MetaMask-style Header */
+        .header {
+            background: linear-gradient(180deg, #ffffff 0%, #f7f9fa 100%);
+            border-bottom: 1px solid var(--border-color);
+            padding: 16px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, var(--mm-orange) 0%, #e2761b 100%);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 20px;
+        }
+
+        .network-selector {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            cursor: pointer;
+        }
+
+        .network-dot {
+            width: 8px;
+            height: 8px;
+            background: var(--accent-green);
+            border-radius: 50%;
+        }
+
+        /* Main Content */
+        .main-content {
+            max-width: 400px;
+            margin: 0 auto;
+            padding: 24px 16px;
+        }
+
+        /* Account Card */
+        .account-card {
+            background: linear-gradient(135deg, var(--mm-orange) 0%, #e2761b 100%);
+            border-radius: 16px;
+            padding: 24px;
+            color: white;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 12px rgba(246, 133, 27, 0.3);
+        }
+
+        .account-label {
+            font-size: 14px;
+            opacity: 0.9;
+            margin-bottom: 8px;
+        }
+
+        .account-balance {
+            font-size: 36px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .account-address {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            opacity: 0.9;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 8px 12px;
+            border-radius: 8px;
+            word-break: break-all;
+            text-align: center;
+        }
+
+        /* Action Buttons */
+        .action-buttons {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+
+        .action-btn {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            padding: 16px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .action-btn:hover {
+            background: var(--bg-tertiary);
+            transform: translateY(-2px);
+        }
+
+        .action-btn-icon {
+            width: 32px;
+            height: 32px;
+            background: var(--accent-blue);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 16px;
+        }
+
+        .action-btn-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        /* Wallet List */
+        .wallet-section {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .section-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .wallet-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .wallet-item:hover {
+            border-color: var(--mm-orange);
+            transform: translateX(4px);
+        }
+
+        .wallet-avatar {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 16px;
+        }
+
+        .wallet-info {
+            flex: 1;
+        }
+
+        .wallet-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+
+        .wallet-address-short {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .wallet-balance-display {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--accent-blue);
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 12px;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+            width: 100%;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--mm-orange) 0%, #e2761b 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(246, 133, 27, 0.4);
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, var(--accent-green) 0%, #0ca678 100%);
+            color: white;
+        }
+
+        .btn-success:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(18, 184, 95, 0.4);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, var(--accent-red) 0%, #cb2431 100%);
+            color: white;
+        }
+
+        .btn-danger:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(215, 58, 73, 0.4);
+        }
+
+        .btn-secondary {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover {
+            background: var(--border-color);
+        }
+
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 16px;
+            padding: 32px;
+            max-width: 400px;
+            width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+        }
+
+        .modal-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 24px;
+            color: var(--text-secondary);
+            cursor: pointer;
+        }
+
+        /* Form */
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            font-size: 14px;
+            color: var(--text-primary);
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 12px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 14px;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: var(--mm-orange);
+        }
+
+        /* Toast */
+        .toast {
+            display: none;
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 16px 24px;
+            border-radius: 12px;
+            color: white;
+            font-weight: 600;
+            font-size: 14px;
+            z-index: 10000;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from { transform: translateX(400px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        @keyframes slideOut {
+            from { transform: translateX(0); opacity: 1; }
+            to { transform: translateX(400px); opacity: 0; }
+        }
+
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-secondary);
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        /* Security Notice */
+        .security-notice {
+            background: rgba(246, 133, 27, 0.1);
+            border: 1px solid var(--mm-orange);
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 13px;
+            margin-bottom: 16px;
+        }
+
+        .private-key-display {
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            word-break: break-all;
+            padding: 12px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            margin: 12px 0;
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="header">
+        <div class="logo">
+            <div class="logo-icon">N</div>
+            <span>NogoChain Wallet</span>
+        </div>
+        <div class="network-selector">
+            <div class="network-dot"></div>
+            <span>NogoChain Mainnet</span>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-content">
+        <!-- Account Card -->
+        <div class="account-card" id="mainAccount" style="display: none;">
+            <div class="account-label">总余额</div>
+            <div class="account-balance"><span id="totalBalance">0</span> NOGO</div>
+            <div class="account-address" id="mainAddress">NOGO...</div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="action-buttons">
+            <button class="action-btn" onclick="showCreateModal()">
+                <div class="action-btn-icon">➕</div>
+                <div class="action-btn-label">创建</div>
+            </button>
+            <button class="action-btn" onclick="showImportModal()">
+                <div class="action-btn-icon">📥</div>
+                <div class="action-btn-label">导入</div>
+            </button>
+            <button class="action-btn" onclick="loadWallets()">
+                <div class="action-btn-icon">🔄</div>
+                <div class="action-btn-label">刷新</div>
+            </button>
+        </div>
+
+        <!-- Wallet List -->
+        <div class="wallet-section">
+            <div class="section-title">我的钱包</div>
+            <div id="walletList">
+                <div class="empty-state">
+                    <div class="empty-state-icon">👛</div>
+                    <div>暂无钱包</div>
+                    <div style="font-size: 13px; margin-top: 8px;">创建或导入您的第一个钱包</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Active Proposals -->
+        <div class="wallet-section" id="proposalsSection">
+            <div class="section-title" style="display: flex; justify-content: space-between; align-items: center;">
+                <span>🔥 活跃提案</span>
+                <button class="btn btn-secondary" onclick="window.location.href='/proposals/'" style="padding: 4px 12px; font-size: 12px; width: auto;">查看全部</button>
+            </div>
+            <div id="activeProposalsList">
+                <div class="empty-state">
+                    <div>加载中...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quick Actions -->
+        <div style="display: flex; gap: 12px; margin-top: 24px;">
+            <button class="btn btn-primary" onclick="showProposalModal()" style="flex: 1;">
+                📋 创建提案
+            </button>
+            <button class="btn btn-secondary" onclick="window.location.href='/proposals/'" style="flex: 1;">
+                🗳️ 提案管理
+            </button>
+        </div>
+        
+        <div style="display: flex; gap: 12px; margin-top: 12px;">
+            <button class="btn btn-secondary" onclick="window.location.href='/explorer/'" style="flex: 1;">
+                🔍 区块浏览器
+            </button>
+        </div>
+    </div>
+
+    <!-- Create Wallet Modal -->
+    <div id="createModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">创建新钱包</h2>
+                <button class="close-btn" onclick="closeModal('createModal')">×</button>
+            </div>
+
+            <div class="security-notice">
+                ⚠️ <strong>安全提示：</strong>钱包创建后，请立即备份私钥！私钥丢失将无法恢复钱包。
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">钱包标签（可选）</label>
+                <input type="text" id="walletLabel" class="form-input" placeholder="例如：我的主钱包" />
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">密码</label>
+                <input type="password" id="walletPassword" class="form-input" placeholder="至少 8 位密码" minlength="8" required />
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">确认密码</label>
+                <input type="password" id="walletPasswordConfirm" class="form-input" placeholder="再次输入密码" required />
+            </div>
+
+            <div style="display: flex; gap: 12px;">
+                <button class="btn btn-secondary" onclick="closeModal('createModal')" style="flex: 1;">取消</button>
+                <button class="btn btn-primary" onclick="createWallet()" style="flex: 1;">创建钱包</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Import Wallet Modal -->
+    <div id="importModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">导入钱包</h2>
+                <button class="close-btn" onclick="closeModal('importModal')">×</button>
+            </div>
+
+            <div class="security-notice">
+                ⚠️ <strong>安全提示：</strong>请确保您的私钥来源可靠，不要在不受信任的设备上导入钱包。
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">钱包标签（可选）</label>
+                <input type="text" id="importLabel" class="form-input" placeholder="例如：导入的钱包" />
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">私钥</label>
+                <textarea id="importPrivateKey" class="form-input" rows="4" placeholder="输入 Base64 或 Hex 编码的私钥" required></textarea>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">密码</label>
+                <input type="password" id="importPassword" class="form-input" placeholder="设置钱包密码" minlength="8" required />
+            </div>
+
+            <div style="display: flex; gap: 12px;">
+                <button class="btn btn-secondary" onclick="closeModal('importModal')" style="flex: 1;">取消</button>
+                <button class="btn btn-primary" onclick="importWallet()" style="flex: 1;">导入钱包</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Export Wallet Modal -->
+    <div id="exportModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">导出私钥</h2>
+                <button class="close-btn" onclick="closeModal('exportModal')">×</button>
+            </div>
+
+            <div class="security-notice" style="background: rgba(215, 58, 73, 0.1); border-color: var(--accent-red);">
+                ⚠️ <strong>极度危险：</strong>私钥可以完全控制您的钱包！切勿分享给任何人！
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">钱包地址</label>
+                <div id="exportAddress" class="private-key-display"></div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">私钥</label>
+                <div id="exportPrivateKey" class="private-key-display" style="color: var(--accent-red); font-weight: bold;"></div>
+            </div>
+
+            <div class="security-notice">
+                ✅ 请立即备份私钥到安全位置（推荐离线存储）
+            </div>
+
+            <div style="display: flex; gap: 12px;">
+                <button class="btn btn-secondary" onclick="closeModal('exportModal')" style="flex: 1;">关闭</button>
+                <button class="btn btn-primary" onclick="copyPrivateKey()" style="flex: 1;">📋 复制私钥</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Proposal Modal -->
+    <div id="proposalModal" class="modal">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">
+                <h2 class="modal-title">创建提案</h2>
+                <button class="close-btn" onclick="closeModal('proposalModal')">×</button>
+            </div>
+
+            <div class="security-notice">
+                💡 <strong>提示：</strong>创建提案需要至少 10 NOGO 押金，提案通过后可退还
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">提案人地址</label>
+                <input type="text" id="proposalProposer" class="form-input" placeholder="NOGO 地址" required />
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">提案标题</label>
+                <input type="text" id="proposalTitle" class="form-input" placeholder="简短描述您的提案" required />
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">提案描述</label>
+                <textarea id="proposalDescription" class="form-input" rows="4" placeholder="详细描述您的提案内容、目标、预算等" required></textarea>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">提案类型</label>
+                <select id="proposalType" class="form-input">
+                    <option value="treasury">💰 财政支出</option>
+                    <option value="ecosystem">🌱 生态建设</option>
+                    <option value="grant">🎁 资助申请</option>
+                    <option value="event">🎉 社区活动</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">申请金额（NOGO）</label>
+                <input type="number" id="proposalAmount" class="form-input" placeholder="例如：100" min="0" step="0.01" required />
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">接收地址</label>
+                <input type="text" id="proposalRecipient" class="form-input" placeholder="接收资金的 NOGO 地址" required />
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">押金（NOGO）</label>
+                <input type="number" id="proposalDeposit" class="form-input" value="10" min="10" step="0.01" required />
+            </div>
+
+            <div style="display: flex; gap: 12px;">
+                <button class="btn btn-secondary" onclick="closeModal('proposalModal')" style="flex: 1;">取消</button>
+                <button class="btn btn-primary" onclick="createProposal()" style="flex: 1;">提交提案</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Vote Modal -->
+    <div id="voteModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">投票</h2>
+                <button class="close-btn" onclick="closeModal('voteModal')">×</button>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">您的地址</label>
+                <input type="text" id="voteAddress" class="form-input" placeholder="NOGO 地址" required />
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">投票权（NOGO）</label>
+                <input type="number" id="votePower" class="form-input" placeholder="用于投票的 NOGO 数量" min="1" step="0.01" required />
+            </div>
+
+            <div style="display: flex; gap: 12px; margin-top: 20px;">
+                <button class="btn btn-success" onclick="submitVote(true)" style="flex: 1;">
+                    👍 赞成
+                </button>
+                <button class="btn btn-danger" onclick="submitVote(false)" style="flex: 1;">
+                    👎 反对
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast">
+        <div id="toastMessage"></div>
+    </div>
+
+    <script>
+        // API helper
+        async function api(endpoint, options = {}) {
+            try {
+                const res = await fetch(endpoint, {
+                    ...options,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...options.headers,
+                    },
+                });
+                if (!res.ok) throw new Error('API error');
+                return await res.json();
+            } catch (err) {
+                console.error('API error:', err);
+                return null;
+            }
+        }
+
+        // Toast notification
+        function showToast(message, type = 'info') {
+            const toast = document.getElementById('toast');
+            const toastMessage = document.getElementById('toastMessage');
+            
+            const colors = {
+                success: 'linear-gradient(135deg, #12b85f 0%, #0ca678 100%)',
+                error: 'linear-gradient(135deg, #d73a49 0%, #cb2431 100%)',
+                info: 'linear-gradient(135deg, #0376c9 0%, #005cc5 100%)',
+                warning: 'linear-gradient(135deg, #b08800 0%, #735c0f 100%)'
+            };
+            
+            toast.style.background = colors[type] || colors.info;
+            toastMessage.textContent = message;
+            toast.style.display = 'block';
+            
+            setTimeout(() => {
+                toast.style.animation = 'slideOut 0.3s ease-out';
+                setTimeout(() => {
+                    toast.style.display = 'none';
+                    toast.style.animation = '';
+                }, 300);
+            }, 3000);
+        }
+
+        // Modal functions
+        function showCreateModal() {
+            document.getElementById('createModal').style.display = 'flex';
+        }
+
+        function showImportModal() {
+            document.getElementById('importModal').style.display = 'flex';
+        }
+
+        function closeModal(modalId) {
+            document.getElementById(modalId).style.display = 'none';
+        }
+
+        // Close modal when clicking outside
+        document.querySelectorAll('.modal').forEach(modal => {
+            modal.addEventListener('click', function(e) {
+                if (e.target === this) {
+                    this.style.display = 'none';
+                }
+            });
+        });
+
+        // Create wallet
+        async function createWallet() {
+            const label = document.getElementById('walletLabel').value;
+            const password = document.getElementById('walletPassword').value;
+            const passwordConfirm = document.getElementById('walletPasswordConfirm').value;
+
+            if (!password) {
+                showToast('请输入密码', 'error');
+                return;
+            }
+
+            if (password.length < 8) {
+                showToast('密码至少需要 8 位', 'error');
+                return;
+            }
+
+            if (password !== passwordConfirm) {
+                showToast('两次输入的密码不一致', 'error');
+                return;
+            }
+
+            const result = await api('/wallet/create_persistent', {
+                method: 'POST',
+                body: JSON.stringify({ password, label })
+            });
+
+            if (result && result.address) {
+                showToast('钱包创建成功！', 'success');
+                closeModal('createModal');
+                
+                // Show private key
+                if (result.privateKey) {
+                    document.getElementById('exportAddress').textContent = result.address;
+                    document.getElementById('exportPrivateKey').textContent = result.privateKey;
+                    document.getElementById('exportModal').style.display = 'flex';
+                }
+                
+                loadWallets();
+                
+                // Clear form
+                document.getElementById('walletLabel').value = '';
+                document.getElementById('walletPassword').value = '';
+                document.getElementById('walletPasswordConfirm').value = '';
+            } else {
+                showToast('创建失败：' + (result?.error || '未知错误'), 'error');
+            }
+        }
+
+        // Import wallet
+        async function importWallet() {
+            const label = document.getElementById('importLabel').value;
+            const privateKey = document.getElementById('importPrivateKey').value;
+            const password = document.getElementById('importPassword').value;
+
+            if (!privateKey) {
+                showToast('请输入私钥', 'error');
+                return;
+            }
+
+            if (!password) {
+                showToast('请输入密码', 'error');
+                return;
+            }
+
+            const result = await api('/wallet/import', {
+                method: 'POST',
+                body: JSON.stringify({ privateKey, password, label })
+            });
+
+            if (result && result.address) {
+                showToast('钱包导入成功！', 'success');
+                closeModal('importModal');
+                loadWallets();
+                
+                // Clear form
+                document.getElementById('importLabel').value = '';
+                document.getElementById('importPrivateKey').value = '';
+                document.getElementById('importPassword').value = '';
+            } else {
+                showToast('导入失败：' + (result?.error || '未知错误'), 'error');
+            }
+        }
+
+        // Load wallets
+        async function loadWallets() {
+            const result = await api('/wallet/list');
+            const list = document.getElementById('walletList');
+
+            if (!result || !result.wallets || result.wallets.length === 0) {
+                list.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">👛</div>
+                        <div>暂无钱包</div>
+                        <div style="font-size: 13px; margin-top: 8px;">创建或导入您的第一个钱包</div>
+                    </div>
+                `;
+                return;
+            }
+
+            let totalBalance = 0;
+            let mainAddress = '';
+            let mainBalance = 0;
+
+            list.innerHTML = result.wallets.map((wallet, index) => {
+                totalBalance += (wallet.balance || 0);
+                if (index === 0) {
+                    mainAddress = wallet.address;
+                    mainBalance = wallet.balance || 0;
+                }
+                
+                const shortAddr = wallet.address.substring(0, 10) + '...' + wallet.address.substring(wallet.address.length - 8);
+                const avatarLetter = wallet.address.charAt(4).toUpperCase();
+                
+                return `
+                    <div class="wallet-item" onclick="selectWallet('${wallet.address}')">
+                        <div class="wallet-avatar">${avatarLetter}</div>
+                        <div class="wallet-info">
+                            <div class="wallet-name">${wallet.label || '未命名钱包'}</div>
+                            <div class="wallet-address-short">${shortAddr}</div>
+                        </div>
+                        <div class="wallet-balance-display">${(wallet.balance || 0) / 1e8} NOGO</div>
+                    </div>
+                `;
+            }).join('');
+
+            // Update main account card
+            if (mainAddress) {
+                document.getElementById('mainAccount').style.display = 'block';
+                document.getElementById('totalBalance').textContent = (mainBalance / 1e8).toFixed(2);
+                document.getElementById('mainAddress').textContent = mainAddress;
+            }
+        }
+
+        // Select wallet
+        function selectWallet(address) {
+            showToast('地址已复制：' + address.substring(0, 10) + '...', 'info');
+            navigator.clipboard.writeText(address);
+        }
+
+        // Copy private key
+        function copyPrivateKey() {
+            const privateKey = document.getElementById('exportPrivateKey').textContent;
+            navigator.clipboard.writeText(privateKey).then(() => {
+                showToast('私钥已复制到剪贴板', 'success');
+                closeModal('exportModal');
+            }).catch(() => {
+                showToast('复制失败', 'error');
+            });
+        }
+
+        // Check balance
+        async function checkBalance(address) {
+            const result = await api('/wallet/balance/' + address);
+            if (result) {
+                showToast(`余额：${(result.balance || 0) / 1e8} NOGO`, 'info');
+            }
+        }
+
+        // Load wallets on page load
+        loadWallets();
+        loadActiveProposals();
+
+        // Load active proposals
+        async function loadActiveProposals() {
+            const result = await api('/api/proposals');
+            const list = document.getElementById('activeProposalsList');
+
+            if (!result || !Array.isArray(result) || result.length === 0) {
+                list.innerHTML = `
+                    <div class="empty-state">
+                        <div style="font-size: 36px; margin-bottom: 8px;">📋</div>
+                        <div>暂无活跃提案</div>
+                        <div style="font-size: 13px; margin-top: 8px;">成为第一个创建提案的人！</div>
+                    </div>
+                `;
+                return;
+            }
+
+            // Filter active proposals and show top 3
+            const statusMap = {0: 'active', 1: 'passed', 2: 'rejected', 3: 'executed', 4: 'expired'};
+            const activeProposals = result
+                .filter(p => statusMap[p.status] === 'active')
+                .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+                .slice(0, 3);
+
+            if (activeProposals.length === 0) {
+                list.innerHTML = `
+                    <div class="empty-state">
+                        <div style="font-size: 36px; margin-bottom: 8px;">📋</div>
+                        <div>暂无活跃提案</div>
+                        <div style="font-size: 13px; margin-top: 8px;">成为第一个创建提案的人！</div>
+                    </div>
+                `;
+                return;
+            }
+
+            list.innerHTML = activeProposals.map(p => {
+                const title = p.title || '未命名提案';
+                const description = (p.description || '').substring(0, 80) + '...';
+                const votesFor = (p.votesFor || 0) / 1e8;
+                const votesAgainst = (p.votesAgainst || 0) / 1e8;
+                const typeMap = {treasury: '💰', ecosystem: '🌱', grant: '🎁', event: '🎉'};
+                const typeIcon = typeMap[p.type] || '📄';
+
+                return `
+                    <div class="wallet-item" onclick="window.location.href='/proposals/?id=${p.id}'" style="display: block; padding: 16px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <div style="font-size: 14px; font-weight: 700; color: var(--text-primary);">
+                                ${typeIcon} ${title}
+                            </div>
+                            <button class="btn btn-primary" onclick="event.stopPropagation(); showVoteModal('${p.id}')" style="padding: 6px 12px; font-size: 12px; width: auto;">
+                                投票
+                            </button>
+                        </div>
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 12px;">
+                            ${description}
+                        </div>
+                        <div style="display: flex; gap: 12px; font-size: 12px;">
+                            <span style="color: var(--accent-green);">👍 ${votesFor.toFixed(2)} NOGO</span>
+                            <span style="color: var(--accent-red);">👎 ${votesAgainst.toFixed(2)} NOGO</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Proposal functions
+        function showProposalModal() {
+            document.getElementById('proposalModal').style.display = 'flex';
+        }
+
+        async function createProposal() {
+            const proposer = document.getElementById('proposalProposer').value;
+            const title = document.getElementById('proposalTitle').value;
+            const description = document.getElementById('proposalDescription').value;
+            const type = document.getElementById('proposalType').value;
+            const amount = parseFloat(document.getElementById('proposalAmount').value) * 1e8;
+            const recipient = document.getElementById('proposalRecipient').value;
+            const deposit = parseFloat(document.getElementById('proposalDeposit').value) * 1e8;
+
+            if (!proposer) {
+                showToast('请输入提案人地址', 'error');
+                return;
+            }
+
+            if (!title) {
+                showToast('请输入提案标题', 'error');
+                return;
+            }
+
+            if (!description) {
+                showToast('请输入提案描述', 'error');
+                return;
+            }
+
+            if (!recipient) {
+                showToast('请输入接收地址', 'error');
+                return;
+            }
+
+            if (amount <= 0) {
+                showToast('申请金额必须大于 0', 'error');
+                return;
+            }
+
+            if (deposit < 10 * 1e8) {
+                showToast('押金至少需要 10 NOGO', 'error');
+                return;
+            }
+
+            const proposalData = {
+                proposer,
+                title,
+                description,
+                type,
+                amount: Math.floor(amount),
+                recipient,
+                deposit: Math.floor(deposit)
+            };
+
+            const result = await api('/api/proposals/create', {
+                method: 'POST',
+                body: JSON.stringify(proposalData)
+            });
+
+            if (result && result.success) {
+                showToast('提案创建成功！ID: ' + result.proposalId.substring(0, 16) + '...', 'success');
+                closeModal('proposalModal');
+                
+                // Clear form
+                document.getElementById('proposalProposer').value = '';
+                document.getElementById('proposalTitle').value = '';
+                document.getElementById('proposalDescription').value = '';
+                document.getElementById('proposalAmount').value = '';
+                document.getElementById('proposalRecipient').value = '';
+                document.getElementById('proposalDeposit').value = '10';
+            } else {
+                showToast('创建失败：' + (result?.error || '未知错误'), 'error');
+            }
+        }
+
+        // Vote functions
+        let currentVotingProposalId = null;
+
+        function showVoteModal(proposalId) {
+            currentVotingProposalId = proposalId;
+            document.getElementById('voteModal').style.display = 'flex';
+        }
+
+        async function submitVote(support) {
+            const voter = document.getElementById('voteAddress').value;
+            const votingPower = parseFloat(document.getElementById('votePower').value) * 1e8;
+
+            if (!voter) {
+                showToast('请输入您的地址', 'error');
+                return;
+            }
+
+            if (!votingPower || votingPower < 1e8) {
+                showToast('投票权至少需要 1 NOGO', 'error');
+                return;
+            }
+
+            const voteData = {
+                proposalId: currentVotingProposalId,
+                voter,
+                support,
+                votingPower: Math.floor(votingPower)
+            };
+
+            const result = await api('/api/proposals/vote', {
+                method: 'POST',
+                body: JSON.stringify(voteData)
+            });
+
+            if (result && result.success) {
+                showToast('投票成功！', 'success');
+                closeModal('voteModal');
+            } else {
+                showToast('投票失败：' + (result?.error || '未知错误'), 'error');
+            }
+        }
+    </script>
+</body>
+</html>

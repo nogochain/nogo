@@ -58,26 +58,10 @@ func NewSimpleServer(bc Blockchain, mp *MempoolImpl, miner *MinerImpl, peers *Pe
 func (s *SimpleServer) Start(addr string) error {
 	mux := http.NewServeMux()
 
-	// Health check endpoint
-	mux.HandleFunc("/health", s.handleHealth)
-
-	// Chain info endpoint
-	mux.HandleFunc("/chain/info", s.handleChainInfo)
-
-	// Latest block endpoint
-	mux.HandleFunc("/block/latest", s.handleLatestBlock)
-
-	// Block by height endpoint
-	mux.HandleFunc("/block/", s.handleBlockByHeight)
-
-	// Mempool endpoint
-	mux.HandleFunc("/mempool", s.handleMempool)
-
-	// Metrics endpoint
-	mux.HandleFunc("/metrics", s.handleMetrics)
-
-	// Version endpoint
-	mux.HandleFunc("/version", s.handleVersion)
+	// Mining API endpoints (for pool miners) - MUST be registered before /block/
+	mux.HandleFunc("/block/template", s.handleGetBlockTemplate)
+	mux.HandleFunc("/mining/submit", s.handleSubmitWork)
+	mux.HandleFunc("/mining/info", s.handleGetMiningInfo)
 
 	// Explorer UI
 	mux.HandleFunc("/explorer/", s.handleExplorer)
@@ -85,6 +69,24 @@ func (s *SimpleServer) Start(addr string) error {
 	// Favicon
 	mux.HandleFunc("/explorer/favicon.ico", s.handleFavicon)
 	mux.HandleFunc("/favicon.ico", s.handleFavicon)
+
+	// Chain info endpoint
+	mux.HandleFunc("/chain/info", s.handleChainInfo)
+
+	// Latest block endpoint
+	mux.HandleFunc("/block/latest", s.handleLatestBlock)
+
+	// Block by height endpoint (must be after /block/template and /block/latest)
+	mux.HandleFunc("/block/", s.handleBlockByHeight)
+
+	// Mempool endpoint
+	mux.HandleFunc("/mempool", s.handleMempool)
+
+	// Exchange API endpoints
+	mux.HandleFunc("/address/", s.handleAddressBalance)
+	mux.HandleFunc("/tx/", s.handleTxByHash)
+	mux.HandleFunc("/tx/submit", s.handleSubmitTx)
+	mux.HandleFunc("/block/hash/", s.handleBlockByHash)
 
 	s.server = &http.Server{
 		Addr:         addr,

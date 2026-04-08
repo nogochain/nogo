@@ -18,7 +18,8 @@ package nogopow
 
 import (
 	"fmt"
-	"github.com/nogochain/nogo/config"
+
+	"github.com/nogochain/nogo/blockchain/config"
 )
 
 type Mode uint
@@ -29,60 +30,38 @@ const (
 	ModeTest
 )
 
-// Difficulty constants - Production-grade configuration parameters
-// All values loaded from centralized config package
-// Configurable via genesis.json consensusParams
-const (
-	minimumDifficulty      = config.DefaultMinimumDifficulty      // Minimum difficulty floor (ensures network liveness)
-	targetBlockTime        = config.DefaultTargetBlockTime        // Target block time in seconds (economic equilibrium point)
-	difficultyBoundDivisor = config.DefaultDifficultyBoundDivisor // Controls maximum adjustment magnitude
-	lowDifficultyThreshold = config.DefaultLowDifficultyThreshold // Threshold for switching to high-precision calculation
-	adjustmentSensitivity  = config.DefaultAdjustmentSensitivity  // PI controller damping coefficient (50% correction per block)
-)
-
 type Config struct {
-	PowMode      Mode
-	CacheDir     string
-	Log          Logger
-	Difficulty   *DifficultyConfig
-	UseSIMD      bool
-	UseBitShift  bool
-	ReuseObjects bool
-}
-
-type DifficultyConfig struct {
-	MinimumDifficulty      uint64  // Minimum difficulty floor
-	AdjustmentWindow       uint64  // Number of blocks for difficulty calculation
-	TargetBlockTime        uint64  // Target block time in seconds
-	BoundDivisor           uint64  // Maximum adjustment bound divisor
-	LowDifficultyThreshold uint64  // Threshold for low-difficulty regime
-	AdjustmentSensitivity  float64 // PI controller sensitivity (damping coefficient)
-	DifficultyBombDelay    uint64  // Delay before difficulty bomb activation
-	UseDifficultyBomb      bool    // Enable difficulty bomb (for chain transitions)
+	PowMode         Mode
+	CacheDir        string
+	Log             Logger
+	ConsensusParams *config.ConsensusParams
+	UseSIMD         bool
+	UseBitShift     bool
+	ReuseObjects    bool
 }
 
 func DefaultConfig() *Config {
 	return &Config{
-		PowMode:      ModeNormal,
-		CacheDir:     "",
-		Log:          &defaultLogger{},
-		Difficulty:   DefaultDifficultyConfig(),
+		PowMode:  ModeNormal,
+		CacheDir: "",
+		Log:      &defaultLogger{},
+		ConsensusParams: &config.ConsensusParams{
+			ChainID:                      1,
+			DifficultyEnable:             true,
+			BlockTimeTargetSeconds:       15,
+			DifficultyAdjustmentInterval: 1,
+			MaxBlockTimeDriftSeconds:     900,
+			MinDifficulty:                1,
+			MaxDifficulty:                4294967295,
+			MinDifficultyBits:            1,
+			MaxDifficultyBits:            255,
+			MaxDifficultyChangePercent:   20,
+			MedianTimePastWindow:         11,
+			GenesisDifficultyBits:        18,
+		},
 		UseSIMD:      false,
 		UseBitShift:  false,
 		ReuseObjects: true,
-	}
-}
-
-func DefaultDifficultyConfig() *DifficultyConfig {
-	return &DifficultyConfig{
-		MinimumDifficulty:      minimumDifficulty,
-		AdjustmentWindow:       1,                      // Calculate difficulty every block
-		TargetBlockTime:        targetBlockTime,        // 17 seconds target
-		BoundDivisor:           difficultyBoundDivisor, // 2048 for smooth adjustment
-		LowDifficultyThreshold: lowDifficultyThreshold, // 100 for high-precision regime
-		AdjustmentSensitivity:  adjustmentSensitivity,  // 0.5 (50% correction per block)
-		DifficultyBombDelay:    0,                      // Disabled by default
-		UseDifficultyBomb:      false,                  // Disabled by default
 	}
 }
 

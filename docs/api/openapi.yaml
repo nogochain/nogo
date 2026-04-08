@@ -1,38 +1,96 @@
 openapi: 3.0.3
 info:
-  title: NogoChain API
+  title: NogoChain Exchange API
   description: |
-    # NogoChain API Documentation
+    # NogoChain Exchange API Documentation
     
-    HTTP API documentation for NogoChain blockchain node
+    Complete HTTP API documentation for NogoChain blockchain nodes, supporting transaction submission, query, wallet management, mining, and other features.
     
-    NogoChain 区块链节点的 HTTP API 接口文档
+    ## Features
     
-    ## Authentication / 认证方式
+    - **High Performance**: Supports high concurrency requests with built-in rate limiting
+    - **Security**: Supports Admin Token authentication with structured error responses
+    - **RESTful**: Follows REST architecture style
+    - **Real-time**: WebSocket support for real-time event subscription
     
-    Some endpoints require Admin Token authentication, pass via `Authorization` header:
+    ## Base URLs
     
-    部分接口需要 Admin Token 认证，通过 `Authorization` 头传递：
+    - **Mainnet**: `http://main.nogochain.org:8080`
+    - **Local Development**: `http://localhost:8080`
     
-    ```
+    ## Authentication
+    
+    Some administrative endpoints require Admin Token authentication, passed via the `Authorization` header:
+    
+    ```http
     Authorization: Bearer YOUR_ADMIN_TOKEN
     ```
     
-    ## Base URLs / 基础 URL
+    ## Response Format
     
-    - Mainnet: `http://main.nogochain.org:8080`
-    - Local: `http://localhost:8080`
+    All endpoints return data in JSON format:
     
-    ## Response Format / 响应格式
+    ### Success Response
     
-    All endpoints return JSON format data. Success responses include `data` field, error responses include `error` field.
+    ```json
+    {
+      "data": {...},
+      "requestId": "req_xxxxx"
+    }
+    ```
     
-    所有接口返回 JSON 格式数据，成功响应包含 `data` 字段，错误响应包含 `error` 字段。
-  version: 1.1.0
+    ### Error Response
+    
+    ```json
+    {
+      "error": {
+        "code": "ERROR_CODE",
+        "message": "Error description",
+        "details": {...},
+        "requestId": "req_xxxxx"
+      }
+    }
+    ```
+    
+    ## Rate Limiting
+    
+    API implements rate limiting to protect node resources:
+    
+    - **Default Limit**: 10 requests/second, burst 20
+    - **API Key**: Can apply for increased limits (5x)
+    - **Rate Limit Headers**: Response includes `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
+    
+    ## Error Codes
+    
+    Error codes are categorized as follows:
+    
+    - **1000-1999**: Validation errors
+    - **2000-2999**: Resource not found
+    - **3000-3999**: Internal errors
+    - **4000-4999**: Rate limiting
+    - **5000-5999**: Authentication and authorization errors
+    
+    For detailed error codes, refer to the [Error Code Reference](./错误码参考.md)
+    
+    ## SDKs and Tools
+    
+    - **JavaScript SDK**: Coming soon
+    - **Python SDK**: Coming soon
+    - **Postman Collection**: Coming soon
+    
+    ## Support
+    
+    - **Official Website**: https://nogochain.org
+    - **Technical Documentation**: https://docs.nogochain.org
+    - **Email**: dev@nogochain.org
+  version: 1.2.0
   contact:
     name: NogoChain Team
     url: https://nogochain.org
     email: dev@nogochain.org
+  license:
+    name: LGPL-3.0
+    url: https://www.gnu.org/licenses/lgpl-3.0.html
 
 servers:
   - url: http://localhost:8080
@@ -42,31 +100,43 @@ servers:
 
 tags:
   - name: System
-    description: System endpoints (health check, version info) / 系统相关接口（健康检查、版本信息）
-  - name: Chain
-    description: Blockchain information (chain info, blocks, transactions) / 区块链信息查询（链信息、区块、交易）
+    description: System-related endpoints (health check, version info, chain info)
+  - name: Block
+    description: Block query endpoints
   - name: Transaction
-    description: Transaction operations (submit, query) / 交易相关操作（提交、查询）
+    description: Transaction endpoints (submit, query, receipt, status)
   - name: Wallet
-    description: Wallet operations (create, sign) / 钱包相关操作（创建、签名）
-  - name: P2P
-    description: P2P network endpoints / P2P 网络相关接口
+    description: Wallet endpoints (create, import, sign, balance)
+  - name: Address
+    description: Address endpoints (balance, transaction history)
+  - name: Mempool
+    description: Mempool endpoints
   - name: Mining
-    description: Mining endpoints / 挖矿相关接口
+    description: Mining endpoints (block template, submit work)
+  - name: P2P
+    description: P2P network endpoints
+  - name: Governance
+    description: Community governance endpoints (proposals, voting)
   - name: WebSocket
-    description: WebSocket real-time subscription / WebSocket 实时订阅
+    description: WebSocket real-time subscription endpoints
 
 paths:
+  # ============================================================================
+  # System Endpoints
+  # ============================================================================
   /health:
     get:
       tags:
         - System
-      summary: Health Check / 健康检查
-      description: Check if the node is running normally / 检查节点是否正常运行
+      summary: Health check
+      description: |
+        Check if the node is running normally.
+        
+        Returns 200 status code indicating the node is healthy and can handle requests.
       operationId: getHealth
       responses:
         '200':
-          description: Node is healthy / 节点健康
+          description: Node is healthy
           content:
             application/json:
               schema:
@@ -75,19 +145,28 @@ paths:
                   status:
                     type: string
                     example: ok
+              example:
+                status: ok
         '503':
-          description: Node is unavailable / 节点异常
+          description: Node exception
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /version:
     get:
       tags:
         - System
-      summary: Version Info / 版本信息
-      description: Get node version and build information / 获取节点版本和构建信息
+      summary: Version info
+      description: |
+        Get node version and build information.
+        
+        Includes version number, build time, Git commit, and other details.
       operationId: getVersion
       responses:
         '200':
-          description: Version information / 版本信息
+          description: Version information
           content:
             application/json:
               schema:
@@ -96,105 +175,235 @@ paths:
   /chain/info:
     get:
       tags:
-        - Chain
-      summary: Chain Info / 链信息
-      description: Get complete information about the current blockchain / 获取当前区块链的完整信息
+        - System
+      summary: Chain info
+      description: |
+        Get complete information about the current blockchain.
+        
+        Includes block height, hash, difficulty, consensus parameters, monetary policy, and more.
       operationId: getChainInfo
       responses:
         '200':
-          description: Chain information / 链信息
+          description: Chain information
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ChainInfo'
 
+  /chain/special_addresses:
+    get:
+      tags:
+        - System
+      summary: Special addresses
+      description: |
+        Get system special address information.
+        
+        Includes community fund, integrity pool, genesis addresses, and more.
+      operationId: getSpecialAddresses
+      responses:
+        '200':
+          description: Special address list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpecialAddresses'
+
+  # ============================================================================
+  # Block Endpoints
+  # ============================================================================
   /block/height/{height}:
     get:
       tags:
-        - Chain
-      summary: Get Block by Height / 按高度查询区块
-      description: Get block details by block height / 根据区块高度获取区块详情
+        - Block
+      summary: Query block by height
+      description: |
+        Get block details by block height.
+        
+        Returns complete block information including transaction list and reward distribution details.
       operationId: getBlockByHeight
       parameters:
         - name: height
           in: path
           required: true
-          description: Block height, or use "latest" for the latest block / 区块高度，或使用 "latest" 获取最新区块
+          description: Block height (integer) or use "latest" to get the latest block
           schema:
             oneOf:
               - type: integer
                 format: int64
+                minimum: 0
                 example: 100
               - type: string
                 example: latest
       responses:
         '200':
-          description: Block details / 区块详情
+          description: Block details
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Block'
+                $ref: '#/components/schemas/BlockDetail'
         '404':
-          description: Block not found / 区块不存在
+          description: Block not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /block/hash/{hash}:
     get:
       tags:
-        - Chain
-      summary: Get Block by Hash / 按哈希查询区块
-      description: Get block details by block hash / 根据区块哈希获取区块详情
+        - Block
+      summary: Query block by hash
+      description: |
+        Get block details by block hash.
       operationId: getBlockByHash
       parameters:
         - name: hash
           in: path
           required: true
-          description: Block hash (64 character hexadecimal) / 区块哈希（64 字符十六进制）
+          description: Block hash (64 character hexadecimal)
           schema:
             type: string
-            format: hex
+            pattern: '^[a-fA-F0-9]{64}$'
             example: bbba903f8a8c06e1f170d91aeab8eb11234a1ffa88a709d71323bfb41b31f3e2
       responses:
         '200':
-          description: Block details / 区块详情
+          description: Block details
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Block'
         '404':
-          description: Block not found / 区块不存在
-
-  /tx/{txid}:
-    get:
-      tags:
-        - Transaction
-      summary: Get Transaction / 查询交易
-      description: Get transaction details by transaction ID / 根据交易 ID 获取交易详情
-      operationId: getTransaction
-      parameters:
-        - name: txid
-          in: path
-          required: true
-          description: Transaction ID (64 character hexadecimal) / 交易 ID（64 字符十六进制）
-          schema:
-            type: string
-            format: hex
-      responses:
-        '200':
-          description: Transaction details / 交易详情
+          description: Block not found
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Transaction'
-        '404':
-          description: Transaction not found / 交易未找到
+                $ref: '#/components/schemas/ErrorResponse'
 
+  /blocks/from/{height}:
+    get:
+      tags:
+        - Block
+      summary: Batch query blocks
+      description: |
+        Get multiple blocks starting from specified height.
+        
+        Used for fast block data synchronization.
+      operationId: getBlocksFrom
+      parameters:
+        - name: height
+          in: path
+          required: true
+          description: Starting block height
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: count
+          in: query
+          required: false
+          description: Number to retrieve (default 20)
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: Block list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Block'
+
+  /headers/from/{height}:
+    get:
+      tags:
+        - Block
+      summary: Batch query block headers
+      description: |
+        Get multiple block headers starting from specified height.
+        
+        Returns only block header information, used for light client synchronization.
+      operationId: getHeadersFrom
+      parameters:
+        - name: height
+          in: path
+          required: true
+          description: Starting block height
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: count
+          in: query
+          required: false
+          description: Number to retrieve (default 100)
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: Block header list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BlockHeader'
+
+  # ============================================================================
+  # Transaction Endpoints
+  # ============================================================================
   /tx:
     post:
       tags:
         - Transaction
-      summary: Submit Transaction / 提交交易
-      description: Broadcast a signed transaction to the network / 向网络广播已签名的交易
+      summary: Submit transaction
+      description: |
+        Broadcast a signed transaction to the network.
+        
+        Transaction will be added to the mempool waiting for miners to package.
       operationId: submitTransaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionSubmitRequest'
+      responses:
+        '200':
+          description: Transaction submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionSubmitResponse'
+        '400':
+          description: Invalid transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Request rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /tx/batch:
+    post:
+      tags:
+        - Transaction
+      summary: Batch submit transactions
+      description: |
+        Submit multiple signed transactions in batch.
+        
+        Suitable for scenarios requiring one-time submission of multiple transactions.
+      operationId: submitBatchTransactions
       requestBody:
         required: true
         content:
@@ -202,93 +411,466 @@ paths:
             schema:
               type: object
               properties:
-                rawTx:
-                  type: string
-                  format: hex
-                  description: Signed transaction in hexadecimal / 已签名的交易（十六进制）
+                transactions:
+                  type: array
+                  description: Transaction list
+                  items:
+                    $ref: '#/components/schemas/TransactionSubmitRequest'
               required:
-                - rawTx
+                - transactions
       responses:
         '200':
-          description: Transaction submitted successfully / 交易提交成功
+          description: Batch submission successful
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  txid:
-                    type: string
-                    format: hex
-        '400':
-          description: Invalid transaction / 交易无效
-        '500':
-          description: Submission failed / 提交失败
-
-  /balance/{address}:
-    get:
-      tags:
-        - Chain
-      summary: Get Balance / 查询余额
-      description: Get NOGO balance for a specific address / 获取指定地址的 NOGO 余额
-      operationId: getBalance
-      parameters:
-        - name: address
-          in: path
-          required: true
-          description: NogoChain address / NogoChain 地址
-          schema:
-            type: string
-            example: NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c
-      responses:
-        '200':
-          description: Balance information / 余额信息
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  address:
-                    type: string
-                  balance:
+                  accepted:
                     type: integer
-                    format: int64
-                    description: Balance in smallest unit (1 NOGO = 10^8) / 余额（最小单位，1 NOGO = 10^8）
-                  balanceNOGO:
-                    type: number
-                    format: double
-                    description: Balance in NOGO unit / 余额（NOGO 单位）
+                    description: Number of accepted transactions
+                  rejected:
+                    type: integer
+                    description: Number of rejected transactions
+                  txIds:
+                    type: array
+                    description: List of accepted transaction IDs
+                    items:
+                      type: string
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
-  /mempool:
+  /tx/{txid}:
     get:
       tags:
         - Transaction
-      summary: Get Mempool / 内存池
-      description: Get list of pending transactions / 获取待确认交易列表
-      operationId: getMempool
+      summary: Query transaction
+      description: |
+        Get transaction details by transaction ID.
+        
+        Returns transaction information and its location in the block.
+      operationId: getTransaction
+      parameters:
+        - name: txid
+          in: path
+          required: true
+          description: Transaction ID (64 character hexadecimal)
+          schema:
+            type: string
+            pattern: '^[a-fA-F0-9]{64}$'
       responses:
         '200':
-          description: Mempool transaction list / 内存池交易列表
+          description: Transaction details
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  count:
-                    type: integer
-                  txs:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Transaction'
+                $ref: '#/components/schemas/TransactionDetail'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
+  /tx/status/{txid}:
+    get:
+      tags:
+        - Transaction
+      summary: Query transaction status
+      description: |
+        Get transaction status and confirmation count.
+        
+        Returns whether the transaction is confirmed, confirmation count, block location, and other information.
+      operationId: getTransactionStatus
+      parameters:
+        - name: txid
+          in: path
+          required: true
+          description: Transaction ID
+          schema:
+            type: string
+            pattern: '^[a-fA-F0-9]{64}$'
+      responses:
+        '200':
+          description: Transaction status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionStatus'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /tx/receipt/{txid}:
+    get:
+      tags:
+        - Transaction
+      summary: Query transaction receipt
+      description: |
+        Get transaction execution receipt.
+        
+        Contains detailed results and status of transaction execution.
+      operationId: getTransactionReceipt
+      parameters:
+        - name: txid
+          in: path
+          required: true
+          description: Transaction ID
+          schema:
+            type: string
+            pattern: '^[a-fA-F0-9]{64}$'
+      responses:
+        '200':
+          description: Transaction receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionReceipt'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /tx/proof/{txid}:
+    get:
+      tags:
+        - Transaction
+      summary: Query transaction proof
+      description: |
+        Get Merkle proof for a transaction.
+        
+        Used to verify whether a transaction is included in a block.
+      operationId: getTransactionProof
+      parameters:
+        - name: txid
+          in: path
+          required: true
+          description: Transaction ID
+          schema:
+            type: string
+            pattern: '^[a-fA-F0-9]{64}$'
+      responses:
+        '200':
+          description: Merkle proof
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerkleProof'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Merkle proof not supported (block version < 2)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /tx/estimate_fee:
+    get:
+      tags:
+        - Transaction
+      summary: Estimate transaction fee
+      description: |
+        Estimate fee based on transaction size and mempool status.
+        
+        Supports three speed options: fast, average, slow.
+      operationId: estimateFee
+      parameters:
+        - name: speed
+          in: query
+          required: false
+          description: Speed option (fast/average/slow)
+          schema:
+            type: string
+            default: average
+            enum: [fast, average, slow]
+        - name: size
+          in: query
+          required: false
+          description: Transaction size in bytes (default 350)
+          schema:
+            type: integer
+            default: 350
+            minimum: 100
+      responses:
+        '200':
+          description: Fee estimate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeeEstimate'
+
+  /tx/fee/recommend:
+    get:
+      tags:
+        - Transaction
+      summary: Recommended fee
+      description: |
+        Get recommended transaction fee rate.
+        
+        Based on current mempool status and network congestion.
+      operationId: getRecommendedFee
+      responses:
+        '200':
+          description: Recommended fee
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeeRecommendation'
+
+  # ============================================================================
+  # Wallet Endpoints
+  # ============================================================================
   /wallet/create:
     post:
       tags:
         - Wallet
-      summary: Create Wallet / 创建钱包
-      description: Create a new HD wallet / 创建新的 HD 钱包
+      summary: Create wallet
+      description: |
+        Create a new HD wallet.
+        
+        Returns mnemonic phrase, public/private keys, and address. **Note: Mnemonic is shown only once, please save it securely!**
       operationId: createWallet
-      security:
-        - bearerAuth: []
+      responses:
+        '200':
+          description: Wallet created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletInfo'
+
+  /wallet/create_persistent:
+    post:
+      tags:
+        - Wallet
+      summary: Create persistent wallet
+      description: |
+        Create a persistent wallet and save to disk.
+        
+        Wallet will be encrypted and saved to the data directory.
+      operationId: createPersistentWallet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password:
+                  type: string
+                  description: Encryption password
+                  minLength: 8
+              required:
+                - password
+      responses:
+        '200':
+          description: Wallet created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletInfo'
+
+  /wallet/import:
+    post:
+      tags:
+        - Wallet
+      summary: Import wallet
+      description: |
+        Import wallet via mnemonic phrase or private key.
+      operationId: importWallet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  properties:
+                    mnemonic:
+                      type: string
+                      description: Mnemonic phrase
+                  required:
+                    - mnemonic
+                - type: object
+                  properties:
+                    privateKey:
+                      type: string
+                      description: Private key (hexadecimal or Base64)
+                  required:
+                    - privateKey
+      responses:
+        '200':
+          description: Wallet imported successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletInfo'
+        '400':
+          description: Invalid mnemonic or private key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /wallet/list:
+    get:
+      tags:
+        - Wallet
+      summary: List wallets
+      description: |
+        Get list of all imported wallet addresses.
+      operationId: listWallets
+      responses:
+        '200':
+          description: Wallet list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  addresses:
+                    type: array
+                    items:
+                      type: string
+
+  /wallet/balance/{address}:
+    get:
+      tags:
+        - Wallet
+      summary: Query wallet balance
+      description: |
+        Get balance for specified address.
+      operationId: getWalletBalance
+      parameters:
+        - name: address
+          in: path
+          required: true
+          description: Wallet address
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Balance information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Balance'
+        '404':
+          description: Address not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /wallet/sign:
+    post:
+      tags:
+        - Wallet
+      summary: Sign transaction
+      description: |
+        Sign a transaction using private key.
+        
+        **WARNING: Do not pass private keys through API in production! Use local wallet signing instead.**
+      operationId: signTransaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignTransactionRequest'
+      responses:
+        '200':
+          description: Signature successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignedTransaction'
+
+  /wallet/sign_tx:
+    post:
+      tags:
+        - Wallet
+      summary: Sign transaction (full version)
+      description: |
+        Sign a complete transaction object.
+      operationId: signTransactionFull
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                transaction:
+                  $ref: '#/components/schemas/Transaction'
+                privateKey:
+                  type: string
+                  description: Private key
+              required:
+                - transaction
+                - privateKey
+      responses:
+        '200':
+          description: Signature successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignedTransaction'
+
+  /wallet/verify:
+    post:
+      tags:
+        - Wallet
+      summary: Verify address
+      description: |
+        Verify if address format is valid.
+      operationId: verifyAddress
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                address:
+                  type: string
+                  description: Address to verify
+              required:
+                - address
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid:
+                    type: boolean
+                  address:
+                    type: string
+
+  /wallet/derive:
+    post:
+      tags:
+        - Wallet
+      summary: Derive from seed
+      description: |
+        Derive address from mnemonic phrase or seed.
+      operationId: deriveFromSeed
       requestBody:
         required: true
         content:
@@ -298,27 +880,245 @@ paths:
               properties:
                 mnemonic:
                   type: string
-                  description: Optional, provide mnemonic to import wallet / 可选，提供助记词导入钱包
-                  minLength: 1
+                  description: Mnemonic phrase
+                path:
+                  type: string
+                  description: Derivation path (default m/44'/0'/0'/0/0)
+                  default: "m/44'/0'/0'/0/0"
               required:
                 - mnemonic
       responses:
         '200':
-          description: Wallet created successfully / 钱包创建成功
+          description: Derivation result
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WalletInfo'
-        '400':
-          description: Invalid parameters / 参数错误
+                $ref: '#/components/schemas/DerivedAddress'
 
-  /wallet/sign:
+  /wallet/addresses:
     post:
       tags:
         - Wallet
-      summary: Sign Transaction / 签名交易
-      description: Sign a transaction using the wallet / 使用钱包对交易进行签名
-      operationId: signTransaction
+      summary: Batch derive addresses
+      description: |
+        Batch derive multiple addresses from HD wallet.
+        
+        Supports BIP44 standard derivation path.
+      operationId: deriveAddresses
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeriveAddressesRequest'
+      responses:
+        '200':
+          description: Derivation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeriveAddressesResponse'
+
+  # ============================================================================
+  # Address Endpoints
+  # ============================================================================
+  /balance/{address}:
+    get:
+      tags:
+        - Address
+      summary: Query balance
+      description: |
+        Get NOGO balance and Nonce for specified address.
+      operationId: getBalance
+      parameters:
+        - name: address
+          in: path
+          required: true
+          description: NogoChain address
+          schema:
+            type: string
+            example: NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c
+      responses:
+        '200':
+          description: Balance information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Balance'
+
+  /address/{address}/txs:
+    get:
+      tags:
+        - Address
+      summary: Query address transactions
+      description: |
+        Get transaction history for specified address.
+        
+        Supports paginated queries, controlled via cursor parameter.
+      operationId: getAddressTransactions
+      parameters:
+        - name: address
+          in: path
+          required: true
+          description: Address
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Number per page (default 50)
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+        - name: cursor
+          in: query
+          required: false
+          description: Pagination cursor
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Transaction list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddressTransactions'
+
+  # ============================================================================
+  # Mempool Endpoints
+  # ============================================================================
+  /mempool:
+    get:
+      tags:
+        - Mempool
+      summary: Query mempool
+      description: |
+        Get list of pending transactions in current mempool.
+        
+        Transactions are sorted by fee in descending order.
+      operationId: getMempool
+      responses:
+        '200':
+          description: Mempool transaction list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Mempool'
+
+  # ============================================================================
+  # Mining Endpoints
+  # ============================================================================
+  /block/template:
+    get:
+      tags:
+        - Mining
+      summary: Get block template
+      description: |
+        Get block template for mining.
+        
+        Miners perform proof-of-work calculations based on this template.
+      operationId: getBlockTemplate
+      responses:
+        '200':
+          description: Block template
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BlockTemplate'
+
+  /mining/submit:
+    post:
+      tags:
+        - Mining
+      summary: Submit work
+      description: |
+        Submit mining proof-of-work.
+        
+        Miner will verify and submit the block to the network.
+      operationId: submitWork
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitWorkRequest'
+      responses:
+        '200':
+          description: Submission successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmitWorkResponse'
+        '400':
+          description: Invalid work
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /mining/info:
+    get:
+      tags:
+        - Mining
+      summary: Get mining info
+      description: |
+        Get current mining status information.
+        
+        Includes difficulty, network hash rate, and more.
+      operationId: getMiningInfo
+      responses:
+        '200':
+          description: Mining information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MiningInfo'
+
+  /mine/once:
+    post:
+      tags:
+        - Mining
+      summary: Mine once
+      description: |
+        Execute one mining operation (for testing).
+        
+        Requires Admin Token authentication.
+      operationId: mineOnce
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Mining result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MineOnceResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /block:
+    post:
+      tags:
+        - Mining
+      summary: Submit block
+      description: |
+        Submit complete block (administrative endpoint).
+        
+        Used for inter-node block synchronization. Requires Admin Token authentication.
+      operationId: addBlock
       security:
         - bearerAuth: []
       requestBody:
@@ -326,306 +1126,1075 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                from:
-                  type: string
-                  description: Sender address / 发送方地址
-                to:
-                  type: string
-                  description: Recipient address / 接收方地址
-                amount:
-                  type: integer
-                  format: int64
-                  description: Amount in smallest unit / 金额（最小单位）
-                fee:
-                  type: integer
-                  format: int64
-                  description: Fee in smallest unit / 手续费（最小单位）
-                nonce:
-                  type: integer
-                  format: int64
-                  description: Random number (anti-replay) / 随机数（防重放）
-              required:
-                - from
-                - to
-                - amount
+              $ref: '#/components/schemas/Block'
       responses:
         '200':
-          description: Signature successful / 签名成功
+          description: Block accepted
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  rawTx:
-                    type: string
-                    format: hex
-                    description: Signed transaction / 已签名的交易
+                  accepted:
+                    type: boolean
+                  reorged:
+                    type: boolean
+        '400':
+          description: Invalid block
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
+  /audit/chain:
+    post:
+      tags:
+        - Mining
+      summary: Audit chain
+      description: |
+        Execute blockchain integrity audit.
+        
+        Checks validity of all blocks and transactions. Requires Admin Token authentication.
+      operationId: auditChain
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Audit result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [SUCCESS, FAILED]
+                  message:
+                    type: string
+
+  # ============================================================================
+  # P2P Endpoints
+  # ============================================================================
   /p2p/getaddr:
     get:
       tags:
         - P2P
-      summary: Get Peer Addresses / 获取节点列表
-      description: Get list of known P2P node addresses / 获取已知的 P2P 节点地址列表
+      summary: Get peer addresses
+      description: |
+        Get list of known P2P node addresses.
+        
+        Used for new nodes joining the network.
       operationId: getPeerAddresses
       responses:
         '200':
-          description: Peer address list / 节点地址列表
+          description: Node address list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerAddresses'
+
+  /p2p/addr:
+    post:
+      tags:
+        - P2P
+      summary: Submit peer address
+      description: |
+        Report your own P2P address to the node.
+        
+        Helps the network discover more nodes.
+      operationId: submitPeerAddress
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                addresses:
+                  type: array
+                  description: Address list
+                  items:
+                    type: object
+                    properties:
+                      ip:
+                        type: string
+                      port:
+                        type: integer
+              required:
+                - addresses
+      responses:
+        '200':
+          description: Submission successful
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  peers:
-                    type: array
-                    items:
-                      type: string
-                      example: "223.254.144.158:9090"
+                  status:
+                    type: string
+                    example: ok
 
+  # ============================================================================
+  # Governance Endpoints
+  # ============================================================================
+  /api/proposals:
+    get:
+      tags:
+        - Governance
+      summary: Get proposal list
+      description: |
+        Get all community fund proposals.
+      operationId: getProposals
+      responses:
+        '200':
+          description: Proposal list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Proposal'
+
+  /api/proposals/{proposalId}:
+    get:
+      tags:
+        - Governance
+      summary: Get proposal details
+      description: |
+        Get proposal details by ID.
+      operationId: getProposalById
+      parameters:
+        - name: proposalId
+          in: path
+          required: true
+          description: Proposal ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Proposal details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Proposal'
+        '404':
+          description: Proposal not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/proposals/create:
+    post:
+      tags:
+        - Governance
+      summary: Create proposal
+      description: |
+        Create a new community fund proposal.
+        
+        Requires deposit payment (specified via depositTx).
+      operationId: createProposal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProposalRequest'
+      responses:
+        '200':
+          description: Proposal created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateProposalResponse'
+
+  /api/proposals/vote:
+    post:
+      tags:
+        - Governance
+      summary: Vote
+      description: |
+        Vote on a proposal.
+      operationId: voteProposal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoteRequest'
+      responses:
+        '200':
+          description: Vote successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+
+  /api/proposals/deposit:
+    post:
+      tags:
+        - Governance
+      summary: Create deposit
+      description: |
+        Create proposal deposit transaction.
+      operationId: createDeposit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDepositRequest'
+      responses:
+        '200':
+          description: Deposit transaction created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateDepositResponse'
+
+  # ============================================================================
+  # WebSocket Endpoint
+  # ============================================================================
   /ws:
     get:
       tags:
         - WebSocket
-      summary: WebSocket Connection / WebSocket 连接
-      description: Establish WebSocket connection to subscribe to real-time events / 建立 WebSocket 连接以订阅实时事件
+      summary: WebSocket connection
+      description: |
+        Establish WebSocket connection to subscribe to real-time events.
+        
+        Supported event types:
+        - `new_block`: New block
+        - `new_tx`: New transaction
+        - `mempool_added`: Transaction added to mempool
+        - `mempool_removed`: Transaction removed from mempool
+        
+        Example:
+        ```javascript
+        const ws = new WebSocket('ws://localhost:8080/ws');
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          console.log('Event:', data.type, data.data);
+        };
+        
+        // Subscribe to specific events
+        ws.send(JSON.stringify({
+          action: 'subscribe',
+          events: ['new_block', 'new_tx']
+        }));
+        ```
       operationId: websocketConnection
       responses:
         '101':
-          description: Protocol switch successful, WebSocket connection established / 协议切换成功，建立 WebSocket 连接
+          description: Protocol switch successful, WebSocket connection established
 
 components:
+  # ===========================================================================
+  # Security Schemes
+  # ===========================================================================
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: JWT
-      description: Use ADMIN_TOKEN as Bearer Token / 使用 ADMIN_TOKEN 作为 Bearer Token
+      bearerFormat: opaque
+      description: Use ADMIN_TOKEN as Bearer Token
 
+  # ===========================================================================
+  # Schemas
+  # ===========================================================================
   schemas:
+    # -------------------------------------------------------------------------
+    # Error Response
+    # -------------------------------------------------------------------------
+    ErrorResponse:
+      type: object
+      description: Error response
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorBody'
+    
+    ErrorBody:
+      type: object
+      properties:
+        code:
+          type: string
+          description: Error code
+          example: VALIDATION_ERROR
+        message:
+          type: string
+          description: Error message
+          example: invalid request body
+        details:
+          type: object
+          description: Detailed error information
+          additionalProperties: true
+        requestId:
+          type: string
+          description: Request ID
+          example: req_abc123
+
+    # -------------------------------------------------------------------------
+    # System
+    # -------------------------------------------------------------------------
     VersionInfo:
       type: object
       properties:
         version:
           type: string
-          example: dev
+          example: 1.0.0
         buildTime:
           type: string
           example: unknown
-        goVersion:
+        chainId:
+          type: integer
+          example: 1
+        height:
+          type: integer
+          example: 105
+        gitCommit:
           type: string
-          example: go1.21.5
+          example: unknown
 
     ChainInfo:
       type: object
-      description: Blockchain information / 区块链信息
       properties:
+        version:
+          type: string
+        chainId:
+          type: integer
         height:
           type: integer
-          format: int64
-          description: Block height / 区块高度
-          example: 105
         latestHash:
           type: string
-          format: hex
-          description: Latest block hash / 最新区块哈希
         genesisHash:
           type: string
-          format: hex
-          description: Genesis block hash / 创世区块哈希
-        difficultyBits:
+        genesisTimestampUnix:
           type: integer
-          format: int32
-          example: 11
-        chainWork:
+        genesisMinerAddress:
           type: string
-          example: "379008"
+        minerAddress:
+          type: string
         peersCount:
           type: integer
-          description: Number of connected peers / 节点数量
-          example: 1
-        rulesHash:
+        chainWork:
           type: string
-          format: hex
-          description: Consensus rules hash / 共识规则哈希
-        consensusParams:
-          $ref: '#/components/schemas/ConsensusParams'
-        monetaryPolicy:
-          $ref: '#/components/schemas/MonetaryPolicy'
-
-    ConsensusParams:
-      type: object
-      description: Consensus parameters / 共识参数
-      properties:
+        work:
+          type: string
+        totalSupply:
+          type: integer
+        currentReward:
+          type: integer
+        nextHalvingHeight:
+          type: integer
+        difficultyBits:
+          type: integer
+        difficultyEnable:
+          type: boolean
         difficultyTargetMs:
           type: integer
-          description: Target block time in milliseconds / 目标出块时间（毫秒）
-          example: 17000
         difficultyWindow:
           type: integer
-          description: Difficulty adjustment window / 难度调整窗口
-          example: 10
         difficultyMinBits:
           type: integer
-          description: Minimum difficulty bits / 最小难度位数
-          example: 1
         difficultyMaxBits:
           type: integer
-          description: Maximum difficulty bits / 最大难度位数
-          example: 32
+        difficultyMaxStepBits:
+          type: integer
         maxBlockSize:
           type: integer
-          description: Maximum block size in bytes / 最大区块大小（字节）
-          example: 2000000
         maxTimeDrift:
           type: integer
-          description: Maximum timestamp drift in seconds / 最大时间偏移（秒）
-          example: 7200
+        merkleEnable:
+          type: boolean
+        merkleActivationHeight:
+          type: integer
+        binaryEncodingEnable:
+          type: boolean
+        binaryEncodingActivationHeight:
+          type: integer
+        monetaryPolicy:
+          $ref: '#/components/schemas/MonetaryPolicy'
+        consensusParams:
+          $ref: '#/components/schemas/ConsensusParams'
 
     MonetaryPolicy:
       type: object
-      description: Monetary policy parameters / 货币政策参数
       properties:
         initialBlockReward:
           type: integer
-          format: int64
-          description: Initial block reward in smallest unit / 初始区块奖励（最小单位）
-          example: 800000000
         halvingInterval:
           type: integer
-          description: Block reward halving interval / 区块奖励减半间隔
-          example: 0
-        tailEmission:
-          type: integer
-          description: Tail emission rate / 尾部发行率
-          example: 0
         minerFeeShare:
           type: integer
-          description: Miner fee share percentage / 矿工手续费分成比例
-          example: 100
+        tailEmission:
+          type: integer
 
+    ConsensusParams:
+      type: object
+      properties:
+        difficultyEnable:
+          type: boolean
+        difficultyTargetMs:
+          type: integer
+        difficultyWindow:
+          type: integer
+        difficultyMinBits:
+          type: integer
+        difficultyMaxBits:
+          type: integer
+        difficultyMaxStepBits:
+          type: integer
+        medianTimePastWindow:
+          type: integer
+        maxTimeDrift:
+          type: integer
+        maxBlockSize:
+          type: integer
+        merkleEnable:
+          type: boolean
+        merkleActivationHeight:
+          type: integer
+        binaryEncodingEnable:
+          type: boolean
+        binaryEncodingActivationHeight:
+          type: integer
+
+    SpecialAddresses:
+      type: object
+      properties:
+        communityFund:
+          type: object
+          properties:
+            address:
+              type: string
+            balance:
+              type: integer
+            purpose:
+              type: string
+        integrityPool:
+          type: object
+          properties:
+            address:
+              type: string
+            balance:
+              type: integer
+            purpose:
+              type: string
+        genesis:
+          type: object
+          properties:
+            address:
+              type: string
+            purpose:
+              type: string
+        rewardDistribution:
+          type: object
+          properties:
+            minerShare:
+              type: integer
+            communityShare:
+              type: integer
+            genesisShare:
+              type: integer
+            integrityShare:
+              type: integer
+            minerFeeShare:
+              type: integer
+            description:
+              type: string
+
+    # -------------------------------------------------------------------------
+    # Block
+    # -------------------------------------------------------------------------
     Block:
       type: object
-      description: Block structure / 区块结构
       properties:
         height:
           type: integer
-          format: int64
-          description: Block height / 区块高度
         hash:
           type: string
-          format: hex
-          description: Block hash / 区块哈希
         prevHash:
           type: string
-          format: hex
-          description: Previous block hash / 前一个区块哈希
-        timestamp:
-          type: string
-          format: date-time
-          description: Block timestamp (ISO 8601) / 区块时间戳（ISO 8601 格式）
         timestampUnix:
           type: integer
-          format: int64
-          description: Block timestamp (Unix epoch) / 区块时间戳（Unix 时间戳）
         difficultyBits:
           type: integer
-          format: int32
-          description: Difficulty target / 难度目标
         nonce:
           type: integer
-          format: int64
-          description: Mining nonce / 挖矿随机数
         minerAddress:
           type: string
-          description: Miner address / 矿工地址
         transactions:
           type: array
-          description: List of transactions / 交易列表
           items:
             $ref: '#/components/schemas/Transaction'
 
+    BlockDetail:
+      allOf:
+        - $ref: '#/components/schemas/Block'
+        - type: object
+          properties:
+            txCount:
+              type: integer
+            coinbase:
+              type: object
+              properties:
+                totalAmount:
+                  type: integer
+                minerReward:
+                  type: integer
+                fee:
+                  type: integer
+                data:
+                  type: string
+            rewardBreakdown:
+              type: object
+              properties:
+                miner:
+                  type: integer
+                description:
+                  type: string
+
+    BlockHeader:
+      type: object
+      properties:
+        height:
+          type: integer
+        hash:
+          type: string
+        prevHash:
+          type: string
+        timestampUnix:
+          type: integer
+        difficultyBits:
+          type: integer
+        nonce:
+          type: integer
+
+    BlockTemplate:
+      type: object
+      properties:
+        height:
+          type: integer
+        prevHash:
+          type: string
+        timestamp:
+          type: integer
+        difficultyBits:
+          type: integer
+        transactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transaction'
+
+    # -------------------------------------------------------------------------
+    # Transaction
+    # -------------------------------------------------------------------------
     Transaction:
       type: object
-      description: Transaction structure / 交易结构
       properties:
-        txid:
+        type:
           type: string
-          format: hex
-          description: Transaction ID / 交易 ID
-        version:
+          enum: [transfer, coinbase, contract, proposal]
+        chainId:
           type: integer
-          format: int32
-          description: Transaction version / 交易版本
-        inputs:
-          type: array
-          description: Transaction inputs / 交易输入
-          items:
-            $ref: '#/components/schemas/TxInput'
-        outputs:
-          type: array
-          description: Transaction outputs / 交易输出
-          items:
-            $ref: '#/components/schemas/TxOutput'
-        lockTime:
+        fromPubKey:
+          type: string
+          format: byte
+        toAddress:
+          type: string
+        amount:
           type: integer
-          format: int64
-          description: Lock time / 锁定时间
-        signatures:
+        fee:
+          type: integer
+        nonce:
+          type: integer
+        data:
+          type: string
+        signature:
+          type: string
+          format: byte
+
+    TransactionSubmitRequest:
+      type: object
+      properties:
+        rawTx:
+          type: string
+          description: Signed transaction (hexadecimal)
+      required:
+        - rawTx
+
+    TransactionSubmitResponse:
+      type: object
+      properties:
+        accepted:
+          type: boolean
+        message:
+          type: string
+        txId:
+          type: string
+
+    TransactionDetail:
+      type: object
+      properties:
+        txId:
+          type: string
+        transaction:
+          $ref: '#/components/schemas/Transaction'
+        location:
+          $ref: '#/components/schemas/TxLocation'
+
+    TxLocation:
+      type: object
+      properties:
+        height:
+          type: integer
+        blockHashHex:
+          type: string
+        index:
+          type: integer
+
+    TransactionStatus:
+      type: object
+      properties:
+        txId:
+          type: string
+        status:
+          type: string
+          enum: [confirmed, pending, not_found]
+        confirmed:
+          type: boolean
+        confirmations:
+          type: integer
+        blockHeight:
+          type: integer
+        blockHash:
+          type: string
+        blockTime:
+          type: integer
+        txIndex:
+          type: integer
+        transaction:
+          $ref: '#/components/schemas/Transaction'
+        error:
+          type: string
+
+    TransactionReceipt:
+      type: object
+      properties:
+        txId:
+          type: string
+        status:
+          type: string
+        blockHash:
+          type: string
+        blockNumber:
+          type: integer
+        from:
+          type: string
+        to:
+          type: string
+        amount:
+          type: integer
+        fee:
+          type: integer
+        data:
+          type: string
+
+    MerkleProof:
+      type: object
+      properties:
+        txId:
+          type: string
+        blockHeight:
+          type: integer
+        blockHash:
+          type: string
+        txIndex:
+          type: integer
+        merkleRoot:
+          type: string
+        branch:
           type: array
-          description: Signatures / 签名列表
           items:
             type: string
-            format: hex
+        siblingLeft:
+          type: boolean
 
-    TxInput:
+    FeeEstimate:
       type: object
-      description: Transaction input / 交易输入
       properties:
-        prevTxID:
-          type: string
-          format: hex
-          description: Previous transaction ID / 前一个交易 ID
-        prevIndex:
+        estimatedFee:
           type: integer
-          description: Previous output index / 前一个输出索引
-        scriptSig:
-          type: string
-          format: hex
-          description: Signature script / 签名脚本
-        sequence:
+        txSize:
           type: integer
-          format: int64
-          description: Sequence number / 序列号
+        mempoolSize:
+          type: integer
+        speed:
+          type: string
+        minFee:
+          type: integer
+        minFeePerByte:
+          type: integer
 
-    TxOutput:
+    FeeRecommendation:
       type: object
-      description: Transaction output / 交易输出
       properties:
-        value:
+        fast:
           type: integer
-          format: int64
-          description: Output value in smallest unit / 输出值（最小单位）
-        scriptPubKey:
-          type: string
-          format: hex
-          description: Public key script / 公钥脚本
-        address:
-          type: string
-          description: Recipient address / 接收方地址
+          description: Fast confirmation fee
+        average:
+          type: integer
+          description: Standard fee
+        slow:
+          type: integer
+          description: Slow fee
+        mempoolSize:
+          type: integer
 
+    # -------------------------------------------------------------------------
+    # Wallet
+    # -------------------------------------------------------------------------
     WalletInfo:
       type: object
-      description: Wallet information / 钱包信息
+      properties:
+        address:
+          type: string
+        publicKey:
+          type: string
+        privateKey:
+          type: string
+        mnemonic:
+          type: string
+
+    Balance:
+      type: object
+      properties:
+        address:
+          type: string
+        balance:
+          type: integer
+        nonce:
+          type: integer
+
+    SignTransactionRequest:
+      type: object
+      properties:
+        privateKey:
+          type: string
+        toAddress:
+          type: string
+        amount:
+          type: integer
+        fee:
+          type: integer
+        nonce:
+          type: integer
+        data:
+          type: string
+      required:
+        - privateKey
+        - toAddress
+        - amount
+
+    SignedTransaction:
+      type: object
+      properties:
+        tx:
+          $ref: '#/components/schemas/Transaction'
+        txJson:
+          type: string
+        txid:
+          type: string
+        signed:
+          type: boolean
+        from:
+          type: string
+        nonce:
+          type: integer
+        chainId:
+          type: integer
+
+    DerivedAddress:
+      type: object
+      properties:
+        address:
+          type: string
+        path:
+          type: string
+
+    DeriveAddressesRequest:
+      type: object
       properties:
         mnemonic:
           type: string
-          description: Mnemonic phrase (shown only once) / 助记词（仅首次返回）
+        path:
+          type: string
+          default: "m/44'/0'/0'/0"
+        start:
+          type: integer
+          default: 0
+        count:
+          type: integer
+          default: 10
+          maximum: 100
+        network:
+          type: string
+          enum: [mainnet, testnet]
+          default: mainnet
+      required:
+        - mnemonic
+
+    DeriveAddressesResponse:
+      type: object
+      properties:
+        addresses:
+          type: array
+          items:
+            type: object
+            properties:
+              address:
+                type: string
+              path:
+                type: string
+              index:
+                type: integer
+
+    AddressTransactions:
+      type: object
+      properties:
         address:
           type: string
-          description: Default address / 默认地址
-        derivationPath:
+        txs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transaction'
+        nextCursor:
+          type: integer
+        more:
+          type: boolean
+
+    # -------------------------------------------------------------------------
+    # Mempool
+    # -------------------------------------------------------------------------
+    Mempool:
+      type: object
+      properties:
+        size:
+          type: integer
+        txs:
+          type: array
+          items:
+            type: object
+            properties:
+              txId:
+                type: string
+              fee:
+                type: integer
+              amount:
+                type: integer
+              nonce:
+                type: integer
+              fromAddr:
+                type: string
+              toAddress:
+                type: string
+
+    # -------------------------------------------------------------------------
+    # Mining
+    # -------------------------------------------------------------------------
+    SubmitWorkRequest:
+      type: object
+      properties:
+        height:
+          type: integer
+        nonce:
+          type: integer
+        timestamp:
+          type: integer
+        minerAddress:
           type: string
-          description: HD derivation path / HD 推导路径
-          example: "m/44'/0'/0'/0/0"
+      required:
+        - height
+        - nonce
+        - timestamp
+        - minerAddress
+
+    SubmitWorkResponse:
+      type: object
+      properties:
+        accepted:
+          type: boolean
+        message:
+          type: string
+        blockHash:
+          type: string
+        height:
+          type: integer
+
+    MiningInfo:
+      type: object
+      properties:
+        difficulty:
+          type: integer
+        networkHashRate:
+          type: number
+        blocksUntilDifficultyAdjustment:
+          type: integer
+        currentBlockReward:
+          type: integer
+
+    MineOnceResponse:
+      type: object
+      properties:
+        mined:
+          type: boolean
+        message:
+          type: string
+        height:
+          type: integer
+        blockHash:
+          type: string
+        difficultyBits:
+          type: integer
+
+    # -------------------------------------------------------------------------
+    # P2P
+    # -------------------------------------------------------------------------
+    PeerAddresses:
+      type: object
+      properties:
+        addresses:
+          type: array
+          items:
+            type: object
+            properties:
+              ip:
+                type: string
+              port:
+                type: integer
+              timestamp:
+                type: integer
+
+    # -------------------------------------------------------------------------
+    # Governance
+    # -------------------------------------------------------------------------
+    Proposal:
+      type: object
+      properties:
+        id:
+          type: string
+        proposer:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+          enum: [treasury, ecosystem, grant, event]
+        amount:
+          type: integer
+        recipient:
+          type: string
+        deposit:
+          type: integer
+        status:
+          type: string
+          enum: [active, passed, rejected, executed]
+        votesFor:
+          type: integer
+        votesAgainst:
+          type: integer
+        votingPower:
+          type: integer
+        createdAt:
+          type: integer
+        expiresAt:
+          type: integer
+
+    CreateProposalRequest:
+      type: object
+      properties:
+        proposer:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+        amount:
+          type: integer
+        recipient:
+          type: string
+        deposit:
+          type: integer
+        signature:
+          type: string
+        depositTx:
+          type: string
+      required:
+        - proposer
+        - title
+        - description
+
+    CreateProposalResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        proposalId:
+          type: string
+        message:
+          type: string
+        depositCollected:
+          type: boolean
+
+    VoteRequest:
+      type: object
+      properties:
+        proposalId:
+          type: string
+        voter:
+          type: string
+        support:
+          type: boolean
+        votingPower:
+          type: integer
+        signature:
+          type: string
+      required:
+        - proposalId
+        - voter
+        - support
+
+    CreateDepositRequest:
+      type: object
+      properties:
+        from:
+          type: string
+        to:
+          type: string
+        amount:
+          type: integer
+        privateKey:
+          type: string
+      required:
+        - from
+        - amount
+        - privateKey
+
+    CreateDepositResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        txHash:
+          type: string
+        message:
+          type: string

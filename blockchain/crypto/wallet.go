@@ -58,6 +58,9 @@ var (
 
 	// ErrInvalidWalletVersion is returned when wallet version is unsupported
 	ErrInvalidWalletVersion = errors.New("unsupported wallet version")
+
+	// Rand is the secure random reader for cryptographic operations
+	Rand = rand.Reader
 )
 
 // Wallet represents a NogoChain wallet with Ed25519 keys

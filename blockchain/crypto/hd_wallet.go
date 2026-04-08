@@ -56,9 +56,6 @@ var (
 	// ErrInvalidDerivationPath is returned for malformed paths
 	ErrInvalidDerivationPath = errors.New("invalid derivation path")
 
-	// ErrHardenedAtRoot is returned when trying to derive hardened key at root
-	ErrHardenedAtRoot = errors.New("cannot derive hardened key at root level")
-
 	// ErrInvalidChildIndex is returned for invalid child index
 	ErrInvalidChildIndex = errors.New("invalid child index")
 
@@ -76,6 +73,8 @@ type HDWallet struct {
 	Depth      uint8
 	Index      uint32
 	ParentFP   []byte
+	Parent     *HDWallet
+	PathStr    string
 }
 
 // DerivationPath represents a parsed BIP32 derivation path
@@ -122,19 +121,15 @@ func (w *HDWallet) Derive(path string) (*HDWallet, error) {
 	}
 
 	current := w
-	for i, index := range parsed.Components {
+	for _, index := range parsed.Components {
 		isHardened := index >= BIP32HardenedOffset
-
-		if i == 0 && isHardened {
-			return nil, ErrHardenedAtRoot
-		}
 
 		childIndex := index
 		if isHardened {
 			childIndex = index - BIP32HardenedOffset
 		}
 
-		current, err = current.DeriveChild(childIndex, isHardened)
+		current, err = current.DeriveChild(childIndex, isHardened, index)
 		if err != nil {
 			return nil, fmt.Errorf("failed to derive child %d: %w", childIndex, err)
 		}
@@ -145,7 +140,7 @@ func (w *HDWallet) Derive(path string) (*HDWallet, error) {
 
 // DeriveChild derives a child wallet at a specific index
 // Security: uses HMAC-SHA512 for key derivation
-func (w *HDWallet) DeriveChild(index uint32, hardened bool) (*HDWallet, error) {
+func (w *HDWallet) DeriveChild(index uint32, hardened bool, fullPathIndex uint32) (*HDWallet, error) {
 	if index > 0x7FFFFFFF {
 		return nil, ErrInvalidChildIndex
 	}
@@ -155,10 +150,10 @@ func (w *HDWallet) DeriveChild(index uint32, hardened bool) (*HDWallet, error) {
 		data = make([]byte, 1+HDKeyLen+4)
 		data[0] = 0x00
 		copy(data[1:33], w.PrivateKey.Seed())
-		binary.BigEndian.PutUint32(data[37:], index+BIP32HardenedOffset)
+		binary.BigEndian.PutUint32(data[33:], index+BIP32HardenedOffset)
 	} else {
 		data = make([]byte, HDChainCodeLen+4)
-		copy(data, w.PublicKey)
+		copy(data[:32], w.PublicKey)
 		binary.BigEndian.PutUint32(data[32:], index)
 	}
 
@@ -188,8 +183,9 @@ func (w *HDWallet) DeriveChild(index uint32, hardened bool) (*HDWallet, error) {
 		PublicKey:  childPub,
 		ChainCode:  childChainCode,
 		Depth:      w.Depth + 1,
-		Index:      index,
+		Index:      fullPathIndex,
 		ParentFP:   parentFP,
+		Parent:     w,
 	}, nil
 }
 
@@ -285,20 +281,29 @@ func (w *HDWallet) IsHardened() bool {
 
 // Path returns the full path as string
 func (w *HDWallet) Path() string {
+	if w.PathStr != "" {
+		return w.PathStr
+	}
+
 	parts := []string{"m"}
 	current := w
 
 	path := []string{}
 	for current != nil && current.Depth > 0 {
-		component := fmt.Sprintf("%d", current.Index)
+		index := current.Index
+		component := ""
 		if current.IsHardened() {
-			component += "'"
+			component = fmt.Sprintf("%d'", index-BIP32HardenedOffset)
+		} else {
+			component = fmt.Sprintf("%d", index)
 		}
 		path = append([]string{component}, path...)
+		current = current.Parent
 	}
 
 	parts = append(parts, path...)
-	return strings.Join(parts, "/")
+	w.PathStr = strings.Join(parts, "/")
+	return w.PathStr
 }
 
 // WalletFromMnemonic creates a wallet from mnemonic phrase

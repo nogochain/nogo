@@ -33,6 +33,20 @@ import (
 	"github.com/nogochain/nogo/blockchain/core"
 )
 
+// getBlockVersion calculates the appropriate block version based on consensus rules
+func getBlockVersion(consensus config.ConsensusParams, height uint64) uint32 {
+	// Check if Merkle Root feature is active
+	if consensus.MerkleRootActive(height) {
+		return 2
+	}
+	// Check if Binary Encoding feature is active
+	if consensus.BinaryEncodingActive(height) {
+		return 2
+	}
+	// Default version
+	return 1
+}
+
 // ANSI color codes for colored logging
 const (
 	colorReset         = "\033[0m"
@@ -137,10 +151,11 @@ type Mempool interface {
 	EntriesSortedByFeeDesc() []MempoolEntry
 }
 
-// PeerAPI defines the peer management interface
+// PeerAPI defines the peer management API
 type PeerAPI interface {
 	Peers() []string
 	FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, error)
+	BroadcastBlock(ctx context.Context, block *core.Block)
 }
 
 // ChainInfo represents peer chain information
@@ -456,7 +471,7 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 
 	block, err := m.MineOnce(ctx, force)
 	if err != nil {
-		logf(colorRed, "❌ ", "Mine once failed: %v", err)
+		logf(colorRed, "❌ ", fmt.Sprintf("Mine once failed: %v", err))
 		return
 	}
 
@@ -467,7 +482,7 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 
 // handleMinedBlock handles a successfully mined block
 func (m *Miner) handleMinedBlock(ctx context.Context, block *core.Block) {
-	logf(colorBrightGreen, "✅ ", "Block #%d mined successfully, hash=%x", block.Height, block.Hash)
+	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block #%d mined successfully, hash=%x", block.Height, block.Hash))
 	logf(colorCyan, "ℹ️ ", "Waiting for network sync")
 	time.Sleep(time.Duration(config.DefaultNetworkSyncCheckDelayMs) * time.Millisecond)
 
@@ -482,12 +497,14 @@ func (m *Miner) checkNetworkWork(ctx context.Context, block *core.Block) {
 	localWork := m.bc.CanonicalWork()
 
 	if networkMaxWork != nil && networkMaxWork.Cmp(localWork) > 0 {
-		logf(colorBrightYellow, "⚠️ ", "Network has more work (local=%v, network=%v) - triggering sync", localWork, networkMaxWork)
+		logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Network has more work (local=%v, network=%v) - triggering sync", localWork, networkMaxWork))
 		m.InterruptMining()
 		return
 	}
 
 	logf(colorBrightGreen, "✅ ", "Local chain has most work, continuing mining")
+	// Resume mining to ensure continuous block production
+	m.ResumeMining()
 }
 
 // getNetworkMaxWork gets the maximum work from all peers
@@ -526,12 +543,12 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		peerHeight := getPeerHeight(pm)
 
 		if peerHeight > localHeight {
-			logf(colorBrightYellow, "⚠️ ", "Network advanced (local=%d, peer=%d) - aborting to sync", localHeight, peerHeight)
+			logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Network advanced (local=%d, peer=%d) - aborting to sync", localHeight, peerHeight))
 			return nil, nil
 		}
 
 		if peerHeight == localHeight || peerHeight == 0 {
-			logf(colorBrightMagenta, "⛏️ ", "Competing at height %d (peer=%d), mining immediately", localHeight, peerHeight)
+			logf(colorBrightMagenta, "⛏️ ", fmt.Sprintf("Competing at height %d (peer=%d), mining immediately", localHeight, peerHeight))
 
 			if config.DefaultBlockPropagationDelayMs > 0 {
 				time.Sleep(time.Duration(config.DefaultBlockPropagationDelayMs) * time.Millisecond)
@@ -549,7 +566,7 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 
 	selected, selectedIDs, err := m.bc.SelectMempoolTxs(m.mp, m.maxTxPerBlock)
 	if err != nil {
-		logf(colorRed, "❌ ", "Select txs failed: %v", err)
+		logf(colorRed, "❌ ", fmt.Sprintf("Select txs failed: %v", err))
 		return nil, err
 	}
 
@@ -558,7 +575,7 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		return nil, nil
 	}
 
-	logf(colorBrightMagenta, "⛏️ ", "Attempting to mine block with %d transactions", len(selected))
+	logf(colorBrightMagenta, "⛏️ ", fmt.Sprintf("Attempting to mine block with %d transactions", len(selected)))
 
 	parentAtMineTime := m.bc.LatestBlock()
 	if parentAtMineTime == nil {
@@ -566,41 +583,27 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		return nil, errors.New("no parent block")
 	}
 
-	parentCopy := &core.Block{
-		Height:         parentAtMineTime.Height,
-		Hash:           append([]byte(nil), parentAtMineTime.Hash...),
-		PrevHash:       append([]byte(nil), parentAtMineTime.PrevHash...),
-		TimestampUnix:  parentAtMineTime.TimestampUnix,
-		DifficultyBits: parentAtMineTime.DifficultyBits,
-		MinerAddress:   parentAtMineTime.MinerAddress,
-	}
-
+	fmt.Printf("[DEBUG] miner.go: Calling MineTransfers with %d transactions\n", len(selected))
 	b, err := m.bc.MineTransfers(selected)
 	if err != nil {
-		logf(colorRed, "❌ ", "Mine failed: %v", err)
+		fmt.Printf("[ERROR] miner.go: MineTransfers failed: %v\n", err)
+		logf(colorRed, "❌ ", fmt.Sprintf("Mine failed: %v", err))
 		return nil, err
 	}
+	fmt.Printf("[DEBUG] miner.go: MineTransfers returned block %d, hash=%x\n", b.Height, b.Hash)
+	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block mined - height=%d, hash=%x", b.Height, b.Hash))
 
-	logf(colorBrightGreen, "✅ ", "Block mined - height=%d, hash=%x", b.Height, b.Hash)
-
-	if b.TimestampUnix <= parentCopy.TimestampUnix {
-		oldTs := b.TimestampUnix
-		b.TimestampUnix = parentCopy.TimestampUnix + 1
-		logf(colorCyan, "ℹ️ ", "Adjusted timestamp from %d to %d", oldTs, b.TimestampUnix)
-	}
-
-	if err := validateBlockPoW(m.bc.GetConsensus(), b, parentCopy); err != nil {
-		logf(colorRed, "❌ ", "POW validation failed: %v", err)
-		return nil, nil
-	}
-
+	// Redundant POW validation removed for the following reasons:
+	// 1. POW already validated by NogoPow engine during Seal
+	// 2. validateBlockLocked performs additional POW validation in MineTransfers
+	// 3. This validation is redundant and incomplete
 	latest := m.bc.LatestBlock()
 	if latest == nil || latest.Hash == nil || string(latest.Hash) != string(b.Hash) {
 		logf(colorYellow, "⚠️ ", "Mined block was not added to chain")
 		return nil, nil
 	}
 
-	logf(colorBrightGreen, "✅ ", "Block validated and added to chain (height=%d, hash=%x)", b.Height, b.Hash)
+	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block validated and added to chain (height=%d, hash=%x)", b.Height, b.Hash))
 
 	propagationDelay := calculateAdaptivePropagationDelay(pm)
 	time.Sleep(time.Duration(propagationDelay) * time.Millisecond)
@@ -610,7 +613,7 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		peerCount = len(pm.Peers())
 	}
 
-	logf(colorCyan, "📡 ", "Broadcasting block #%d to %d peers", b.Height, peerCount)
+	logf(colorCyan, "📡 ", fmt.Sprintf("Broadcasting block #%d to %d peers", b.Height, peerCount))
 	go m.broadcastBlock(ctx, b)
 
 	if len(selectedIDs) > 0 {
@@ -645,11 +648,14 @@ func (m *Miner) broadcastBlock(ctx context.Context, block *core.Block) {
 		return
 	}
 
-	logf(colorCyan, "📡 ", "Broadcasting block %d (%s)", block.Height, hex.EncodeToString(block.Hash))
+	logf(colorCyan, "📡 ", fmt.Sprintf("Broadcasting block %d (%s)", block.Height, hex.EncodeToString(block.Hash)))
 
-	// Broadcast block to peers
+	// Broadcast block to peers via P2P manager
 	if m.pm != nil {
-		logf(colorBrightGreen, "✅ ", "Broadcast completed height=%d", block.Height)
+		peerCount := len(m.pm.Peers())
+		logf(colorCyan, "📡 ", fmt.Sprintf("Starting broadcast to %d peers", peerCount))
+		m.pm.BroadcastBlock(ctx, block)
+		logf(colorBrightGreen, "✅ ", fmt.Sprintf("Broadcast completed height=%d", block.Height))
 	}
 }
 
@@ -742,8 +748,10 @@ func CreateCoinbaseTx(minerAddress string, height uint64, totalFees uint64, chai
 	}
 
 	blockReward := consensus.MonetaryPolicy.BlockReward(height)
+	// Miner receives 96% of block reward, fees are burned (miner gets 100% of fees as incentive)
+	minerReward := blockReward * uint64(consensus.MonetaryPolicy.MinerRewardShare) / 100
 	minerFee := consensus.MonetaryPolicy.MinerFeeAmount(totalFees)
-	totalAmount := blockReward + minerFee
+	totalAmount := minerReward + minerFee
 
 	if totalAmount > math.MaxUint64 {
 		return nil, errors.New("coinbase amount overflow")
@@ -803,8 +811,11 @@ func CreateBlockTemplate(
 		return nil, fmt.Errorf("compute merkle root: %w", err)
 	}
 
+	// Calculate block version based on consensus rules
+	blockVersion := getBlockVersion(consensus, parent.Height+1)
+
 	template := &core.Block{
-		Version:        1,
+		Version:        blockVersion,
 		Height:         parent.Height + 1,
 		PrevHash:       append([]byte(nil), parent.Hash...),
 		TimestampUnix:  time.Now().Unix(),
@@ -813,7 +824,7 @@ func CreateBlockTemplate(
 		Transactions:   allTxs,
 		CoinbaseTx:     coinbase,
 		Header: core.BlockHeader{
-			Version:        1,
+			Version:        blockVersion,
 			PrevHash:       append([]byte(nil), parent.Hash...),
 			TimestampUnix:  time.Now().Unix(),
 			DifficultyBits: parent.Header.DifficultyBits,

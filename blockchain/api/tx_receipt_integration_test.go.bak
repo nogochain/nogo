@@ -1,0 +1,327 @@
+// Copyright 2026 NogoChain Team
+// This file is part of the NogoChain library.
+//
+// The NogoChain library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The NogoChain library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the NogoChain library. If not, see <http://www.org/licenses/>.
+
+package api_test
+
+import (
+	"crypto/ed25519"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/nogochain/nogo/blockchain/api"
+	"github.com/nogochain/nogo/blockchain/config"
+	"github.com/nogochain/nogo/blockchain/core"
+	"github.com/nogochain/nogo/blockchain/storage"
+)
+
+func setupTestBlockchain(t *testing.T) (*core.Chain, func()) {
+	t.Helper()
+
+	tempDir, err := os.MkdirTemp("", "nogo_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.DataDir = tempDir
+
+	genesisConfig := &core.GenesisConfig{
+		Timestamp:           time.Now().Unix(),
+		GenesisMinerAddress: "NOGO000000000000000000000000000000000000000000000000000000001",
+		InitialSupply:       1000000,
+	}
+
+	store, err := storage.NewBoltStore(tempDir)
+	if err != nil {
+		os.RemoveAll(tempDir)
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	chain, err := core.NewChainWithGenesis(genesisConfig, cfg.Consensus, store)
+	if err != nil {
+		os.RemoveAll(tempDir)
+		t.Fatalf("failed to create chain: %v", err)
+	}
+
+	cleanup := func() {
+		chain.Stop()
+		os.RemoveAll(tempDir)
+	}
+
+	return chain, cleanup
+}
+
+func addTestBlocks(t *testing.T, chain *core.Chain, count int) []string {
+	t.Helper()
+
+	var txIDs []string
+
+	for i := 0; i < count; i++ {
+		pubKey, privKey, _ := ed25519.GenerateKey(nil)
+		fromAddr := core.GenerateAddress(pubKey)
+		toAddr := "NOGO000000000000000000000000000000000000000000000000000000002"
+
+		account := core.Account{
+			Balance: 100000,
+			Nonce:   uint64(i),
+		}
+
+		latestBlock := chain.LatestBlock()
+		coinbaseTx := core.Transaction{
+			Type:      core.TxCoinbase,
+			ChainID:   cfg.Consensus.ChainID,
+			ToAddress: fromAddr,
+			Amount:    cfg.Consensus.MonetaryPolicy.BlockReward(latestBlock.Height + 1),
+		}
+
+		tx := core.Transaction{
+			Type:       core.TxTransfer,
+			ChainID:    cfg.Consensus.ChainID,
+			FromPubKey: pubKey,
+			ToAddress:  toAddr,
+			Amount:     100,
+			Fee:        10,
+			Nonce:      uint64(i + 1),
+		}
+
+		h, _ := tx.SigningHash()
+		signature := ed25519.Sign(privKey, h)
+		tx.Signature = signature
+
+		txID, _ := core.TxIDHexForConsensus(tx, cfg.Consensus, latestBlock.Height+1)
+		txIDs = append(txIDs, txID)
+
+		block := &core.Block{
+			Version:      1,
+			Height:       latestBlock.Height + 1,
+			PrevHash:     latestBlock.Hash,
+			TimestampUnix: time.Now().Unix(),
+			DifficultyBits: cfg.Consensus.MinDifficultyBits,
+			Transactions: []core.Transaction{coinbaseTx, tx},
+			MinerAddress: fromAddr,
+		}
+
+		hash, err := core.HashBlockForConsensus(block, cfg.Consensus)
+		if err != nil {
+			t.Fatalf("failed to hash block: %v", err)
+		}
+		block.Hash = hash
+
+		if err := chain.AddBlockForTest(block); err != nil {
+			t.Fatalf("failed to add block: %v", err)
+		}
+	}
+
+	return txIDs
+}
+
+func TestTxReceiptIntegration_Success(t *testing.T) {
+	chain, cleanup := setupTestBlockchain(t)
+	defer cleanup()
+
+	txIDs := addTestBlocks(t, chain, 5)
+
+	mp := api.NewMempool(1000)
+	server := api.NewSimpleServer(chain, nil, mp, nil, "")
+
+	handler := server.Routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/tx/receipt/"+txIDs[0], nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp api.TxReceiptResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Status != "success" {
+		t.Errorf("expected status 'success', got '%s'", resp.Status)
+	}
+
+	if resp.TxID != txIDs[0] {
+		t.Errorf("expected txId %s, got %s", txIDs[0], resp.TxID)
+	}
+
+	if resp.BlockHeight != 1 {
+		t.Errorf("expected block height 1, got %d", resp.BlockHeight)
+	}
+
+	if resp.Confirmations != 5 {
+		t.Errorf("expected 5 confirmations, got %d", resp.Confirmations)
+	}
+
+	if resp.Transaction == nil {
+		t.Error("expected transaction to be present")
+	}
+}
+
+func TestTxReceiptIntegration_NotFound(t *testing.T) {
+	chain, cleanup := setupTestBlockchain(t)
+	defer cleanup()
+
+	addTestBlocks(t, chain, 3)
+
+	mp := api.NewMempool(1000)
+	server := api.NewSimpleServer(chain, nil, mp, nil, "")
+
+	handler := server.Routes()
+
+	nonExistentTxID := hex.EncodeToString([]byte("non-existent-tx"))
+	req := httptest.NewRequest(http.MethodGet, "/tx/receipt/"+nonExistentTxID, nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected status 404, got %d", w.Code)
+	}
+
+	var resp api.TxReceiptResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Status != "error" {
+		t.Errorf("expected status 'error', got '%s'", resp.Status)
+	}
+}
+
+func TestTxReceiptIntegration_MultipleConfirmations(t *testing.T) {
+	chain, cleanup := setupTestBlockchain(t)
+	defer cleanup()
+
+	txIDs := addTestBlocks(t, chain, 10)
+
+	mp := api.NewMempool(1000)
+	server := api.NewSimpleServer(chain, nil, mp, nil, "")
+
+	handler := server.Routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/tx/receipt/"+txIDs[0], nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp api.TxReceiptResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Confirmations != 10 {
+		t.Errorf("expected 10 confirmations, got %d", resp.Confirmations)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/tx/receipt/"+txIDs[4], nil)
+	w2 := httptest.NewRecorder()
+
+	handler.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w2.Code)
+	}
+
+	var resp2 api.TxReceiptResponse
+	if err := json.NewDecoder(w2.Body).Decode(&resp2); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp2.Confirmations != 6 {
+		t.Errorf("expected 6 confirmations, got %d", resp2.Confirmations)
+	}
+}
+
+func TestTxReceiptIntegration_Performance(t *testing.T) {
+	chain, cleanup := setupTestBlockchain(t)
+	defer cleanup()
+
+	txIDs := addTestBlocks(t, chain, 50)
+
+	mp := api.NewMempool(1000)
+	server := api.NewSimpleServer(chain, nil, mp, nil, "")
+
+	handler := server.Routes()
+
+	txID := txIDs[25]
+
+	start := time.Now()
+	for i := 0; i < 100; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/tx/receipt/"+txID, nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", w.Code)
+		}
+	}
+	elapsed := time.Since(start)
+
+	avgResponseTime := elapsed / 100
+	t.Logf("Average response time: %v", avgResponseTime)
+
+	if avgResponseTime > 20*time.Millisecond {
+		t.Errorf("average response time %v exceeds target 20ms", avgResponseTime)
+	}
+}
+
+func TestTxReceiptIntegration_BlockHashConsistency(t *testing.T) {
+	chain, cleanup := setupTestBlockchain(t)
+	defer cleanup()
+
+	txIDs := addTestBlocks(t, chain, 5)
+
+	mp := api.NewMempool(1000)
+	server := api.NewSimpleServer(chain, nil, mp, nil, "")
+
+	handler := server.Routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/tx/receipt/"+txIDs[0], nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	var resp api.TxReceiptResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	block, exists := chain.BlockByHash(resp.BlockHash)
+	if !exists {
+		t.Error("block should exist")
+	}
+
+	if block == nil {
+		t.Fatal("block should not be nil")
+	}
+
+	if block.Height != resp.BlockHeight {
+		t.Errorf("block height mismatch: receipt=%d, block=%d", resp.BlockHeight, block.Height)
+	}
+}

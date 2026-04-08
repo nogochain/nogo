@@ -58,7 +58,7 @@ func New(config *Config) *NogopowEngine {
 		running:      false,
 		hashrate:     0,
 		cache:        NewCache(config),
-		diffAdjuster: NewDifficultyAdjuster(config.Difficulty),
+		diffAdjuster: NewDifficultyAdjuster(config.ConsensusParams),
 	}
 
 	if config.ReuseObjects {
@@ -211,7 +211,7 @@ func (t *NogopowEngine) Finalize(chain ChainHeaderReader, header *Header, stateD
 	// Compute state root after applying all transactions
 	// This is the Merkle root of the state trie, representing the complete state
 	header.Root = stateDB.IntermediateRoot(true)
-	
+
 	// Note: Transaction execution and reward distribution occur at blockchain layer.
 	// The consensus engine only computes the cryptographic state commitment.
 }
@@ -442,8 +442,13 @@ func (t *NogopowEngine) SealHash(header *Header) Hash {
 
 // CalcDifficulty returns the difficulty for a new block
 func (t *NogopowEngine) CalcDifficulty(chain ChainHeaderReader, time uint64, parent *Header) *big.Int {
+	minDifficulty := uint64(1)
+	if t.config.ConsensusParams != nil {
+		minDifficulty = uint64(t.config.ConsensusParams.MinDifficulty)
+	}
+
 	if parent == nil || parent.Difficulty == nil {
-		return big.NewInt(int64(t.config.Difficulty.MinimumDifficulty))
+		return big.NewInt(int64(minDifficulty))
 	}
 
 	// Use difficulty adjuster for smooth adjustment

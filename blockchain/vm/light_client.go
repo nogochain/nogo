@@ -203,14 +203,12 @@ func (lc *LightClient) CreateMerkleProof(txHash, blockHash string) ([]string, er
 
 	var targetBlock *core.Block
 	for i := range lc.headersChain {
-		if lc.headersChain[i].Height != nil {
-			height := lc.headersChain[i].Height(uint64(i))
-			if blker, ok := lc.bc.(interface{ GetBlockByHeight(uint64) *core.Block }); ok {
-				candidate := blker.GetBlockByHeight(height)
-				if candidate != nil && fmt.Sprintf("%x", candidate.Hash) == blockHash {
-					targetBlock = candidate
-					break
-				}
+		height := uint64(i)
+		if blker, ok := lc.bc.(interface{ GetBlockByHeight(uint64) *core.Block }); ok {
+			candidate := blker.GetBlockByHeight(height)
+			if candidate != nil && fmt.Sprintf("%x", candidate.Hash) == blockHash {
+				targetBlock = candidate
+				break
 			}
 		}
 	}

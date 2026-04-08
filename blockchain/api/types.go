@@ -100,8 +100,8 @@ func NewMetricsServer(addr string, handler interface{}) *HTTPServer {
 	var h http.Handler
 	if handler != nil {
 		// Try to use provided handler
-		if h, ok := handler.(http.Handler); ok {
-			h = h
+		if handler, ok := handler.(http.Handler); ok {
+			h = handler
 		}
 	}
 	

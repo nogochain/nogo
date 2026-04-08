@@ -1,4 +1,5 @@
 package api
+
 import (
 	"bufio"
 	"bytes"
@@ -16,16 +17,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nogochain/nogo/blockchain/core"
 )
 
-type WSEvent struct {
-	Type string `json:"type"`
-	Data any    `json:"data,omitempty"`
-}
+// WSEvent is an alias for core.WSEvent for backward compatibility
+type WSEvent = core.WSEvent
 
-type EventSink interface {
-	Publish(WSEvent)
-}
+// EventSink is an alias for core.EventSink for backward compatibility
+type EventSink = core.EventSink
 
 type WSHub struct {
 	maxConns int

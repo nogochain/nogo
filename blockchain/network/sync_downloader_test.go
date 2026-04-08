@@ -125,6 +125,33 @@ func (m *mockBlockchain) SyncLoop() SyncLoopInterface {
 	return nil
 }
 
+func (m *mockBlockchain) GetContractManager() *core.ContractManager {
+	return nil
+}
+
+func (m *mockBlockchain) HasTransaction(txHash []byte) bool {
+	return false
+}
+
+func (m *mockBlockchain) GetBlockByHash(hash []byte) (*core.Block, bool) {
+	return nil, false
+}
+
+func (m *mockBlockchain) GetBlockByHashBytes(hash []byte) (*core.Block, bool) {
+	return nil, false
+}
+
+func (m *mockBlockchain) GetAllBlocks() ([]*core.Block, error) {
+	return nil, nil
+}
+
+type mockMiner struct{}
+
+func (m *mockMiner) InterruptMining()        {}
+func (m *mockMiner) ResumeMining()           {}
+func (m *mockMiner) IsVerifying() bool       { return false }
+func (m *mockMiner) OnBlockAdded()           {}
+
 type mockPeerAPI struct {
 	blocks map[string]*core.Block
 }
@@ -160,6 +187,10 @@ func (m *mockPeerAPI) FetchBlockByHash(ctx context.Context, peer string, hashHex
 	return &core.Block{Height: 1}, nil
 }
 
+func (m *mockPeerAPI) FetchBlockByHeight(ctx context.Context, peer string, height uint64) (*core.Block, error) {
+	return &core.Block{Height: height}, nil
+}
+
 func (m *mockPeerAPI) FetchAnyBlockByHash(ctx context.Context, hashHex string) (*core.Block, string, error) {
 	return nil, "", nil
 }
@@ -187,18 +218,23 @@ func TestBlockDownloader_New(t *testing.T) {
 	bc := &mockBlockchain{height: 100}
 	validator := &mockValidator{}
 	m := &metrics.Metrics{}
+	syncConfig := config.SyncConfig{
+		BatchSize:              500,
+		MaxConcurrentDownloads: 8,
+		MemoryThresholdMB:      1500,
+	}
 
-	downloader := NewBlockDownloader(pm, bc, validator, m)
+	downloader := NewBlockDownloader(pm, bc, validator, m, syncConfig)
 	if downloader == nil {
 		t.Fatal("expected downloader to be created")
 	}
 
 	config := downloader.GetConfig()
-	if config.BatchSize != DefaultBatchSize {
-		t.Errorf("expected batch size %d, got %d", DefaultBatchSize, config.BatchSize)
+	if config.BatchSize != 500 {
+		t.Errorf("expected batch size 500, got %d", config.BatchSize)
 	}
-	if config.MaxConcurrent != DefaultMaxConcurrent {
-		t.Errorf("expected max concurrent %d, got %d", DefaultMaxConcurrent, config.MaxConcurrent)
+	if config.MaxConcurrent != 8 {
+		t.Errorf("expected max concurrent 8, got %d", config.MaxConcurrent)
 	}
 }
 
@@ -207,8 +243,13 @@ func TestBlockDownloader_UpdateConfig(t *testing.T) {
 	bc := &mockBlockchain{height: 100}
 	validator := &mockValidator{}
 	m := &metrics.Metrics{}
+	syncConfig := config.SyncConfig{
+		BatchSize:              500,
+		MaxConcurrentDownloads: 8,
+		MemoryThresholdMB:      1500,
+	}
 
-	downloader := NewBlockDownloader(pm, bc, validator, m)
+	downloader := NewBlockDownloader(pm, bc, validator, m, syncConfig)
 
 	newConfig := DownloaderConfig{
 		BatchSize:     1000,

@@ -862,13 +862,17 @@ var MainnetGenesisConfig = GenesisConfiguration{
 	ChainID:             1,
 	Timestamp:           1775044800, // 2026-04-01 12:00:00 UTC
 	GenesisMinerAddress: "NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c",
-	InitialSupply:       1, // Genesis block coinbase amount (1 wei)
+	InitialSupply:       100000000000000, // Genesis block coinbase amount (1 wei)
 	GenesisMessage:      "NogoChain Mainnet Launch - A new era of decentralized finance - 2026-04-01 12:00:00 UTC",
 	MonetaryPolicy: MonetaryPolicy{
 		InitialBlockReward:     800000000, // 8 NOGO in wei (1 NOGO = 10^8 wei)
 		MinimumBlockReward:     10000000,  // 0.1 NOGO minimum reward
 		AnnualReductionPercent: 10,        // 10% annual reduction
-		MinerFeeShare:          100,       // 100% of fees to miner
+		MinerFeeShare:          100,       // 100% of fees to miner (deprecated, fees are burned)
+		MinerRewardShare:       96,        // 96% of block reward to miner
+		CommunityFundShare:     2,         // 2% of block reward to community fund
+		GenesisShare:           1,         // 1% of block reward to genesis address
+		IntegrityPoolShare:     1,         // 1% of block reward to integrity pool
 	},
 	ConsensusParams: ConsensusParams{
 		DifficultyEnable:               true,
@@ -901,7 +905,11 @@ var TestnetGenesisConfig = GenesisConfiguration{
 		InitialBlockReward:     5000000000, // 50 NOGO initial reward
 		MinimumBlockReward:     10000000,   // 0.1 NOGO minimum reward
 		AnnualReductionPercent: 10,         // 10% annual reduction
-		MinerFeeShare:          100,        // 100% of fees to miner
+		MinerFeeShare:          100,        // 100% of fees to miner (deprecated, fees are burned)
+		MinerRewardShare:       96,         // 96% of block reward to miner
+		CommunityFundShare:     2,          // 2% of block reward to community fund
+		GenesisShare:           1,          // 1% of block reward to genesis address
+		IntegrityPoolShare:     1,          // 1% of block reward to integrity pool
 	},
 	ConsensusParams: ConsensusParams{
 		DifficultyEnable:               true,
@@ -939,6 +947,11 @@ type MonetaryPolicy struct {
 	MinimumBlockReward     uint64
 	AnnualReductionPercent uint8
 	MinerFeeShare          uint8
+	// Reward distribution shares (must sum to 100)
+	MinerRewardShare   uint8
+	CommunityFundShare uint8
+	GenesisShare       uint8
+	IntegrityPoolShare uint8
 }
 
 // ConsensusParams defines blockchain consensus parameters

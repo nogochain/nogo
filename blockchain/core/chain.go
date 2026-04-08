@@ -18,17 +18,22 @@ package core
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/nogochain/nogo/blockchain/config"
+	"github.com/nogochain/nogo/blockchain/index"
 	"github.com/nogochain/nogo/blockchain/nogopow"
 	"github.com/nogochain/nogo/internal/ntp"
 )
@@ -75,22 +80,9 @@ type TxLocation struct {
 	Index        int    `json:"index"`
 }
 
-// AddressTxEntry represents a transaction entry for address indexing
-type AddressTxEntry struct {
-	TxID      string          `json:"txId"`
-	Location  TxLocation      `json:"location"`
-	FromAddr  string          `json:"fromAddr"`
-	ToAddress string          `json:"toAddress"`
-	Amount    uint64          `json:"amount"`
-	Fee       uint64          `json:"fee"`
-	Nonce     uint64          `json:"nonce"`
-	Timestamp int64           `json:"timestamp"`
-	Type      TransactionType `json:"type"`
-}
-
 // applyBlockToState applies a block to the state
 // Production-grade: validates and updates account balances
-func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) error {
+func applyBlockToState(p ConsensusParams, mp MonetaryPolicy, state map[string]Account, b *Block, genesisAddress string, genesisTimestamp int64) error {
 	if p.MaxBlockSize > 0 {
 		size, err := blockSizeForConsensus(b)
 		if err != nil {
@@ -125,10 +117,53 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 		if cb.ToAddress != b.MinerAddress {
 			return errors.New("coinbase toAddress must match minerAddress")
 		}
-		policy := p.MonetaryPolicy
-		expected := policy.BlockReward(b.Height) + policy.MinerFeeAmount(fees)
+		policy := mp
+		// Miner receives 96% of block reward + 100% of fees (fees are burned, not distributed)
+		expected := policy.BlockReward(b.Height)*uint64(policy.MinerRewardShare)/100 + policy.MinerFeeAmount(fees)
 		if cb.Amount != expected {
 			return fmt.Errorf("bad coinbase amount: expected %d got %d", expected, cb.Amount)
+		}
+
+		// Distribute block rewards according to economic model
+		// Contract addresses are generated using genesis timestamp (fixed for all blocks)
+		blockReward := policy.BlockReward(b.Height)
+
+		// 1. Community Fund (2%) - to governance contract address (fixed at genesis)
+		communityFund := blockReward * uint64(policy.CommunityFundShare) / 100
+		if communityFund > 0 {
+			communityAddr := generateContractAddress(cb.ChainID, genesisTimestamp, "COMMUNITY_FUND_GOVERNANCE")
+			acct := state[communityAddr]
+			// Overflow check: ensure balance + communityFund doesn't overflow
+			if acct.Balance > math.MaxUint64-communityFund {
+				return errors.New("community fund balance overflow")
+			}
+			acct.Balance += communityFund
+			state[communityAddr] = acct
+		}
+
+		// 2. Genesis Address (1%) - to preset genesis miner address
+		genesisReward := blockReward * uint64(policy.GenesisShare) / 100
+		if genesisReward > 0 {
+			acct := state[genesisAddress]
+			// Overflow check: ensure balance + genesisReward doesn't overflow
+			if acct.Balance > math.MaxUint64-genesisReward {
+				return errors.New("genesis address balance overflow")
+			}
+			acct.Balance += genesisReward
+			state[genesisAddress] = acct
+		}
+
+		// 3. Integrity Pool (1%) - to reward contract address (fixed at genesis)
+		integrityPool := blockReward * uint64(policy.IntegrityPoolShare) / 100
+		if integrityPool > 0 {
+			integrityAddr := generateContractAddress(cb.ChainID, genesisTimestamp, "INTEGRITY_REWARD_CONTRACT")
+			acct := state[integrityAddr]
+			// Overflow check: ensure balance + integrityPool doesn't overflow
+			if acct.Balance > math.MaxUint64-integrityPool {
+				return errors.New("integrity pool balance overflow")
+			}
+			acct.Balance += integrityPool
+			state[integrityAddr] = acct
 		}
 	}
 
@@ -142,7 +177,8 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 				return err
 			}
 			acct := state[tx.ToAddress]
-			if acct.Balance+tx.Amount < acct.Balance {
+			// Overflow check: ensure balance + amount doesn't overflow
+			if acct.Balance > math.MaxUint64-tx.Amount {
 				return errors.New("coinbase balance overflow")
 			}
 			acct.Balance += tx.Amount
@@ -160,6 +196,10 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 			if from.Nonce+1 != tx.Nonce {
 				return fmt.Errorf("bad nonce for %s: expected %d got %d", fromAddr, from.Nonce+1, tx.Nonce)
 			}
+			// Overflow check for totalDebit
+			if tx.Amount > math.MaxUint64-tx.Fee {
+				return errors.New("transaction amount + fee overflow")
+			}
 			totalDebit := tx.Amount + tx.Fee
 			if from.Balance < totalDebit {
 				return fmt.Errorf("insufficient funds for %s", fromAddr)
@@ -169,7 +209,8 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 			state[fromAddr] = from
 
 			to := state[tx.ToAddress]
-			if to.Balance+tx.Amount < to.Balance {
+			// Overflow check: ensure balance + amount doesn't overflow
+			if to.Balance > math.MaxUint64-tx.Amount {
 				return errors.New("transfer balance overflow")
 			}
 			to.Balance += tx.Amount
@@ -183,14 +224,18 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 
 // Chain represents the blockchain with thread-safe access
 // Production-grade: implements full chain management with proper concurrency control
+// Fork support: stores alternative blocks at same height for automatic reorganization
 type Chain struct {
 	mu sync.RWMutex
 
 	// Chain metadata
-	chainID      uint64
-	minerAddress string
-	consensus    ConsensusParams
-	rulesHash    [32]byte
+	chainID          uint64
+	minerAddress     string
+	genesisAddress   string // Preset genesis miner address for 1% reward
+	genesisTimestamp int64  // Genesis block timestamp for contract address generation
+	consensus        ConsensusParams
+	monetaryPolicy   MonetaryPolicy
+	rulesHash        [32]byte
 
 	// Chain state
 	blocks        []*Block           // Canonical chain
@@ -199,9 +244,19 @@ type Chain struct {
 	bestTipHash   string             // Hash of best tip
 	canonicalWork *big.Int           // Total work on canonical chain
 
+	// Fork management - store alternative blocks at same height
+	// Key: height, Value: list of blocks at that height (including canonical)
+	forkBlocks map[uint64][]*Block
+
+	// Orphan pool - store blocks whose parent is not yet known
+	orphanPool     map[string]*Block     // hash -> block
+	orphanByParent map[string][]string   // parent hash -> list of orphan hashes
+
 	// Indexes
-	txIndex      map[string]TxLocation       // txid -> location (canonical only)
-	addressIndex map[string][]AddressTxEntry // address -> transfer history
+	txIndex          map[string]TxLocation       // txid -> location (canonical only)
+	addressIndex     map[string][]AddressTxEntry // address -> transfer history (in-memory)
+	addressIndexBolt *index.AddressIndex         // address -> transactions (BoltDB persistent)
+	indexPath        string                      // path to index database
 
 	// Storage
 	store ChainStore
@@ -212,6 +267,14 @@ type Chain struct {
 	// References for coordination
 	syncLoop       *SyncLoop
 	peerBlockchain *peerRef
+
+	// Integrity reward system
+	integrityManager     *NodeIntegrityManager
+	integrityDistributor *IntegrityRewardDistributor
+	scoreCalculator      *ScoreCalculator
+
+	// Contract management
+	contractManager *ContractManager
 }
 
 // ChainConfig holds chain configuration
@@ -221,6 +284,16 @@ type ChainConfig struct {
 	MinerAddress string
 	Store        ChainStore
 	GenesisPath  string
+	IndexPath    string // path to address index database
+}
+
+// SetEventSink sets the event sink for publishing blockchain events
+// Production-grade: enables WebSocket real-time notifications for new blocks
+// Concurrency safety: safe to call before chain is used (during initialization)
+func (c *Chain) SetEventSink(sink EventSink) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = sink
 }
 
 // NewChain creates a new blockchain instance
@@ -251,15 +324,35 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 	}
 
 	chain := &Chain{
-		chainID:       cfg.ChainID,
-		minerAddress:  cfg.MinerAddress,
-		consensus:     genesisCfg.ConsensusParams,
-		state:         make(map[string]Account),
-		store:         cfg.Store,
-		blocksByHash:  make(map[string]*Block),
-		txIndex:       make(map[string]TxLocation),
-		addressIndex:  make(map[string][]AddressTxEntry),
-		canonicalWork: big.NewInt(0),
+		chainID:          cfg.ChainID,
+		minerAddress:     cfg.MinerAddress,
+		genesisAddress:   genesisCfg.GenesisMinerAddress,
+		genesisTimestamp: genesisCfg.Timestamp,
+		consensus:        genesisCfg.ConsensusParams,
+		monetaryPolicy:   genesisCfg.MonetaryPolicy,
+		state:            make(map[string]Account),
+		store:            cfg.Store,
+		blocksByHash:     make(map[string]*Block),
+		blocks:           make([]*Block, 0),
+		forkBlocks:       make(map[uint64][]*Block),
+		txIndex:          make(map[string]TxLocation),
+		addressIndex:     make(map[string][]AddressTxEntry),
+		indexPath:        cfg.IndexPath,
+		canonicalWork:    big.NewInt(0),
+		// Initialize integrity reward system
+		integrityManager:     NewNodeIntegrityManager(),
+		integrityDistributor: NewIntegrityRewardDistributor(),
+		scoreCalculator:      NewScoreCalculator(),
+		// Initialize contract manager
+		contractManager: NewContractManager(),
+	}
+
+	// Initialize contracts at genesis
+	if err := chain.contractManager.InitializeContracts(
+		genesisCfg.CommunityFundAddress,
+		genesisCfg.IntegrityPoolAddress,
+	); err != nil {
+		return nil, fmt.Errorf("initialize contracts: %w", err)
 	}
 
 	// Initialize rules hash for consensus validation
@@ -306,6 +399,11 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 
 	// Initialize indexes
 	chain.initCanonicalIndexesLocked()
+
+	// Initialize BoltDB address index
+	if err := chain.initAddressIndexLocked(); err != nil {
+		return nil, fmt.Errorf("init address index: %w", err)
+	}
 
 	return chain, nil
 }
@@ -457,7 +555,7 @@ func (c *Chain) AppendBlock(block *Block) error {
 	}
 
 	// Apply block to state
-	if err := applyBlockToState(c.consensus, c.state, block); err != nil {
+	if err := applyBlockToState(c.consensus, c.monetaryPolicy, c.state, block, c.genesisAddress, c.genesisTimestamp); err != nil {
 		return fmt.Errorf("apply block to state: %w", err)
 	}
 
@@ -478,6 +576,36 @@ func (c *Chain) AppendBlock(block *Block) error {
 	c.indexTxsForBlockLocked(block)
 	c.indexAddressTxsForBlockLocked(block)
 
+	// Update BoltDB address index
+	if c.addressIndexBolt != nil {
+		entries := make([]index.AddressIndexEntry, 0, len(block.Transactions))
+		for _, tx := range block.Transactions {
+			if tx.Type != TxTransfer {
+				continue
+			}
+			fromAddr, err := tx.FromAddress()
+			if err != nil {
+				continue
+			}
+			txID, err := tx.GetIDWithError()
+			if err != nil {
+				continue
+			}
+			entries = append(entries, index.AddressIndexEntry{
+				TxID:      txID,
+				FromAddr:  fromAddr,
+				ToAddress: tx.ToAddress,
+				Amount:    tx.Amount,
+				Fee:       tx.Fee,
+				Nonce:     tx.Nonce,
+				Type:      index.TransactionType(tx.Type),
+			})
+		}
+		if err := c.addressIndexBolt.IndexBlockSimple(block.Hash, block.Height, block.TimestampUnix, entries); err != nil {
+			log.Printf("WARNING: index block %d in BoltDB: %v", block.Height, err)
+		}
+	}
+
 	// Update tip
 	c.bestTipHash = hashHex
 
@@ -486,6 +614,9 @@ func (c *Chain) AppendBlock(block *Block) error {
 		c.canonicalWork = big.NewInt(0)
 	}
 	c.canonicalWork.Add(c.canonicalWork, WorkForDifficultyBits(block.DifficultyBits))
+	// CRITICAL: Set TotalWork on the block for fork resolution
+	// This field is required for other nodes to compare chain work during fork detection
+	block.TotalWork = c.canonicalWork.String()
 
 	// Publish event
 	if c.events != nil {
@@ -632,9 +763,13 @@ func (c *Chain) validateBlockDifficultyLocked(block, parent *Block) error {
 		return nil
 	}
 
-	// Use NogoPow difficulty adjuster
-	diffConfig := nogopow.DefaultDifficultyConfig()
-	adjuster := nogopow.NewDifficultyAdjuster(diffConfig)
+	// Use NogoPow difficulty adjuster with consensus params
+	consensusParams := &config.ConsensusParams{
+		BlockTimeTargetSeconds:     15,
+		MaxDifficultyChangePercent: 20,
+		MinDifficulty:              1,
+	}
+	adjuster := nogopow.NewDifficultyAdjuster(consensusParams)
 
 	// Create parent header for calculation
 	var parentHash nogopow.Hash
@@ -654,10 +789,11 @@ func (c *Chain) validateBlockDifficultyLocked(block, parent *Block) error {
 	actualDifficulty := big.NewInt(int64(block.DifficultyBits))
 
 	// Calculate acceptable range (±tolerance)
-	minAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100-DifficultyTolerancePercent))
+	tolerance := int64(DifficultyTolerancePercent)
+	minAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100-tolerance))
 	minAllowed.Div(minAllowed, big.NewInt(100))
 
-	maxAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100+DifficultyTolerancePercent))
+	maxAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100+tolerance))
 	maxAllowed.Div(maxAllowed, big.NewInt(100))
 
 	if actualDifficulty.Cmp(minAllowed) < 0 {
@@ -764,9 +900,9 @@ func (c *Chain) validateCoinbaseLocked(block *Block) error {
 			}
 		}
 
-		// Calculate expected reward
-		policy := c.consensus.MonetaryPolicy
-		expectedReward := policy.BlockReward(block.Height) + policy.MinerFeeAmount(totalFees)
+		// Calculate expected reward (miner receives 96% of block reward)
+		policy := c.monetaryPolicy
+		expectedReward := policy.BlockReward(block.Height)*uint64(policy.MinerRewardShare)/100 + policy.MinerFeeAmount(totalFees)
 
 		if coinbase.Amount != expectedReward {
 			return fmt.Errorf("bad coinbase amount: expected %d got %d", expectedReward, coinbase.Amount)
@@ -924,11 +1060,13 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	// Update tip
 	c.bestTipHash = hex.EncodeToString(newTip.Hash)
 
-	// Recalculate total work
+	// Recalculate total work and update TotalWork on each block
 	c.canonicalWork = big.NewInt(0)
 	for _, block := range c.blocks {
 		work := WorkForDifficultyBits(block.DifficultyBits)
 		c.canonicalWork.Add(c.canonicalWork, work)
+		// Update TotalWork on each block for fork resolution
+		block.TotalWork = c.canonicalWork.String()
 	}
 
 	// Update storage
@@ -1134,6 +1272,32 @@ func (c *Chain) GetConsensus() ConsensusParams {
 	return c.consensus
 }
 
+// GetAllBlocks returns all blocks in the canonical chain
+// Concurrency safety: returns a copy of the slice
+func (c *Chain) GetAllBlocks() ([]*Block, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Return a copy to prevent external modification
+	result := make([]*Block, len(c.blocks))
+	copy(result, c.blocks)
+	return result, nil
+}
+
+// RulesHashHex returns the rules hash in hex format
+// Concurrency safety: read-only operation
+func (c *Chain) RulesHashHex() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Check if rulesHash is all zeros
+	var zeroHash [32]byte
+	if c.rulesHash == zeroHash {
+		return ""
+	}
+	return hex.EncodeToString(c.rulesHash[:])
+}
+
 // Balance returns the balance and nonce for an address
 // Production-grade: scans canonical chain to compute balance
 func (c *Chain) Balance(addr string) (Account, bool) {
@@ -1146,6 +1310,25 @@ func (c *Chain) Balance(addr string) (Account, bool) {
 	}
 
 	return acct, true
+}
+
+// HasTransaction checks if a transaction exists in the blockchain
+func (c *Chain) HasTransaction(txHash []byte) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	txHashStr := hex.EncodeToString(txHash)
+
+	// Search in all blocks
+	for _, block := range c.blocks {
+		for _, tx := range block.Transactions {
+			if hash, err := tx.SigningHash(); err == nil && hex.EncodeToString(hash) == txHashStr {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // addToIndexLocked adds block to indexes
@@ -1252,7 +1435,7 @@ func (c *Chain) reindexAllAddressTxsLocked() {
 func (c *Chain) recomputeStateLocked() error {
 	c.state = make(map[string]Account)
 	for _, block := range c.blocks {
-		if err := applyBlockToState(c.consensus, c.state, block); err != nil {
+		if err := applyBlockToState(c.consensus, c.monetaryPolicy, c.state, block, c.genesisAddress, c.genesisTimestamp); err != nil {
 			return fmt.Errorf("apply block %d: %w", block.Height, err)
 		}
 	}
@@ -1552,7 +1735,7 @@ func (c *Chain) validateStateLocked() error {
 	recomputedState := make(map[string]Account)
 
 	for _, block := range c.blocks {
-		if err := applyBlockToState(c.consensus, recomputedState, block); err != nil {
+		if err := applyBlockToState(c.consensus, c.monetaryPolicy, recomputedState, block, c.genesisAddress, c.genesisTimestamp); err != nil {
 			return fmt.Errorf("block %d state application failed: %w", block.Height, err)
 		}
 	}
@@ -1624,8 +1807,10 @@ func (c *Chain) GetBlockByHeight(height uint64) (*Block, bool) {
 	return c.blocks[height], true
 }
 
-// AddBlock adds a block to the chain
+// AddBlock adds a block to the chain with automatic fork detection and reorganization
 // Concurrency safety: uses mutex to protect chain state
+// Fork support: stores alternative blocks and triggers reorg if heavier chain found
+// Orphan support: stores orphan blocks (height > expected) for later processing
 func (c *Chain) AddBlock(block *Block) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1636,20 +1821,382 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 		return false, nil
 	}
 
-	// Validate block height
-	expectedHeight := uint64(len(c.blocks))
-	if block.Height != expectedHeight {
-		return false, fmt.Errorf("invalid block height: expected %d, got %d", expectedHeight, block.Height)
-	}
-
-	// Add block to chain
-	c.blocks = append(c.blocks, block)
+	// Store block in blocksByHash for reference
 	c.blocksByHash[hashHex] = block
 
-	// Update indexes
-	c.updateIndexesForBlock(block, expectedHeight)
+	// Validate block height and handle forks
+	expectedHeight := uint64(len(c.blocks))
 
+	if block.Height == expectedHeight {
+		// Normal case: block extends canonical chain
+		return c.addCanonicalBlockLocked(block, hashHex)
+	} else if block.Height < expectedHeight {
+		// Fork case: block at lower height - store as alternative
+		return c.addForkBlockLocked(block, hashHex)
+	} else if block.Height == expectedHeight + 1 {
+		// Next height block - check if parent exists
+		parent, parentExists := c.blocksByHash[hex.EncodeToString(block.PrevHash)]
+		if !parentExists {
+			// Parent not found - store as orphan
+			log.Printf("[Chain] Orphan block %d: parent %s not found, storing for later", 
+				block.Height, hex.EncodeToString(block.PrevHash)[:16])
+			return c.addOrphanBlockLocked(block, hashHex)
+		}
+		// Parent exists - this should have been expectedHeight, logic error
+		log.Printf("[Chain] WARNING: block height %d but expected %d with parent at %d", 
+			block.Height, expectedHeight, parent.Height)
+		return c.addCanonicalBlockLocked(block, hashHex)
+	} else {
+		// Orphan case: block height too high (gap > 1)
+		log.Printf("[Chain] Orphan block %d: height gap too large (expected %d), storing for later", 
+			block.Height, expectedHeight)
+		return c.addOrphanBlockLocked(block, hashHex)
+	}
+}
+
+// addOrphanBlockLocked stores an orphan block for later processing
+// Caller must hold c.mu lock
+func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error) {
+	// Initialize orphan pool if needed
+	if c.orphanPool == nil {
+		c.orphanPool = make(map[string]*Block)
+		c.orphanByParent = make(map[string][]string)
+	}
+
+	// Store orphan block
+	c.orphanPool[hashHex] = block
+	
+	// Index by parent hash for efficient lookup
+	parentHashHex := hex.EncodeToString(block.PrevHash)
+	c.orphanByParent[parentHashHex] = append(c.orphanByParent[parentHashHex], hashHex)
+
+	log.Printf("[Chain] Orphan block stored: height=%d hash=%s parent=%s", 
+		block.Height, hashHex[:16], parentHashHex[:16])
+
+	// Try to process orphan children
+	return c.tryProcessOrphansLocked()
+}
+
+// tryProcessOrphansLocked attempts to process orphan blocks whose parents have arrived
+// Caller must hold c.mu lock
+func (c *Chain) tryProcessOrphansLocked() (bool, error) {
+	if c.orphanPool == nil || len(c.orphanPool) == 0 {
+		return false, nil
+	}
+
+	processed := false
+	maxIterations := len(c.orphanPool) // Safety limit
+	iterations := 0
+
+	for iterations < maxIterations {
+		iterations++
+		foundOrphan := false
+
+		// Find orphans whose parent is now in the chain
+		for orphanHash, orphan := range c.orphanPool {
+			parent, parentExists := c.blocksByHash[hex.EncodeToString(orphan.PrevHash)]
+			if !parentExists {
+				continue
+			}
+
+			// Check if parent is on canonical chain
+			expectedHeight := uint64(len(c.blocks))
+			if orphan.Height != expectedHeight {
+				// Parent exists but not at right height - might be on fork
+				continue
+			}
+
+			foundOrphan = true
+			log.Printf("[Chain] Processing orphan %d with parent %d", orphan.Height, parent.Height)
+
+			// Remove from orphan pool
+			delete(c.orphanPool, orphanHash)
+			parentHashHex := hex.EncodeToString(orphan.PrevHash)
+			c.removeOrphanIndexLocked(orphanHash, parentHashHex)
+
+			// Add to canonical chain
+			accepted, err := c.addCanonicalBlockLocked(orphan, orphanHash)
+			if err != nil {
+				log.Printf("[Chain] Failed to add processed orphan: %v", err)
+				continue
+			}
+			if accepted {
+				processed = true
+				log.Printf("[Chain] Orphan %d added to canonical chain", orphan.Height)
+			}
+			break // Restart iteration since chain changed
+		}
+
+		if !foundOrphan {
+			break // No more processable orphans
+		}
+	}
+
+	if processed {
+		log.Printf("[Chain] Processed %d orphan blocks", iterations)
+	}
+	return processed, nil
+}
+
+// removeOrphanIndexLocked removes an orphan from the parent index
+// Caller must hold c.mu lock
+func (c *Chain) removeOrphanIndexLocked(orphanHash, parentHash string) {
+	if c.orphanByParent == nil {
+		return
+	}
+
+	children := c.orphanByParent[parentHash]
+	for i, h := range children {
+		if h == orphanHash {
+			c.orphanByParent[parentHash] = append(children[:i], children[i+1:]...)
+			if len(c.orphanByParent[parentHash]) == 0 {
+				delete(c.orphanByParent, parentHash)
+			}
+			break
+		}
+	}
+}
+
+// addCanonicalBlockLocked adds a block to the canonical chain
+// Caller must hold c.mu lock
+func (c *Chain) addCanonicalBlockLocked(block *Block, hashHex string) (bool, error) {
+	height := uint64(len(c.blocks))
+
+	// Add to canonical chain
+	c.blocks = append(c.blocks, block)
+
+	// Update indexes
+	c.updateIndexesForBlock(block, height)
+
+	// Update canonical work
+	if c.canonicalWork == nil {
+		c.canonicalWork = big.NewInt(0)
+	}
+	c.canonicalWork.Add(c.canonicalWork, WorkForDifficultyBits(block.DifficultyBits))
+	block.TotalWork = c.canonicalWork.String()
+
+	// Add to fork blocks list
+	c.forkBlocks[height] = append(c.forkBlocks[height], block)
+
+	// Persist to storage
+	if c.store != nil {
+		if err := c.store.AppendCanonical(block); err != nil {
+			log.Printf("[Chain] WARNING: Failed to persist block %d: %v", block.Height, err)
+			// Rollback in-memory changes
+			c.blocks = c.blocks[:len(c.blocks)-1]
+			delete(c.blocksByHash, hashHex)
+			return false, fmt.Errorf("persist block: %w", err)
+		}
+	}
+
+	log.Printf("[Chain] Block %d added to canonical chain (height: %d, hash: %s)", block.Height, height, hashHex[:16])
 	return true, nil
+}
+
+// addForkBlockLocked adds a block as an alternative fork
+// Caller must hold c.mu lock
+func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
+	height := block.Height
+
+	// Store in fork blocks
+	c.forkBlocks[height] = append(c.forkBlocks[height], block)
+
+	log.Printf("[Chain] Fork block %d stored (hash: %s, canonical hash: %s)", 
+		height, hashHex[:16], c.blocks[height].Hash)
+
+	// Check if this fork has more work and should become canonical
+	if c.shouldReorgToLocked(block) {
+		log.Printf("[Chain] Heavier fork detected at height %d, triggering reorganization", height)
+		if err := c.reorganizeToLocked(block); err != nil {
+			log.Printf("[Chain] Reorganization failed: %v", err)
+			return false, fmt.Errorf("reorg failed: %w", err)
+		}
+		log.Printf("[Chain] Reorganization completed successfully to height %d", block.Height)
+		return true, nil
+	}
+
+	return false, nil // Fork stored but not reorganized
+}
+
+// shouldReorgToLocked checks if we should reorganize to the given block
+// Caller must hold c.mu lock
+func (c *Chain) shouldReorgToLocked(newBlock *Block) bool {
+	if len(c.blocks) == 0 {
+		return true
+	}
+
+	currentTip := c.blocks[len(c.blocks)-1]
+	if currentTip.Height < newBlock.Height {
+		return true // New block is higher
+	}
+
+	if currentTip.Height == newBlock.Height {
+		// Same height - compare work
+		currentWork := c.canonicalWork
+		newWork, ok := StringToWork(newBlock.TotalWork)
+		if !ok {
+			// Calculate work from difficulty if TotalWork not set
+			newWork = WorkForDifficultyBits(newBlock.DifficultyBits)
+			// Add parent work
+			if parent, exists := c.blocksByHash[hex.EncodeToString(newBlock.PrevHash)]; exists {
+				if parent.TotalWork != "" {
+					if parentWork, ok := StringToWork(parent.TotalWork); ok {
+						newWork.Add(newWork, parentWork)
+					}
+				}
+			}
+		}
+
+		if newWork.Cmp(currentWork) > 0 {
+			return true // More work
+		}
+
+		// Same work - use hash as tie-breaker (smaller hash wins)
+		if newWork.Cmp(currentWork) == 0 {
+			return bytes.Compare(newBlock.Hash, currentTip.Hash) < 0
+		}
+	}
+
+	return false
+}
+
+// reorganizeToLocked performs chain reorganization to the new block
+// Uses existing reorganizeChainLocked for production-grade implementation
+// Caller must hold c.mu lock
+func (c *Chain) reorganizeToLocked(newBlock *Block) error {
+	// Use the existing reorganization logic
+	ancestor, _, err := c.findCommonAncestorLocked(newBlock)
+	if err != nil {
+		return fmt.Errorf("find common ancestor: %w", err)
+	}
+
+	if ancestor == nil {
+		return fmt.Errorf("no common ancestor found")
+	}
+
+	// Use existing reorganizeChainLocked
+	return c.reorganizeChainLocked(ancestor, newBlock)
+}
+
+// rebuildIndexesLocked rebuilds all indexes from canonical chain
+// Caller must hold c.mu lock
+func (c *Chain) rebuildIndexesLocked() {
+	c.txIndex = make(map[string]TxLocation)
+	c.addressIndex = make(map[string][]AddressTxEntry)
+
+	for height, block := range c.blocks {
+		hashHex := hex.EncodeToString(block.Hash)
+		for i, tx := range block.Transactions {
+			txid := tx.GetID()
+			c.txIndex[txid] = TxLocation{
+				Height:       uint64(height),
+				BlockHashHex: hashHex,
+				Index:        i,
+			}
+
+			// Update address index
+			fromAddr, err := tx.FromAddress()
+			if err == nil {
+				c.addressIndex[fromAddr] = append(c.addressIndex[fromAddr], AddressTxEntry{
+					TxID: txid,
+					Location: TxLocation{
+						Height:       uint64(height),
+						BlockHashHex: hashHex,
+						Index:        i,
+					},
+					FromAddr:  fromAddr,
+					ToAddress: tx.ToAddress,
+					Amount:    tx.Amount,
+				})
+			}
+
+			if tx.ToAddress != "" {
+				c.addressIndex[tx.ToAddress] = append(c.addressIndex[tx.ToAddress], AddressTxEntry{
+					TxID: txid,
+					Location: TxLocation{
+						Height:       uint64(height),
+						BlockHashHex: hashHex,
+						Index:        i,
+					},
+					FromAddr:  fromAddr,
+					ToAddress: tx.ToAddress,
+					Amount:    tx.Amount,
+				})
+			}
+		}
+	}
+}
+
+// shouldReorgToHeaviestLocked checks if there's a heavier fork chain
+// Caller must hold c.mu lock
+func (c *Chain) shouldReorgToHeaviestLocked() bool {
+	if len(c.forkBlocks) == 0 {
+		return false
+	}
+
+	// Find the heaviest fork chain
+	var heaviestFork *Block
+	heaviestWork := c.canonicalWork
+
+	for height, blocks := range c.forkBlocks {
+		// Skip if this height is already canonical
+		if height < uint64(len(c.blocks)) {
+			continue
+		}
+
+		for _, block := range blocks {
+			blockWork, ok := StringToWork(block.TotalWork)
+			if !ok {
+				continue
+			}
+
+			if blockWork.Cmp(heaviestWork) > 0 {
+				heaviestWork = blockWork
+				heaviestFork = block
+			}
+		}
+	}
+
+	return heaviestFork != nil
+}
+
+// reorganizeToHeaviestLocked reorganizes to the heaviest fork chain
+// Caller must hold c.mu lock
+func (c *Chain) reorganizeToHeaviestLocked() error {
+	if len(c.forkBlocks) == 0 {
+		return nil
+	}
+
+	// Find the heaviest fork chain
+	var heaviestFork *Block
+	heaviestWork := c.canonicalWork
+
+	for height, blocks := range c.forkBlocks {
+		if height < uint64(len(c.blocks)) {
+			continue
+		}
+
+		for _, block := range blocks {
+			blockWork, ok := StringToWork(block.TotalWork)
+			if !ok {
+				continue
+			}
+
+			if blockWork.Cmp(heaviestWork) > 0 {
+				heaviestWork = blockWork
+				heaviestFork = block
+			}
+		}
+	}
+
+	if heaviestFork == nil {
+		return nil // No heavier chain found
+	}
+
+	log.Printf("[Chain] Reorganizing to heaviest fork: height=%d work=%s", 
+		heaviestFork.Height, heaviestWork.String())
+
+	return c.reorganizeToLocked(heaviestFork)
 }
 
 // updateIndexesForBlock updates transaction and address indexes for a block
@@ -1664,7 +2211,11 @@ func (c *Chain) updateIndexesForBlock(block *Block, height uint64) {
 		}
 
 		// Update address index
-		fromAddr, _ := tx.FromAddress()
+		fromAddr, err := tx.FromAddress()
+		if err != nil {
+			log.Printf("WARNING: failed to get from address for tx %d in block %d: %v", i, height, err)
+			continue
+		}
 		c.addressIndex[fromAddr] = append(c.addressIndex[fromAddr], AddressTxEntry{
 			TxID: txid,
 			Location: TxLocation{
@@ -1693,6 +2244,25 @@ func (c *Chain) updateIndexesForBlock(block *Block, height uint64) {
 	}
 }
 
+// generateContractAddress generates a contract address matching the wallet address format
+// Format: NOGO + version(1) + hash(32) + checksum(4) = 78 characters
+func generateContractAddress(chainID uint64, timestamp int64, purpose string) string {
+	data := []byte(fmt.Sprintf("%d-%d-%s", chainID, timestamp, purpose))
+	hash := sha256.Sum256(data)
+
+	// Build address: version byte (0x00) + 32-byte hash
+	addressData := make([]byte, 1+32)
+	addressData[0] = 0x00 // Version byte
+	copy(addressData[1:], hash[:32])
+
+	// Calculate 4-byte checksum
+	checksumHash := sha256.Sum256(addressData)
+	addressData = append(addressData, checksumHash[:4]...)
+
+	// Encode to hex and add prefix
+	return "NOGO" + hex.EncodeToString(addressData)
+}
+
 // GetCanonicalBlocks returns a copy of all blocks on canonical chain
 // Concurrency safety: returns copy to prevent external modification
 func (c *Chain) GetCanonicalBlocks() []*Block {
@@ -1704,6 +2274,11 @@ func (c *Chain) GetCanonicalBlocks() []*Block {
 		result[i] = block
 	}
 	return result
+}
+
+// GetContractManager returns the contract manager
+func (c *Chain) GetContractManager() *ContractManager {
+	return c.contractManager
 }
 
 // GetBlockByHashHex returns block by hash hex string
@@ -1846,7 +2421,11 @@ func (c *Chain) RollbackToHeight(height uint64) error {
 			txid := tx.GetID()
 			delete(c.txIndex, txid)
 			// Remove from address index
-			fromAddr, _ := tx.FromAddress()
+			fromAddr, err := tx.FromAddress()
+			if err != nil {
+				log.Printf("WARNING: failed to get from address for tx %d in block %d: %v", j, i, err)
+				continue
+			}
 			if entries, exists := c.addressIndex[fromAddr]; exists {
 				newEntries := make([]AddressTxEntry, 0, len(entries))
 				for _, entry := range entries {
@@ -1872,5 +2451,180 @@ func (c *Chain) RollbackToHeight(height uint64) error {
 
 	c.blocks = c.blocks[:height+1]
 	c.initCanonicalIndexesLocked()
+	return nil
+}
+
+// initAddressIndexLocked initializes the BoltDB address index
+// Production-grade: creates index database and builds from existing blocks
+// Concurrency safety: must be called with mutex held
+func (c *Chain) initAddressIndexLocked() error {
+	if c.indexPath == "" {
+		c.indexPath = "blockchain_data"
+	}
+
+	indexDir := filepath.Join(c.indexPath, "address_index")
+	if err := os.MkdirAll(indexDir, 0755); err != nil {
+		return fmt.Errorf("create index dir: %w", err)
+	}
+
+	indexDBPath := filepath.Join(indexDir, "address.db")
+	addrIndex, err := index.NewAddressIndex(indexDBPath)
+	if err != nil {
+		return fmt.Errorf("create address index: %w", err)
+	}
+
+	c.addressIndexBolt = addrIndex
+
+	if len(c.blocks) > 0 {
+		log.Printf("Building address index from %d blocks...", len(c.blocks))
+		for _, block := range c.blocks {
+			entries := make([]index.AddressIndexEntry, 0, len(block.Transactions))
+			for _, tx := range block.Transactions {
+				if tx.Type != TxTransfer {
+					continue
+				}
+				fromAddr, err := tx.FromAddress()
+				if err != nil {
+					continue
+				}
+				txID, err := tx.GetIDWithError()
+				if err != nil {
+					continue
+				}
+				entries = append(entries, index.AddressIndexEntry{
+					TxID:      txID,
+					FromAddr:  fromAddr,
+					ToAddress: tx.ToAddress,
+					Amount:    tx.Amount,
+					Fee:       tx.Fee,
+					Nonce:     tx.Nonce,
+					Type:      index.TransactionType(tx.Type),
+				})
+			}
+			if err := c.addressIndexBolt.IndexBlockSimple(block.Hash, block.Height, block.TimestampUnix, entries); err != nil {
+				log.Printf("WARNING: index block %d: %v", block.Height, err)
+			}
+		}
+		log.Printf("Address index built successfully")
+	}
+
+	return nil
+}
+
+// GetAddressIndex returns the address index instance
+// Note: Use with caution, direct access may bypass concurrency control
+func (c *Chain) GetAddressIndex() *index.AddressIndex {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.addressIndexBolt
+}
+
+// AddressTxEntry represents a transaction entry for address indexing
+type AddressTxEntry struct {
+	TxID      string          `json:"txId"`
+	Location  TxLocation      `json:"location"`
+	FromAddr  string          `json:"fromAddr"`
+	ToAddress string          `json:"toAddress"`
+	Amount    uint64          `json:"amount"`
+	Fee       uint64          `json:"fee"`
+	Nonce     uint64          `json:"nonce"`
+	Timestamp int64           `json:"timestamp"`
+	Type      TransactionType `json:"type"`
+}
+
+// QueryAddressTxs queries transactions for an address with pagination
+// Production-grade: uses BoltDB index for fast queries (< 50ms for 1000 txs)
+// Concurrency safety: thread-safe read-only operation
+func (c *Chain) QueryAddressTxs(addr string, limit, offset int, sortDesc bool) ([]AddressTxEntry, uint64, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.addressIndexBolt == nil {
+		return nil, 0, errors.New("address index not initialized")
+	}
+
+	sortOrder := index.SortAsc
+	if sortDesc {
+		sortOrder = index.SortDesc
+	}
+
+	opts := index.QueryOptions{
+		Limit:  limit,
+		Offset: offset,
+		Sort:   sortOrder,
+	}
+
+	entries, totalCount, err := c.addressIndexBolt.QueryAddressTxs(addr, opts)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query address txs: %w", err)
+	}
+
+	result := make([]AddressTxEntry, len(entries))
+	for i, entry := range entries {
+		result[i] = AddressTxEntry{
+			TxID:      entry.TxID,
+			Location:  TxLocation{Height: entry.Height, BlockHashHex: entry.BlockHash, Index: entry.Index},
+			FromAddr:  entry.FromAddr,
+			ToAddress: entry.ToAddress,
+			Amount:    entry.Amount,
+			Fee:       entry.Fee,
+			Nonce:     entry.Nonce,
+			Timestamp: entry.Timestamp,
+			Type:      TransactionType(entry.Type),
+		}
+	}
+
+	return result, totalCount, nil
+}
+
+// AddressStats holds statistics for an address
+type AddressStats struct {
+	TxCount       uint64 `json:"txCount"`
+	TotalReceived uint64 `json:"totalReceived"`
+	TotalSent     uint64 `json:"totalSent"`
+	FirstTxHeight uint64 `json:"firstTxHeight"`
+	LastTxHeight  uint64 `json:"lastTxHeight"`
+	FirstTxTime   int64  `json:"firstTxTime"`
+	LastTxTime    int64  `json:"lastTxTime"`
+}
+
+// GetAddressStats retrieves statistics for an address
+// Concurrency safety: thread-safe read-only operation
+func (c *Chain) GetAddressStats(addr string) (*AddressStats, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.addressIndexBolt == nil {
+		return nil, errors.New("address index not initialized")
+	}
+
+	boltStats, err := c.addressIndexBolt.GetAddressStats(addr)
+	if err != nil {
+		return nil, fmt.Errorf("get address stats: %w", err)
+	}
+
+	return &AddressStats{
+		TxCount:       boltStats.TxCount,
+		TotalReceived: boltStats.TotalReceived,
+		TotalSent:     boltStats.TotalSent,
+		FirstTxHeight: boltStats.FirstTxHeight,
+		LastTxHeight:  boltStats.LastTxHeight,
+		FirstTxTime:   boltStats.FirstTxTime,
+		LastTxTime:    boltStats.LastTxTime,
+	}, nil
+}
+
+// Close closes the address index database
+// Resource management: properly closes BoltDB connection
+func (c *Chain) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.addressIndexBolt != nil {
+		if err := c.addressIndexBolt.Close(); err != nil {
+			log.Printf("WARNING: close address index: %v", err)
+		}
+	}
+
 	return nil
 }

@@ -319,6 +319,31 @@ func (w *networkChainWrapper) GetChainID() uint64 {
 	return w.chain.GetChainID()
 }
 
+// GetBlockByHash retrieves a block by hash (implements BlockProvider)
+func (w *networkChainWrapper) GetBlockByHash(hash []byte) (*core.Block, bool) {
+	return w.chain.GetBlockByHash(hash)
+}
+
+// GetBlockByHashBytes retrieves a block by hash bytes (implements BlockchainInterface)
+func (w *networkChainWrapper) GetBlockByHashBytes(hash []byte) (*core.Block, bool) {
+	return w.chain.GetBlockByHash(hash)
+}
+
+// GetAllBlocks returns all blocks on canonical chain (implements BlockProvider)
+func (w *networkChainWrapper) GetAllBlocks() ([]*core.Block, error) {
+	return w.chain.GetAllBlocks()
+}
+
+// GetChain returns the underlying chain instance
+func (w *networkChainWrapper) GetChain() *core.Chain {
+	return w.chain
+}
+
+// GetUnderlyingChain returns the underlying chain instance (for fork resolution)
+func (w *networkChainWrapper) GetUnderlyingChain() *core.Chain {
+	return w.chain
+}
+
 // GetMinerAddress returns the miner address
 func (w *networkChainWrapper) GetMinerAddress() string {
 	return w.chain.GetMinerAddress()
@@ -375,6 +400,16 @@ func (w *networkChainWrapper) AddressTxs(addr string, limit, cursor int) ([]core
 // Balance returns account balance
 func (w *networkChainWrapper) Balance(addr string) (core.Account, bool) {
 	return w.chain.Balance(addr)
+}
+
+// HasTransaction checks if a transaction exists in the blockchain
+func (w *networkChainWrapper) HasTransaction(txHash []byte) bool {
+	return w.chain.HasTransaction(txHash)
+}
+
+// GetContractManager returns the contract manager
+func (w *networkChainWrapper) GetContractManager() *core.ContractManager {
+	return w.chain.GetContractManager()
 }
 
 // GetConsensus returns consensus parameters
@@ -693,6 +728,11 @@ func (w *p2pManagerWrapper) FetchChainInfo(ctx context.Context, peer string) (*m
 		Height: networkInfo.Height,
 		Work:   networkInfo.Work,
 	}, nil
+}
+
+// BroadcastBlock broadcasts a block to all peers (for miner.PeerAPI)
+func (w *p2pManagerWrapper) BroadcastBlock(ctx context.Context, block *core.Block) {
+	w.mgr.BroadcastBlock(ctx, block)
 }
 
 // FetchChainInfoNetwork fetches chain info from a peer (for network.PeerAPI)

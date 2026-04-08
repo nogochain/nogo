@@ -215,6 +215,22 @@ func DecodeAddress(addr string) ([]byte, error) {
 	return decoded[:len(decoded)-ChecksumLen], nil
 }
 
+// EncodeAddress encodes raw address data (version + hash) to a full address with checksum
+// Production-grade: adds checksum and prefix for complete address
+func EncodeAddress(addrData []byte) string {
+	if len(addrData) == 0 {
+		return ""
+	}
+
+	// Calculate checksum
+	checksum := sha256.Sum256(addrData)
+	fullData := append(addrData, checksum[:ChecksumLen]...)
+
+	// Encode to hex and add prefix
+	encoded := hex.EncodeToString(fullData)
+	return fmt.Sprintf("%s%s", AddressPrefix, encoded)
+}
+
 // FormatAddress formats an address for display by truncating
 // Production-grade: safe truncation that preserves address structure
 func FormatAddress(addr string) string {

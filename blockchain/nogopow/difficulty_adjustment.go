@@ -18,6 +18,8 @@ package nogopow
 
 import (
 	"math/big"
+
+	"github.com/nogochain/nogo/blockchain/config"
 )
 
 // DifficultyAdjuster implements production-grade difficulty adjustment
@@ -29,7 +31,7 @@ import (
 //   - Formula: output = Kp * error + Ki * integral(error)
 //   - Anti-windup: Integral clamped to [-10, 10] to prevent overshoot
 type DifficultyAdjuster struct {
-	config              *DifficultyConfig
+	consensusParams     *config.ConsensusParams
 	integralAccumulator *big.Float // Accumulated error for integral term
 	integralGain        float64    // Ki coefficient (integral gain)
 }
@@ -39,15 +41,18 @@ type DifficultyAdjuster struct {
 //   - Proportional Gain (Kp): config.AdjustmentSensitivity (default 0.5)
 //   - Integral Gain (Ki): 0.1 (fixed for stable convergence)
 //   - Integral Anti-windup: [-10.0, 10.0] (prevents integral saturation)
-func NewDifficultyAdjuster(config *DifficultyConfig) *DifficultyAdjuster {
-	if config == nil {
-		config = DefaultDifficultyConfig()
+func NewDifficultyAdjuster(consensusParams *config.ConsensusParams) *DifficultyAdjuster {
+	if consensusParams == nil {
+		consensusParams = &config.ConsensusParams{
+			BlockTimeTargetSeconds:     15,
+			MaxDifficultyChangePercent: 20,
+		}
 	}
 
 	return &DifficultyAdjuster{
-		config:              config,
-		integralAccumulator: big.NewFloat(0.0), // Initialize integral term to zero
-		integralGain:        0.1,               // Ki = 0.1 for stable integral action
+		consensusParams:     consensusParams,
+		integralAccumulator: big.NewFloat(0.0),
+		integralGain:        0.1,
 	}
 }
 
@@ -79,7 +84,11 @@ func NewDifficultyAdjuster(config *DifficultyConfig) *DifficultyAdjuster {
 func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header) *big.Int {
 	// Guard clause: validate parent header
 	if parent == nil || parent.Difficulty == nil {
-		return big.NewInt(int64(da.config.MinimumDifficulty))
+		minDiff := big.NewInt(1)
+		if da.consensusParams.MinDifficulty > 0 {
+			minDiff = big.NewInt(int64(da.consensusParams.MinDifficulty))
+		}
+		return minDiff
 	}
 
 	// Extract parent difficulty and timing information
@@ -91,7 +100,7 @@ func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header)
 		timeDiff = int64(currentTime - parent.Time)
 	}
 
-	targetTime := int64(da.config.TargetBlockTime)
+	targetTime := int64(da.consensusParams.BlockTimeTargetSeconds)
 
 	// PI Controller calculation with high-precision arithmetic
 	// Unified approach: Use big.Float for all difficulty levels
@@ -150,7 +159,8 @@ func (da *DifficultyAdjuster) calculatePIDifficulty(timeDiff, targetTime int64, 
 
 	// Calculate PI controller output
 	// Proportional term: Kp * error
-	proportionalGain := big.NewFloat(da.config.AdjustmentSensitivity)
+	// Use MaxDifficultyChangePercent as sensitivity (convert from percent to ratio)
+	proportionalGain := big.NewFloat(float64(da.consensusParams.MaxDifficultyChangePercent) / 100.0)
 	proportionalTerm := new(big.Float).Mul(error, proportionalGain)
 
 	// Integral term: Ki * integral
@@ -180,7 +190,7 @@ func (da *DifficultyAdjuster) calculatePIDifficulty(timeDiff, targetTime int64, 
 // Note: Integral term in PI controller already provides smoothing,
 // so no additional exponential moving average is needed
 func (da *DifficultyAdjuster) enforceBoundaryConditions(newDifficulty, parentDiff *big.Int, timeDiff, targetTime int64) *big.Int {
-	minDiff := big.NewInt(int64(da.config.MinimumDifficulty))
+	minDiff := big.NewInt(int64(da.consensusParams.MinDifficulty))
 	maxDiff := new(big.Int).Lsh(big.NewInt(1), 256) // Maximum difficulty: 2^256
 
 	// Constraint 1: Enforce minimum difficulty (network liveness guarantee)
@@ -217,15 +227,17 @@ func (da *DifficultyAdjuster) ValidateDifficulty(difficulty *big.Int, parent *He
 	}
 
 	// Check 2: Difficulty must be >= minimum
-	minDiff := big.NewInt(int64(da.config.MinimumDifficulty))
+	minDiff := big.NewInt(int64(da.consensusParams.MinDifficulty))
 	if difficulty.Cmp(minDiff) < 0 {
 		return false
 	}
 
-	// Check 3: Difficulty increase must be within bounds (if parent exists)
+	// Check 3: Difficulty change must be within bounds
 	if parent != nil && parent.Difficulty != nil && parent.Difficulty.Sign() > 0 {
 		// Maximum allowed: parent * BoundDivisor / 1000
-		maxAllowed := new(big.Int).Mul(parent.Difficulty, big.NewInt(int64(da.config.BoundDivisor)))
+		// Use default bound divisor of 2048 (smooth adjustment)
+		boundDivisor := int64(2048)
+		maxAllowed := new(big.Int).Mul(parent.Difficulty, big.NewInt(boundDivisor))
 		maxAllowed.Div(maxAllowed, big.NewInt(1000))
 
 		if difficulty.Cmp(maxAllowed) > 0 {
@@ -262,7 +274,8 @@ func (da *DifficultyAdjuster) SetIntegralGain(ki float64) {
 // GetParameters returns the current PI controller parameters
 // Returns: Kp (proportional gain), Ki (integral gain), and current integral value
 func (da *DifficultyAdjuster) GetParameters() (kp, ki, integral float64) {
-	kp = da.config.AdjustmentSensitivity
+	// Use MaxDifficultyChangePercent as sensitivity (Kp)
+	kp = float64(da.consensusParams.MaxDifficultyChangePercent) / 100.0
 	ki = da.integralGain
 	integral, _ = da.integralAccumulator.Float64()
 	return

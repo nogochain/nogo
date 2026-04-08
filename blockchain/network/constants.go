@@ -98,6 +98,10 @@ const (
 
 	// MaxPeerFailures is the maximum consecutive failures before peer removal
 	MaxPeerFailures = 10
+
+	// MaxConsecutiveFailures is the threshold for removing a peer after consecutive failures
+	// Aligned with MaxPeerFailures for consistency
+	MaxConsecutiveFailures = MaxPeerFailures
 )
 
 // =============================================================================

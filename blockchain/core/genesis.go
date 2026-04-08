@@ -44,6 +44,24 @@ var (
 	genesisMu sync.RWMutex
 )
 
+// generateCommunityFundAddress generates a deterministic address for community fund governance contract
+// Address is derived from chainID, timestamp, and contract type to ensure uniqueness
+// Security: uses SHA256 for collision resistance
+func generateCommunityFundAddress(chainID uint64, timestamp int64) string {
+	data := fmt.Sprintf("%d-%d-COMMUNITY_FUND_GOVERNANCE", chainID, timestamp)
+	hash := sha256.Sum256([]byte(data))
+	return "NOGO" + hex.EncodeToString(hash[:20])
+}
+
+// generateIntegrityPoolAddress generates a deterministic address for integrity reward contract
+// Address is derived from chainID, timestamp, and contract type to ensure uniqueness
+// Security: uses SHA256 for collision resistance
+func generateIntegrityPoolAddress(chainID uint64, timestamp int64) string {
+	data := fmt.Sprintf("%d-%d-INTEGRITY_POOL_REWARD", chainID, timestamp)
+	hash := sha256.Sum256([]byte(data))
+	return "NOGO" + hex.EncodeToString(hash[:20])
+}
+
 // GenesisConfig represents the genesis configuration
 // Production-grade: all fields are configurable for different networks
 // Concurrency safety: immutable after initialization, safe for concurrent reads
@@ -77,6 +95,14 @@ type GenesisConfig struct {
 
 	// ConsensusParams defines the consensus parameters
 	ConsensusParams ConsensusParams `json:"consensusParams"`
+
+	// CommunityFundAddress is the auto-generated address for community fund governance contract
+	// Generated at genesis using SHA256(chainID + timestamp + "COMMUNITY_FUND")
+	CommunityFundAddress string `json:"communityFundAddress"`
+
+	// IntegrityPoolAddress is the auto-generated address for integrity reward contract
+	// Generated at genesis using SHA256(chainID + timestamp + "INTEGRITY_POOL")
+	IntegrityPoolAddress string `json:"integrityPoolAddress"`
 }
 
 // Uint64String is a custom type for flexible uint64 JSON parsing
@@ -232,6 +258,11 @@ func LoadGenesisConfigWithChainID(path string, chainID uint64) (*GenesisConfig, 
 func loadHardcodedMainnetGenesis() (*GenesisConfig, error) {
 	genesisConfig := nogoconfig.MainnetGenesisConfig
 
+	// Auto-generate community fund and integrity pool addresses
+	// These addresses are deterministic and unique for each chain
+	communityFundAddr := generateCommunityFundAddress(genesisConfig.ChainID, genesisConfig.Timestamp)
+	integrityPoolAddr := generateIntegrityPoolAddress(genesisConfig.ChainID, genesisConfig.Timestamp)
+
 	cfg := &GenesisConfig{
 		Network:             genesisConfig.Network,
 		ChainID:             genesisConfig.ChainID,
@@ -244,6 +275,10 @@ func loadHardcodedMainnetGenesis() (*GenesisConfig, error) {
 			MinimumBlockReward:     genesisConfig.MonetaryPolicy.MinimumBlockReward,
 			AnnualReductionPercent: genesisConfig.MonetaryPolicy.AnnualReductionPercent,
 			MinerFeeShare:          genesisConfig.MonetaryPolicy.MinerFeeShare,
+			MinerRewardShare:       genesisConfig.MonetaryPolicy.MinerRewardShare,
+			CommunityFundShare:     genesisConfig.MonetaryPolicy.CommunityFundShare,
+			GenesisShare:           genesisConfig.MonetaryPolicy.GenesisShare,
+			IntegrityPoolShare:     genesisConfig.MonetaryPolicy.IntegrityPoolShare,
 		},
 		ConsensusParams: ConsensusParams{
 			ChainID:                        genesisConfig.ChainID,
@@ -263,6 +298,8 @@ func loadHardcodedMainnetGenesis() (*GenesisConfig, error) {
 			BinaryEncodingActivationHeight: genesisConfig.ConsensusParams.BinaryEncodingActivationHeight,
 			GenesisDifficultyBits:          genesisConfig.ConsensusParams.GenesisDifficultyBits,
 		},
+		CommunityFundAddress: communityFundAddr,
+		IntegrityPoolAddress: integrityPoolAddr,
 	}
 
 	return cfg, nil
@@ -273,6 +310,10 @@ func loadHardcodedMainnetGenesis() (*GenesisConfig, error) {
 func loadHardcodedTestnetGenesis() (*GenesisConfig, error) {
 	genesisConfig := nogoconfig.TestnetGenesisConfig
 
+	// Auto-generate community fund and integrity pool addresses
+	communityFundAddr := generateCommunityFundAddress(genesisConfig.ChainID, genesisConfig.Timestamp)
+	integrityPoolAddr := generateIntegrityPoolAddress(genesisConfig.ChainID, genesisConfig.Timestamp)
+
 	cfg := &GenesisConfig{
 		Network:             genesisConfig.Network,
 		ChainID:             genesisConfig.ChainID,
@@ -285,6 +326,10 @@ func loadHardcodedTestnetGenesis() (*GenesisConfig, error) {
 			MinimumBlockReward:     genesisConfig.MonetaryPolicy.MinimumBlockReward,
 			AnnualReductionPercent: genesisConfig.MonetaryPolicy.AnnualReductionPercent,
 			MinerFeeShare:          genesisConfig.MonetaryPolicy.MinerFeeShare,
+			MinerRewardShare:       genesisConfig.MonetaryPolicy.MinerRewardShare,
+			CommunityFundShare:     genesisConfig.MonetaryPolicy.CommunityFundShare,
+			GenesisShare:           genesisConfig.MonetaryPolicy.GenesisShare,
+			IntegrityPoolShare:     genesisConfig.MonetaryPolicy.IntegrityPoolShare,
 		},
 		ConsensusParams: ConsensusParams{
 			ChainID:                        genesisConfig.ChainID,
@@ -304,6 +349,8 @@ func loadHardcodedTestnetGenesis() (*GenesisConfig, error) {
 			BinaryEncodingActivationHeight: genesisConfig.ConsensusParams.BinaryEncodingActivationHeight,
 			GenesisDifficultyBits:          genesisConfig.ConsensusParams.GenesisDifficultyBits,
 		},
+		CommunityFundAddress: communityFundAddr,
+		IntegrityPoolAddress: integrityPoolAddr,
 	}
 
 	return cfg, nil

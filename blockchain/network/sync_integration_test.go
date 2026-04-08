@@ -254,6 +254,14 @@ func (m *MockBlockchainInterface) AddressTxs(addr string, limit, cursor int) ([]
 	return nil, 0, false
 }
 
+func (m *MockBlockchainInterface) GetContractManager() *core.ContractManager {
+	return nil
+}
+
+func (m *MockBlockchainInterface) HasTransaction(txHash []byte) bool {
+	return false
+}
+
 // MockMiner implements Miner interface for testing
 type MockMiner struct{}
 
@@ -279,8 +287,13 @@ func TestSyncLoopWithPeerScoring(t *testing.T) {
 	orphanPool := utils.NewOrphanPool(100, time.Hour)
 	
 	validator := createTestValidator(metrics)
+	syncConfig := config.SyncConfig{
+		BatchSize:              100,
+		MaxConcurrentDownloads: 8,
+		MemoryThresholdMB:      1500,
+	}
 
-	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator)
+	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator, syncConfig)
 
 	if syncLoop == nil {
 		t.Fatal("Failed to create SyncLoop")
@@ -320,8 +333,13 @@ func TestSyncLoopRetryIntegration(t *testing.T) {
 	orphanPool := utils.NewOrphanPool(100, time.Hour)
 	
 	validator := createTestValidator(metrics)
+	syncConfig := config.SyncConfig{
+		BatchSize:              100,
+		MaxConcurrentDownloads: 8,
+		MemoryThresholdMB:      1500,
+	}
 
-	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator)
+	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator, syncConfig)
 
 	// Add peer to scorer
 	peer := "192.168.1.100:9090"

@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- ⚠️ VERSION: 2026-04-06-FIXED-FEE - If you see this, cache is cleared! ⚠️ -->
 <html lang="en">
 <head>
         <meta charset="UTF-8">
@@ -6,7 +7,7 @@
         <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
         <meta http-equiv="Pragma" content="no-cache">
         <meta http-equiv="Expires" content="0">
-        <title>NogoChain Web Wallet (BIP39)</title>
+        <title>NogoChain Web Wallet (BIP39) v2026-04-06-FEE-FIX</title>
         <link rel="icon" type="image/x-icon" href="../explorer/favicon.ico">
     <!-- BIP39 Implementation (inline for browser compatibility) -->
     <script>
@@ -559,10 +560,12 @@ body {
 </head>
 <body>
     <!-- Header -->
-    <header class="header">
+    <header class="header" style="display: block !important; visibility: visible !important;">
         <div class="container">
             <div class="logo">NogoChain Wallet</div>
             <nav class="nav">
+                <a href="#wallet" onclick="showWalletSection(); return false;">Wallet</a>
+                <a href="#proposals" onclick="showProposalsSection(); return false;">Proposals</a>
                 <a href="../explorer/" target="_blank">Explorer</a>
                 <a href="../" target="_blank">API</a>
             </nav>
@@ -1920,7 +1923,22 @@ body {
                 const balanceData = await balanceResp.json();
                 const balance = balanceData.balance || 0;
                 let nonce = balanceData.nonce || 0;
-                let fee = 1000; // Minimum fee
+                let fee = 10000; // Default minimum fee
+                
+                // Estimate fee from API
+                try {
+                    const feeResp = await fetch(`${API_BASE}/tx/estimate_fee?speed=average`);
+                    const feeData = await feeResp.json();
+                    fee = feeData.estimatedFee || 30000;
+                    console.log('[Fee Estimate] Estimated fee:', fee, 'for speed:', feeData.speed);
+                } catch (e) {
+                    console.error('Failed to estimate fee, using default:', e);
+                    fee = 30000; // Fallback to safe default (MinFee + 200*MinFeePerByte)
+                }
+                
+                console.log('💰 [DEBUG] Final fee value before signing:', fee);
+                console.log('💰 [DEBUG] Nonce:', nonce);
+                console.log('💰 [DEBUG] Amount:', amount);
                 
                 // Calculate next nonce considering pending transactions in mempool
                 // First check mempool for pending transactions
@@ -2038,6 +2056,10 @@ body {
                 // Add signature to transaction
                 tx.signature = arrayBufferToBase64(signature.buffer);
                 
+                // DEBUG: Log the transaction being sent
+                console.log('📤 [TX DEBUG] Sending transaction:', JSON.stringify(tx, null, 2));
+                console.log('📤 [TX DEBUG] Fee value in tx:', tx.fee);
+                
                 // Submit transaction
                 const submitResp = await fetch(`${API_BASE}/tx`, {
                     method: 'POST',
@@ -2127,6 +2149,192 @@ body {
             const bytes = new Uint8Array(buffer);
             return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
         }
+
+        // ==================== Proposal Management Functions ====================
+        
+        // Load proposals
+        async function loadProposals() {
+            try {
+                const response = await fetch('/api/proposals');
+                const proposals = await response.json();
+                
+                const proposalsList = document.getElementById('proposalsList');
+                if (!proposals || proposals.length === 0) {
+                    proposalsList.innerHTML = '<div style="padding:20px;text-align:center;color:#6a737d;">暂无提案</div>';
+                    return;
+                }
+                
+                const statusMap = {0: 'active', 1: 'passed', 2: 'rejected', 3: 'executed', 4: 'expired'};
+                const typeMap = {treasury: '💰', ecosystem: '🌱', grant: '🎁', event: '🎉'};
+                
+                // Sort by creation time (newest first)
+                proposals.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+                
+                proposalsList.innerHTML = proposals.map(p => {
+                    const status = statusMap[p.status] || 'unknown';
+                    const typeIcon = typeMap[p.type] || '📄';
+                    const votesFor = (p.votesFor || 0) / 1e8;
+                    const votesAgainst = (p.votesAgainst || 0) / 1e8;
+                    const totalVotes = votesFor + votesAgainst;
+                    const supportPercent = totalVotes > 0 ? ((votesFor / totalVotes) * 100).toFixed(1) : 0;
+                    
+                    return `
+                        <div style="background:#f6f8fa;border:1px solid #e1e4e8;border-radius:8px;padding:16px;margin-bottom:16px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                                <div style="font-size:16px;font-weight:600;color:#24272a;">
+                                    ${typeIcon} ${p.title || '未命名提案'}
+                                </div>
+                                <span style="background:${status === 'active' ? '#28a745' : '#6a737d'};color:white;padding:4px 12px;border-radius:12px;font-size:12px;">
+                                    ${status}
+                                </span>
+                            </div>
+                            <div style="color:#6a737d;font-size:14px;margin-bottom:12px;">
+                                ${p.description || ''}
+                            </div>
+                            <div style="display:flex;gap:16px;font-size:13px;margin-bottom:12px;">
+                                <span style="color:#28a745;">👍 ${votesFor.toFixed(2)} NOGO</span>
+                                <span style="color:#d73a49;">👎 ${votesAgainst.toFixed(2)} NOGO</span>
+                                <span style="color:#0366d6;">支持率：${supportPercent}%</span>
+                            </div>
+                            ${status === 'active' ? `
+                                <div style="display:flex;gap:8px;">
+                                    <button onclick="vote('${p.id}', true)" style="flex:1;background:#28a745;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600;">
+                                        👍 赞成
+                                    </button>
+                                    <button onclick="vote('${p.id}', false)" style="flex:1;background:#d73a49;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600;">
+                                        👎 反对
+                                    </button>
+                                </div>
+                            ` : ''}
+                        </div>
+                    `;
+                }).join('');
+            } catch (e) {
+                console.error('Load proposals failed:', e);
+                document.getElementById('proposalsList').innerHTML = '<div style="padding:20px;text-align:center;color:#d73a49;">加载失败</div>';
+            }
+        }
+        
+        // Vote for a proposal
+        async function vote(proposalId, support) {
+            const voter = prompt('请输入您的 NOGO 地址:');
+            if (!voter) return;
+            
+            const votingPower = prompt('请输入投票权（NOGO 数量，至少 1）:', '1');
+            if (!votingPower || parseFloat(votingPower) < 1) {
+                alert('投票权必须至少为 1 NOGO');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/proposals/vote', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        proposalId,
+                        voter,
+                        support,
+                        votingPower: Math.floor(parseFloat(votingPower) * 1e8)
+                    })
+                });
+                
+                const result = await response.json();
+                if (response.ok && result.success) {
+                    alert('✅ 投票成功！');
+                    loadProposals();
+                } else {
+                    alert('❌ 投票失败：' + (result.error || '未知错误'));
+                }
+            } catch (e) {
+                console.error('Vote failed:', e);
+                alert('❌ 投票失败：' + e.message);
+            }
+        }
+        
+        // Create proposal
+        async function createProposal() {
+            const proposer = prompt('请输入提案人地址:');
+            if (!proposer) return;
+            
+            const title = prompt('请输入提案标题:');
+            if (!title) return;
+            
+            const description = prompt('请输入提案描述:');
+            if (!description) return;
+            
+            const type = prompt('提案类型 (treasury/ecosystem/grant/event):', 'event');
+            if (!type) return;
+            
+            const amount = prompt('申请金额（NOGO）:', '10');
+            if (!amount) return;
+            
+            const recipient = prompt('接收地址:');
+            if (!recipient) return;
+            
+            const deposit = prompt('押金（NOGO，至少 10）:', '10');
+            if (!deposit || parseFloat(deposit) < 10) {
+                alert('押金至少需要 10 NOGO');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/proposals/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        proposer,
+                        title,
+                        description,
+                        type,
+                        amount: Math.floor(parseFloat(amount) * 1e8),
+                        recipient,
+                        deposit: Math.floor(parseFloat(deposit) * 1e8)
+                    })
+                });
+                
+                const result = await response.json();
+                if (response.ok && result.success) {
+                    alert('✅ 提案创建成功！\n提案 ID: ' + result.proposalId);
+                    loadProposals();
+                } else {
+                    alert('❌ 创建失败：' + (result.error || '未知错误'));
+                }
+            } catch (e) {
+                console.error('Create proposal failed:', e);
+                alert('❌ 创建失败：' + e.message);
+            }
+        }
+        
+        // Show proposals section
+        function showProposalsSection() {
+            document.getElementById('walletSection').style.display = 'none';
+            document.getElementById('proposalsSection').style.display = 'block';
+            loadProposals();
+        }
+        
+        // Show wallet section
+        function showWalletSection() {
+            document.getElementById('proposalsSection').style.display = 'none';
+            document.getElementById('walletSection').style.display = 'block';
+        }
+        
+        console.log('Proposal management functions loaded');
     </script>
+    
+    <!-- Proposals Section (Hidden by default) -->
+    <div id="proposalsSection" style="display: none;">
+        <div class="container" style="max-width:1200px;margin:0 auto;padding:24px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;">
+                <h1 style="font-size:28px;color:#24272a;margin:0;">📋 提案治理</h1>
+                <button class="btn btn-primary" onclick="createProposal()" style="padding:12px 24px;background:#0366d6;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:14px;">
+                    ➕ 创建提案
+                </button>
+            </div>
+            
+            <div id="proposalsList">
+                <div style="padding:20px;text-align:center;color:#6a737d;">加载中...</div>
+            </div>
+        </div>
+    </div>
 </body>
 </html>

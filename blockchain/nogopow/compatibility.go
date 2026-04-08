@@ -19,6 +19,8 @@ package nogopow
 import (
 	"fmt"
 	"math/big"
+
+	"github.com/nogochain/nogo/blockchain/config"
 )
 
 // BlockchainCompatibility provides compatibility layer for blockchain package
@@ -35,26 +37,29 @@ type BlockHeader struct {
 
 // DifficultyCalculator provides difficulty calculation services
 type DifficultyCalculator struct {
-	adjuster *DifficultyAdjuster
-	config   *DifficultyConfig
+	adjuster        *DifficultyAdjuster
+	consensusParams *config.ConsensusParams
 }
 
 // NewDifficultyCalculator creates a new difficulty calculator
-func NewDifficultyCalculator(config *DifficultyConfig) *DifficultyCalculator {
-	if config == nil {
-		config = DefaultDifficultyConfig()
+func NewDifficultyCalculator(consensusParams *config.ConsensusParams) *DifficultyCalculator {
+	if consensusParams == nil {
+		consensusParams = &config.ConsensusParams{
+			BlockTimeTargetSeconds:     15,
+			MaxDifficultyChangePercent: 20,
+		}
 	}
 
 	return &DifficultyCalculator{
-		adjuster: NewDifficultyAdjuster(config),
-		config:   config,
+		adjuster:        NewDifficultyAdjuster(consensusParams),
+		consensusParams: consensusParams,
 	}
 }
 
 // CalcNextDifficulty calculates difficulty for next block given parent block
 func (dc *DifficultyCalculator) CalcNextDifficulty(parent *BlockHeader, currentTime uint64) uint32 {
 	if parent == nil {
-		return uint32(dc.config.MinimumDifficulty)
+		return uint32(dc.consensusParams.MinDifficulty)
 	}
 
 	// Convert parent to nogopow.Header format
@@ -113,7 +118,7 @@ func (e *DifficultyMismatchError) Error() string {
 
 // GetMinimumDifficulty returns the minimum difficulty value
 func (dc *DifficultyCalculator) GetMinimumDifficulty() uint32 {
-	return uint32(dc.config.MinimumDifficulty)
+	return uint32(dc.consensusParams.MinDifficulty)
 }
 
 // GetMaximumDifficulty returns the maximum difficulty value (256 bits)

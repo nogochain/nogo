@@ -1,6 +1,7 @@
 package network
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nogochain/nogo/blockchain/config"
 	"github.com/nogochain/nogo/blockchain/consensus"
 	"github.com/nogochain/nogo/blockchain/core"
 )
@@ -100,6 +102,30 @@ func NewP2PServer(bc BlockchainInterface, pm *P2PPeerManager, mp Mempool, listen
 	// Initialize rate limiter for DDoS protection
 	rateLimiter := NewRateLimiter(DefaultRateLimitConfig())
 
+	// Initialize fork detection and resolution components
+	// Each component has its own instance for independent decision-making
+	// This follows Bitcoin's model: each node independently evaluates forks
+	// based on accumulated work (Chain Work), eventually reaching consensus
+	forkDetector := core.NewForkDetector()
+	
+	// Create chain selector if chain supports it
+	var chainSelector *core.ChainSelector
+	var resolutionEngine *ForkResolutionEngine
+	
+	// Try to get underlying chain for ChainSelector
+	type chainProvider interface {
+		GetUnderlyingChain() *core.Chain
+	}
+	
+	if cp, ok := bc.(chainProvider); ok {
+		chain := cp.GetUnderlyingChain()
+		chainSelector = core.NewChainSelector(chain, bc)
+		resolutionEngine = NewForkResolutionEngine(chainSelector, forkDetector)
+		log.Printf("[P2PServer] Fork resolution engine initialized (chain_height=%d)", chain.LatestBlock().Height)
+	} else {
+		log.Printf("[P2PServer] Warning: bc does not provide underlying chain, fork resolution disabled")
+	}
+
 	s := &P2PServer{
 		bc:            bc,
 		pm:            pm, // Interface passed by value - safe as interfaces are reference types
@@ -116,6 +142,11 @@ func NewP2PServer(bc BlockchainInterface, pm *P2PPeerManager, mp Mempool, listen
 		peerPorts:     make(map[string]int),
 		scorer:        NewPeerScorer(maxPeers),
 		rateLimiter:   rateLimiter,
+		// Fork resolution components initialized above
+		forkDetector:     forkDetector,
+		chainSelector:    chainSelector,
+		resolutionEngine: resolutionEngine,
+		blockPropagator:  nil, // Will be initialized in Serve()
 	}
 	if s.maxConns <= 0 {
 		s.maxConns = DefaultP2PMaxConnections
@@ -151,6 +182,14 @@ func (s *P2PServer) Serve(ctx context.Context) error {
 	log.Printf("P2P listening on %s (nodeId=%s)", s.listenAddr, s.nodeID)
 	getP2PLogger().P2P("Listening on %s | Node ID: %s", s.listenAddr, s.nodeID)
 
+	// Initialize block propagator if resolution engine is available
+	if s.resolutionEngine != nil && s.chainSelector != nil && s.forkDetector != nil {
+		s.blockPropagator = NewOptimizedBlockPropagator(s, s.chainSelector, s.forkDetector, s.resolutionEngine)
+		log.Printf("[P2PServer] Block propagator initialized with independent fork resolution")
+	} else {
+		log.Printf("[P2PServer] Warning: fork resolution components not available, block propagator disabled")
+	}
+
 	// Start peer discovery loop if peer manager is available
 	if s.pm.peers != nil {
 		go s.runPeerDiscoveryLoop(ctx)
@@ -169,7 +208,11 @@ func (s *P2PServer) Serve(ctx context.Context) error {
 
 		// DDoS protection: Check connection rate limit
 		remoteAddr := c.RemoteAddr().String()
-		host, _, _ := net.SplitHostPort(remoteAddr)
+		host, _, err := net.SplitHostPort(remoteAddr)
+		if err != nil {
+			log.Printf("p2p server: failed to parse remote address %s: %v", remoteAddr, err)
+			host = remoteAddr
+		}
 		if !s.rateLimiter.AllowConnection(host) {
 			log.Printf("p2p server: connection rate limit exceeded for %s", remoteAddr)
 			_ = c.Close()
@@ -196,7 +239,13 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 	defer c.Close()
 
 	remoteAddr := c.RemoteAddr().String()
-	host, _, _ := net.SplitHostPort(remoteAddr)
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		log.Printf("handleConn: failed to parse remote address %s: %v", remoteAddr, err)
+		host = remoteAddr
+	}
+
+	log.Printf("handleConn: new connection from %s", remoteAddr)
 
 	// DDoS protection: Check if IP is banned
 	if s.rateLimiter.IsBanned(host) {
@@ -210,11 +259,13 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 	_ = c.SetDeadline(time.Now().Add(15 * time.Second))
 
 	// Expect hello first.
+	log.Printf("handleConn: waiting for hello from %s", remoteAddr)
 	raw, err := p2pReadJSON(c, 1<<20)
 	if err != nil {
 		log.Printf("P2P server: failed to read from %s: %v", c.RemoteAddr().String(), err)
 		return err
 	}
+	log.Printf("handleConn: received %d bytes from %s", len(raw), remoteAddr)
 	var env p2pEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		log.Printf("P2P server: failed to unmarshal from %s: %v", c.RemoteAddr().String(), err)
@@ -227,16 +278,29 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 	}
 	var hello p2pHello
 	if err := json.Unmarshal(env.Payload, &hello); err != nil {
+		log.Printf("P2P server: failed to unmarshal hello payload from %s: %v", c.RemoteAddr().String(), err)
 		return err
 	}
+
+	log.Printf("P2P server: received hello from %s - ChainID=%d, RulesHash=%s, Protocol=%d, NodeID=%s",
+		c.RemoteAddr().String(), hello.ChainID, hello.RulesHash, hello.Protocol, hello.NodeID)
+	log.Printf("P2P server: my ChainID=%d, my RulesHash=%s", s.bc.GetChainID(), s.bc.RulesHashHex())
+
 	if hello.Protocol != 1 || hello.ChainID != s.bc.GetChainID() {
+		log.Printf("P2P server: chain/protocol mismatch from %s - expected ChainID=%d, got ChainID=%d, Protocol=%d",
+			c.RemoteAddr().String(), s.bc.GetChainID(), hello.ChainID, hello.Protocol)
 		_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "wrong_chain_or_protocol"})})
 		return errors.New("wrong chain/protocol")
 	}
 	if strings.TrimSpace(hello.RulesHash) == "" || hello.RulesHash != s.bc.RulesHashHex() {
+		log.Printf("P2P server: RULES HASH MISMATCH from %s!", c.RemoteAddr().String())
+		log.Printf("P2P server: expected RulesHash=%s, got RulesHash=%s", s.bc.RulesHashHex(), hello.RulesHash)
+		log.Printf("P2P server: rejecting connection - code version mismatch")
 		_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "rules_hash_mismatch"})})
 		return errors.New("rules hash mismatch")
 	}
+
+	log.Printf("P2P server: handshake successful with %s", c.RemoteAddr().String())
 
 	// Reply hello.
 	_ = p2pWriteJSON(c, p2pEnvelope{Type: "hello", Payload: mustJSON(newP2PHello(s.bc.GetChainID(), s.bc.RulesHashHex(), s.nodeID))})
@@ -277,58 +341,101 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 		return fmt.Errorf("message rate limit exceeded")
 	}
 
-	raw, err = p2pReadJSON(c, s.maxMsgSize)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return err
-	}
-
 	_ = c.SetDeadline(time.Now().Add(30 * time.Second))
 
-	switch env.Type {
-	case "chain_info_req":
-		return s.writeChainInfo(c)
-	case "headers_from_req":
-		var req p2pHeadersFromReq
-		if err := json.Unmarshal(env.Payload, &req); err != nil {
-			return err
+	// Long-lived connection: keep processing messages in a loop
+	for {
+		raw, err = p2pReadJSON(c, s.maxMsgSize)
+		if err != nil {
+			log.Printf("P2P server: connection closed by %s: %v", remoteAddr, err)
+			break // Connection closed, exit loop gracefully
 		}
-		return s.writeHeadersFrom(c, req.From, req.Count)
-	case "block_by_hash_req":
-		var req p2pBlockByHashReq
-		if err := json.Unmarshal(env.Payload, &req); err != nil {
-			return err
+
+		if err := json.Unmarshal(raw, &env); err != nil {
+			log.Printf("P2P server: failed to unmarshal message from %s: %v", remoteAddr, err)
+			continue
 		}
-		return s.writeBlockByHash(c, req.HashHex)
-	case "tx_req":
-		return s.handleTransactionReq(c, env.Payload)
-	case "tx_broadcast":
-		return s.handleTransactionBroadcast(c, env.Payload)
-	case "block_broadcast":
-		return s.handleBlockBroadcast(c, env.Payload)
-	case "block_req":
-		return s.handleBlockReq(c, env.Payload)
-	case "getaddr":
-		return s.handleGetAddr(c)
-	case "addr":
-		return s.handleAddr(c, env.Payload)
-	default:
-		_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "unknown_type"})})
-		return nil
+
+		log.Printf("P2P server: received message type=%s from %s", env.Type, remoteAddr)
+
+		var handleErr error
+		switch env.Type {
+		case "chain_info_req":
+			log.Printf("P2P server: received chain_info_req from %s", remoteAddr)
+			handleErr = s.writeChainInfo(c)
+			if handleErr != nil {
+				log.Printf("P2P server: writeChainInfo failed: %v", handleErr)
+			} else {
+				log.Printf("P2P server: sent chain_info response to %s", remoteAddr)
+			}
+		case "headers_from_req":
+			var req p2pHeadersFromReq
+			if err := json.Unmarshal(env.Payload, &req); err != nil {
+				handleErr = err
+			} else {
+				handleErr = s.writeHeadersFrom(c, req.From, req.Count)
+			}
+		case "block_by_hash_req":
+			var req p2pBlockByHashReq
+			if err := json.Unmarshal(env.Payload, &req); err != nil {
+				handleErr = err
+			} else {
+				handleErr = s.writeBlockByHash(c, req.HashHex)
+			}
+		case "block_by_height_req":
+			var req p2pBlockByHeightReq
+			if err := json.Unmarshal(env.Payload, &req); err != nil {
+				handleErr = err
+			} else {
+				handleErr = s.writeBlockByHeight(c, req.Height)
+			}
+		case "tx_req":
+			handleErr = s.handleTransactionReq(c, env.Payload)
+		case "tx_broadcast":
+			handleErr = s.handleTransactionBroadcast(c, env.Payload)
+		case "block_broadcast":
+			handleErr = s.handleBlockBroadcast(c, env.Payload)
+		case "block_req":
+			handleErr = s.handleBlockReq(c, env.Payload)
+		case "getaddr":
+			handleErr = s.handleGetAddr(c)
+		case "addr":
+			handleErr = s.handleAddr(c, env.Payload)
+		case "ping":
+			handleErr = s.handlePing(c, env.Payload)
+		case "pong":
+			handleErr = s.handlePong(c, env.Payload)
+		default:
+			handleErr = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "unknown_type"})})
+		}
+
+		// Reset deadline after each successful request to keep connection alive
+		_ = c.SetDeadline(time.Now().Add(30 * time.Second))
+
+		// Check if we should close connection on error
+		if handleErr != nil {
+			log.Printf("P2P server: error handling message from %s: %v", remoteAddr, handleErr)
+			// Don't immediately close - allow client to retry
+		}
 	}
+
+	log.Printf("P2P server: connection with %s closed", remoteAddr)
+	return nil
 }
 
 func (s *P2PServer) writeChainInfo(w io.Writer) error {
 	latest := s.bc.LatestBlock()
 	if latest == nil {
 		log.Printf("writeChainInfo: latest block is nil, returning height=0")
-		return p2pWriteJSON(w, p2pEnvelope{Type: "chain_info", Payload: mustJSON(map[string]any{
+		err := p2pWriteJSON(w, p2pEnvelope{Type: "chain_info", Payload: mustJSON(map[string]any{
 			"chainId":    s.bc.GetChainID(),
 			"height":     0,
 			"latestHash": "",
 		})})
+		if err != nil {
+			log.Printf("writeChainInfo: failed to write nil block response: %v", err)
+		}
+		return err
 	}
 
 	genesis, _ := s.bc.BlockByHeight(0)
@@ -348,7 +455,11 @@ func (s *P2PServer) writeChainInfo(w io.Writer) error {
 		"work":                 chainWork.String(),
 	}
 	log.Printf("writeChainInfo: returning height=%d hash=%s work=%s", latest.Height, fmt.Sprintf("%x", latest.Hash), chainWork.String())
-	return p2pWriteJSON(w, p2pEnvelope{Type: "chain_info", Payload: mustJSON(out)})
+	err := p2pWriteJSON(w, p2pEnvelope{Type: "chain_info", Payload: mustJSON(out)})
+	if err != nil {
+		log.Printf("writeChainInfo: failed to write response: %v", err)
+	}
+	return err
 }
 
 func (s *P2PServer) writeHeadersFrom(w io.Writer, from uint64, count int) error {
@@ -367,6 +478,14 @@ func (s *P2PServer) writeBlockByHash(w io.Writer, hashHex string) error {
 	b, ok := s.bc.BlockByHash(hashHex)
 	if !ok {
 		return p2pWriteJSON(w, p2pEnvelope{Type: "not_found", Payload: mustJSON(map[string]any{"hashHex": hashHex})})
+	}
+	return p2pWriteJSON(w, p2pEnvelope{Type: "block", Payload: mustJSON(b)})
+}
+
+func (s *P2PServer) writeBlockByHeight(w io.Writer, height uint64) error {
+	b, ok := s.bc.BlockByHeight(height)
+	if !ok {
+		return p2pWriteJSON(w, p2pEnvelope{Type: "not_found", Payload: mustJSON(map[string]any{"height": height})})
 	}
 	return p2pWriteJSON(w, p2pEnvelope{Type: "block", Payload: mustJSON(b)})
 }
@@ -444,13 +563,202 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 	log.Printf("p2p: received block broadcast height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
 	getP2PLogger().BlockProduced("Received block broadcast | Height: %d | Hash: %s", block.Height, hex.EncodeToString(block.Hash))
 
-	// CRITICAL: Interrupt ongoing mining to ensure fast chain switching
+	// CRITICAL: Interrupt mining to ensure fast chain switching
 	// This prevents forks caused by mining on an outdated chain
 	if s.miner != nil {
 		s.miner.InterruptMining()
 	}
 
-	// Try to add the block
+	// CRITICAL: Validate block PoW before any processing
+	// This prevents invalid blocks from being processed
+	if err := s.validateBlockPoW(&block); err != nil {
+		log.Printf("[P2P] Block PoW validation failed: %v", err)
+		
+		// Special case: unknown parent - let AddBlock handle it with orphan pool
+		if err == consensus.ErrUnknownParent {
+			log.Printf("[P2P] Unknown parent, will let AddBlock handle as orphan block")
+			// Continue to AddBlock - it will store as orphan and try to sync ancestors
+		} else {
+			// Other PoW validation errors - reject immediately
+			return p2pWriteJSON(c, p2pEnvelope{
+				Type: "block_broadcast_ack",
+				Payload: mustJSON(map[string]any{
+					"hash":     fmt.Sprintf("%x", block.Hash),
+					"accepted": false,
+					"error":    fmt.Sprintf("PoW validation failed: %v", err),
+				}),
+			})
+		}
+	} else {
+		log.Printf("[P2P] Block PoW validation passed height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
+	}
+
+	// CRITICAL: Enhanced fork detection with parent validation
+	// Detects forks at same height, historical heights, and orphan forks
+	currentTip := s.bc.LatestBlock()
+	log.Printf("[P2P] Fork detection: currentTip height=%d, received block height=%d", currentTip.Height, block.Height)
+
+	if currentTip != nil {
+		// Case 1: Same height fork - direct competition
+		if currentTip.Height == block.Height {
+			if !bytes.Equal(currentTip.Hash, block.Hash) {
+				log.Printf("[P2P] Same-height fork detected at height %d! Local: %s, Remote: %s",
+					block.Height, hex.EncodeToString(currentTip.Hash), hex.EncodeToString(block.Hash))
+
+				// Use fork resolution engine for automatic resolution
+				if s.resolutionEngine != nil && s.forkDetector != nil {
+					forkEvent := s.forkDetector.DetectFork(currentTip, &block, "p2p_broadcast")
+					if forkEvent != nil {
+						log.Printf("[P2P] Fork event created: type=%v alert_level=%s",
+							forkEvent.Type, forkEvent.AlertLevel)
+
+						request := &ResolutionRequest{
+							LocalTip:    currentTip,
+							RemoteBlock: &block,
+							PeerID:      "p2p_broadcast",
+							ReceivedAt:  time.Now(),
+							Priority:    getResolutionPriority(forkEvent),
+						}
+
+						if err := s.resolutionEngine.SubmitResolution(request); err != nil {
+							log.Printf("[P2P] Failed to submit fork resolution: %v", err)
+						} else {
+							log.Printf("[P2P] Fork resolution submitted to engine")
+							// Continue to AddBlock - the resolution engine will handle reorg if needed
+						}
+					}
+				}
+
+				// Fallback: compare work directly
+				localWork := s.bc.CanonicalWork()
+				remoteWork, ok := core.StringToWork(block.TotalWork)
+
+				// If TotalWork is empty, calculate work from difficulty (same height = same work for single block)
+				// For same-height forks, we need to use tie-breaker rules
+				if !ok || remoteWork == nil || remoteWork.Sign() == 0 {
+					// TotalWork not provided, calculate from block difficulty
+					remoteWork = core.WorkForDifficultyBits(block.DifficultyBits)
+					// Add parent chain work if available
+					if parent, exists := s.bc.BlockByHash(hex.EncodeToString(block.PrevHash)); exists {
+						if parent.TotalWork != "" {
+							parentWork, _ := core.StringToWork(parent.TotalWork)
+							if parentWork != nil {
+								remoteWork.Add(remoteWork, parentWork)
+							}
+						}
+					}
+				}
+
+				workCmp := 0
+				if localWork != nil && remoteWork != nil {
+					workCmp = remoteWork.Cmp(localWork)
+				}
+
+				if workCmp > 0 {
+					// Remote has more work - accept and trigger reorg
+					log.Printf("[P2P] Remote chain has more work (%s > %s), will trigger reorganization",
+						remoteWork.String(), localWork.String())
+				} else if workCmp == 0 {
+					// Same work - use tie-breaker: smaller hash wins
+					hashCmp := bytes.Compare(block.Hash, currentTip.Hash)
+					if hashCmp < 0 {
+						// Remote hash is smaller - remote wins
+						log.Printf("[P2P] Equal work, remote has smaller hash - remote wins")
+					} else {
+						// Local hash is smaller or equal - local wins
+						log.Printf("[P2P] Equal work, local has smaller or equal hash - keeping local")
+						// Still continue to AddBlock to store as fork block
+					}
+				} else {
+					// Local has more work - keep local
+					log.Printf("[P2P] Local chain has more work (%s >= %s), keeping local",
+						localWork.String(), remoteWork.String())
+					// Still continue to AddBlock to store as fork block
+				}
+			}
+		} else if block.Height < currentTip.Height {
+			// Case 2: Historical fork - block at lower height
+			localBlock, exists := s.bc.BlockByHeight(block.Height)
+			if exists && !bytes.Equal(localBlock.Hash, block.Hash) {
+				log.Printf("[P2P] Historical fork detected at height %d! Local: %s, Remote: %s",
+					block.Height, hex.EncodeToString(localBlock.Hash), hex.EncodeToString(block.Hash))
+
+				// Use fork resolution engine
+				if s.resolutionEngine != nil && s.forkDetector != nil {
+					forkEvent := s.forkDetector.DetectFork(localBlock, &block, "p2p_broadcast")
+					if forkEvent != nil {
+						log.Printf("[P2P] Fork event created: type=%v alert_level=%s",
+							forkEvent.Type, forkEvent.AlertLevel)
+
+						request := &ResolutionRequest{
+							LocalTip:    currentTip,
+							RemoteBlock: &block,
+							PeerID:      "p2p_broadcast",
+							ReceivedAt:  time.Now(),
+							Priority:    getResolutionPriority(forkEvent),
+						}
+
+						if err := s.resolutionEngine.SubmitResolution(request); err != nil {
+						log.Printf("[P2P] Failed to submit fork resolution: %v", err)
+					} else {
+						log.Printf("[P2P] Fork resolution submitted to engine")
+						// Continue to AddBlock - the resolution engine will handle reorg if needed
+					}
+					}
+				}
+			}
+		} else {
+			// Case 3: Higher height block - validate parent is on canonical or fork chain
+			parentHashHex := hex.EncodeToString(block.PrevHash)
+			parent, exists := s.bc.BlockByHash(parentHashHex)
+			
+			if !exists {
+				// Parent not found - this is an orphan block or indicates a fork
+				log.Printf("[P2P] Orphan block detected: height=%d parent=%s not found", 
+					block.Height, parentHashHex[:16])
+				// Will be handled by AddBlock which returns ErrOrphanBlock
+			} else {
+				// Parent exists - check if it's on canonical chain
+				allBlocks := s.bc.Blocks()
+				if len(allBlocks) > 0 && parent.Height < uint64(len(allBlocks)) {
+					canonicalParent := allBlocks[parent.Height]
+					if canonicalParent != nil {
+						parentHashStr := hex.EncodeToString(parent.Hash)
+						canonicalHashStr := hex.EncodeToString(canonicalParent.Hash)
+						
+						if parentHashStr != canonicalHashStr {
+							// Parent is on a fork chain
+							log.Printf("[P2P] Fork detected: block height=%d parent height=%d (canonical tip=%d)",
+								block.Height, parent.Height, len(allBlocks)-1)
+							log.Printf("[P2P] Parent is on fork chain, triggering resolution")
+							
+							if s.resolutionEngine != nil && s.forkDetector != nil {
+								forkEvent := s.forkDetector.DetectFork(canonicalParent, &block, "p2p_broadcast")
+								if forkEvent != nil {
+									request := &ResolutionRequest{
+										LocalTip:    currentTip,
+										RemoteBlock: &block,
+										PeerID:      "p2p_broadcast",
+										ReceivedAt:  time.Now(),
+										Priority:    getResolutionPriority(forkEvent),
+									}
+									
+									if err := s.resolutionEngine.SubmitResolution(request); err != nil {
+										log.Printf("[P2P] Failed to submit fork resolution: %v", err)
+									} else {
+										log.Printf("[P2P] Fork resolution submitted to engine")
+										// Continue to AddBlock - the resolution engine will handle reorg if needed
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Normal path: add block to chain
 	accepted, err := s.bc.AddBlock(&block)
 	if err != nil {
 		log.Printf("p2p block broadcast add result: %v", err)
@@ -541,7 +849,7 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 		s.blockRecvCB(&block)
 	}
 
-	return p2pWriteJSON(c, p2pEnvelope{Type: "block_broadcast_ack", Payload: mustJSON(map[string]any{
+	ackPayload := map[string]any{
 		"hash":     fmt.Sprintf("%x", block.Hash),
 		"accepted": accepted,
 		"error": func() string {
@@ -550,7 +858,10 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 			}
 			return ""
 		}(),
-	})})
+	}
+	log.Printf("[P2P] Sending block_broadcast_ack: hash=%s, accepted=%v, error=%v", 
+		ackPayload["hash"], ackPayload["accepted"], ackPayload["error"])
+	return p2pWriteJSON(c, p2pEnvelope{Type: "block_broadcast_ack", Payload: mustJSON(ackPayload)})
 }
 
 // syncMissingBlocks fetches missing ancestor blocks from the peer
@@ -711,6 +1022,34 @@ func (s *P2PServer) handleGetAddr(c net.Conn) error {
 	return p2pWriteJSON(c, p2pEnvelope{Type: "addr", Payload: mustJSON(map[string]any{"addresses": peerAddrs})})
 }
 
+func (s *P2PServer) handlePing(c net.Conn, payload json.RawMessage) error {
+	var ping p2pPing
+	if err := json.Unmarshal(payload, &ping); err != nil {
+		// If payload is empty or invalid, use current timestamp
+		ping.Timestamp = time.Now().Unix()
+	}
+
+	// Log ping for debugging
+	log.Printf("P2P server: received ping from %s (timestamp: %d)", c.RemoteAddr(), ping.Timestamp)
+
+	// Respond with pong containing the same timestamp
+	pong := p2pPong{Timestamp: ping.Timestamp}
+	return p2pWriteJSON(c, p2pEnvelope{Type: "pong", Payload: mustJSON(pong)})
+}
+
+func (s *P2PServer) handlePong(c net.Conn, payload json.RawMessage) error {
+	var pong p2pPong
+	if err := json.Unmarshal(payload, &pong); err != nil {
+		return fmt.Errorf("invalid pong payload: %w", err)
+	}
+
+	// Log pong for debugging
+	log.Printf("P2P server: received pong from %s (timestamp: %d)", c.RemoteAddr(), pong.Timestamp)
+
+	// Pong is just an acknowledgment, no response needed
+	return nil
+}
+
 func (s *P2PServer) handleAddr(c net.Conn, payload json.RawMessage) error {
 	type addrMsg struct {
 		Addresses []struct {
@@ -850,4 +1189,37 @@ func RequestBlockFromPeer(ctx context.Context, peerAddr string, hashHex string) 
 	}
 
 	return &block, nil
+}
+
+// validateBlockPoW validates the block's Proof of Work
+// This is called before processing any received block broadcast
+func (s *P2PServer) validateBlockPoW(block *core.Block) error {
+	if block == nil {
+		return fmt.Errorf("nil block")
+	}
+
+	// Genesis block doesn't need PoW validation
+	if block.Height == 0 {
+		return nil
+	}
+
+	// Get parent block
+	parentHashHex := hex.EncodeToString(block.PrevHash)
+	parent, exists := s.bc.BlockByHash(parentHashHex)
+	if !exists {
+		// Parent unknown, will be handled by ErrUnknownParent logic
+		return consensus.ErrUnknownParent
+	}
+
+	// Use consensus validator for full validation
+	// Note: ValidateBlock includes PoW, difficulty, and timestamp validation
+	cfg := config.DefaultConfig()
+	validator := consensus.NewBlockValidator(cfg.Consensus, 1, nil)
+	
+	// Validate with empty state (we're only validating structure and PoW)
+	if err := validator.ValidateBlock(block, parent, nil); err != nil {
+		return fmt.Errorf("block validation failed: %w", err)
+	}
+
+	return nil
 }

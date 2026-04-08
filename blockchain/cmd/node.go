@@ -34,6 +34,7 @@ type NodeConfig struct {
 	P2PMaxPeers          int
 	P2PMaxConnections    int
 	SyncEnable           bool
+	Sync                 config.SyncConfig
 	MineForceEmptyBlocks bool
 	MaxTxPerBlock        int
 	MineIntervalMs       int64
@@ -42,6 +43,7 @@ type NodeConfig struct {
 	DataDir              string
 	RateLimitReqs        int
 	RateLimitBurst       int
+	Mempool              config.MempoolConfig
 }
 
 type Node struct {
@@ -151,12 +153,13 @@ func (n *Node) initializeComponents() error {
 	mpSize := config.DefaultMempoolMax
 	n.mempool = mempool.NewMempool(
 		mpSize,
-		1000,
+		core.MinFeePerByte,
 		24*time.Hour,
 		nil,
 		n.config.ChainID,
 		config.ConsensusParams{},
 		chain.GetHeight()+1,
+		n.config.Mempool,
 	)
 
 	// Use direct types instead of wrappers
@@ -188,6 +191,7 @@ func (n *Node) initializeComponents() error {
 		nil,
 		n.orphanPool,
 		n.validator,
+		n.config.Sync,
 	)
 	
 	// Set sync loop reference after creation
@@ -211,6 +215,10 @@ func (n *Node) initializeComponents() error {
 	trustProxy := false
 	wsEnable := true
 	wsHub := api.NewWSHub(100)
+
+	// Set WebSocket hub as event sink for real-time block notifications
+	// Production-grade: enables Explorer to receive new_block events via WebSocket
+	n.chain.SetEventSink(wsHub)
 
 	n.metrics, err = metrics.NewMetrics(metricsChainWrapper, metricsMempoolWrapper, metricsP2PWrapper, nil, nodeID, n.config.ChainID)
 	if err != nil {

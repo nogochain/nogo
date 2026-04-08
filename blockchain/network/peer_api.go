@@ -15,6 +15,7 @@ type PeerAPI interface {
 	FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, error)
 	FetchHeadersFrom(ctx context.Context, peer string, fromHeight uint64, count int) ([]core.BlockHeader, error)
 	FetchBlockByHash(ctx context.Context, peer, hashHex string) (*core.Block, error)
+	FetchBlockByHeight(ctx context.Context, peer string, height uint64) (*core.Block, error)
 	FetchAnyBlockByHash(ctx context.Context, hashHex string) (*core.Block, string, error)
 
 	BroadcastTransaction(ctx context.Context, tx core.Transaction, hops int)

@@ -19,7 +19,10 @@ package core
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
+	"math"
 	"math/big"
 	"os"
 
@@ -34,16 +37,11 @@ func (c *Chain) GetHeaderByHash(hash nogopow.Hash) *nogopow.Header {
 	hashHex := hex.EncodeToString(hash.Bytes())
 	for _, block := range c.blocks {
 		if hex.EncodeToString(block.Hash) == hashHex {
-			var coinbaseAddr nogopow.Address
-			minerAddr := c.minerAddress
-			start := 0
-			if len(minerAddr) >= 4 && minerAddr[:4] == "NOGO" {
-				start = 4
-			}
-			for i := 0; i < 20 && start+i*2+2 <= len(minerAddr); i++ {
-				var byteVal byte
-				fmt.Sscanf(minerAddr[start+i*2:start+i*2+2], "%02x", &byteVal)
-				coinbaseAddr[i] = byteVal
+			// Convert miner address using reusable function for consistency
+			coinbaseAddr, err := StringToAddress(c.minerAddress)
+			if err != nil {
+				// Return zero address if conversion fails (should not happen in production)
+				coinbaseAddr = nogopow.Address{}
 			}
 			return &nogopow.Header{
 				ParentHash: nogopow.BytesToHash(block.PrevHash),
@@ -59,6 +57,7 @@ func (c *Chain) GetHeaderByHash(hash nogopow.Hash) *nogopow.Header {
 
 // MineTransfers mines a block with the given transactions
 // Production-grade: performs PoW mining to create new block
+// Fork-aware: checks for heavier chain before mining
 func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	c.mu.RLock()
 	latest := c.GetTip()
@@ -67,9 +66,28 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 		return nil, fmt.Errorf("no genesis block")
 	}
 
+	// Fork prevention: check if we should reorganize before mining
+	// This ensures we're mining on the heaviest chain
+	if c.shouldReorgToHeaviestLocked() {
+		c.mu.RUnlock()
+		log.Printf("[Mining] Heavier fork detected, triggering reorganization before mining")
+		if err := c.reorganizeToHeaviestLocked(); err != nil {
+			log.Printf("[Mining] Reorganization failed: %v", err)
+		} else {
+			log.Printf("[Mining] Reorganization completed, resuming mining")
+		}
+		// Re-lock and get latest block after reorg
+		c.mu.RLock()
+		latest = c.GetTip()
+		if latest == nil {
+			c.mu.RUnlock()
+			return nil, fmt.Errorf("no genesis block after reorg")
+		}
+	}
+
 	prevHash := append([]byte(nil), latest.Hash...)
 	height := latest.Height + 1
-	
+
 	// Use NTP synchronized time for block timestamp
 	now := getNetworkTimeUnix()
 	ts := now
@@ -94,25 +112,61 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 			c.mu.RUnlock()
 			return nil, err
 		}
-		if tx.Fee < minFee {
+		// Validate transaction fee using FeeChecker
+		feeChecker := NewFeeChecker(MinFee, MinFeePerByte)
+		if err := feeChecker.ValidateFee(&tx); err != nil {
 			c.mu.RUnlock()
-			return nil, fmt.Errorf("fee too low: minFee=%d", minFee)
+			return nil, err
 		}
 		fees += tx.Fee
 	}
 
-	policy := c.consensus.MonetaryPolicy
-	reward := policy.BlockReward(height)
-	minerFees := policy.MinerFeeAmount(fees)
-	coinbaseData := fmt.Sprintf("block reward + fees (height=%d)", height)
+	policy := c.monetaryPolicy
+	baseReward := policy.BlockReward(height)
+
+	// Debug: verify policy is loaded correctly
+	if policy.MinerRewardShare == 0 {
+		fmt.Printf("[ERROR] MinerRewardShare is 0! policy=%+v\n", policy)
+		return nil, errors.New("monetary policy not loaded correctly")
+	}
+	if policy.InitialBlockReward == 0 {
+		fmt.Printf("[ERROR] InitialBlockReward is 0! policy=%+v\n", policy)
+		return nil, errors.New("monetary policy not loaded correctly")
+	}
+
+	// Add 1% of block reward to integrity pool (if integrity system is enabled)
+	if c.integrityDistributor != nil {
+		c.integrityDistributor.AddToPool(baseReward)
+	}
+
+	// Calculate reward distribution (convert uint8 to uint64 for multiplication)
+	minerReward := baseReward * uint64(policy.MinerRewardShare) / 100
+	communityFund := baseReward * uint64(policy.CommunityFundShare) / 100
+	genesisReward := baseReward * uint64(policy.GenesisShare) / 100
+	integrityPool := baseReward * uint64(policy.IntegrityPoolShare) / 100
+
+	// Coinbase data includes all reward distribution information
+	coinbaseData := fmt.Sprintf("block reward (height=%d, miner=%d, community=%d, genesis=%d, integrity=%d)",
+		height, minerReward, communityFund, genesisReward, integrityPool)
 	if height == 1 {
 		coinbaseData = "Memphis"
+	}
+
+	// Create coinbase transaction - miner receives miner's share (96%) + 100% of fees
+	// Fees are burned but miner gets them as incentive
+	// Overflow check: ensure minerReward + fees doesn't overflow
+	var minerTotal uint64
+	if fees > math.MaxUint64-minerReward {
+		log.Printf("WARNING: miner reward overflow detected, capping at MaxUint64")
+		minerTotal = math.MaxUint64
+	} else {
+		minerTotal = minerReward + fees
 	}
 	coinbase := Transaction{
 		Type:      TxCoinbase,
 		ChainID:   c.chainID,
 		ToAddress: c.minerAddress,
-		Amount:    reward + minerFees,
+		Amount:    minerTotal, // Miner receives 96% of block reward + 100% of fees
 		Data:      coinbaseData,
 	}
 
@@ -159,18 +213,38 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	parentHash := nogopow.Hash{}
 	copy(parentHash[:], newBlock.PrevHash)
 
-	// Prepare coinbase address for POW header
-	var powCoinbase nogopow.Address
-	minerAddr := c.minerAddress
-	start := 0
-	if len(minerAddr) >= 4 && minerAddr[:4] == "NOGO" {
-		start = 4
+	// Compute merkle root from transactions
+	fmt.Printf("[DEBUG] Computing merkle root for %d transactions\n", len(newBlock.Transactions))
+	leaves := make([][]byte, 0, len(newBlock.Transactions))
+	for i, tx := range newBlock.Transactions {
+		th, err := txSigningHashForConsensus(tx, c.consensus, height)
+		if err != nil {
+			fmt.Printf("[ERROR] Failed to compute tx hash for tx %d: %v\n", i, err)
+			c.mu.RUnlock()
+			return nil, fmt.Errorf("compute tx hash: %w", err)
+		}
+		leaves = append(leaves, th)
+		fmt.Printf("[DEBUG] Tx %d hash: %x\n", i, th)
 	}
-	// Parse up to 20 bytes from the hex string
-	for i := 0; i < 20 && start+i*2+2 <= len(minerAddr); i++ {
-		var byteVal byte
-		fmt.Sscanf(minerAddr[start+i*2:start+i*2+2], "%02x", &byteVal)
-		powCoinbase[i] = byteVal
+
+	merkleRoot, err := MerkleRoot(leaves)
+	if err != nil {
+		fmt.Printf("[ERROR] Failed to compute merkle root: %v\n", err)
+		c.mu.RUnlock()
+		return nil, fmt.Errorf("compute merkle root: %w", err)
+	}
+	fmt.Printf("[DEBUG] Computed merkle root: %x\n", merkleRoot)
+
+	// Set merkle root in block header
+	newBlock.Header.MerkleRoot = merkleRoot
+	fmt.Printf("[DEBUG] Set block merkle root: %x\n", newBlock.Header.MerkleRoot)
+
+	// Prepare coinbase address for POW header using reusable function
+	// This ensures consistent address conversion with validation
+	powCoinbase, err := StringToAddress(c.minerAddress)
+	if err != nil {
+		c.mu.RUnlock()
+		return nil, fmt.Errorf("invalid miner address: %w", err)
 	}
 
 	header := &nogopow.Header{
@@ -202,8 +276,11 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	}()
 
 	// Wait for result (no timeout for production-grade implementation)
+	fmt.Printf("[DEBUG] Waiting for Seal result...\n")
 	result, ok := <-resultCh
+	fmt.Printf("[DEBUG] Seal result received: ok=%v, result=%v\n", ok, result != nil)
 	if !ok {
+		fmt.Printf("[ERROR] Mining result channel closed\n")
 		close(stop)
 		c.mu.RUnlock()
 		return nil, fmt.Errorf("mining failed: channel closed")
@@ -211,30 +288,58 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 
 	// Extract nonce and hash from sealed header
 	sealedHeader := result.Header()
+	fmt.Printf("[DEBUG] Extracting nonce and hash from sealed header\n")
 	newBlock.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
 	newBlock.Header.Nonce = newBlock.Nonce
 	newBlock.Hash = sealedHeader.Hash().Bytes()
+	fmt.Printf("[DEBUG] Sealed block: height=%d, hash=%x, nonce=%d\n", newBlock.Height, newBlock.Hash, newBlock.Nonce)
 
-	// Apply block to state
+	// Release read lock and acquire write lock for state modification
+	fmt.Printf("[DEBUG] Releasing read lock and acquiring write lock\n")
 	c.mu.RUnlock()
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	fmt.Printf("[DEBUG] Write lock acquired, starting validation\n")
+	// Note: No defer here, we manually manage lock for AddBlock call
 
-	if err := applyBlockToState(c.consensus, c.state, newBlock); err != nil {
-		return nil, err
+	// Get parent block for validation (validateBlockLocked requires parent in blocksByHash)
+	// Note: We already hold the lock, so access c.blocks directly instead of calling GetTip()
+	fmt.Printf("[DEBUG] Getting parent block from c.blocks (len=%d)\n", len(c.blocks))
+	var parent *Block
+	if len(c.blocks) == 0 {
+		fmt.Printf("[ERROR] No parent block in c.blocks\n")
+		c.mu.Unlock()
+		return nil, errors.New("no parent block")
 	}
-	if err := c.store.AppendCanonical(newBlock); err != nil {
-		return nil, err
+	parent = c.blocks[len(c.blocks)-1]
+	fmt.Printf("[DEBUG] Parent block for validation: height=%d, hash=%x\n", parent.Height, parent.Hash)
+
+	// CRITICAL: Release lock before calling AddBlock to avoid deadlock
+	// AddBlock will acquire its own lock
+	fmt.Printf("[DEBUG] Releasing lock before AddBlock to prevent deadlock\n")
+	c.mu.Unlock()
+
+	// AddBlock will handle fork detection and reorganization
+	fmt.Printf("[DEBUG] Adding mined block via AddBlock for fork handling\n")
+	accepted, err := c.AddBlock(newBlock)
+	if err != nil {
+		fmt.Printf("[ERROR] AddBlock failed for mined block %d: %v\n", newBlock.Height, err)
+		return nil, fmt.Errorf("add mined block: %w", err)
 	}
-	c.blocks = append(c.blocks, newBlock)
-	c.addToIndexLocked(newBlock)
-	c.indexTxsForBlockLocked(newBlock)
-	c.indexAddressTxsForBlockLocked(newBlock)
-	c.bestTipHash = hex.EncodeToString(newBlock.Hash)
-	if c.canonicalWork == nil {
-		c.canonicalWork = big.NewInt(0)
+
+	if !accepted {
+		// Block was stored as fork but not added to canonical chain
+		// This means a heavier chain exists, we should mine on that chain instead
+		fmt.Printf("[INFO] Mined block not accepted to canonical chain (stored as fork)\n")
+		return nil, fmt.Errorf("mined block on fork chain, reorg needed")
 	}
-	c.canonicalWork.Add(c.canonicalWork, WorkForDifficultyBits(newBlock.DifficultyBits))
+	fmt.Printf("[DEBUG] Block %d added to canonical chain successfully\n", newBlock.Height)
+
+	// Re-acquire lock for subsequent operations
+	c.mu.Lock()
+
+	// Process integrity rewards after block is added to chain
+	// Note: called within locked section, so processIntegrityRewardsLocked doesn't acquire lock
+	c.processIntegrityRewardsLocked(newBlock)
 
 	// Publish event
 	if c.events != nil {
@@ -252,7 +357,53 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 		c.events.Publish(*event)
 	}
 
+	// Release lock before returning
+	c.mu.Unlock()
 	return newBlock, nil
+}
+
+// processIntegrityRewardsLocked processes integrity node rewards for a block
+// Called after each block is added to the chain
+// Note: This function assumes the lock is already held - do NOT call directly
+func (c *Chain) processIntegrityRewardsLocked(block *Block) {
+	if c.integrityDistributor == nil || c.integrityManager == nil {
+		return
+	}
+
+	height := block.Height
+
+	// Check if it's distribution time (every 5082 blocks)
+	if c.integrityDistributor.ShouldDistribute(height) {
+		// Get all active nodes
+		nodes := c.integrityManager.GetActiveNodes()
+
+		if len(nodes) > 0 {
+			// Distribute rewards
+			rewards, err := c.integrityDistributor.DistributeRewards(nodes, height)
+			if err != nil {
+				// Log error but don't fail the block
+				fmt.Printf("Integrity reward distribution error at height %d: %v\n", height, err)
+			} else if len(rewards) > 0 {
+				// Create reward distribution transactions
+				// Note: In production, these would be special system transactions
+				// For now, we track them in the distributor's history
+				fmt.Printf("Distributed integrity rewards at height %d: %d nodes, total=%d wei\n",
+					height, len(rewards), c.integrityDistributor.GetTotalDistributed())
+			}
+		}
+
+		// Update next distribution height
+		_ = c.integrityDistributor.GetNextDistributionHeight()
+	}
+}
+
+// processIntegrityRewards processes integrity node rewards for a block
+// Called after each block is added to the chain
+// Public version that acquires the lock
+func (c *Chain) processIntegrityRewards(block *Block) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.processIntegrityRewardsLocked(block)
 }
 
 // addressesForBlock extracts all addresses involved in a block
