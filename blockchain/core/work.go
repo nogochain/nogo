@@ -58,7 +58,7 @@ func (wc *WorkCalculator) CalculateChainWork(block *Block, getBlockByHash func(h
 	}
 
 	// Calculate work from this block back to genesis
-	totalWork := wc.GetBlockProof(block.DifficultyBits)
+	totalWork := wc.GetBlockProof(block.Header.DifficultyBits)
 	current := block
 
 	// Traverse back to genesis
@@ -74,7 +74,7 @@ func (wc *WorkCalculator) CalculateChainWork(block *Block, getBlockByHash func(h
 		}
 
 		// Add parent's work
-		parentWork := wc.GetBlockProof(parent.DifficultyBits)
+		parentWork := wc.GetBlockProof(parent.Header.DifficultyBits)
 		totalWork.Add(totalWork, parentWork)
 
 		current = parent

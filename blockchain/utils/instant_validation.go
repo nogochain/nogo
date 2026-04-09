@@ -62,7 +62,7 @@ func (v *InstantValidator) validateBlockStructure(b *core.Block) error {
 }
 
 func (v *InstantValidator) validatePoW(b *core.Block) error {
-	if b.DifficultyBits == 0 {
+	if b.Header.DifficultyBits == 0 {
 		return errors.New("invalid difficulty")
 	}
 
@@ -70,7 +70,7 @@ func (v *InstantValidator) validatePoW(b *core.Block) error {
 		return errors.New("missing block hash")
 	}
 
-	target := new(big.Int).SetUint64(uint64(b.DifficultyBits))
+	target := new(big.Int).SetUint64(uint64(b.Header.DifficultyBits))
 	hashInt := new(big.Int).SetBytes(b.Hash)
 
 	if hashInt.Cmp(target) >= 0 {
@@ -104,13 +104,13 @@ func CalculateCumulativeWork(b *core.Block) (*big.Int, error) {
 	current := b
 
 	for current != nil {
-		if current.DifficultyBits == 0 {
+		if current.Header.DifficultyBits == 0 {
 			return nil, errors.New("invalid difficulty")
 		}
-		work := new(big.Int).SetUint64(uint64(current.DifficultyBits))
+		work := new(big.Int).SetUint64(uint64(current.Header.DifficultyBits))
 		totalWork.Add(totalWork, work)
 
-		if len(current.PrevHash) == 0 {
+		if len(current.Header.PrevHash) == 0 {
 			break
 		}
 	}

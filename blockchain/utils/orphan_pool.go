@@ -61,7 +61,7 @@ func (op *OrphanPool) AddOrphan(block *core.Block) bool {
 	}
 
 	hash := string(block.Hash)
-	parentHash := string(block.PrevHash)
+	parentHash := string(block.Header.PrevHash)
 
 	op.mu.Lock()
 	defer op.mu.Unlock()
@@ -121,7 +121,7 @@ func (op *OrphanPool) RemoveOrphan(hash string) *core.Block {
 	}
 
 	// Remove from parent index
-	parentHash := string(block.PrevHash)
+	parentHash := string(block.Header.PrevHash)
 	if childHashes, ok := op.parentIndex[parentHash]; ok {
 		// Find and remove hash from slice
 		for i, h := range childHashes {
@@ -164,7 +164,7 @@ func (op *OrphanPool) CleanupExpired() int {
 			}
 
 			// Remove from parent index
-			parentHash := string(block.PrevHash)
+			parentHash := string(block.Header.PrevHash)
 			if childHashes, ok := op.parentIndex[parentHash]; ok {
 				for i, h := range childHashes {
 					if h == hash {
@@ -239,7 +239,7 @@ func (op *OrphanPool) SetMaxSize(maxSize int) {
 			}
 
 			// Remove from parent index
-			parentHash := string(block.PrevHash)
+			parentHash := string(block.Header.PrevHash)
 			if childHashes, ok := op.parentIndex[parentHash]; ok {
 				for idx, h := range childHashes {
 					if h == hash {

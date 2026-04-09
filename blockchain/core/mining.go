@@ -43,11 +43,11 @@ func (c *Chain) GetHeaderByHash(hash nogopow.Hash) *nogopow.Header {
 				coinbaseAddr = nogopow.Address{}
 			}
 			return &nogopow.Header{
-				ParentHash: nogopow.BytesToHash(block.PrevHash),
+				ParentHash: nogopow.BytesToHash(block.Header.PrevHash),
 				Coinbase:   coinbaseAddr,
 				Number:     big.NewInt(int64(block.Height)),
-				Time:       uint64(block.TimestampUnix),
-				Difficulty: big.NewInt(int64(block.DifficultyBits)),
+				Time:       uint64(block.Header.TimestampUnix),
+				Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
 			}
 		}
 	}
@@ -90,8 +90,8 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	// Use NTP synchronized time for block timestamp
 	now := getNetworkTimeUnix()
 	ts := now
-	if ts <= latest.TimestampUnix {
-		ts = latest.TimestampUnix + 1
+	if ts <= latest.Header.TimestampUnix {
+		ts = latest.Header.TimestampUnix + 1
 	}
 
 	var fees uint64
@@ -177,21 +177,17 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	// Get parent header for difficulty calculation
 	parentHeader := &nogopow.Header{
 		Number:     big.NewInt(int64(latest.Height)),
-		Time:       uint64(latest.TimestampUnix),
-		Difficulty: big.NewInt(int64(latest.DifficultyBits)),
+		Time:       uint64(latest.Header.TimestampUnix),
+		Difficulty: big.NewInt(int64(latest.Header.DifficultyBits)),
 	}
 
 	// Calculate next difficulty
 	nextDifficulty := engine.CalcDifficulty(c, uint64(ts), parentHeader)
 
 	newBlock := &Block{
-		Version:        blockVersionForHeight(c.consensus, height),
-		Height:         height,
-		TimestampUnix:  ts,
-		PrevHash:       prevHash,
-		DifficultyBits: uint32(nextDifficulty.Uint64()),
-		MinerAddress:   c.minerAddress,
-		Transactions:   txs,
+		Height:       height,
+		MinerAddress: c.minerAddress,
+		Transactions: txs,
 		Header: BlockHeader{
 			Version:        blockVersionForHeight(c.consensus, height),
 			PrevHash:       prevHash,
@@ -202,7 +198,7 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 
 	// Create NogoPow block
 	parentHash := nogopow.Hash{}
-	copy(parentHash[:], newBlock.PrevHash)
+	copy(parentHash[:], newBlock.Header.PrevHash)
 
 	// Compute merkle root from transactions
 	leaves := make([][]byte, 0, len(newBlock.Transactions))
@@ -234,7 +230,7 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 
 	header := &nogopow.Header{
 		Number:     big.NewInt(int64(newBlock.Height)),
-		Time:       uint64(newBlock.TimestampUnix),
+		Time:       uint64(newBlock.Header.TimestampUnix),
 		ParentHash: parentHash,
 		Difficulty: nextDifficulty,
 		Coinbase:   powCoinbase,
@@ -270,8 +266,8 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 
 	// Extract nonce and hash from sealed header
 	sealedHeader := result.Header()
-	newBlock.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
-	newBlock.Header.Nonce = newBlock.Nonce
+	newBlock.Header.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
+	newBlock.Header.Nonce = newBlock.Header.Nonce
 	newBlock.Hash = sealedHeader.Hash().Bytes()
 
 	// Release read lock and acquire write lock for state modification
@@ -315,8 +311,8 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 			Data: map[string]any{
 				"height":         newBlock.Height,
 				"hash":           hex.EncodeToString(newBlock.Hash),
-				"prevHash":       hex.EncodeToString(newBlock.PrevHash),
-				"difficultyBits": newBlock.DifficultyBits,
+				"prevHash":       hex.EncodeToString(newBlock.Header.PrevHash),
+				"difficultyBits": newBlock.Header.DifficultyBits,
 				"txCount":        len(newBlock.Transactions),
 				"addresses":      addressesForBlock(newBlock),
 			},

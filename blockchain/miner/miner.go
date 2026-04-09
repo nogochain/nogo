@@ -583,11 +583,14 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		return nil, errors.New("no parent block")
 	}
 
+	fmt.Printf("[DEBUG] miner.go: Calling MineTransfers with %d transactions\n", len(selected))
 	b, err := m.bc.MineTransfers(selected)
 	if err != nil {
+		fmt.Printf("[ERROR] miner.go: MineTransfers failed: %v\n", err)
 		logf(colorRed, "❌ ", fmt.Sprintf("Mine failed: %v", err))
 		return nil, err
 	}
+	fmt.Printf("[DEBUG] miner.go: MineTransfers returned block %d, hash=%x\n", b.Height, b.Hash)
 	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block mined - height=%d, hash=%x", b.Height, b.Hash))
 
 	// Redundant POW validation removed for the following reasons:
@@ -745,7 +748,8 @@ func CreateCoinbaseTx(minerAddress string, height uint64, totalFees uint64, chai
 	}
 
 	blockReward := consensus.MonetaryPolicy.BlockReward(height)
-	// Miner receives 96% of block reward, fees are burned (miner gets 100% of fees as incentive)
+	// Miner receives MinerRewardShare% of block reward
+	// Transaction fees are burned (MinerFeeShare=0) to create deflationary pressure
 	minerReward := blockReward * uint64(consensus.MonetaryPolicy.MinerRewardShare) / 100
 	minerFee := consensus.MonetaryPolicy.MinerFeeAmount(totalFees)
 	totalAmount := minerReward + minerFee
@@ -812,14 +816,10 @@ func CreateBlockTemplate(
 	blockVersion := getBlockVersion(consensus, parent.Height+1)
 
 	template := &core.Block{
-		Version:        blockVersion,
-		Height:         parent.Height + 1,
-		PrevHash:       append([]byte(nil), parent.Hash...),
-		TimestampUnix:  time.Now().Unix(),
-		DifficultyBits: parent.Header.DifficultyBits,
-		MinerAddress:   minerAddress,
-		Transactions:   allTxs,
-		CoinbaseTx:     coinbase,
+		Height:       parent.Height + 1,
+		MinerAddress: minerAddress,
+		Transactions: allTxs,
+		CoinbaseTx:   coinbase,
 		Header: core.BlockHeader{
 			Version:        blockVersion,
 			PrevHash:       append([]byte(nil), parent.Hash...),
@@ -829,9 +829,8 @@ func CreateBlockTemplate(
 		},
 	}
 
-	if template.TimestampUnix <= parent.TimestampUnix {
-		template.TimestampUnix = parent.TimestampUnix + 1
-		template.Header.TimestampUnix = template.TimestampUnix
+	if template.Header.TimestampUnix <= parent.Header.TimestampUnix {
+		template.Header.TimestampUnix = parent.Header.TimestampUnix + 1
 	}
 
 	return template, nil

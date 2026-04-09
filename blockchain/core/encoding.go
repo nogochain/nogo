@@ -248,11 +248,11 @@ func blockHeaderPreimageBinaryV1(b *Block, nonce uint64, p ConsensusParams) ([]b
 	if b == nil {
 		return nil, errors.New("nil block")
 	}
-	if b.TimestampUnix <= 0 {
+	if b.Header.TimestampUnix <= 0 {
 		return nil, errors.New("invalid timestamp")
 	}
-	if len(b.PrevHash) != 0 && len(b.PrevHash) != 32 {
-		return nil, fmt.Errorf("invalid prevHash length: %d", len(b.PrevHash))
+	if len(b.Header.PrevHash) != 0 && len(b.Header.PrevHash) != 32 {
+		return nil, fmt.Errorf("invalid prevHash length: %d", len(b.Header.PrevHash))
 	}
 	if len(b.Hash) != 0 && len(b.Hash) != 32 {
 		return nil, fmt.Errorf("invalid hash length: %d", len(b.Hash))
@@ -263,7 +263,7 @@ func blockHeaderPreimageBinaryV1(b *Block, nonce uint64, p ConsensusParams) ([]b
 	}
 
 	var root [32]byte
-	switch b.Version {
+	switch b.Header.Version {
 	case 2:
 		r, err := b.MerkleRootV2ForConsensus(p)
 		if err != nil {
@@ -279,21 +279,21 @@ func blockHeaderPreimageBinaryV1(b *Block, nonce uint64, p ConsensusParams) ([]b
 	}
 
 	var prev [32]byte
-	if len(b.PrevHash) == 32 {
-		copy(prev[:], b.PrevHash)
+	if len(b.Header.PrevHash) == 32 {
+		copy(prev[:], b.Header.PrevHash)
 	}
 
 	var buf bytes.Buffer
 	if err := buf.WriteByte(binaryEncodingVersionV1); err != nil {
 		return nil, fmt.Errorf("write version: %w", err)
 	}
-	if err := binary.Write(&buf, binary.LittleEndian, b.Version); err != nil {
+	if err := binary.Write(&buf, binary.LittleEndian, b.Header.Version); err != nil {
 		return nil, fmt.Errorf("write version: %w", err)
 	}
 	if err := binary.Write(&buf, binary.LittleEndian, b.Height); err != nil {
 		return nil, fmt.Errorf("write height: %w", err)
 	}
-	if err := binary.Write(&buf, binary.LittleEndian, b.TimestampUnix); err != nil {
+	if err := binary.Write(&buf, binary.LittleEndian, b.Header.TimestampUnix); err != nil {
 		return nil, fmt.Errorf("write timestamp: %w", err)
 	}
 	if _, err := buf.Write(prev[:]); err != nil {
@@ -302,7 +302,7 @@ func blockHeaderPreimageBinaryV1(b *Block, nonce uint64, p ConsensusParams) ([]b
 	if _, err := buf.Write(root[:]); err != nil {
 		return nil, fmt.Errorf("write root: %w", err)
 	}
-	if err := binary.Write(&buf, binary.LittleEndian, b.DifficultyBits); err != nil {
+	if err := binary.Write(&buf, binary.LittleEndian, b.Header.DifficultyBits); err != nil {
 		return nil, fmt.Errorf("write difficultyBits: %w", err)
 	}
 	if _, err := buf.Write(miner[:]); err != nil {
@@ -368,24 +368,24 @@ func EncodeBlockBinary(block *Block) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteByte(binaryEncodingVersionV1)
 
-	if err := binary.Write(&buf, binary.LittleEndian, block.Version); err != nil {
+	if err := binary.Write(&buf, binary.LittleEndian, block.Header.Version); err != nil {
 		return nil, fmt.Errorf("encode version: %w", err)
 	}
 	if err := binary.Write(&buf, binary.LittleEndian, block.Height); err != nil {
 		return nil, fmt.Errorf("encode height: %w", err)
 	}
-	if err := binary.Write(&buf, binary.LittleEndian, block.TimestampUnix); err != nil {
+	if err := binary.Write(&buf, binary.LittleEndian, block.Header.TimestampUnix); err != nil {
 		return nil, fmt.Errorf("encode timestamp: %w", err)
 	}
-	if err := binary.Write(&buf, binary.LittleEndian, block.DifficultyBits); err != nil {
+	if err := binary.Write(&buf, binary.LittleEndian, block.Header.DifficultyBits); err != nil {
 		return nil, fmt.Errorf("encode difficulty: %w", err)
 	}
-	if err := binary.Write(&buf, binary.LittleEndian, block.Nonce); err != nil {
+	if err := binary.Write(&buf, binary.LittleEndian, block.Header.Nonce); err != nil {
 		return nil, fmt.Errorf("encode nonce: %w", err)
 	}
 
 	buf.Write(block.Hash)
-	buf.Write(block.PrevHash)
+	buf.Write(block.Header.PrevHash)
 	buf.Write(block.Header.MerkleRoot)
 
 	if err := binary.Write(&buf, binary.LittleEndian, uint32(len(block.Transactions))); err != nil {

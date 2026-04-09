@@ -42,6 +42,7 @@ type RetryStrategy struct {
 
 // DefaultRetryStrategy returns production-grade default retry strategy
 // 3 retries with exponential backoff: 1s, 2s, 4s
+// Timeout is set to 5 minutes to allow sufficient time for block downloads
 func DefaultRetryStrategy() *RetryStrategy {
 	return &RetryStrategy{
 		MaxRetries:   3,
@@ -49,7 +50,7 @@ func DefaultRetryStrategy() *RetryStrategy {
 		MaxDelay:     10 * time.Second,
 		Multiplier:   2.0,
 		Jitter:       0.1,
-		Timeout:      30 * time.Second,
+		Timeout:      5 * time.Minute, // 5 minutes for block downloads
 		RetryableErrors: []error{
 			utils.ErrTimeout,
 			utils.ErrConnectionClosed,

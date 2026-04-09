@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,12 @@ const (
 	// StuckNodeThreshold is threshold after which node is considered stuck
 	// (no recent sync activity while in isolated mode)
 	StuckNodeThreshold = 5 * time.Minute
+
+	// ProgressChannelBufferSize is the buffer size for progress update channel
+	ProgressChannelBufferSize = 10
+
+	// BlocksAddedProgressInterval is how often to update progress during block processing
+	BlocksAddedProgressInterval = 50
 )
 
 // SyncLoop manages blockchain synchronization with peers
@@ -357,9 +364,9 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) {
 		if s.isCorruptedBlock(block) {
 			log.Printf("[Sync] CRITICAL: Corrupted block %d detected from remote node", block.Height)
 			log.Printf("[Sync]   - Hash: %s", hex.EncodeToString(block.Hash))
-			log.Printf("[Sync]   - PrevHash: %s", hex.EncodeToString(block.PrevHash))
-			log.Printf("[Sync]   - DifficultyBits: %d", block.DifficultyBits)
-			log.Printf("[Sync]   - Timestamp: %d", block.TimestampUnix)
+			log.Printf("[Sync]   - PrevHash: %s", hex.EncodeToString(block.Header.PrevHash))
+			log.Printf("[Sync]   - DifficultyBits: %d", block.Header.DifficultyBits)
+			log.Printf("[Sync]   - Timestamp: %d", block.Header.TimestampUnix)
 			log.Printf("[Sync]   - This may indicate remote node data corruption or network issues")
 			// Do not add corrupted block to orphan pool
 			return
@@ -451,7 +458,7 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) {
 			}
 		} else {
 			// Case 3: Higher height block - check if parent is on fork chain
-			parent, exists := s.bc.BlockByHash(hex.EncodeToString(block.PrevHash))
+			parent, exists := s.bc.BlockByHash(hex.EncodeToString(block.Header.PrevHash))
 			if exists {
 				// Check if parent is on canonical chain
 				allBlocks := s.bc.Blocks()
@@ -605,49 +612,105 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 			}
 		}
 
-		// Download blocks in batches with retry
-		// Validate chain continuity using PrevHash from headers
-		currentBlockHeight := syncStartHeight
-		var expectedPrevHash []byte
-
-		// Adjust headers slice to start from syncStartHeight
-		headersStartIndex := int(syncStartHeight - currentHeight)
-		if headersStartIndex < 0 {
-			headersStartIndex = 0
-		}
-		if headersStartIndex >= len(headers) {
-			log.Printf("[Sync] No headers to sync after finding common ancestor")
+		// Download blocks in batches using BlockDownloader for efficient parallel download
+		// BatchDownloadBlocks handles concurrent downloads with automatic retry and validation
+		syncFromHeight := syncStartHeight + 1
+		blocksToFetch := info.Height - syncStartHeight
+		if blocksToFetch == 0 {
+			log.Printf("[Sync] No blocks to fetch, already synced")
+			s.mu.Lock()
+			s.syncProgress = 1.0
+			s.isSyncing = false
+			s.lastUpdateTime = time.Now()
+			s.mu.Unlock()
 			return nil
 		}
 
-		for i := headersStartIndex; i < len(headers); i++ {
+		log.Printf("[Sync] Starting batch download: height %d to %d (%d blocks)", syncFromHeight, info.Height, blocksToFetch)
+
+		// Use the downloader for batch downloading with concurrent workers
+		progressChan := make(chan DownloadProgress, ProgressChannelBufferSize)
+		go func() {
+			for progress := range progressChan {
+				s.mu.Lock()
+				if info.Height > 0 {
+					s.syncProgress = float64(progress.CurrentHeight-syncFromHeight+1) / float64(info.Height-syncFromHeight+1)
+				}
+				s.lastUpdateTime = time.Now()
+				s.mu.Unlock()
+				percentage := float64(progress.Downloaded) * 100.0 / float64(blocksToFetch)
+				log.Printf("[Sync] Batch progress: %d/%d blocks (%.1f%%, %.1f blocks/sec)",
+					progress.Downloaded, blocksToFetch, percentage, progress.BlocksPerSec)
+			}
+		}()
+
+		blocks, err := s.downloader.BatchDownloadBlocks(ctx, p, syncFromHeight, blocksToFetch, progressChan)
+		close(progressChan)
+
+		if err != nil {
+			log.Printf("[Sync] Batch download failed: %v", err)
+			return fmt.Errorf("batch download failed: %w", err)
+		}
+
+		log.Printf("[Sync] Downloaded %d blocks, processing...", len(blocks))
+
+		// Sort blocks by height to ensure correct order
+		sort.Slice(blocks, func(i, j int) bool {
+			return blocks[i].Height < blocks[j].Height
+		})
+
+		// Process downloaded blocks - validate chain continuity and add to chain
+		var expectedPrevHash []byte
+		if syncStartHeight >= 0 {
+			// Get the previous block's hash for chain continuity check
+			if syncStartHeight == currentHeight {
+				localTip := s.bc.LatestBlock()
+				if localTip != nil {
+					expectedPrevHash = localTip.Hash
+				}
+			} else {
+				// Get block at syncStartHeight for prevHash
+				prevBlock, exists := s.bc.BlockByHeight(syncStartHeight)
+				if exists && prevBlock != nil {
+					expectedPrevHash = prevBlock.Hash
+				}
+			}
+		}
+
+		blocksAdded := 0
+		for _, block := range blocks {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			default:
 			}
 
-			// Fetch block by height
-			currentBlockHeight++
-			block, err := s.fetchBlockByHeightWithRetry(ctx, p, currentBlockHeight)
-			if err != nil {
-				log.Printf("[Sync] Failed to fetch block at height %d: %v", currentBlockHeight, err)
-				continue
-			}
-
-			// Validate chain continuity (except for first block)
-			if i > headersStartIndex && len(expectedPrevHash) > 0 {
+			// Validate chain continuity
+			if len(expectedPrevHash) > 0 {
 				if !bytes.Equal(block.Header.PrevHash, expectedPrevHash) {
-					log.Printf("[Sync] Chain continuity mismatch at height %d", currentBlockHeight)
+					log.Printf("[Sync] Chain discontinuity at height %d: expected prevHash %x, got %x",
+						block.Height, expectedPrevHash[:8], block.Header.PrevHash[:8])
+					// Try to continue with next block - might be orphan situation
 					continue
 				}
 			}
 
-			// Update expected prev hash for next block
-			expectedPrevHash = block.Header.PrevHash
-
+			// Add block to chain via handleNewBlock for proper validation and fork handling
 			s.handleNewBlock(ctx, block)
+
+			// Update expected prevHash for next block
+			expectedPrevHash = block.Hash
+			blocksAdded++
+
+			// Update progress periodically
+			if blocksAdded%BlocksAddedProgressInterval == 0 {
+				s.mu.Lock()
+				s.lastUpdateTime = time.Now()
+				s.mu.Unlock()
+			}
 		}
+
+		log.Printf("[Sync] Batch sync complete: %d/%d blocks added to chain", blocksAdded, len(blocks))
 
 		s.mu.Lock()
 		s.syncProgress = 1.0
@@ -1046,37 +1109,19 @@ func (s *SyncLoop) isCorruptedBlock(block *core.Block) bool {
 	// Block height 0 (genesis) can have empty prevHash
 	if block.Height > 0 {
 		// Non-genesis blocks must have non-empty prevHash
-		// Check both top-level and Header fields
-		hasPrevHash := len(block.PrevHash) > 0 || len(block.Header.PrevHash) > 0
-		if !hasPrevHash {
+		if len(block.Header.PrevHash) == 0 {
 			return true
 		}
 	}
 
 	// All blocks must have valid timestamp (after genesis)
 	// Genesis timestamp is around 1775044800 (April 2026)
-	// Check both top-level and Header fields
-	timestamp := block.TimestampUnix
-	if timestamp == 0 {
-		timestamp = block.Header.TimestampUnix
-	}
-	if timestamp < 1775044800 && block.Height > 0 {
+	if block.Header.TimestampUnix < 1775044800 && block.Height > 0 {
 		return true
 	}
 
 	// All blocks must have non-zero difficulty
-	// Check both top-level and Header fields, including Difficulty variant
-	difficulty := block.DifficultyBits
-	if difficulty == 0 {
-		if block.Difficulty > 0 {
-			difficulty = block.Difficulty
-		} else if block.Header.DifficultyBits > 0 {
-			difficulty = block.Header.DifficultyBits
-		} else if block.Header.Difficulty > 0 {
-			difficulty = block.Header.Difficulty
-		}
-	}
-	if difficulty == 0 {
+	if block.Header.DifficultyBits == 0 && block.Header.Difficulty == 0 {
 		return true
 	}
 

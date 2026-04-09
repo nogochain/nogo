@@ -15,6 +15,12 @@ type p2pBlockByHeightReq struct {
 	Height uint64 `json:"height"`
 }
 
+// p2pBlocksByRangeReq requests multiple blocks by height range
+type p2pBlocksByRangeReq struct {
+	StartHeight uint64 `json:"startHeight"`
+	Count       uint64 `json:"count"`
+}
+
 type p2pTransactionReq struct {
 	TxHex string `json:"txHex"`
 }

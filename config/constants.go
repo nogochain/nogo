@@ -114,9 +114,9 @@ const (
 	DefaultMaxUncleDepth = 6
 
 	// DefaultMinerFeeSharePercent is the percentage of fees going to miner
-	// 100% = miner gets all fees
+	// 0% = fees are burned (removed from total supply)
 	// Configurable via genesis.json: monetaryPolicy.minerFeeShare
-	DefaultMinerFeeSharePercent = 100
+	DefaultMinerFeeSharePercent = 0
 )
 
 // =============================================================================
@@ -868,7 +868,7 @@ var MainnetGenesisConfig = GenesisConfiguration{
 		InitialBlockReward:     800000000, // 8 NOGO in wei (1 NOGO = 10^8 wei)
 		MinimumBlockReward:     10000000,  // 0.1 NOGO minimum reward
 		AnnualReductionPercent: 10,        // 10% annual reduction
-		MinerFeeShare:          100,       // 100% of fees to miner (deprecated, fees are burned)
+		MinerFeeShare:          0,         // 0% of fees to miner (fees are burned)
 		MinerRewardShare:       96,        // 96% of block reward to miner
 		CommunityFundShare:     2,         // 2% of block reward to community fund
 		GenesisShare:           1,         // 1% of block reward to genesis address
@@ -905,7 +905,7 @@ var TestnetGenesisConfig = GenesisConfiguration{
 		InitialBlockReward:     5000000000, // 50 NOGO initial reward
 		MinimumBlockReward:     10000000,   // 0.1 NOGO minimum reward
 		AnnualReductionPercent: 10,         // 10% annual reduction
-		MinerFeeShare:          100,        // 100% of fees to miner (deprecated, fees are burned)
+		MinerFeeShare:          0,          // 0% of fees to miner (fees are burned)
 		MinerRewardShare:       96,         // 96% of block reward to miner
 		CommunityFundShare:     2,          // 2% of block reward to community fund
 		GenesisShare:           1,          // 1% of block reward to genesis address

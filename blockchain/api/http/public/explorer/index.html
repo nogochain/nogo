@@ -384,6 +384,28 @@ body {
   font-family: 'Courier New', monospace;
   white-space: nowrap; /* Keep amount on one line */
 }
+.tx-hash-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0;
+  margin-bottom: 10px;
+  border-bottom: 1px dashed var(--border-color);
+  font-size: 13px;
+}
+.tx-hash-label {
+  color: var(--text-secondary);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.tx-hash-value {
+  font-family: 'Courier New', monospace;
+  color: var(--accent-blue);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  word-break: break-all;
+}
 
 /* ==================== Error & Toast ==================== */
 .error { 
@@ -1100,11 +1122,19 @@ async function showBlock(height) {
       
       const toAddr = tx.toAddress || '-';
       
+      // Get transaction hash/txid
+      const txHash = tx.txid || tx.hash || '-';
+      const txHashShort = txHash !== '-' ? txHash.substring(0, 16) + '...' : '-';
+      
       txCards.push(`
         <div class="tx-card">
           <div class="tx-card-header">
             <span class="tx-id">Tx #${idx}</span>
             <span class="tx-type-badge ${isCoinbase ? 'coinbase' : ''}">${isCoinbase ? 'Coinbase' : 'Transfer'}</span>
+          </div>
+          <div class="tx-hash-row">
+            <span class="tx-hash-label">TX Hash:</span>
+            <span class="tx-hash-value">${txHashShort} <button class="copy-btn" onclick="copyToClipboard('${txHash}', 'TX Hash')">📋</button></span>
           </div>
           <div class="tx-body">
             <div class="tx-address">

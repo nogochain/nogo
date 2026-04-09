@@ -753,24 +753,26 @@ func CreateGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, 
 	}
 
 	genesis := &Block{
-		Version:        blockVersionForHeight(consensus, 0),
-		Height:         0,
-		TimestampUnix:  cfg.Timestamp,
-		DifficultyBits: consensus.GenesisDifficultyBits,
-		MinerAddress:   cfg.GenesisMinerAddress,
-		Transactions:   []Transaction{coinbase},
-		PrevHash:       make([]byte, 0),
+		Height:       0,
+		MinerAddress: cfg.GenesisMinerAddress,
+		Transactions: []Transaction{coinbase},
+		Header: BlockHeader{
+			Version:        blockVersionForHeight(consensus, 0),
+			TimestampUnix:  cfg.Timestamp,
+			DifficultyBits: consensus.GenesisDifficultyBits,
+			PrevHash:       make([]byte, 0),
+		},
 	}
 
 	engine := nogopow.New(nogopow.DefaultConfig())
 	defer engine.Close()
 
 	genesisHeader := &nogopow.Header{
-		ParentHash: nogopow.BytesToHash(genesis.PrevHash),
+		ParentHash: nogopow.BytesToHash(genesis.Header.PrevHash),
 		Coinbase:   stringToAddress(genesis.MinerAddress),
 		Number:     big.NewInt(int64(genesis.Height)),
-		Time:       uint64(genesis.TimestampUnix),
-		Difficulty: big.NewInt(int64(genesis.DifficultyBits)),
+		Time:       uint64(genesis.Header.TimestampUnix),
+		Difficulty: big.NewInt(int64(genesis.Header.DifficultyBits)),
 	}
 
 	genesisBlock := nogopow.NewBlock(genesisHeader, nil, nil, nil)
@@ -788,8 +790,8 @@ func CreateGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, 
 	}
 
 	sealedHeader := result.Header()
-	genesis.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
-	genesis.Header.Nonce = genesis.Nonce
+	genesis.Header.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
+	genesis.Header.Nonce = genesis.Header.Nonce
 	genesis.Header.TimestampUnix = int64(sealedHeader.Time)
 	genesis.Header.DifficultyBits = uint32(sealedHeader.Difficulty.Uint64())
 	hashBytes := sealedHeader.Hash().Bytes()
@@ -849,20 +851,20 @@ func ValidateGenesisBlock(b *Block, cfg *GenesisConfig, consensus ConsensusParam
 	if b.Height != 0 {
 		return fmt.Errorf("invalid genesis height: %d", b.Height)
 	}
-	if len(b.PrevHash) != 0 {
+	if len(b.Header.PrevHash) != 0 {
 		return errors.New("invalid genesis prevHash")
 	}
-	if b.Version != blockVersionForHeight(consensus, 0) {
-		return fmt.Errorf("invalid genesis version: %d", b.Version)
+	if b.Header.Version != blockVersionForHeight(consensus, 0) {
+		return fmt.Errorf("invalid genesis version: %d", b.Header.Version)
 	}
-	if b.TimestampUnix != cfg.Timestamp {
-		return fmt.Errorf("genesis timestamp mismatch: %d != %d", b.TimestampUnix, cfg.Timestamp)
+	if b.Header.TimestampUnix != cfg.Timestamp {
+		return fmt.Errorf("genesis timestamp mismatch: %d != %d", b.Header.TimestampUnix, cfg.Timestamp)
 	}
 	if b.MinerAddress != cfg.GenesisMinerAddress {
 		return fmt.Errorf("genesis miner mismatch: %s != %s", b.MinerAddress, cfg.GenesisMinerAddress)
 	}
-	if b.DifficultyBits != consensus.GenesisDifficultyBits {
-		return fmt.Errorf("genesis difficulty mismatch: %d != %d", b.DifficultyBits, consensus.GenesisDifficultyBits)
+	if b.Header.DifficultyBits != consensus.GenesisDifficultyBits {
+		return fmt.Errorf("genesis difficulty mismatch: %d != %d", b.Header.DifficultyBits, consensus.GenesisDifficultyBits)
 	}
 	if len(b.Transactions) != 1 {
 		return errors.New("genesis must contain exactly one transaction")
@@ -900,16 +902,16 @@ func validateGenesisPoWNogoPow(consensus ConsensusParams, b *Block) error {
 	defer engine.Close()
 
 	header := &nogopow.Header{
-		ParentHash: nogopow.BytesToHash(b.PrevHash),
+		ParentHash: nogopow.BytesToHash(b.Header.PrevHash),
 		Coinbase:   stringToAddress(b.MinerAddress),
 		Number:     big.NewInt(int64(b.Height)),
-		Time:       uint64(b.TimestampUnix),
-		Difficulty: big.NewInt(int64(b.DifficultyBits)),
+		Time:       uint64(b.Header.TimestampUnix),
+		Difficulty: big.NewInt(int64(b.Header.DifficultyBits)),
 		Nonce:      nogopow.BlockNonce{},
 		Extra:      []byte{},
 	}
 
-	binary.LittleEndian.PutUint64(header.Nonce[:8], b.Nonce)
+	binary.LittleEndian.PutUint64(header.Nonce[:8], b.Header.Nonce)
 
 	if err := engine.VerifyHeader(nil, header, false); err != nil {
 		return fmt.Errorf("invalid genesis pow: %w", err)
@@ -921,7 +923,7 @@ func validateGenesisPoWNogoPow(consensus ConsensusParams, b *Block) error {
 // ensureBlockHash ensures the block hash is computed and set
 // Concurrency safety: modifies block in place, caller must ensure exclusive access
 func ensureBlockHash(b *Block, consensus ConsensusParams) ([]byte, error) {
-	header, err := b.HeaderBytesForConsensus(consensus, b.Nonce)
+	header, err := b.HeaderBytesForConsensus(consensus, b.Header.Nonce)
 	if err != nil {
 		return nil, err
 	}
@@ -970,15 +972,17 @@ func LoadGenesisBlockFromFile(genesisPath string) (*Block, error) {
 		}
 
 		genesis := &Block{
-			Version:        blockVersionForHeight(cfg.ConsensusParams, 0),
-			Height:         0,
-			TimestampUnix:  cfg.Timestamp,
-			DifficultyBits: cfg.ConsensusParams.GenesisDifficultyBits,
-			MinerAddress:   cfg.GenesisMinerAddress,
-			Transactions:   []Transaction{coinbase},
-			Hash:           hashBytes,
-			Nonce:          nonce,
-			PrevHash:       make([]byte, 0),
+			Height:       0,
+			MinerAddress: cfg.GenesisMinerAddress,
+			Transactions: []Transaction{coinbase},
+			Hash:         hashBytes,
+			Header: BlockHeader{
+				Version:        blockVersionForHeight(cfg.ConsensusParams, 0),
+				TimestampUnix:  cfg.Timestamp,
+				DifficultyBits: cfg.ConsensusParams.GenesisDifficultyBits,
+				Nonce:          nonce,
+				PrevHash:       make([]byte, 0),
+			},
 		}
 
 		genesisMu.Lock()

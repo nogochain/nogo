@@ -245,7 +245,7 @@ func AdjustDifficulty(
 	parentHeader := &nogopow.Header{
 		Number:     new(big.Int).SetUint64(parentBlock.Height),
 		Difficulty: new(big.Int).SetUint64(uint64(parentBlock.Header.DifficultyBits)),
-		Time:       uint64(parentBlock.TimestampUnix),
+		Time:       uint64(parentBlock.Header.TimestampUnix),
 	}
 
 	newDifficulty := adjuster.CalcDifficulty(currentTime, parentHeader)

@@ -146,7 +146,7 @@ func (fh *ForkHandler) HandleBlock(block *Block) (*ForkChoiceResult, error) {
 		return nil, fmt.Errorf("header validation failed: %w", err)
 	}
 
-	parentHashHex := hex.EncodeToString(block.PrevHash)
+	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 	var parent *Block
 
 	fh.mu.RLock()
@@ -270,7 +270,7 @@ func (fh *ForkHandler) HandleBlock(block *Block) (*ForkChoiceResult, error) {
 				"height":         block.Height,
 				"hash":           hashHex,
 				"prevHash":       parentHashHex,
-				"difficultyBits": block.DifficultyBits,
+				"difficultyBits": block.Header.DifficultyBits,
 				"txCount":        len(block.Transactions),
 				"addresses":      addressesForBlock(block),
 			},
@@ -330,20 +330,20 @@ func (fh *ForkHandler) selectForkChoice(newWork *big.Int, newTipHash string, cur
 }
 
 func (fh *ForkHandler) validateBlockHeader(block *Block) error {
-	if expected := blockVersionForHeight(fh.consensus, block.Height); block.Version != expected {
-		return fmt.Errorf("bad block version at %d: expected %d got %d", block.Height, expected, block.Version)
+	if expected := blockVersionForHeight(fh.consensus, block.Height); block.Header.Version != expected {
+		return fmt.Errorf("bad block version at %d: expected %d got %d", block.Height, expected, block.Header.Version)
 	}
 
 	if len(block.Hash) == 0 {
 		return errors.New("missing block hash")
 	}
 
-	if block.DifficultyBits == 0 {
+	if block.Header.DifficultyBits == 0 {
 		return errors.New("missing difficultyBits")
 	}
 
-	if block.DifficultyBits > maxDifficultyBits {
-		return fmt.Errorf("difficultyBits out of range: %d", block.DifficultyBits)
+	if block.Header.DifficultyBits > maxDifficultyBits {
+		return fmt.Errorf("difficultyBits out of range: %d", block.Header.DifficultyBits)
 	}
 
 	return nil
@@ -366,10 +366,10 @@ func (fh *ForkHandler) computeCanonicalForTipLocked(tipHashHex string) ([]*Block
 		}
 		rev = append(rev, b)
 
-		if b.Height == 0 || len(b.PrevHash) == 0 {
+		if b.Height == 0 || len(b.Header.PrevHash) == 0 {
 			break
 		}
-		cur = hex.EncodeToString(b.PrevHash)
+		cur = hex.EncodeToString(b.Header.PrevHash)
 	}
 
 	path := make([]*Block, 0, len(rev))
@@ -382,10 +382,10 @@ func (fh *ForkHandler) computeCanonicalForTipLocked(tipHashHex string) ([]*Block
 
 	for i, b := range path {
 		if i == 0 {
-			if b.Height != 0 || len(b.PrevHash) != 0 {
+			if b.Height != 0 || len(b.Header.PrevHash) != 0 {
 				return nil, nil, nil, ErrBadGenesisHeader
 			}
-			if expected := blockVersionForHeight(fh.consensus, 0); b.Version != expected {
+			if expected := blockVersionForHeight(fh.consensus, 0); b.Header.Version != expected {
 				return nil, nil, nil, ErrBadGenesisVersion
 			}
 		} else {
@@ -393,7 +393,7 @@ func (fh *ForkHandler) computeCanonicalForTipLocked(tipHashHex string) ([]*Block
 			if b.Height != prev.Height+1 {
 				return nil, nil, nil, ErrBadHeightLinkage
 			}
-			if !bytes.Equal(b.PrevHash, prev.Hash) {
+			if !bytes.Equal(b.Header.PrevHash, prev.Hash) {
 				return nil, nil, nil, ErrBadPrevHashLink
 			}
 			if fh.consensus.DifficultyEnable {
@@ -401,8 +401,8 @@ func (fh *ForkHandler) computeCanonicalForTipLocked(tipHashHex string) ([]*Block
 					return nil, nil, nil, err
 				}
 			}
-			if expected := blockVersionForHeight(fh.consensus, b.Height); b.Version != expected {
-				return nil, nil, nil, fmt.Errorf("bad block version at %d: expected %d got %d", b.Height, expected, b.Version)
+			if expected := blockVersionForHeight(fh.consensus, b.Height); b.Header.Version != expected {
+				return nil, nil, nil, fmt.Errorf("bad block version at %d: expected %d got %d", b.Height, expected, b.Header.Version)
 			}
 		}
 
@@ -410,7 +410,7 @@ func (fh *ForkHandler) computeCanonicalForTipLocked(tipHashHex string) ([]*Block
 			return nil, nil, nil, fmt.Errorf("state apply failed at height %d: %w", b.Height, err)
 		}
 
-		work.Add(work, WorkForDifficultyBits(b.DifficultyBits))
+		work.Add(work, WorkForDifficultyBits(b.Header.DifficultyBits))
 	}
 
 	return path, state, work, nil
@@ -429,7 +429,7 @@ func (fh *ForkHandler) appendBlockToChainLocked(b *Block) error {
 	if fh.canonicalWork == nil {
 		fh.canonicalWork = big.NewInt(0)
 	}
-	fh.canonicalWork.Add(fh.canonicalWork, WorkForDifficultyBits(b.DifficultyBits))
+	fh.canonicalWork.Add(fh.canonicalWork, WorkForDifficultyBits(b.Header.DifficultyBits))
 
 	if fh.store != nil {
 		if err := fh.store.AppendCanonical(b); err != nil {
@@ -510,7 +510,7 @@ func (fh *ForkHandler) rollbackToHeightInternalLocked(targetHeight uint64) error
 
 	totalWork := big.NewInt(0)
 	for _, block := range fh.blocks {
-		totalWork.Add(totalWork, WorkForDifficultyBits(block.DifficultyBits))
+		totalWork.Add(totalWork, WorkForDifficultyBits(block.Header.DifficultyBits))
 	}
 	fh.canonicalWork = totalWork
 
@@ -677,8 +677,8 @@ func (fh *ForkHandler) GetKnownTips() []string {
 	isParent := make(map[string]struct{})
 
 	for _, b := range fh.blocksByHash {
-		if len(b.PrevHash) > 0 {
-			isParent[hex.EncodeToString(b.PrevHash)] = struct{}{}
+		if len(b.Header.PrevHash) > 0 {
+			isParent[hex.EncodeToString(b.Header.PrevHash)] = struct{}{}
 		}
 	}
 
@@ -715,9 +715,9 @@ func validateDifficultyNogoPow(consensus ConsensusParams, path []*Block, idx int
 	}
 
 	if idx == 0 {
-		if path[0].DifficultyBits != consensus.GenesisDifficultyBits {
+		if path[0].Header.DifficultyBits != consensus.GenesisDifficultyBits {
 			return fmt.Errorf("bad genesis difficulty: expected %d got %d",
-				consensus.GenesisDifficultyBits, path[0].DifficultyBits)
+				consensus.GenesisDifficultyBits, path[0].Header.DifficultyBits)
 		}
 		return nil
 	}
@@ -725,32 +725,37 @@ func validateDifficultyNogoPow(consensus ConsensusParams, path []*Block, idx int
 	currentBlock := path[idx]
 	parentBlock := path[idx-1]
 
-	if currentBlock.DifficultyBits < consensus.MinDifficultyBits {
-		return fmt.Errorf("difficulty %d below min %d", currentBlock.DifficultyBits, consensus.MinDifficultyBits)
+	if currentBlock.Header.DifficultyBits < consensus.MinDifficultyBits {
+		return fmt.Errorf("difficulty %d below min %d", currentBlock.Header.DifficultyBits, consensus.MinDifficultyBits)
 	}
-	if currentBlock.DifficultyBits > consensus.MaxDifficultyBits {
-		return fmt.Errorf("difficulty %d above max %d", currentBlock.DifficultyBits, consensus.MaxDifficultyBits)
+	if currentBlock.Header.DifficultyBits > consensus.MaxDifficultyBits {
+		return fmt.Errorf("difficulty %d above max %d", currentBlock.Header.DifficultyBits, consensus.MaxDifficultyBits)
 	}
 
 	if consensus.DifficultyEnable {
-		adjuster := nogopow.NewDifficultyAdjuster(&consensus)
+		consensusParams := &config.ConsensusParams{
+			BlockTimeTargetSeconds:       15,
+			MaxDifficultyChangePercent:   20,
+			MinDifficulty:                1,
+		}
+		adjuster := nogopow.NewDifficultyAdjuster(consensusParams)
 
 		var parentHash nogopow.Hash
 		if len(parentBlock.Hash) > 0 {
 			copy(parentHash[:], parentBlock.Hash)
 		} else {
-			copy(parentHash[:], parentBlock.PrevHash)
+			copy(parentHash[:], parentBlock.Header.PrevHash)
 		}
 
 		parentHeader := &nogopow.Header{
 			Number:     big.NewInt(int64(parentBlock.Height)),
-			Time:       uint64(parentBlock.TimestampUnix),
-			Difficulty: big.NewInt(int64(parentBlock.DifficultyBits)),
+			Time:       uint64(parentBlock.Header.TimestampUnix),
+			Difficulty: big.NewInt(int64(parentBlock.Header.DifficultyBits)),
 			ParentHash: parentHash,
 		}
 
-		expectedDifficulty := adjuster.CalcDifficulty(uint64(currentBlock.TimestampUnix), parentHeader)
-		actualDifficulty := big.NewInt(int64(currentBlock.DifficultyBits))
+		expectedDifficulty := adjuster.CalcDifficulty(uint64(currentBlock.Header.TimestampUnix), parentHeader)
+		actualDifficulty := big.NewInt(int64(currentBlock.Header.DifficultyBits))
 
 		minAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100-DifficultyTolerancePercent))
 		minAllowed.Div(minAllowed, big.NewInt(100))

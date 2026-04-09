@@ -204,7 +204,7 @@ func (op *OrphanPoolOptimized) AddOrphan(block *core.Block) bool {
 	}
 
 	hash := hex.EncodeToString(block.Hash)
-	parentHash := hex.EncodeToString(block.PrevHash)
+	parentHash := hex.EncodeToString(block.Header.PrevHash)
 
 	op.mu.Lock()
 	defer op.mu.Unlock()
@@ -294,7 +294,7 @@ func (op *OrphanPoolOptimized) removeOrphanInternal(hash string) *core.Block {
 		return nil
 	}
 
-	parentHash := hex.EncodeToString(block.PrevHash)
+	parentHash := hex.EncodeToString(block.Header.PrevHash)
 	if children, ok := op.childIndex[parentHash]; ok {
 		delete(children, hash)
 		if len(children) == 0 {

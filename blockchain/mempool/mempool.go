@@ -398,6 +398,22 @@ func (m *Mempool) ReplaceByFee(tx core.Transaction) (string, bool, []string, err
 	return m.ReplaceByFeeWithTxID(tx, txid, m.consensus, m.currentHeight)
 }
 
+// UpdateHeight updates the current height for consensus validation
+// This should be called when a new block is added to the chain
+func (m *Mempool) UpdateHeight(height uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.currentHeight = height
+}
+
+// UpdateConsensus updates the consensus parameters for validation
+// This should be called if consensus rules change (e.g., hard forks)
+func (m *Mempool) UpdateConsensus(consensus config.ConsensusParams) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.consensus = consensus
+}
+
 // ReplaceByFeeWithTxID replaces a transaction with explicit txid
 func (m *Mempool) ReplaceByFeeWithTxID(
 	tx core.Transaction,

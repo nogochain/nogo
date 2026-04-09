@@ -195,10 +195,10 @@ func (h *BlockHeader) HashHex(blockHash []byte) string {
 // Block represents a blockchain block
 // Production-grade: includes all necessary fields for consensus
 // Concurrency safety: use mutex for write operations, safe for concurrent reads
+// Design: Header is the single source of truth for block metadata
 type Block struct {
 	mu sync.RWMutex
 
-	Version      uint32        `json:"version"`
 	Hash         []byte        `json:"hash,omitempty"`
 	Height       uint64        `json:"height"`
 	Header       BlockHeader   `json:"header"`
@@ -206,12 +206,6 @@ type Block struct {
 	CoinbaseTx   *Transaction  `json:"coinbaseTx,omitempty"`
 	MinerAddress string        `json:"minerAddress"`
 	TotalWork    string        `json:"totalWork"`
-
-	TimestampUnix  int64  `json:"timestampUnix"`
-	DifficultyBits uint32 `json:"difficultyBits"`
-	Difficulty     uint32 `json:"difficulty"`
-	Nonce          uint64 `json:"nonce"`
-	PrevHash       []byte `json:"prevHash"`
 }
 
 // GetHeight returns the block height
@@ -272,32 +266,74 @@ func (b *Block) GetMinerAddress() string {
 	return b.MinerAddress
 }
 
-// SetTimestampUnix sets the timestamp in both Block and Header
+// SetTimestampUnix sets the timestamp in Header
 // Concurrency safety: uses mutex to protect concurrent writes
 func (b *Block) SetTimestampUnix(ts int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.TimestampUnix = ts
 	b.Header.TimestampUnix = ts
 }
 
-// SetDifficultyBits sets the difficulty in both Block and Header
+// SetDifficultyBits sets the difficulty in Header
 // Concurrency safety: uses mutex to protect concurrent writes
 func (b *Block) SetDifficultyBits(diff uint32) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.DifficultyBits = diff
 	b.Header.DifficultyBits = diff
 	b.Header.Difficulty = diff
 }
 
-// SetNonce sets the nonce in both Block and Header
+// SetNonce sets the nonce in Header
 // Concurrency safety: uses mutex to protect concurrent writes
 func (b *Block) SetNonce(nonce uint64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.Nonce = nonce
 	b.Header.Nonce = nonce
+}
+
+// SetPrevHash sets the previous block hash in Header
+// Concurrency safety: uses mutex to protect concurrent writes
+func (b *Block) SetPrevHash(prevHash []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if prevHash != nil {
+		b.Header.PrevHash = make([]byte, len(prevHash))
+		copy(b.Header.PrevHash, prevHash)
+	} else {
+		b.Header.PrevHash = nil
+	}
+}
+
+// SetVersion sets the version in Header
+// Concurrency safety: uses mutex to protect concurrent writes
+func (b *Block) SetVersion(version uint32) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.Header.Version = version
+}
+
+// GetNonce returns the nonce
+// Concurrency safety: read-only operation, safe for concurrent access
+func (b *Block) GetNonce() uint64 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.Header.Nonce
+}
+
+// GetVersion returns the version
+// Concurrency safety: read-only operation, safe for concurrent access
+func (b *Block) GetVersion() uint32 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.Header.Version
+}
+
+// GetDifficulty returns the difficulty
+// Concurrency safety: read-only operation, safe for concurrent access
+func (b *Block) GetDifficulty() uint32 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.Header.Difficulty
 }
 
 // SetHash sets the block hash
@@ -336,6 +372,66 @@ func (b *Block) GetTransactions() []Transaction {
 	txs := make([]Transaction, len(b.Transactions))
 	copy(txs, b.Transactions)
 	return txs
+}
+
+// blockLegacyJSON represents the legacy JSON format with top-level fields
+// Used for backward compatibility when deserializing from older nodes
+type blockLegacyJSON struct {
+	Hash          []byte        `json:"hash"`
+	Height        uint64        `json:"height"`
+	Header        BlockHeader   `json:"header"`
+	Transactions  []Transaction `json:"transactions"`
+	CoinbaseTx    *Transaction  `json:"coinbaseTx"`
+	MinerAddress  string        `json:"minerAddress"`
+	TotalWork     string        `json:"totalWork"`
+	Version       uint32        `json:"version"`
+	TimestampUnix int64         `json:"timestampUnix"`
+	DifficultyBits uint32       `json:"difficultyBits"`
+	Difficulty    uint32        `json:"difficulty"`
+	Nonce         uint64        `json:"nonce"`
+	PrevHash      []byte        `json:"prevHash"`
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for backward compatibility
+// Handles both new format (fields in Header only) and legacy format (fields at top-level)
+func (b *Block) UnmarshalJSON(data []byte) error {
+	var legacy blockLegacyJSON
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+
+	b.Hash = legacy.Hash
+	b.Height = legacy.Height
+	b.Transactions = legacy.Transactions
+	b.CoinbaseTx = legacy.CoinbaseTx
+	b.MinerAddress = legacy.MinerAddress
+	b.TotalWork = legacy.TotalWork
+
+	// Copy Header fields
+	b.Header = legacy.Header
+
+	// Migrate legacy top-level fields to Header if Header fields are empty
+	// This handles blocks serialized by older nodes that put data at top-level
+	if legacy.Version != 0 && b.Header.Version == 0 {
+		b.Header.Version = legacy.Version
+	}
+	if len(legacy.PrevHash) > 0 && len(b.Header.PrevHash) == 0 {
+		b.Header.PrevHash = legacy.PrevHash
+	}
+	if legacy.TimestampUnix != 0 && b.Header.TimestampUnix == 0 {
+		b.Header.TimestampUnix = legacy.TimestampUnix
+	}
+	if legacy.DifficultyBits != 0 && b.Header.DifficultyBits == 0 {
+		b.Header.DifficultyBits = legacy.DifficultyBits
+	}
+	if legacy.Difficulty != 0 && b.Header.Difficulty == 0 {
+		b.Header.Difficulty = legacy.Difficulty
+	}
+	if legacy.Nonce != 0 && b.Header.Nonce == 0 {
+		b.Header.Nonce = legacy.Nonce
+	}
+
+	return nil
 }
 
 // TxRootLegacyForConsensus computes the legacy transaction root
@@ -605,7 +701,7 @@ func (b *Block) MarshalJSON() ([]byte, error) {
 
 	// Build response with all fields exposed
 	response := map[string]interface{}{
-		"version":        b.Version,
+		"version":        b.Header.Version,
 		"height":         b.Height,
 		"hash":           base64.StdEncoding.EncodeToString(b.Hash),
 		"prevHash":       base64.StdEncoding.EncodeToString(b.Header.PrevHash),
@@ -869,6 +965,7 @@ func (p MonetaryPolicy) GetTotalMinerReward(height uint64, uncleCount int) uint6
 }
 
 // MinerFeeAmount calculates the amount of fees allocated to the miner
+// When MinerFeeShare=0, all fees are burned (deflationary mechanism)
 // Math & numeric safety: uses integer arithmetic to prevent precision loss
 func (p MonetaryPolicy) MinerFeeAmount(totalFees uint64) uint64 {
 	if p.MinerFeeShare == 0 || totalFees == 0 {

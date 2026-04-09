@@ -180,7 +180,7 @@ func (s *BoltStore) AppendCanonical(block *core.Block) error {
 			if prevHash == nil {
 				return fmt.Errorf("missing previous canonical block at height %d", block.Height-1)
 			}
-			if !bytes.Equal(prevHash, block.PrevHash) {
+			if !bytes.Equal(prevHash, block.Header.PrevHash) {
 				return errors.New("prevhash mismatch for append")
 			}
 		}

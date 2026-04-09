@@ -432,18 +432,22 @@ func (pm *P2PPeerManager) DiscoverPeersFromPeer(ctx context.Context, peer string
 }
 
 // FetchHeadersFrom fetches block headers from a peer starting at a specific height
+// Uses dedicated connection per request for safe concurrent access
 func (pm *P2PPeerManager) FetchHeadersFrom(ctx context.Context, peer string, fromHeight uint64, count int) ([]core.BlockHeader, error) {
 	var out []core.BlockHeader
-	if err := pm.client.do(ctx, peer, "headers_from_req", p2pHeadersFromReq{From: fromHeight, Count: count}, &out, "headers"); err != nil {
+	// Use doWithNewConnection for concurrent safety - each request gets its own connection
+	if err := pm.client.doWithNewConnection(ctx, peer, "headers_from_req", p2pHeadersFromReq{From: fromHeight, Count: count}, &out, "headers"); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
 // FetchBlockByHash fetches a specific block by its hash from a peer
+// Uses dedicated connection per request for safe concurrent access
 func (pm *P2PPeerManager) FetchBlockByHash(ctx context.Context, peer string, hashHex string) (*core.Block, error) {
 	var out core.Block
-	err := pm.client.do(ctx, peer, "block_by_hash_req", p2pBlockByHashReq{HashHex: hashHex}, &out, "block")
+	// Use doWithNewConnection for concurrent safety - each request gets its own connection
+	err := pm.client.doWithNewConnection(ctx, peer, "block_by_hash_req", p2pBlockByHashReq{HashHex: hashHex}, &out, "block")
 	if err != nil {
 		if err.Error() == "not found" {
 			return nil, errors.New("not found")
@@ -454,9 +458,11 @@ func (pm *P2PPeerManager) FetchBlockByHash(ctx context.Context, peer string, has
 }
 
 // FetchBlockByHeight fetches a block by its height from a specific peer
+// Uses dedicated connection per request for safe concurrent access
 func (pm *P2PPeerManager) FetchBlockByHeight(ctx context.Context, peer string, height uint64) (*core.Block, error) {
 	var out core.Block
-	err := pm.client.do(ctx, peer, "block_by_height_req", p2pBlockByHeightReq{Height: height}, &out, "block")
+	// Use doWithNewConnection for concurrent safety - each request gets its own connection
+	err := pm.client.doWithNewConnection(ctx, peer, "block_by_height_req", p2pBlockByHeightReq{Height: height}, &out, "block")
 	if err != nil {
 		if err.Error() == "not found" {
 			return nil, errors.New("not found")
@@ -464,6 +470,13 @@ func (pm *P2PPeerManager) FetchBlockByHeight(ctx context.Context, peer string, h
 		return nil, err
 	}
 	return &out, nil
+}
+
+// FetchBlocksByHeightRange fetches multiple blocks by height range in a single connection.
+// This is more efficient than calling FetchBlockByHeight multiple times because it reuses
+// the same TCP connection for all requests, avoiding the overhead of repeated handshakes.
+func (pm *P2PPeerManager) FetchBlocksByHeightRange(ctx context.Context, peer string, startHeight, count uint64) ([]*core.Block, error) {
+	return pm.client.FetchBlocksByHeightRange(ctx, peer, startHeight, count)
 }
 
 // FetchAnyBlockByHash attempts to fetch a block from any available peer
@@ -560,8 +573,8 @@ func (pm *P2PPeerManager) EnsureAncestors(ctx context.Context, bc BlockchainInte
 			return err
 		}
 
-		parentHex := fmt.Sprintf("%x", b.PrevHash)
-		if len(b.PrevHash) != 0 {
+		parentHex := fmt.Sprintf("%x", b.Header.PrevHash)
+		if len(b.Header.PrevHash) != 0 {
 			if _, ok := bc.BlockByHash(parentHex); !ok {
 				if err := pm.EnsureAncestors(ctx, bc, parentHex); err != nil {
 					return err

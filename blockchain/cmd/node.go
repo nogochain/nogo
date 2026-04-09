@@ -157,7 +157,7 @@ func (n *Node) initializeComponents() error {
 		24*time.Hour,
 		nil,
 		n.config.ChainID,
-		config.ConsensusParams{},
+		chain.GetConsensus(), // Use correct consensus params from chain
 		chain.GetHeight()+1,
 		n.config.Mempool,
 	)
@@ -246,13 +246,17 @@ func (n *Node) createHandler(limiter *api.IPRateLimiter, trustProxy, wsEnable bo
 		minerImpl = &miner.Miner{}
 	}
 
+	// Enable transaction gossip when P2P is configured with peers
+	// This ensures transactions are broadcast to the network for any miner to include
+	txGossip := n.p2pManager != nil && len(network.ParseP2PPeersEnv(n.config.P2PPeers)) > 0
+
 	srv := api.NewServer(
 		n.networkChainWrapper,
 		"",
 		n.mempool,
 		minerImpl,
 		n.p2pManager,
-		false,
+		txGossip,
 		n.metrics,
 		n.adminToken,
 		limiter,

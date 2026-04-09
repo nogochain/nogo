@@ -128,7 +128,8 @@ func applyBlockToState(p ConsensusParams, mp MonetaryPolicy, state map[string]Ac
 			return errors.New("coinbase toAddress must match minerAddress")
 		}
 		policy := mp
-		// Miner receives 96% of block reward + 100% of fees (fees are burned, not distributed)
+		// Miner receives MinerRewardShare% of block reward
+		// Transaction fees are burned (MinerFeeShare=0) to create deflationary pressure
 		expected := policy.BlockReward(b.Height)*uint64(policy.MinerRewardShare)/100 + policy.MinerFeeAmount(fees)
 		if cb.Amount != expected {
 			return fmt.Errorf("bad coinbase amount: expected %d got %d", expected, cb.Amount)
@@ -723,7 +724,7 @@ func (c *Chain) AppendBlock(block *Block) error {
 	}
 
 	// Check if block extends canonical chain
-	parentHashHex := hex.EncodeToString(block.PrevHash)
+	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 	isCanonicalExtension := len(c.blocks) > 0 && parentHashHex == hex.EncodeToString(c.blocks[len(c.blocks)-1].Hash)
 
 	if !isCanonicalExtension {
@@ -780,7 +781,7 @@ func (c *Chain) AppendBlock(block *Block) error {
 				Type:      index.TransactionType(tx.Type),
 			})
 		}
-		if err := c.addressIndexBolt.IndexBlockSimple(block.Hash, block.Height, block.TimestampUnix, entries); err != nil {
+		if err := c.addressIndexBolt.IndexBlockSimple(block.Hash, block.Height, block.Header.TimestampUnix, entries); err != nil {
 			log.Printf("WARNING: index block %d in BoltDB: %v", block.Height, err)
 		}
 	}
@@ -792,7 +793,7 @@ func (c *Chain) AppendBlock(block *Block) error {
 	if c.canonicalWork == nil {
 		c.canonicalWork = big.NewInt(0)
 	}
-	c.canonicalWork.Add(c.canonicalWork, WorkForDifficultyBits(block.DifficultyBits))
+	c.canonicalWork.Add(c.canonicalWork, WorkForDifficultyBits(block.Header.DifficultyBits))
 	// CRITICAL: Set TotalWork on the block for fork resolution
 	// This field is required for other nodes to compare chain work during fork detection
 	block.TotalWork = c.canonicalWork.String()
@@ -804,8 +805,8 @@ func (c *Chain) AppendBlock(block *Block) error {
 			Data: map[string]any{
 				"height":         block.Height,
 				"hash":           hashHex,
-				"prevHash":       hex.EncodeToString(block.PrevHash),
-				"difficultyBits": block.DifficultyBits,
+				"prevHash":       hex.EncodeToString(block.Header.PrevHash),
+				"difficultyBits": block.Header.DifficultyBits,
 				"txCount":        len(block.Transactions),
 			},
 		})
@@ -835,14 +836,14 @@ func (c *Chain) validateBlockLocked(block *Block) error {
 	}
 
 	// Find parent block
-	parentHashHex := hex.EncodeToString(block.PrevHash)
+	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 	parent, exists := c.blocksByHash[parentHashHex]
 	if !exists {
 		return ErrOrphanBlock
 	}
 
 	// Validate block header linkage
-	if !bytes.Equal(block.PrevHash, parent.Hash) {
+	if !bytes.Equal(block.Header.PrevHash, parent.Hash) {
 		return errors.New("invalid previous hash")
 	}
 	if block.Height != parent.Height+1 {
@@ -865,7 +866,7 @@ func (c *Chain) validateBlockLocked(block *Block) error {
 	}
 
 	// Validate merkle root (for v2+ blocks)
-	if block.Version >= 2 {
+	if block.Header.Version >= 2 {
 		if err := c.validateMerkleRootLocked(block); err != nil {
 			return fmt.Errorf("invalid merkle root: %w", err)
 		}
@@ -890,12 +891,12 @@ func (c *Chain) validateGenesisBlockLocked(block *Block) error {
 	if block.Height != 0 {
 		return errors.New("genesis block height must be 0")
 	}
-	if len(block.PrevHash) != 0 {
+	if len(block.Header.PrevHash) != 0 {
 		return errors.New("genesis block prevHash must be empty")
 	}
-	if block.DifficultyBits != c.consensus.GenesisDifficultyBits {
+	if block.Header.DifficultyBits != c.consensus.GenesisDifficultyBits {
 		return fmt.Errorf("invalid genesis difficulty: expected %d got %d",
-			c.consensus.GenesisDifficultyBits, block.DifficultyBits)
+			c.consensus.GenesisDifficultyBits, block.Header.DifficultyBits)
 	}
 
 	// Validate genesis PoW
@@ -910,16 +911,16 @@ func (c *Chain) validateGenesisBlockLocked(block *Block) error {
 // Security: prevents timestamp manipulation attacks
 // Math & numeric safety: uses NTP synchronized time
 func (c *Chain) validateBlockTimestampLocked(block, parent *Block) error {
-	if block.TimestampUnix <= parent.TimestampUnix {
+	if block.Header.TimestampUnix <= parent.Header.TimestampUnix {
 		return fmt.Errorf("block timestamp %d not greater than parent timestamp %d",
-			block.TimestampUnix, parent.TimestampUnix)
+			block.Header.TimestampUnix, parent.Header.TimestampUnix)
 	}
 
 	// Check timestamp is not too far in future
 	now := getNetworkTimeUnix()
-	if block.TimestampUnix > now+MaxBlockTimeDriftSec {
+	if block.Header.TimestampUnix > now+MaxBlockTimeDriftSec {
 		return fmt.Errorf("block timestamp %d too far in future (max allowed %d, now=%d)",
-			block.TimestampUnix, now+MaxBlockTimeDriftSec, now)
+			block.Header.TimestampUnix, now+MaxBlockTimeDriftSec, now)
 	}
 
 	return nil
@@ -930,11 +931,11 @@ func (c *Chain) validateBlockTimestampLocked(block, parent *Block) error {
 // Math & numeric safety: uses big.Int for calculations
 func (c *Chain) validateBlockDifficultyLocked(block, parent *Block) error {
 	// Check difficulty range
-	if block.DifficultyBits < c.consensus.MinDifficultyBits {
-		return fmt.Errorf("difficulty %d below min %d", block.DifficultyBits, c.consensus.MinDifficultyBits)
+	if block.Header.DifficultyBits < c.consensus.MinDifficultyBits {
+		return fmt.Errorf("difficulty %d below min %d", block.Header.DifficultyBits, c.consensus.MinDifficultyBits)
 	}
-	if block.DifficultyBits > c.consensus.MaxDifficultyBits {
-		return fmt.Errorf("difficulty %d above max %d", block.DifficultyBits, c.consensus.MaxDifficultyBits)
+	if block.Header.DifficultyBits > c.consensus.MaxDifficultyBits {
+		return fmt.Errorf("difficulty %d above max %d", block.Header.DifficultyBits, c.consensus.MaxDifficultyBits)
 	}
 
 	// Validate difficulty adjustment if enabled
@@ -952,20 +953,20 @@ func (c *Chain) validateBlockDifficultyLocked(block, parent *Block) error {
 
 	// Create parent header for calculation
 	var parentHash nogopow.Hash
-	copy(parentHash[:], parent.PrevHash)
+	copy(parentHash[:], parent.Header.PrevHash)
 
 	parentHeader := &nogopow.Header{
 		Number:     big.NewInt(int64(parent.Height)),
-		Time:       uint64(parent.TimestampUnix),
-		Difficulty: big.NewInt(int64(parent.DifficultyBits)),
+		Time:       uint64(parent.Header.TimestampUnix),
+		Difficulty: big.NewInt(int64(parent.Header.DifficultyBits)),
 		ParentHash: parentHash,
 	}
 
 	// Calculate expected difficulty
-	expectedDifficulty := adjuster.CalcDifficulty(uint64(block.TimestampUnix), parentHeader)
+	expectedDifficulty := adjuster.CalcDifficulty(uint64(block.Header.TimestampUnix), parentHeader)
 
 	// Validate difficulty is within tolerance
-	actualDifficulty := big.NewInt(int64(block.DifficultyBits))
+	actualDifficulty := big.NewInt(int64(block.Header.DifficultyBits))
 
 	// Calculate acceptable range (±tolerance)
 	tolerance := int64(DifficultyTolerancePercent)
@@ -1079,7 +1080,8 @@ func (c *Chain) validateCoinbaseLocked(block *Block) error {
 			}
 		}
 
-		// Calculate expected reward (miner receives 96% of block reward)
+		// Calculate expected reward (miner receives MinerRewardShare% of block reward)
+		// Transaction fees are burned (MinerFeeShare=0)
 		policy := c.monetaryPolicy
 		expectedReward := policy.BlockReward(block.Height)*uint64(policy.MinerRewardShare)/100 + policy.MinerFeeAmount(totalFees)
 
@@ -1134,11 +1136,11 @@ func (c *Chain) findCommonAncestorLocked(newBlock *Block) (*Block, []*Block, err
 		hashHex := hex.EncodeToString(current.Hash)
 		parentMap[hashHex] = current
 
-		if len(current.PrevHash) == 0 {
+		if len(current.Header.PrevHash) == 0 {
 			break
 		}
 
-		parentHashHex := hex.EncodeToString(current.PrevHash)
+		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
 		parent, exists := c.blocksByHash[parentHashHex]
 		if !exists {
 			break
@@ -1168,7 +1170,7 @@ func (c *Chain) findCommonAncestorLocked(newBlock *Block) (*Block, []*Block, err
 func (c *Chain) calculateChainWorkLocked(blocks []*Block) *big.Int {
 	totalWork := big.NewInt(0)
 	for _, block := range blocks {
-		work := WorkForDifficultyBits(block.DifficultyBits)
+		work := WorkForDifficultyBits(block.Header.DifficultyBits)
 		totalWork.Add(totalWork, work)
 	}
 	return totalWork
@@ -1181,10 +1183,10 @@ func (c *Chain) calculateChainWorkFromAncestorLocked(ancestor *Block, tip *Block
 	// Build chain from tip to ancestor
 	current := tip
 	for current.Height > ancestor.Height {
-		work := WorkForDifficultyBits(current.DifficultyBits)
+		work := WorkForDifficultyBits(current.Header.DifficultyBits)
 		totalWork.Add(totalWork, work)
 
-		parentHashHex := hex.EncodeToString(current.PrevHash)
+		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
 		parent, exists := c.blocksByHash[parentHashHex]
 		if !exists {
 			break
@@ -1205,7 +1207,7 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	current := newTip
 	for current.Height > ancestor.Height {
 		newChain = append([]*Block{current}, newChain...)
-		parentHashHex := hex.EncodeToString(current.PrevHash)
+		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
 		parent, exists := c.blocksByHash[parentHashHex]
 		if !exists {
 			return errors.New("parent block not found during reorg")
@@ -1242,7 +1244,7 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	// Recalculate total work and update TotalWork on each block
 	c.canonicalWork = big.NewInt(0)
 	for _, block := range c.blocks {
-		work := WorkForDifficultyBits(block.DifficultyBits)
+		work := WorkForDifficultyBits(block.Header.DifficultyBits)
 		c.canonicalWork.Add(c.canonicalWork, work)
 		// Update TotalWork on each block for fork resolution
 		block.TotalWork = c.canonicalWork.String()
@@ -1377,7 +1379,7 @@ func (c *Chain) SetTip(newTip *Block) error {
 		}
 
 		// Get parent block
-		parent, exists := c.blocksByHash[hex.EncodeToString(current.PrevHash)]
+		parent, exists := c.blocksByHash[hex.EncodeToString(current.Header.PrevHash)]
 		if !exists {
 			return fmt.Errorf("parent block not found for height %d", current.Height)
 		}
@@ -1641,7 +1643,7 @@ func (c *Chain) initCanonicalIndexesLocked() {
 
 	c.canonicalWork = big.NewInt(0)
 	for _, block := range c.blocks {
-		work := WorkForDifficultyBits(block.DifficultyBits)
+		work := WorkForDifficultyBits(block.Header.DifficultyBits)
 		c.canonicalWork.Add(c.canonicalWork, work)
 	}
 }
@@ -1723,14 +1725,14 @@ func verifyBlockPoWSeal(consensus ConsensusParams, block *Block, parent *Block) 
 	// Reconstruct header with all fields
 	header := &nogopow.Header{
 		Number:     big.NewInt(int64(block.Height)),
-		Time:       uint64(block.TimestampUnix),
+		Time:       uint64(block.Header.TimestampUnix),
 		ParentHash: parentHash,
-		Difficulty: big.NewInt(int64(block.DifficultyBits)),
+		Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
 		Coinbase:   powCoinbase,
 	}
 
 	// Set nonce (32 bytes, little-endian)
-	binary.LittleEndian.PutUint64(header.Nonce[:8], block.Nonce)
+	binary.LittleEndian.PutUint64(header.Nonce[:8], block.Header.Nonce)
 
 	// Verify seal using NogoPow engine
 	if err := engine.VerifySealOnly(header); err != nil {
@@ -1869,7 +1871,7 @@ func (c *Chain) AuditChain() error {
 	if genesis.Height != 0 {
 		return fmt.Errorf("genesis block height is %d, expected 0", genesis.Height)
 	}
-	if len(genesis.PrevHash) != 0 {
+	if len(genesis.Header.PrevHash) != 0 {
 		return errors.New("genesis block prevHash is not empty")
 	}
 
@@ -1884,7 +1886,7 @@ func (c *Chain) AuditChain() error {
 		}
 
 		// Validate hash linkage
-		if !bytes.Equal(block.PrevHash, parent.Hash) {
+		if !bytes.Equal(block.Header.PrevHash, parent.Hash) {
 			return fmt.Errorf("block %d has invalid prevHash", i)
 		}
 
@@ -1995,15 +1997,15 @@ func (c *Chain) validateBlockConsensusLocked(block *Block) error {
 	if len(block.Hash) == 0 {
 		return errors.New("missing block hash")
 	}
-	if block.DifficultyBits == 0 {
+	if block.Header.DifficultyBits == 0 {
 		return errors.New("invalid difficulty bits")
 	}
 
 	// Validate block version compatibility
 	expectedVersion := c.blockVersionForHeight(block.Height)
-	if block.Version != expectedVersion {
+	if block.Header.Version != expectedVersion {
 		return fmt.Errorf("invalid block version: expected %d got %d at height %d",
-			expectedVersion, block.Version, block.Height)
+			expectedVersion, block.Header.Version, block.Height)
 	}
 
 	// Validate chain ID consistency
@@ -2083,9 +2085,9 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 		// Validate that block's PrevHash matches current chain tip
 		if len(c.blocks) > 0 {
 			currentTip := c.blocks[len(c.blocks)-1]
-			if !bytes.Equal(block.PrevHash, currentTip.Hash) {
+			if !bytes.Equal(block.Header.PrevHash, currentTip.Hash) {
 				log.Printf("[Chain] Block %d has wrong PrevHash: expected %x, got %x",
-					block.Height, currentTip.Hash[:8], block.PrevHash[:8])
+					block.Height, currentTip.Hash[:8], block.Header.PrevHash[:8])
 				// This block might be from a different fork - handle as fork block
 				return c.addForkBlockLocked(block, hashHex)
 			}
@@ -2096,11 +2098,11 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 		return c.addForkBlockLocked(block, hashHex)
 	} else if block.Height == expectedHeight+1 {
 		// Next height block - check if parent exists
-		parent, parentExists := c.blocksByHash[hex.EncodeToString(block.PrevHash)]
+		parent, parentExists := c.blocksByHash[hex.EncodeToString(block.Header.PrevHash)]
 		if !parentExists {
 			// Parent not found - store as orphan
 			log.Printf("[Chain] Orphan block %d: parent %s not found, storing for later",
-				block.Height, hex.EncodeToString(block.PrevHash)[:16])
+				block.Height, hex.EncodeToString(block.Header.PrevHash)[:16])
 			return c.addOrphanBlockLocked(block, hashHex)
 		}
 		// Parent exists - this should have been expectedHeight, logic error
@@ -2141,7 +2143,7 @@ func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error)
 			delete(c.orphanPool, lowestHash)
 			// Remove from parent index
 			if blk, exists := c.orphanPool[lowestHash]; exists {
-				parentHashHex := hex.EncodeToString(blk.PrevHash)
+				parentHashHex := hex.EncodeToString(blk.Header.PrevHash)
 				orphans := c.orphanByParent[parentHashHex]
 				for i, h := range orphans {
 					if h == lowestHash {
@@ -2161,7 +2163,7 @@ func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error)
 	c.orphanPool[hashHex] = block
 
 	// Index by parent hash for efficient lookup
-	parentHashHex := hex.EncodeToString(block.PrevHash)
+	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 	c.orphanByParent[parentHashHex] = append(c.orphanByParent[parentHashHex], hashHex)
 
 	log.Printf("[Chain] Orphan block stored: height=%d hash=%s parent=%s (pool size: %d/%d)",
@@ -2197,7 +2199,7 @@ func (c *Chain) tryProcessOrphansLocked() (bool, error) {
 		// Find orphans whose parent is the current canonical tip
 		for orphanHash, orphan := range c.orphanPool {
 			// Check if this orphan's parent is the canonical tip
-			orphanParentHash := hex.EncodeToString(orphan.PrevHash)
+			orphanParentHash := hex.EncodeToString(orphan.Header.PrevHash)
 			if orphanParentHash != canonicalTipHash {
 				continue
 			}
@@ -2275,7 +2277,7 @@ func (c *Chain) processLoadedOrphansLocked() {
 
 		// Add to orphan pool
 		c.orphanPool[hashHex] = block
-		parentHashHex := hex.EncodeToString(block.PrevHash)
+		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 		c.orphanByParent[parentHashHex] = append(c.orphanByParent[parentHashHex], hashHex)
 	}
 
@@ -2299,7 +2301,7 @@ func (c *Chain) processLoadedOrphansLocked() {
 
 		found := false
 		for orphanHash, orphan := range c.orphanPool {
-			orphanParentHash := hex.EncodeToString(orphan.PrevHash)
+			orphanParentHash := hex.EncodeToString(orphan.Header.PrevHash)
 
 			// Check if this orphan connects to canonical tip
 			if orphanParentHash != canonicalTipHash {
@@ -2382,7 +2384,7 @@ func (c *Chain) addCanonicalBlockLocked(block *Block, hashHex string) (bool, err
 	if c.canonicalWork == nil {
 		c.canonicalWork = big.NewInt(0)
 	}
-	c.canonicalWork.Add(c.canonicalWork, WorkForDifficultyBits(block.DifficultyBits))
+	c.canonicalWork.Add(c.canonicalWork, WorkForDifficultyBits(block.Header.DifficultyBits))
 	block.TotalWork = c.canonicalWork.String()
 
 	// Add to fork blocks list
@@ -2490,11 +2492,11 @@ func (c *Chain) calculateCumulativeWorkLocked(block *Block) *big.Int {
 	}
 
 	// Calculate work for this block
-	work := WorkForDifficultyBits(block.DifficultyBits)
+	work := WorkForDifficultyBits(block.Header.DifficultyBits)
 
 	// Add parent's cumulative work if parent exists
-	if len(block.PrevHash) > 0 {
-		parentHashHex := hex.EncodeToString(block.PrevHash)
+	if len(block.Header.PrevHash) > 0 {
+		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 		if parent, exists := c.blocksByHash[parentHashHex]; exists {
 			parentWork := c.calculateCumulativeWorkLocked(parent)
 			work.Add(work, parentWork)
@@ -2952,7 +2954,7 @@ func (c *Chain) initAddressIndexLocked() error {
 					Type:      index.TransactionType(tx.Type),
 				})
 			}
-			if err := c.addressIndexBolt.IndexBlockSimple(block.Hash, block.Height, block.TimestampUnix, entries); err != nil {
+			if err := c.addressIndexBolt.IndexBlockSimple(block.Hash, block.Height, block.Header.TimestampUnix, entries); err != nil {
 				log.Printf("WARNING: index block %d: %v", block.Height, err)
 			}
 		}

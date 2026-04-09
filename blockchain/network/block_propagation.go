@@ -21,26 +21,26 @@ import (
 // Production-grade: minimal delay, work-based resolution
 // Thread-safe: concurrent propagation to multiple peers
 type OptimizedBlockPropagator struct {
-	server          *P2PServer
-	chainSelector   *core.ChainSelector
-	forkDetector    *core.ForkDetector
-	resolutionEngine *ForkResolutionEngine
-	broadcastChan   chan *core.Block
-	workers         int
+	server              *P2PServer
+	chainSelector       *core.ChainSelector
+	forkDetector        *core.ForkDetector
+	resolutionEngine    *ForkResolutionEngine
+	broadcastChan       chan *core.Block
+	workers             int
 	minPropagationPeers int
 }
 
 // NewOptimizedBlockPropagator creates a new optimized block propagator
-func NewOptimizedBlockPropagator(server *P2PServer, chainSelector *core.ChainSelector, 
+func NewOptimizedBlockPropagator(server *P2PServer, chainSelector *core.ChainSelector,
 	forkDetector *core.ForkDetector, resolutionEngine *ForkResolutionEngine) *OptimizedBlockPropagator {
-	
+
 	propagator := &OptimizedBlockPropagator{
-		server:          server,
-		chainSelector:   chainSelector,
-		forkDetector:    forkDetector,
-		resolutionEngine: resolutionEngine,
-		broadcastChan:   make(chan *core.Block, 100),
-		workers:         4,
+		server:              server,
+		chainSelector:       chainSelector,
+		forkDetector:        forkDetector,
+		resolutionEngine:    resolutionEngine,
+		broadcastChan:       make(chan *core.Block, 100),
+		workers:             4,
 		minPropagationPeers: 3, // Minimum peers for effective propagation
 	}
 
@@ -86,7 +86,7 @@ func (obp *OptimizedBlockPropagator) HandleBlockBroadcastOptimized(c net.Conn, p
 			default:
 				// Channel full, drop block (backpressure handling)
 			}
-			
+
 			// Send immediate ACK
 			return p2pWriteJSON(c, p2pEnvelope{Type: "block_broadcast_ack", Payload: mustJSON(map[string]any{
 				"hash":     fmt.Sprintf("%x", block.Hash),
@@ -120,7 +120,7 @@ func (obp *OptimizedBlockPropagator) evaluateBlockFast(block, currentTip *core.B
 	// Rule 1: Higher work = always better (Bitcoin rule)
 	blockWork, ok1 := core.StringToWork(block.TotalWork)
 	tipWork, ok2 := core.StringToWork(currentTip.TotalWork)
-	
+
 	if ok1 && ok2 {
 		workDiff := blockWork.Cmp(tipWork)
 		if workDiff > 0 {
@@ -155,13 +155,13 @@ func (obp *OptimizedBlockPropagator) evaluateBlockFast(block, currentTip *core.B
 func (obp *OptimizedBlockPropagator) propagationWorker(id int) {
 	for block := range obp.broadcastChan {
 		startTime := time.Now()
-		
-if err := obp.processBlockBackground(block); err != nil {
-		log.Printf("block processing failed: worker=%d height=%d error=%v", id, block.Height, err)
-	}
-	
-	processingTime := time.Since(startTime)
-	log.Printf("block processed: worker=%d height=%d processing_time_ms=%d", id, block.Height, processingTime.Milliseconds())
+
+		if err := obp.processBlockBackground(block); err != nil {
+			log.Printf("block processing failed: worker=%d height=%d error=%v", id, block.Height, err)
+		}
+
+		processingTime := time.Since(startTime)
+		log.Printf("block processed: worker=%d height=%d processing_time_ms=%d", id, block.Height, processingTime.Milliseconds())
 	}
 }
 
@@ -226,7 +226,7 @@ func (obp *OptimizedBlockPropagator) handleUnknownParent(block *core.Block) erro
 	// Request missing blocks from network
 	// This would integrate with sync mechanism
 	log.Printf("requesting missing ancestor blocks: block_height=%d block_hash=%x parent_hash=%x",
-		block.Height, block.Hash, block.PrevHash,
+		block.Height, block.Hash, block.Header.PrevHash,
 	)
 
 	// In production, this would trigger a sync with the peer that sent this block
@@ -331,8 +331,8 @@ func (obp *OptimizedBlockPropagator) Stop() {
 // GetPropagationStats returns propagation statistics
 func (obp *OptimizedBlockPropagator) GetPropagationStats() map[string]interface{} {
 	return map[string]interface{}{
-		"queue_length":        len(obp.broadcastChan),
-		"workers":             obp.workers,
+		"queue_length":          len(obp.broadcastChan),
+		"workers":               obp.workers,
 		"min_propagation_peers": obp.minPropagationPeers,
 	}
 }

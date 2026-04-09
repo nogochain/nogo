@@ -272,7 +272,7 @@ func (s *Server) handleChainInfo(w http.ResponseWriter, r *http.Request) {
 		"height":                         latest.Height,
 		"latestHash":                     fmt.Sprintf("%x", latest.Hash),
 		"genesisHash":                    fmt.Sprintf("%x", genesis.Hash),
-		"genesisTimestampUnix":           genesis.TimestampUnix,
+		"genesisTimestampUnix":           genesis.Header.TimestampUnix,
 		"genesisMinerAddress":            genesis.MinerAddress,
 		"minerAddress":                   s.bc.GetMinerAddress(),
 		"peersCount":                     peersCount,
@@ -281,7 +281,7 @@ func (s *Server) handleChainInfo(w http.ResponseWriter, r *http.Request) {
 		"totalSupply":                    totalSupply,
 		"currentReward":                  currentReward,
 		"nextHalvingHeight":              nextHalving,
-		"difficultyBits":                 latest.DifficultyBits,
+		"difficultyBits":                 latest.Header.DifficultyBits,
 		"difficultyEnable":               cp.DifficultyEnable,
 		"difficultyTargetMs":             cp.BlockTimeTargetSeconds * 1000,
 		"difficultyWindow":               cp.DifficultyAdjustmentInterval,
@@ -340,7 +340,7 @@ func (s *Server) handleSpecialAddresses(w http.ResponseWriter, r *http.Request) 
 	// Note: In production, these would be retrieved from the contract registry
 	// For now, we generate them using the same algorithm as the contracts
 	chainID := s.bc.GetChainID()
-	timestamp := genesis.TimestampUnix
+	timestamp := genesis.Header.TimestampUnix
 	communityFundAddr := generateContractAddress(chainID, timestamp, "COMMUNITY_FUND_GOVERNANCE")
 	integrityPoolAddr := generateContractAddress(chainID, timestamp, "INTEGRITY_REWARD_CONTRACT")
 
@@ -868,10 +868,10 @@ func (s *Server) handleBlockByHeight(w http.ResponseWriter, r *http.Request) {
 	blockData := map[string]any{
 		"height":         b.Height,
 		"hash":           fmt.Sprintf("%x", b.Hash),
-		"prevHash":       fmt.Sprintf("%x", b.PrevHash),
-		"timestampUnix":  b.TimestampUnix,
-		"difficultyBits": b.DifficultyBits,
-		"nonce":          b.Nonce,
+		"prevHash":       fmt.Sprintf("%x", b.Header.PrevHash),
+		"timestampUnix":  b.Header.TimestampUnix,
+		"difficultyBits": b.Header.DifficultyBits,
+		"nonce":          b.Header.Nonce,
 		"minerAddress":   b.MinerAddress,
 		"transactions":   enrichedTxs,
 		"txCount":        len(b.Transactions),
@@ -937,10 +937,10 @@ func (s *Server) handleBlockByHashParam(w http.ResponseWriter, r *http.Request) 
 	blockData := map[string]any{
 		"height":         b.Height,
 		"hash":           fmt.Sprintf("%x", b.Hash),
-		"prevHash":       fmt.Sprintf("%x", b.PrevHash),
-		"timestampUnix":  b.TimestampUnix,
-		"difficultyBits": b.DifficultyBits,
-		"nonce":          b.Nonce,
+		"prevHash":       fmt.Sprintf("%x", b.Header.PrevHash),
+		"timestampUnix":  b.Header.TimestampUnix,
+		"difficultyBits": b.Header.DifficultyBits,
+		"nonce":          b.Header.Nonce,
 		"minerAddress":   b.MinerAddress,
 		"transactions":   enrichedTxs,
 		"txCount":        len(b.Transactions),
@@ -1076,7 +1076,7 @@ func (s *Server) handleTxStatus(w http.ResponseWriter, r *http.Request) {
 	block, blockFound := s.bc.BlockByHash(location.BlockHashHex)
 	var blockTime int64
 	if blockFound && block != nil {
-		blockTime = block.TimestampUnix
+		blockTime = block.Header.TimestampUnix
 	}
 
 	// Build response
@@ -1134,7 +1134,7 @@ func (s *Server) handleTxProof(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if foundBlock.Version != 2 {
+	if foundBlock.Header.Version != 2 {
 		http.Error(w, "merkle proofs are only available for v2 blocks", http.StatusConflict)
 		return
 	}
@@ -1189,7 +1189,7 @@ func (s *Server) handleAddBlock(w http.ResponseWriter, r *http.Request) {
 	}
 	reorged, err := s.bc.AddBlock(&b)
 	if err != nil && errors.Is(err, consensus.ErrUnknownParent) && s.peers != nil {
-		parentHex := fmt.Sprintf("%x", b.PrevHash)
+		parentHex := fmt.Sprintf("%x", b.Header.PrevHash)
 		if parentHex != "" {
 			if ferr := s.peers.EnsureAncestors(r.Context(), s.bc, parentHex); ferr == nil {
 				reorged, err = s.bc.AddBlock(&b)
@@ -1590,7 +1590,7 @@ func (s *Server) handleMineOnce(w http.ResponseWriter, r *http.Request) {
 		"message":        "ok",
 		"height":         b.Height,
 		"blockHash":      fmt.Sprintf("%x", b.Hash),
-		"difficultyBits": b.DifficultyBits,
+		"difficultyBits": b.Header.DifficultyBits,
 	})
 }
 

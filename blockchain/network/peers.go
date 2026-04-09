@@ -399,8 +399,8 @@ func (pm *PeerManager) EnsureAncestors(ctx context.Context, bc BlockchainInterfa
 		}
 
 		// Ensure the parent first (if needed), then add this block.
-		parentHex := fmt.Sprintf("%x", b.PrevHash)
-		if len(b.PrevHash) != 0 {
+		parentHex := fmt.Sprintf("%x", b.Header.PrevHash)
+		if len(b.Header.PrevHash) != 0 {
 			if _, ok := bc.BlockByHash(parentHex); !ok {
 				if err := pm.EnsureAncestors(ctx, bc, parentHex); err != nil {
 					return err

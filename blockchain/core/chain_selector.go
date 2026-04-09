@@ -152,7 +152,7 @@ func (cs *ChainSelector) Reorganize(newBlock *Block) error {
 		disconnectedBlocks = append(disconnectedBlocks, disconnectCurrent)
 
 		// Get parent block
-		parent, err := cs.getBlockByHash(disconnectCurrent.PrevHash)
+		parent, err := cs.getBlockByHash(disconnectCurrent.Header.PrevHash)
 		if err != nil {
 			return fmt.Errorf("failed to get parent block: %w", err)
 		}
@@ -174,7 +174,7 @@ func (cs *ChainSelector) Reorganize(newBlock *Block) error {
 	for connectCurrent.Height > forkPoint.Height {
 		pathToFork = append(pathToFork, connectCurrent)
 
-		parent, err := cs.getBlockByHash(connectCurrent.PrevHash)
+		parent, err := cs.getBlockByHash(connectCurrent.Header.PrevHash)
 		if err != nil {
 			// Reorganization failed, attempt to reconnect old chain
 			cs.rollbackReorg(disconnectedBlocks)
@@ -232,7 +232,7 @@ func (cs *ChainSelector) findCommonAncestor(block1, block2 *Block) (*Block, erro
 			break // Genesis block
 		}
 
-		parent, err := cs.getBlockByHash(current.PrevHash)
+		parent, err := cs.getBlockByHash(current.Header.PrevHash)
 		if err != nil {
 			break // Reached genesis or missing parent
 		}
@@ -251,7 +251,7 @@ func (cs *ChainSelector) findCommonAncestor(block1, block2 *Block) (*Block, erro
 			break
 		}
 
-		parent, err := cs.getBlockByHash(current.PrevHash)
+		parent, err := cs.getBlockByHash(current.Header.PrevHash)
 		if err != nil {
 			break
 		}
@@ -293,7 +293,7 @@ func (cs *ChainSelector) validateBlock(block *Block) error {
 		return fmt.Errorf("block hash is empty")
 	}
 
-	if len(block.PrevHash) == 0 {
+	if len(block.Header.PrevHash) == 0 {
 		return fmt.Errorf("previous hash is empty")
 	}
 

@@ -389,6 +389,13 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 			} else {
 				handleErr = s.writeBlockByHeight(c, req.Height)
 			}
+		case "blocks_by_range_req":
+			var req p2pBlocksByRangeReq
+			if err := json.Unmarshal(env.Payload, &req); err != nil {
+				handleErr = err
+			} else {
+				handleErr = s.writeBlocksByRange(c, req.StartHeight, req.Count)
+			}
 		case "tx_req":
 			handleErr = s.handleTransactionReq(c, env.Payload)
 		case "tx_broadcast":
@@ -450,7 +457,7 @@ func (s *P2PServer) writeChainInfo(w io.Writer) error {
 		"height":               latest.Height,
 		"latestHash":           fmt.Sprintf("%x", latest.Hash),
 		"genesisHash":          fmt.Sprintf("%x", genesis.Hash),
-		"genesisTimestampUnix": genesis.TimestampUnix,
+		"genesisTimestampUnix": genesis.Header.TimestampUnix,
 		"peersCount":           peersCount,
 		"work":                 chainWork.String(),
 	}
@@ -488,6 +495,36 @@ func (s *P2PServer) writeBlockByHeight(w io.Writer, height uint64) error {
 		return p2pWriteJSON(w, p2pEnvelope{Type: "not_found", Payload: mustJSON(map[string]any{"height": height})})
 	}
 	return p2pWriteJSON(w, p2pEnvelope{Type: "block", Payload: mustJSON(b)})
+}
+
+// writeBlocksByRange writes multiple blocks by height range in a single response
+func (s *P2PServer) writeBlocksByRange(w io.Writer, startHeight, count uint64) error {
+	if count == 0 {
+		return p2pWriteJSON(w, p2pEnvelope{Type: "blocks", Payload: mustJSON([]interface{}{})})
+	}
+
+	// Limit the maximum blocks per request to prevent memory exhaustion
+	maxBlocksPerRequest := uint64(100)
+	if count > maxBlocksPerRequest {
+		count = maxBlocksPerRequest
+	}
+
+	blocks := make([]interface{}, 0, count)
+	for height := startHeight; height < startHeight+count; height++ {
+		b, ok := s.bc.BlockByHeight(height)
+		if !ok {
+			// Stop at first missing block
+			break
+		}
+		blocks = append(blocks, b)
+	}
+
+	if len(blocks) == 0 {
+		return p2pWriteJSON(w, p2pEnvelope{Type: "not_found", Payload: mustJSON(map[string]any{"startHeight": startHeight, "count": count})})
+	}
+
+	log.Printf("P2P server: sending %d blocks (height %d-%d)", len(blocks), startHeight, startHeight+uint64(len(blocks))-1)
+	return p2pWriteJSON(w, p2pEnvelope{Type: "blocks", Payload: mustJSON(blocks)})
 }
 
 func (s *P2PServer) handleTransactionReq(c net.Conn, payload json.RawMessage) error {
@@ -637,9 +674,9 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 				// For same-height forks, we need to use tie-breaker rules
 				if !ok || remoteWork == nil || remoteWork.Sign() == 0 {
 					// TotalWork not provided, calculate from block difficulty
-					remoteWork = core.WorkForDifficultyBits(block.DifficultyBits)
+					remoteWork = core.WorkForDifficultyBits(block.Header.DifficultyBits)
 					// Add parent chain work if available
-					if parent, exists := s.bc.BlockByHash(hex.EncodeToString(block.PrevHash)); exists {
+					if parent, exists := s.bc.BlockByHash(hex.EncodeToString(block.Header.PrevHash)); exists {
 						if parent.TotalWork != "" {
 							parentWork, _ := core.StringToWork(parent.TotalWork)
 							if parentWork != nil {
@@ -709,7 +746,7 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 			}
 		} else {
 			// Case 3: Higher height block - validate parent is on canonical or fork chain
-			parentHashHex := hex.EncodeToString(block.PrevHash)
+			parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 			parent, exists := s.bc.BlockByHash(parentHashHex)
 			
 			if !exists {
@@ -763,14 +800,14 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 	if err != nil {
 		log.Printf("p2p block broadcast add result: %v", err)
 		log.Printf("p2p: block details - height=%d, hash=%s, prevHash=%s, difficulty=%d, timestamp=%d, miner=%s",
-			block.Height, hex.EncodeToString(block.Hash), hex.EncodeToString(block.PrevHash),
-			block.DifficultyBits, block.TimestampUnix, block.MinerAddress)
+			block.Height, hex.EncodeToString(block.Hash), hex.EncodeToString(block.Header.PrevHash),
+			block.Header.DifficultyBits, block.Header.TimestampUnix, block.MinerAddress)
 
 		// Log parent block info if available
-		parentHashHex := hex.EncodeToString(block.PrevHash)
+		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 		if parent, ok := s.bc.BlockByHash(parentHashHex); ok {
 			log.Printf("p2p: parent block found - height=%d, hash=%s, difficulty=%d, timestamp=%d",
-				parent.Height, hex.EncodeToString(parent.Hash), parent.DifficultyBits, parent.TimestampUnix)
+				parent.Height, hex.EncodeToString(parent.Hash), parent.Header.DifficultyBits, parent.Header.TimestampUnix)
 		} else {
 			log.Printf("p2p: parent block NOT found in local chain")
 		}
@@ -869,7 +906,7 @@ func (s *P2PServer) syncMissingBlocks(ctx context.Context, c net.Conn, targetBlo
 	log.Printf("p2p: starting sync of missing blocks, target height=%d", targetBlock.Height)
 
 	// Walk backwards from the target block until we find a known ancestor
-	currentHash := targetBlock.PrevHash
+	currentHash := targetBlock.Header.PrevHash
 
 	maxDepth := 100 // Safety limit
 	for i := 0; i < maxDepth; i++ {
@@ -930,7 +967,7 @@ func (s *P2PServer) syncMissingBlocks(ctx context.Context, c net.Conn, targetBlo
 		}
 
 		// Move to the next ancestor
-		currentHash = fetchedBlock.PrevHash
+		currentHash = fetchedBlock.Header.PrevHash
 	}
 
 	// Now try to add the original target block again
@@ -1204,7 +1241,7 @@ func (s *P2PServer) validateBlockPoW(block *core.Block) error {
 	}
 
 	// Get parent block
-	parentHashHex := hex.EncodeToString(block.PrevHash)
+	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 	parent, exists := s.bc.BlockByHash(parentHashHex)
 	if !exists {
 		// Parent unknown, will be handled by ErrUnknownParent logic

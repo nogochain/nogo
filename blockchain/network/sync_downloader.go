@@ -18,7 +18,6 @@ package network
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"runtime"
@@ -39,6 +38,13 @@ const (
 	HighLatencyThreshold   = 500 * time.Millisecond
 	LowLatencyThreshold    = 100 * time.Millisecond
 	ProgressUpdateInterval = 1 * time.Second
+	// BatchProgressReportInterval controls how often batch progress is reported
+	BatchProgressReportInterval = 10
+	// ConnectionReuseBatchSize is the number of blocks to download per TCP connection
+	// This balances efficiency (fewer connections) with reliability (smaller batches on failure)
+	ConnectionReuseBatchSize = 10
+	// InterBatchDelay is the delay between batch downloads to avoid overwhelming the server
+	InterBatchDelay = 100 * time.Millisecond
 )
 
 type DownloadProgress struct {
@@ -194,160 +200,142 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 	d.failedCount = 0
 	d.mu.Unlock()
 
-	batchSize := atomic.LoadInt32(&d.currentBatchSize)
-	maxConcurrent := atomic.LoadInt32(&d.currentConcurrency)
+	log.Printf("[Downloader] Starting sequential download: height %d to %d (%d blocks, batch size=%d)",
+		startHeight, startHeight+count-1, count, ConnectionReuseBatchSize)
 
-	totalBatches := (count + uint64(batchSize) - 1) / uint64(batchSize)
-	batchChan := make(chan *BatchDownloadResult, totalBatches)
-	semaphore := make(chan struct{}, maxConcurrent)
-
-	var wg sync.WaitGroup
-
-	for batchStart := startHeight; batchStart < startHeight+count; batchStart += uint64(batchSize) {
-		batchEnd := batchStart + uint64(batchSize) - 1
-		if batchEnd >= startHeight+count {
-			batchEnd = startHeight + count - 1
-		}
-
-		wg.Add(1)
-		go func(start, end uint64) {
-			defer wg.Done()
-
-			select {
-			case semaphore <- struct{}{}:
-				defer func() { <-semaphore }()
-			case <-ctx.Done():
-				batchChan <- &BatchDownloadResult{
-					Start:   start,
-					End:     end,
-					Success: false,
-					Error:   ctx.Err(),
-				}
-				return
-			}
-
-			result := d.downloadBatch(ctx, peer, start, end)
-			batchChan <- result
-		}(batchStart, batchEnd)
-	}
-
-	go func() {
-		wg.Wait()
-		close(batchChan)
-	}()
-
+	allBlocks := make([]*core.Block, 0, count)
 	progressTicker := time.NewTicker(ProgressUpdateInterval)
 	defer progressTicker.Stop()
 
-	var allBlocks []*core.Block
-	batchesCompleted := 0
-
-	for {
+	// Download all blocks sequentially with connection reuse
+	// Each batch of ConnectionReuseBatchSize blocks uses a single TCP connection
+	for batchStart := startHeight; batchStart < startHeight+count; batchStart += ConnectionReuseBatchSize {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return allBlocks, ctx.Err()
+		default:
+		}
 
-		case result, ok := <-batchChan:
-			if !ok {
-				if progressChan != nil {
-					progress := d.calculateProgress(startHeight, startHeight+count)
-					progressChan <- progress
-				}
-				return allBlocks, nil
+		// Calculate batch end
+		batchEnd := batchStart + ConnectionReuseBatchSize - 1
+		if batchEnd >= startHeight+count {
+			batchEnd = startHeight + count - 1
+		}
+		batchCount := batchEnd - batchStart + 1
+
+		// Fetch blocks using a single connection for this batch
+		blocks, err := d.pm.FetchBlocksByHeightRange(ctx, peer, batchStart, batchCount)
+		if err != nil {
+			log.Printf("[Downloader] Failed to fetch blocks %d-%d: %v", batchStart, batchEnd, err)
+			atomic.AddUint64(&d.failedCount, batchCount)
+			// Continue with next batch instead of failing completely
+			if len(blocks) > 0 {
+				allBlocks = append(allBlocks, blocks...)
+				atomic.AddUint64(&d.downloadedCount, uint64(len(blocks)))
 			}
+			continue
+		}
 
-			if result.Success {
-				allBlocks = append(allBlocks, result.Blocks...)
-				atomic.AddUint64(&d.downloadedCount, uint64(len(result.Blocks)))
-			} else {
-				atomic.AddUint64(&d.failedCount, result.End-result.Start+1)
-				rateLimitedLog("batch_fail", "[Downloader] Batch %d-%d failed: %v", result.Start, result.End, result.Error)
-			}
+		allBlocks = append(allBlocks, blocks...)
+		atomic.AddUint64(&d.downloadedCount, uint64(len(blocks)))
 
-			batchesCompleted++
-			if progressChan != nil && batchesCompleted%10 == 0 {
-				progress := d.calculateProgress(startHeight, startHeight+count)
-				progressChan <- progress
-			}
+		log.Printf("[Downloader] Progress: %d/%d blocks downloaded (batch %d-%d complete)",
+			len(allBlocks), count, batchStart, batchEnd)
 
-		case <-progressTicker.C:
-			if progressChan != nil {
-				progress := d.calculateProgress(startHeight, startHeight+count)
-				progressChan <- progress
+		// Send progress update
+		if progressChan != nil {
+			progress := d.calculateProgress(startHeight, startHeight+count)
+			select {
+			case progressChan <- progress:
+			default:
 			}
 		}
+
+		// Small delay between batches to avoid overwhelming the server
+		if batchEnd < startHeight+count-1 {
+			time.Sleep(InterBatchDelay)
+		}
 	}
+
+	log.Printf("[Downloader] Download complete: got %d blocks in %v", len(allBlocks), time.Since(d.startTime))
+	return allBlocks, nil
 }
 
 func (d *BlockDownloader) downloadBatch(ctx context.Context, peer string, startHeight, endHeight uint64) *BatchDownloadResult {
 	startTime := time.Now()
 
-	count := int(endHeight - startHeight + 1)
-	headers, err := d.pm.FetchHeadersFrom(ctx, peer, startHeight, count)
-	if err != nil {
+	totalCount := int(endHeight - startHeight + 1)
+	log.Printf("[Downloader] Starting batch download with connection reuse: height %d to %d (%d blocks, batch size=%d)",
+		startHeight, endHeight, totalCount, ConnectionReuseBatchSize)
+
+	allBlocks := make([]*core.Block, 0, totalCount)
+	var fetchErrors []error
+
+	// Download in batches, reusing one TCP connection per batch
+	for batchStart := startHeight; batchStart <= endHeight; batchStart += ConnectionReuseBatchSize {
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			fetchErrors = append(fetchErrors, ctx.Err())
+			break
+		default:
+		}
+
+		// Calculate batch end
+		batchEnd := batchStart + ConnectionReuseBatchSize - 1
+		if batchEnd > endHeight {
+			batchEnd = endHeight
+		}
+		batchCount := batchEnd - batchStart + 1
+
+		// Fetch blocks using a single connection for this batch
+		blocks, err := d.pm.FetchBlocksByHeightRange(ctx, peer, batchStart, batchCount)
+		if err != nil {
+			fetchErrors = append(fetchErrors, fmt.Errorf("failed to fetch blocks %d-%d: %w", batchStart, batchEnd, err))
+			// If partial success, keep the blocks we got
+			if len(blocks) > 0 {
+				allBlocks = append(allBlocks, blocks...)
+			}
+			continue
+		}
+
+		allBlocks = append(allBlocks, blocks...)
+
+		// Log progress after each batch
+		log.Printf("[Downloader] Progress: %d/%d blocks downloaded (batch %d-%d complete, %d blocks)",
+			len(allBlocks), totalCount, batchStart, batchEnd, len(blocks))
+
+		// Small delay between batches to avoid overwhelming the server
+		if batchEnd < endHeight {
+			time.Sleep(InterBatchDelay)
+		}
+	}
+
+	if len(fetchErrors) > 0 {
+		log.Printf("[Downloader] Download completed with %d errors (got %d/%d blocks)",
+			len(fetchErrors), len(allBlocks), totalCount)
+		// Return partial success if we got some blocks
+		if len(allBlocks) > 0 {
+			return &BatchDownloadResult{
+				Blocks:   allBlocks,
+				Start:    startHeight,
+				End:      endHeight,
+				Success:  true,
+				Duration: time.Since(startTime),
+			}
+		}
 		return &BatchDownloadResult{
 			Start:    startHeight,
 			End:      endHeight,
 			Success:  false,
-			Error:    fmt.Errorf("failed to fetch headers: %w", err),
+			Error:    fmt.Errorf("download failed with %d errors: %v", len(fetchErrors), fetchErrors[0]),
 			Duration: time.Since(startTime),
 		}
 	}
 
-	blocks := make([]*core.Block, 0, len(headers))
-	blockChan := make(chan *core.Block, len(headers))
-	errorChan := make(chan error, len(headers))
-
-	var fetchWg sync.WaitGroup
-	for i := range headers {
-		fetchWg.Add(1)
-		go func(idx int) {
-			defer fetchWg.Done()
-
-			h := headers[idx]
-			hashHex := hex.EncodeToString(h.PrevHash)
-			block, err := d.pm.FetchBlockByHash(ctx, peer, hashHex)
-			if err != nil {
-				errorChan <- fmt.Errorf("failed to fetch block %s: %w", hashHex, err)
-				return
-			}
-
-			if err := d.validator.ValidateBlockFast(block); err != nil {
-				errorChan <- fmt.Errorf("failed to validate block %s: %w", hashHex, err)
-				return
-			}
-
-			blockChan <- block
-		}(i)
-	}
-
-	go func() {
-		fetchWg.Wait()
-		close(blockChan)
-		close(errorChan)
-	}()
-
-	var validationErrors []error
-	for block := range blockChan {
-		blocks = append(blocks, block)
-	}
-
-	for err := range errorChan {
-		validationErrors = append(validationErrors, err)
-	}
-
-	if len(validationErrors) > 0 {
-		return &BatchDownloadResult{
-			Start:    startHeight,
-			End:      endHeight,
-			Success:  false,
-			Error:    fmt.Errorf("batch validation failed with %d errors: %v", len(validationErrors), validationErrors[0]),
-			Duration: time.Since(startTime),
-		}
-	}
-
+	log.Printf("[Downloader] Download complete: got %d blocks in %v", len(allBlocks), time.Since(startTime))
 	return &BatchDownloadResult{
-		Blocks:   blocks,
+		Blocks:   allBlocks,
 		Start:    startHeight,
 		End:      endHeight,
 		Success:  true,

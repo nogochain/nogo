@@ -154,17 +154,17 @@ func (v *BlockValidator) validateBlockStructure(block *Block) error {
 		return ErrEmptyBlockHash
 	}
 
-	if block.DifficultyBits == 0 {
+	if block.Header.DifficultyBits == 0 {
 		return ErrZeroDifficultyBits
 	}
 
-	if block.DifficultyBits > maxDifficultyBits {
-		return fmt.Errorf("difficulty bits %d exceeds maximum %d", block.DifficultyBits, maxDifficultyBits)
+	if block.Header.DifficultyBits > maxDifficultyBits {
+		return fmt.Errorf("difficulty bits %d exceeds maximum %d", block.Header.DifficultyBits, maxDifficultyBits)
 	}
 
 	expectedVersion := blockVersionForHeight(v.consensus, block.Height)
-	if block.Version != expectedVersion {
-		return fmt.Errorf("%w: expected %d got %d at height %d", ErrInvalidVersion, expectedVersion, block.Version, block.Height)
+	if block.Header.Version != expectedVersion {
+		return fmt.Errorf("%w: expected %d got %d at height %d", ErrInvalidVersion, expectedVersion, block.Header.Version, block.Height)
 	}
 
 	return nil
@@ -172,8 +172,8 @@ func (v *BlockValidator) validateBlockStructure(block *Block) error {
 
 func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
 	if block.Height == 0 {
-		if block.DifficultyBits != v.consensus.GenesisDifficultyBits {
-			return fmt.Errorf("%w: expected %d got %d", ErrGenesisDifficultyMismatch, v.consensus.GenesisDifficultyBits, block.DifficultyBits)
+		if block.Header.DifficultyBits != v.consensus.GenesisDifficultyBits {
+			return fmt.Errorf("%w: expected %d got %d", ErrGenesisDifficultyMismatch, v.consensus.GenesisDifficultyBits, block.Header.DifficultyBits)
 		}
 		return nil
 	}
@@ -182,12 +182,12 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
 		return ErrParentBlockNil
 	}
 
-	if block.DifficultyBits < v.consensus.MinDifficultyBits {
-		return fmt.Errorf("%w: %d < min %d", ErrDifficultyTooLow, block.DifficultyBits, v.consensus.MinDifficultyBits)
+	if block.Header.DifficultyBits < v.consensus.MinDifficultyBits {
+		return fmt.Errorf("%w: %d < min %d", ErrDifficultyTooLow, block.Header.DifficultyBits, v.consensus.MinDifficultyBits)
 	}
 
-	if block.DifficultyBits > v.consensus.MaxDifficultyBits {
-		return fmt.Errorf("%w: %d > max %d", ErrDifficultyTooHighRange, block.DifficultyBits, v.consensus.MaxDifficultyBits)
+	if block.Header.DifficultyBits > v.consensus.MaxDifficultyBits {
+		return fmt.Errorf("%w: %d > max %d", ErrDifficultyTooHighRange, block.Header.DifficultyBits, v.consensus.MaxDifficultyBits)
 	}
 
 	if v.consensus.DifficultyEnable {
@@ -199,18 +199,18 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
 		if len(parent.Hash) > 0 {
 			copy(parentHash[:], parent.Hash)
 		} else {
-			copy(parentHash[:], parent.PrevHash)
+			copy(parentHash[:], parent.Header.PrevHash)
 		}
 
 		parentHeader := &nogopow.Header{
 			Number:     big.NewInt(int64(parent.Height)),
-			Time:       uint64(parent.TimestampUnix),
-			Difficulty: big.NewInt(int64(parent.DifficultyBits)),
+			Time:       uint64(parent.Header.TimestampUnix),
+			Difficulty: big.NewInt(int64(parent.Header.DifficultyBits)),
 			ParentHash: parentHash,
 		}
 
-		expectedDifficulty := adjuster.CalcDifficulty(uint64(block.TimestampUnix), parentHeader)
-		actualDifficulty := big.NewInt(int64(block.DifficultyBits))
+		expectedDifficulty := adjuster.CalcDifficulty(uint64(block.Header.TimestampUnix), parentHeader)
+		actualDifficulty := big.NewInt(int64(block.Header.DifficultyBits))
 
 		minAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100-DifficultyTolerancePercent))
 		minAllowed.Div(minAllowed, big.NewInt(100))
@@ -231,13 +231,13 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
 }
 
 func (v *BlockValidator) validateTimestamp(block *Block, parent *Block) error {
-	if block.TimestampUnix <= parent.TimestampUnix {
-		return fmt.Errorf("%w: block time %d not greater than parent time %d", ErrTimestampNotIncreasing, block.TimestampUnix, parent.TimestampUnix)
+	if block.Header.TimestampUnix <= parent.Header.TimestampUnix {
+		return fmt.Errorf("%w: block time %d not greater than parent time %d", ErrTimestampNotIncreasing, block.Header.TimestampUnix, parent.Header.TimestampUnix)
 	}
 
 	maxAllowedTime := ntp.NowUnix() + BlockTimeMaxDrift
-	if block.TimestampUnix > maxAllowedTime {
-		return fmt.Errorf("%w: block time %d too far in future (max allowed %d)", ErrTimestampTooFarFuture, block.TimestampUnix, maxAllowedTime)
+	if block.Header.TimestampUnix > maxAllowedTime {
+		return fmt.Errorf("%w: block time %d too far in future (max allowed %d)", ErrTimestampTooFarFuture, block.Header.TimestampUnix, maxAllowedTime)
 	}
 
 	return nil
@@ -354,7 +354,8 @@ func (v *BlockValidator) validateCoinbaseEconomics(block *Block) error {
 	}
 
 	policy := v.consensus.MonetaryPolicy
-	// Miner receives 96% of block reward + 100% of fees (fees are burned)
+	// Miner receives MinerRewardShare% of block reward
+	// Transaction fees are burned (MinerFeeShare=0) to create deflationary pressure
 	expectedAmount := policy.BlockReward(block.Height)*uint64(policy.MinerRewardShare)/100 + policy.MinerFeeAmount(totalFees)
 
 	coinbase := block.Transactions[0]
@@ -378,13 +379,7 @@ func (v *BlockValidator) ValidateBlockFast(block *Block) error {
 		return ErrEmptyBlockHash
 	}
 
-	// Normalize block fields from alternative JSON formats
-	// Remote nodes may return fields at top level or nested in "header"
-	// This ensures consistent field access regardless of serialization source
-	v.normalizeBlockFields(block)
-
-	// After normalization, check for zero difficulty
-	if block.DifficultyBits == 0 {
+	if block.Header.DifficultyBits == 0 {
 		return ErrZeroDifficultyBits
 	}
 
@@ -395,41 +390,7 @@ func (v *BlockValidator) ValidateBlockFast(block *Block) error {
 	return nil
 }
 
-// normalizeBlockFields maps fields from Header to top-level if top-level is empty
-// This handles JSON deserialization where fields may be in either location
-func (v *BlockValidator) normalizeBlockFields(block *Block) {
-	// Normalize DifficultyBits
-	if block.DifficultyBits == 0 {
-		if block.Difficulty > 0 {
-			block.DifficultyBits = block.Difficulty
-		} else if block.Header.DifficultyBits > 0 {
-			block.DifficultyBits = block.Header.DifficultyBits
-		} else if block.Header.Difficulty > 0 {
-			block.DifficultyBits = block.Header.Difficulty
-		}
-	}
 
-	// Normalize PrevHash (critical for chain continuity validation)
-	if len(block.PrevHash) == 0 && len(block.Header.PrevHash) > 0 {
-		block.PrevHash = make([]byte, len(block.Header.PrevHash))
-		copy(block.PrevHash, block.Header.PrevHash)
-	}
-
-	// Normalize TimestampUnix (critical for timestamp validation)
-	if block.TimestampUnix == 0 && block.Header.TimestampUnix > 0 {
-		block.TimestampUnix = block.Header.TimestampUnix
-	}
-
-	// Normalize Nonce
-	if block.Nonce == 0 && block.Header.Nonce > 0 {
-		block.Nonce = block.Header.Nonce
-	}
-
-	// Normalize Version
-	if block.Version == 0 && block.Header.Version > 0 {
-		block.Version = block.Header.Version
-	}
-}
 
 func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Block) error {
 	if block == nil || len(block.Hash) == 0 {
@@ -459,13 +420,13 @@ func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Bl
 
 	header := &nogopow.Header{
 		Number:     big.NewInt(int64(block.Height)),
-		Time:       uint64(block.TimestampUnix),
+		Time:       uint64(block.Header.TimestampUnix),
 		ParentHash: parentHash,
-		Difficulty: big.NewInt(int64(block.DifficultyBits)),
+		Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
 		Coinbase:   powCoinbase,
 	}
 
-	binary.LittleEndian.PutUint64(header.Nonce[:8], block.Nonce)
+	binary.LittleEndian.PutUint64(header.Nonce[:8], block.Header.Nonce)
 
 	if err := engine.VerifySealOnly(header); err != nil {
 		return fmt.Errorf("NogoPow seal verification failed for block %d: %w", block.Height, err)
@@ -631,7 +592,8 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 			return errors.New("coinbase toAddress must match minerAddress")
 		}
 		policy := p.MonetaryPolicy
-		// Miner receives 96% of block reward + 100% of fees (fees are burned)
+		// Miner receives MinerRewardShare% of block reward
+		// Transaction fees are burned (MinerFeeShare=0) to create deflationary pressure
 		expected := policy.BlockReward(b.Height)*uint64(policy.MinerRewardShare)/100 + policy.MinerFeeAmount(fees)
 		if cb.Amount != expected {
 			return fmt.Errorf("bad coinbase amount: expected %d got %d", expected, cb.Amount)

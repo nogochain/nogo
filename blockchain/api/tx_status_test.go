@@ -39,6 +39,7 @@ func createTestMempool() *mempool.Mempool {
 		1,
 		config.DefaultConfig().Consensus,
 		1,
+		config.MempoolConfig{MaxMemoryMB: 100},
 	)
 }
 
@@ -49,14 +50,8 @@ func createTestBlockchainWithTransactions(numBlocks uint64) (*mockBlockchain, []
 
 	// Create genesis block
 	genesis := &core.Block{
-		Header: core.BlockHeader{
-			Version:         1,
-			TimestampUnix:   1000000000,
-			DifficultyBits:  0x1d00ffff,
-		},
-		Height: 0,
-		Hash: make([]byte, 32),
-		PrevHash: make([]byte, 32),
+		Height:       0,
+		Hash:         make([]byte, 32),
 		MinerAddress: bc.minerAddr,
 		Transactions: []core.Transaction{
 			{
@@ -64,6 +59,12 @@ func createTestBlockchainWithTransactions(numBlocks uint64) (*mockBlockchain, []
 				ToAddress: bc.minerAddr,
 				Amount:    1000000,
 			},
+		},
+		Header: core.BlockHeader{
+			Version:        1,
+			TimestampUnix:  1000000000,
+			DifficultyBits: 0x1d00ffff,
+			PrevHash:       make([]byte, 32),
 		},
 	}
 	copy(genesis.Hash[:16], []byte("genesis-block-hash"))
@@ -73,14 +74,8 @@ func createTestBlockchainWithTransactions(numBlocks uint64) (*mockBlockchain, []
 	// Create additional blocks with transactions
 	for i := uint64(1); i <= numBlocks; i++ {
 		block := &core.Block{
-			Header: core.BlockHeader{
-				Version:         1,
-				TimestampUnix:   1000000000 + int64(i)*10,
-				DifficultyBits:  0x1d00ffff,
-			},
-			Height: i,
-			Hash: make([]byte, 32),
-			PrevHash: genesis.Hash,
+			Height:       i,
+			Hash:         make([]byte, 32),
 			MinerAddress: bc.minerAddr,
 			Transactions: []core.Transaction{
 				{
@@ -88,6 +83,12 @@ func createTestBlockchainWithTransactions(numBlocks uint64) (*mockBlockchain, []
 					ToAddress: bc.minerAddr,
 					Amount:    1000000,
 				},
+			},
+			Header: core.BlockHeader{
+				Version:        1,
+				TimestampUnix:  1000000000 + int64(i)*10,
+				DifficultyBits: 0x1d00ffff,
+				PrevHash:       genesis.Hash,
 			},
 		}
 		copy(block.Hash[:16], []byte("block-hash"))

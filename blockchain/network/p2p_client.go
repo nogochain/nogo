@@ -328,6 +328,65 @@ readResponse:
 	return nil
 }
 
+// doWithNewConnection performs a request-response exchange with a dedicated connection.
+// Each call creates a new independent connection that is closed after use.
+// This is designed for concurrent requests where connection sharing would cause response mixing.
+func (c *P2PClient) doWithNewConnection(ctx context.Context, peer string, reqType string, reqPayload any, resp any, expectedRespType string) error {
+	peer = strings.TrimSpace(peer)
+	if peer == "" {
+		return errors.New("empty peer")
+	}
+
+	// Create new dedicated connection for this request
+	d := net.Dialer{Timeout: c.dialTimeout}
+	netConn, err := d.DialContext(ctx, "tcp", peer)
+	if err != nil {
+		return fmt.Errorf("dial %s failed: %w", peer, err)
+	}
+	defer netConn.Close()
+
+	// Perform handshake
+	if err := c.performHandshake(netConn); err != nil {
+		return fmt.Errorf("handshake with %s failed: %w", peer, err)
+	}
+
+	// Set deadline for this operation
+	_ = netConn.SetDeadline(time.Now().Add(c.ioTimeout))
+
+	// Send request
+	var payload json.RawMessage
+	if reqPayload != nil {
+		payload = mustJSON(reqPayload)
+	}
+	if err := p2pWriteJSON(netConn, p2pEnvelope{Type: reqType, Payload: payload}); err != nil {
+		return fmt.Errorf("write to %s failed: %w", peer, err)
+	}
+
+	// Read response
+	raw, err := p2pReadJSON(netConn, c.maxMsgBytes)
+	if err != nil {
+		return fmt.Errorf("read from %s failed: %w", peer, err)
+	}
+
+	var env p2pEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return fmt.Errorf("unmarshal response from %s failed: %w", peer, err)
+	}
+
+	if expectedRespType != "" && env.Type != expectedRespType {
+		if env.Type == "not_found" {
+			return errors.New("not found")
+		}
+		return fmt.Errorf("unexpected response type from %s: %s (expected %s)", peer, env.Type, expectedRespType)
+	}
+
+	if resp != nil {
+		return json.Unmarshal(env.Payload, resp)
+	}
+
+	return nil
+}
+
 // removeConnection removes a connection from the pool
 func (c *P2PClient) removeConnection(peer string) {
 	c.connMutex.Lock()
@@ -412,6 +471,79 @@ func (c *P2PClient) RequestBlock(ctx context.Context, peer string, hashHex strin
 		return nil, err
 	}
 	return &block, nil
+}
+
+// FetchBlocksByHeightRange fetches multiple blocks by height range in a single connection.
+// This is more efficient than calling FetchBlockByHeight multiple times because it reuses
+// the same TCP connection for all requests, avoiding the overhead of repeated handshakes.
+func (c *P2PClient) FetchBlocksByHeightRange(ctx context.Context, peer string, startHeight, count uint64) ([]*core.Block, error) {
+	peer = strings.TrimSpace(peer)
+	if peer == "" {
+		return nil, errors.New("empty peer")
+	}
+	if count == 0 {
+		return []*core.Block{}, nil
+	}
+
+	// Create a single connection for all block requests
+	d := net.Dialer{Timeout: c.dialTimeout}
+	netConn, err := d.DialContext(ctx, "tcp", peer)
+	if err != nil {
+		return nil, fmt.Errorf("dial %s failed: %w", peer, err)
+	}
+	defer netConn.Close()
+
+	// Perform handshake once
+	if err := c.performHandshake(netConn); err != nil {
+		return nil, fmt.Errorf("handshake with %s failed: %w", peer, err)
+	}
+
+	blocks := make([]*core.Block, 0, count)
+
+	// Download all blocks sequentially on the same connection
+	for height := startHeight; height < startHeight+count; height++ {
+		// Set deadline for each request
+		_ = netConn.SetDeadline(time.Now().Add(c.ioTimeout))
+
+		// Send request
+		req := p2pEnvelope{
+			Type:    "block_by_height_req",
+			Payload: mustJSON(p2pBlockByHeightReq{Height: height}),
+		}
+		if err := p2pWriteJSON(netConn, req); err != nil {
+			log.Printf("[P2PClient.FetchBlocksByHeightRange] Write failed at height %d: %v", height, err)
+			return blocks, fmt.Errorf("write failed at height %d: %w", height, err)
+		}
+
+		// Read response
+		raw, err := p2pReadJSON(netConn, c.maxMsgBytes)
+		if err != nil {
+			log.Printf("[P2PClient.FetchBlocksByHeightRange] Read failed at height %d: %v", height, err)
+			return blocks, fmt.Errorf("read failed at height %d: %w", height, err)
+		}
+
+		var env p2pEnvelope
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return blocks, fmt.Errorf("unmarshal failed at height %d: %w", height, err)
+		}
+
+		if env.Type == "not_found" {
+			return blocks, fmt.Errorf("block at height %d not found", height)
+		}
+
+		if env.Type != "block" {
+			return blocks, fmt.Errorf("unexpected response type at height %d: %s", height, env.Type)
+		}
+
+		var block core.Block
+		if err := json.Unmarshal(env.Payload, &block); err != nil {
+			return blocks, fmt.Errorf("unmarshal block at height %d failed: %w", height, err)
+		}
+
+		blocks = append(blocks, &block)
+	}
+
+	return blocks, nil
 }
 
 // RequestPeers requests a list of peers from a remote node

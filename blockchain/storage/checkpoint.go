@@ -379,7 +379,7 @@ func CheckpointFromBlock(block *core.Block, stateRoot string) *Checkpoint {
 		Height:       block.Height,
 		BlockHash:    hex.EncodeToString(block.Hash),
 		BlockHashRaw: hashCopy,
-		Timestamp:    time.Unix(block.TimestampUnix, 0),
+		Timestamp:    time.Unix(block.Header.TimestampUnix, 0),
 		StateRoot:    stateRoot,
 	}
 }

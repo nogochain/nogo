@@ -227,6 +227,7 @@ func (p MonetaryPolicy) GetTotalMinerReward(height uint64, uncleCount int) uint6
 }
 
 // MinerFeeAmount calculates the amount of fees allocated to the miner
+// When MinerFeeShare=0, all fees are burned (deflationary mechanism)
 func (p MonetaryPolicy) MinerFeeAmount(totalFees uint64) uint64 {
 	if p.MinerFeeShare == 0 || totalFees == 0 {
 		return 0

@@ -52,13 +52,15 @@ func newMockBlockchainForIntegration() *mockBlockchainForIntegration {
 func (m *mockBlockchainForIntegration) LatestBlock() *core.Block {
 	if len(m.blocks) == 0 {
 		return &core.Block{
-			Height:         0,
-			Hash:           make([]byte, 32),
-			PrevHash:       make([]byte, 32),
-			TimestampUnix:  time.Now().Unix(),
-			DifficultyBits: 0x1d00ffff,
-			MinerAddress:   m.minerAddr,
-			Transactions:   []core.Transaction{},
+			Height:       0,
+			Hash:         make([]byte, 32),
+			MinerAddress: m.minerAddr,
+			Transactions: []core.Transaction{},
+			Header: core.BlockHeader{
+				PrevHash:       make([]byte, 32),
+				TimestampUnix:  time.Now().Unix(),
+				DifficultyBits: 0x1d00ffff,
+			},
 		}
 	}
 	return m.blocks[len(m.blocks)-1]
@@ -159,13 +161,15 @@ func createIntegrationTestServer() (*Server, *mockBlockchainForIntegration, *mem
 	bc := newMockBlockchainForIntegration()
 
 	genesis := &core.Block{
-		Height:         0,
-		Hash:           make([]byte, 32),
-		PrevHash:       make([]byte, 32),
-		TimestampUnix:  time.Now().Unix(),
-		DifficultyBits: 0x1d00ffff,
-		MinerAddress:   bc.minerAddr,
-		Transactions:   []core.Transaction{},
+		Height:       0,
+		Hash:         make([]byte, 32),
+		MinerAddress: bc.minerAddr,
+		Transactions: []core.Transaction{},
+		Header: core.BlockHeader{
+			PrevHash:       make([]byte, 32),
+			TimestampUnix:  time.Now().Unix(),
+			DifficultyBits: 0x1d00ffff,
+		},
 	}
 	copy(genesis.Hash[:16], []byte("genesis-block-hash"))
 	bc.blocks = append(bc.blocks, genesis)
