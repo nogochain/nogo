@@ -25,7 +25,7 @@ docs/
 ├── Economic-Model-EN.md           # 经济模型白皮书（英文）
 ├── Algorithm-Manual-CN.md         # 算法手册（中文）
 ├── Algorithm-Manual-EN.md         # 算法手册（英文）
-├── 技术文档.md                    # 综合技术文档（中文）
+├── Technical-Documentation.md     # 综合技术文档（中文）
 ├── 技术文档-CN.md                 # 综合技术文档（中文）
 ├── core-types-README.md           # 核心类型说明
 ├── nogopow-README.md              # NogoPow 算法说明
@@ -41,7 +41,7 @@ docs/
 
 ### 新手入门
 
-1. **了解 NogoChain**: 阅读 [技术文档.md](./技术文档.md)
+1. **了解 NogoChain**: 阅读 [Technical-Documentation.md](./Technical-Documentation.md)
 2. **快速部署**: 参考 [Deployment-Guide-CN.md](./Deployment-Guide-CN.md#2-快速开始)
 3. **API 开发**: 查看 [API-Reference-CN.md](./API-Reference-CN.md)
 4. **理解经济模型**: 阅读 [Economic-Model-CN.md](./Economic-Model-CN.md)
@@ -166,7 +166,7 @@ docs/
 ### 5. 综合技术文档
 
 **文件**:
-- [技术文档.md](./技术文档.md) - 完整技术文档
+- [Technical-Documentation.md](./Technical-Documentation.md) - 完整技术文档
 - [core-types-README.md](./core-types-README.md) - 核心类型说明
 - [nogopow-README.md](./nogopow-README.md) - NogoPow 详解
 
