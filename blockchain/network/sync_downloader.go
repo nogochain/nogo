@@ -188,9 +188,11 @@ func (d *BlockDownloader) adjustBatchSize() {
 	}
 }
 
-func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, startHeight uint64, count uint64, progressChan chan<- DownloadProgress) ([]*core.Block, error) {
+type StoreFunc func(ctx context.Context, block *core.Block) error
+
+func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, startHeight uint64, count uint64, progressChan chan<- DownloadProgress, storeFunc StoreFunc) error {
 	if !atomic.CompareAndSwapInt32(&d.isDownloading, 0, 1) {
-		return nil, fmt.Errorf("download already in progress")
+		return fmt.Errorf("download already in progress")
 	}
 	defer atomic.StoreInt32(&d.isDownloading, 0)
 
@@ -200,19 +202,18 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 	d.failedCount = 0
 	d.mu.Unlock()
 
-	log.Printf("[Downloader] Starting sequential download: height %d to %d (%d blocks, batch size=%d)",
+	log.Printf("[Downloader] Starting sequential download with real-time storage: height %d to %d (%d blocks, batch size=%d)",
 		startHeight, startHeight+count-1, count, ConnectionReuseBatchSize)
 
-	allBlocks := make([]*core.Block, 0, count)
+	totalStored := 0
 	progressTicker := time.NewTicker(ProgressUpdateInterval)
 	defer progressTicker.Stop()
 
-	// Download all blocks sequentially with connection reuse
-	// Each batch of ConnectionReuseBatchSize blocks uses a single TCP connection
+	// Download blocks sequentially with real-time storage
 	for batchStart := startHeight; batchStart < startHeight+count; batchStart += ConnectionReuseBatchSize {
 		select {
 		case <-ctx.Done():
-			return allBlocks, ctx.Err()
+			return ctx.Err()
 		default:
 		}
 
@@ -229,22 +230,39 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 			log.Printf("[Downloader] Failed to fetch blocks %d-%d: %v", batchStart, batchEnd, err)
 			atomic.AddUint64(&d.failedCount, batchCount)
 			// Continue with next batch instead of failing completely
-			if len(blocks) > 0 {
-				allBlocks = append(allBlocks, blocks...)
-				atomic.AddUint64(&d.downloadedCount, uint64(len(blocks)))
-			}
 			continue
 		}
 
-		allBlocks = append(allBlocks, blocks...)
+		// Immediately store each block from this batch
+		storedInBatch := 0
+		for _, block := range blocks {
+			if storeFunc != nil {
+				err := storeFunc(ctx, block)
+				if err != nil {
+					log.Printf("[Downloader] Failed to store block %d: %v", block.Height, err)
+					atomic.AddUint64(&d.failedCount, 1)
+				} else {
+					storedInBatch++
+					totalStored++
+				}
+			}
+		}
+
 		atomic.AddUint64(&d.downloadedCount, uint64(len(blocks)))
 
-		log.Printf("[Downloader] Progress: %d/%d blocks downloaded (batch %d-%d complete)",
-			len(allBlocks), count, batchStart, batchEnd)
+		log.Printf("[Downloader] Progress: %d/%d blocks downloaded and stored (batch %d-%d complete, %d stored)",
+			totalStored, count, batchStart, batchEnd, storedInBatch)
 
 		// Send progress update
 		if progressChan != nil {
-			progress := d.calculateProgress(startHeight, startHeight+count)
+			progress := DownloadProgress{
+				CurrentHeight:    batchEnd,
+				TargetHeight:     startHeight + count,
+				Downloaded:       uint64(totalStored),
+				Failed:           0, // Not tracking failures in real-time mode
+				StartTime:        d.startTime,
+				BlocksPerSec:     d.calculateBlocksPerSec(),
+			}
 			select {
 			case progressChan <- progress:
 			default:
@@ -257,8 +275,13 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 		}
 	}
 
-	log.Printf("[Downloader] Download complete: got %d blocks in %v", len(allBlocks), time.Since(d.startTime))
-	return allBlocks, nil
+	log.Printf("[Downloader] Download and storage complete: %d/%d blocks successfully stored in %v", 
+		totalStored, count, time.Since(d.startTime))
+	
+	if uint64(totalStored) < count {
+		return fmt.Errorf("incomplete sync: %d/%d blocks stored", totalStored, count)
+	}
+	return nil
 }
 
 func (d *BlockDownloader) downloadBatch(ctx context.Context, peer string, startHeight, endHeight uint64) *BatchDownloadResult {
@@ -413,4 +436,13 @@ func (d *BlockDownloader) GetStats() map[string]interface{} {
 		"start_time":          d.startTime,
 		"elapsed_seconds":     time.Since(d.startTime).Seconds(),
 	}
+}
+
+// calculateBlocksPerSec calculates the current blocks per second rate
+func (d *BlockDownloader) calculateBlocksPerSec() float64 {
+	duration := time.Since(d.startTime).Seconds()
+	if duration <= 0 {
+		return 0
+	}
+	return float64(atomic.LoadUint64(&d.downloadedCount)) / duration
 }

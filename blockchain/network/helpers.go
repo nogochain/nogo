@@ -88,21 +88,7 @@ func mustJSON(v any) json.RawMessage {
 	return b
 }
 
-// max returns the maximum of two integers
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
 
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
 
 // TxIDHex computes the transaction ID as a hex string
 func TxIDHex(tx core.Transaction) (string, error) {

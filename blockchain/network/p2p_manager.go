@@ -17,6 +17,18 @@ import (
 	"github.com/nogochain/nogo/blockchain/core"
 )
 
+// ANSI Color codes for terminal output
+const (
+	ColorReset  = "\033[0m"
+	ColorRed    = "\033[31m"
+	ColorGreen  = "\033[32m"
+	ColorYellow = "\033[33m"
+	ColorBlue   = "\033[34m"
+	ColorCyan   = "\033[36m"
+	ColorWhite  = "\033[37m"
+	ColorBold   = "\033[1m"
+)
+
 // P2PPeerManager manages P2P peer connections with dynamic storage and cleanup
 type P2PPeerManager struct {
 	mu             sync.RWMutex
@@ -510,6 +522,23 @@ func (pm *P2PPeerManager) BroadcastTransaction(ctx context.Context, tx core.Tran
 		return
 	}
 
+	// Print transaction broadcast header with box and color
+	txHash, err := tx.SigningHash()
+	txHashStr := "unknown"
+	if err == nil {
+		txHashStr = hex.EncodeToString(txHash[:8])
+	}
+	fmt.Printf("\n")
+	fmt.Printf(ColorCyan + ColorBold + "╔═══════════════════════════════════════════════════════════╗\n" + ColorReset)
+	fmt.Printf(ColorCyan + "║" + ColorReset + ColorWhite + "  📤 TRANSACTION BROADCAST                                    " + ColorReset + ColorCyan + "║\n" + ColorReset)
+	fmt.Printf(ColorCyan + "╠═══════════════════════════════════════════════════════════╣\n" + ColorReset)
+	fmt.Printf(ColorCyan+"║"+ColorReset+ColorYellow+"  Hash: %-54s"+ColorReset+ColorCyan+"║\n"+ColorReset, txHashStr+"...")
+	fmt.Printf(ColorCyan+"║"+ColorReset+ColorYellow+"  To:   %-54s"+ColorReset+ColorCyan+"║\n"+ColorReset, tx.ToAddress)
+	fmt.Printf(ColorCyan+"║"+ColorReset+ColorYellow+"  Amount: %-52d NOGO"+ColorReset+ColorCyan+"║\n"+ColorReset, tx.Amount)
+	fmt.Printf(ColorCyan+"║"+ColorReset+ColorGreen+"  Peers: %-53d"+ColorReset+ColorCyan+"║\n"+ColorReset, len(peers))
+	fmt.Printf(ColorCyan + "╚═══════════════════════════════════════════════════════════╝\n" + ColorReset)
+	fmt.Printf("\n")
+
 	var wg sync.WaitGroup
 	for _, peer := range peers {
 		wg.Add(1)
@@ -535,24 +564,41 @@ func (pm *P2PPeerManager) BroadcastBlock(ctx context.Context, block *core.Block)
 		return
 	}
 
-	log.Printf("P2P peer manager: broadcasting block height=%d hash=%s to %d peers: %v", block.Height, hex.EncodeToString(block.Hash), len(peers), peers)
+	// Print block broadcast header with box and color
+	blockHashStr := hex.EncodeToString(block.Hash[:8])
+	fmt.Printf("\n")
+	fmt.Printf(ColorGreen + ColorBold + "╔═══════════════════════════════════════════════════════════╗\n" + ColorReset)
+	fmt.Printf(ColorGreen + "║" + ColorReset + ColorWhite + "  ⛏️  BLOCK BROADCAST                                          " + ColorReset + ColorGreen + "║\n" + ColorReset)
+	fmt.Printf(ColorGreen + "╠═══════════════════════════════════════════════════════════╣\n" + ColorReset)
+	fmt.Printf(ColorGreen+"║"+ColorReset+ColorYellow+"  Height: %-52d"+ColorReset+ColorGreen+"║\n"+ColorReset, block.Height)
+	fmt.Printf(ColorGreen+"║"+ColorReset+ColorYellow+"  Hash: %-54s"+ColorReset+ColorGreen+"║\n"+ColorReset, blockHashStr+"...")
+	fmt.Printf(ColorGreen+"║"+ColorReset+ColorYellow+"  Tx Count: %-50d"+ColorReset+ColorGreen+"║\n"+ColorReset, len(block.Transactions))
+	fmt.Printf(ColorGreen+"║"+ColorReset+ColorYellow+"  Timestamp: %-49s"+ColorReset+ColorGreen+"║\n"+ColorReset, time.Unix(block.Header.TimestampUnix, 0).Format("2006-01-02 15:04:05"))
+	fmt.Printf(ColorGreen+"║"+ColorReset+ColorCyan+"  Peers: %-53d"+ColorReset+ColorGreen+"║\n"+ColorReset, len(peers))
+	fmt.Printf(ColorGreen + "╚═══════════════════════════════════════════════════════════╝\n" + ColorReset)
+	fmt.Printf("\n")
 
 	var wg sync.WaitGroup
 	for _, peer := range peers {
 		wg.Add(1)
 		go func(p string) {
 			defer wg.Done()
-			log.Printf("P2P: sending block_broadcast to peer %s", p)
 			_, err := pm.client.BroadcastBlock(ctx, p, block)
 			if err != nil {
 				log.Printf("p2p broadcast block to %s failed: %v", p, err)
-			} else {
-				log.Printf("p2p broadcast block to %s succeeded", p)
 			}
 		}(peer)
 	}
 	wg.Wait()
 	log.Printf("P2P peer manager: block broadcast completed height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
+}
+
+// formatAddress formats an address for display
+func formatAddress(addr []byte) string {
+	if len(addr) == 0 {
+		return "N/A"
+	}
+	return hex.EncodeToString(addr[:20])
 }
 
 // EnsureAncestors recursively fetches ancestor blocks to ensure chain continuity

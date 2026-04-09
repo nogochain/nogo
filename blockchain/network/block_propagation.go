@@ -261,7 +261,7 @@ func (obp *OptimizedBlockPropagator) handlePotentialFork(block *core.Block) erro
 		RemoteBlock: block,
 		PeerID:      "background_processor",
 		ReceivedAt:  time.Now(),
-		Priority:    PriorityNormal,
+		Priority:    ResolutionPriorityNormal,
 	}
 
 	if err := obp.resolutionEngine.SubmitResolution(request); err != nil {

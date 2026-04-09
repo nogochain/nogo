@@ -24,8 +24,8 @@ const (
 	NodeRoleLightNode
 )
 
-// PeerInfo represents information about a peer
-type PeerInfo struct {
+// NodePeerInfo represents comprehensive information about a peer in the network topology
+type NodePeerInfo struct {
 	ID           string
 	Address      string
 	ConnectedAt  time.Time
@@ -42,7 +42,7 @@ type PeerInfo struct {
 // NetworkTopology represents the network topology
 type NetworkTopology struct {
 	mu          sync.RWMutex
-	peers       map[string]*PeerInfo
+	peers       map[string]*NodePeerInfo
 	connections map[string][]string // peerID -> connected peerIDs
 	startTime   time.Time
 	ourNodeID   string
@@ -52,7 +52,7 @@ type NetworkTopology struct {
 // NewNetworkTopology creates a new network topology analyzer
 func NewNetworkTopology(nodeID string, role NodeRole) *NetworkTopology {
 	return &NetworkTopology{
-		peers:       make(map[string]*PeerInfo),
+		peers:       make(map[string]*NodePeerInfo),
 		connections: make(map[string][]string),
 		startTime:   time.Now(),
 		ourNodeID:   nodeID,
@@ -61,7 +61,7 @@ func NewNetworkTopology(nodeID string, role NodeRole) *NetworkTopology {
 }
 
 // AddPeer adds or updates a peer in the topology
-func (nt *NetworkTopology) AddPeer(info *PeerInfo) {
+func (nt *NetworkTopology) AddPeer(info *NodePeerInfo) {
 	if info == nil {
 		return
 	}
@@ -243,7 +243,7 @@ func (nt *NetworkTopology) AnalyzeConnectivity() map[string]interface{} {
 }
 
 // GetPeerInfo returns information about a specific peer
-func (nt *NetworkTopology) GetPeerInfo(peerID string) (*PeerInfo, bool) {
+func (nt *NetworkTopology) GetPeerInfo(peerID string) (*NodePeerInfo, bool) {
 	nt.mu.RLock()
 	defer nt.mu.RUnlock()
 
@@ -251,17 +251,18 @@ func (nt *NetworkTopology) GetPeerInfo(peerID string) (*PeerInfo, bool) {
 	return peer, exists
 }
 
-// GetAllPeers returns all known peers
-func (nt *NetworkTopology) GetAllPeers() map[string]*PeerInfo {
+func (nt *NetworkTopology) GetAllPeers() map[string]*NodePeerInfo {
 	nt.mu.RLock()
 	defer nt.mu.RUnlock()
 
-	peers := make(map[string]*PeerInfo)
+	peers := make(map[string]*NodePeerInfo)
 	for k, v := range nt.peers {
 		peers[k] = v
 	}
 	return peers
 }
+
+
 
 // AnalyzeNetworkLatency analyzes network latency distribution
 func (nt *NetworkTopology) AnalyzeNetworkLatency() map[string]interface{} {

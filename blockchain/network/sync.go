@@ -23,7 +23,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -353,7 +352,7 @@ func (s *SyncLoop) performSyncStep() {
 
 // handleNewBlock processes incoming block events with automatic fork resolution
 // This handles forks discovered during active synchronization
-func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) {
+func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error {
 	log.Printf("[Sync] Received block %d hash=%s",
 		block.GetHeight(), hex.EncodeToString(block.Hash))
 
@@ -369,13 +368,13 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) {
 			log.Printf("[Sync]   - Timestamp: %d", block.Header.TimestampUnix)
 			log.Printf("[Sync]   - This may indicate remote node data corruption or network issues")
 			// Do not add corrupted block to orphan pool
-			return
+			return fmt.Errorf("corrupted block data: %v", err)
 		}
 		
 		log.Printf("[Sync] Failed to validate block: %v", err)
 		// Try adding as orphan for non-corrupted blocks
 		s.orphanPool.AddOrphan(block)
-		return
+		return fmt.Errorf("block validation failed: %v", err)
 	}
 
 	log.Printf("[Sync] Block %d validated", block.GetHeight())
@@ -410,7 +409,7 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) {
 							log.Printf("[Sync] Failed to submit fork resolution: %v", err)
 						} else {
 							log.Printf("[Sync] Fork resolution submitted to engine")
-							return
+							return fmt.Errorf("fork resolution in progress")
 						}
 					}
 				}
@@ -422,7 +421,7 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) {
 					log.Printf("[Sync] Remote chain has more work, will trigger reorganization")
 				} else {
 					log.Printf("[Sync] Local chain has equal or more work, keeping local")
-					return
+					return fmt.Errorf("local chain has equal or more work")
 				}
 			}
 		} else if block.Height < currentTip.Height {
@@ -451,7 +450,7 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) {
 							log.Printf("[Sync] Failed to submit fork resolution: %v", err)
 						} else {
 							log.Printf("[Sync] Fork resolution submitted to engine")
-							// Continue to AddBlock - don't return here!
+							return fmt.Errorf("historical fork resolution in progress")
 						}
 					}
 				}
@@ -473,19 +472,19 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) {
 						if s.forkResolver != nil {
 							forkEvent := s.forkDetector.DetectFork(canonicalParent, block, "sync_loop")
 							if forkEvent != nil {
-								request := &ResolutionRequest{
-									LocalTip:    currentTip,
-									RemoteBlock: block,
-									PeerID:      "sync_loop",
-									ReceivedAt:  time.Now(),
-									Priority:    getResolutionPriority(forkEvent),
-								}
+									request := &ResolutionRequest{
+										LocalTip:    currentTip,
+										RemoteBlock: block,
+										PeerID:      "sync_loop",
+										ReceivedAt:  time.Now(),
+										Priority:    getResolutionPriority(forkEvent),
+									}
 
 								if err := s.forkResolver.SubmitResolution(request); err != nil {
 									log.Printf("[Sync] Failed to submit fork resolution: %v", err)
 								} else {
 									log.Printf("[Sync] Fork resolution submitted to engine")
-									// Continue to AddBlock - don't return here!
+									return fmt.Errorf("fork chain resolution in progress")
 								}
 							}
 						}
@@ -517,18 +516,19 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) {
 			}
 		}
 
-		return
+		return fmt.Errorf("failed to add block to chain: %v", err)
 	}
 
 	if !accepted {
 		log.Printf("[Sync] Block %d was not accepted to chain", block.GetHeight())
-		return
+		return fmt.Errorf("block not accepted to chain")
 	}
 
 	log.Printf("[Sync] Block %d added to chain (new height: %d)", block.GetHeight(), s.bc.LatestBlock().GetHeight())
 
 	// Check if we can process orphan blocks
 	s.processOrphans(ctx)
+	return nil
 }
 
 // processOrphans attempts to process orphaned blocks
@@ -644,73 +644,45 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 			}
 		}()
 
-		blocks, err := s.downloader.BatchDownloadBlocks(ctx, p, syncFromHeight, blocksToFetch, progressChan)
-		close(progressChan)
-
-		if err != nil {
-			log.Printf("[Sync] Batch download failed: %v", err)
-			return fmt.Errorf("batch download failed: %w", err)
-		}
-
-		log.Printf("[Sync] Downloaded %d blocks, processing...", len(blocks))
-
-		// Sort blocks by height to ensure correct order
-		sort.Slice(blocks, func(i, j int) bool {
-			return blocks[i].Height < blocks[j].Height
-		})
-
-		// Process downloaded blocks - validate chain continuity and add to chain
-		var expectedPrevHash []byte
-		if syncStartHeight >= 0 {
-			// Get the previous block's hash for chain continuity check
-			if syncStartHeight == currentHeight {
-				localTip := s.bc.LatestBlock()
-				if localTip != nil {
-					expectedPrevHash = localTip.Hash
-				}
-			} else {
-				// Get block at syncStartHeight for prevHash
-				prevBlock, exists := s.bc.BlockByHeight(syncStartHeight)
-				if exists && prevBlock != nil {
-					expectedPrevHash = prevBlock.Hash
+		// Define storage function for real-time persistence
+		storeFunc := func(ctx context.Context, block *core.Block) error {
+			// Validate chain continuity first
+			expectedPrevHash := []byte{}
+			if block.Height > syncStartHeight {
+				if block.Height == syncStartHeight+1 {
+					localTip := s.bc.LatestBlock()
+					if localTip != nil {
+						expectedPrevHash = localTip.Hash
+					}
+				} else {
+					// Get block at previous height for prevHash check
+					prevBlock, exists := s.bc.BlockByHeight(block.Height - 1)
+					if exists && prevBlock != nil {
+						expectedPrevHash = prevBlock.Hash
+					}
 				}
 			}
-		}
 
-		blocksAdded := 0
-		for _, block := range blocks {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
-			// Validate chain continuity
-			if len(expectedPrevHash) > 0 {
-				if !bytes.Equal(block.Header.PrevHash, expectedPrevHash) {
-					log.Printf("[Sync] Chain discontinuity at height %d: expected prevHash %x, got %x",
-						block.Height, expectedPrevHash[:8], block.Header.PrevHash[:8])
-					// Try to continue with next block - might be orphan situation
-					continue
-				}
+			if len(expectedPrevHash) > 0 && !bytes.Equal(block.Header.PrevHash, expectedPrevHash) {
+				log.Printf("[Sync] Chain discontinuity at height %d: expected prevHash %x, got %x",
+					block.Height, expectedPrevHash[:8], block.Header.PrevHash[:8])
+				return fmt.Errorf("chain discontinuity at height %d", block.Height)
 			}
 
 			// Add block to chain via handleNewBlock for proper validation and fork handling
-			s.handleNewBlock(ctx, block)
-
-			// Update expected prevHash for next block
-			expectedPrevHash = block.Hash
-			blocksAdded++
-
-			// Update progress periodically
-			if blocksAdded%BlocksAddedProgressInterval == 0 {
-				s.mu.Lock()
-				s.lastUpdateTime = time.Now()
-				s.mu.Unlock()
-			}
+			return s.handleNewBlock(ctx, block)
 		}
 
-		log.Printf("[Sync] Batch sync complete: %d/%d blocks added to chain", blocksAdded, len(blocks))
+		// Use real-time download and storage
+		err = s.downloader.BatchDownloadBlocks(ctx, p, syncFromHeight, blocksToFetch, progressChan, storeFunc)
+		close(progressChan)
+
+		if err != nil {
+			log.Printf("[Sync] Batch download and storage failed: %v", err)
+			return fmt.Errorf("batch download and storage failed: %w", err)
+		}
+
+		log.Printf("[Sync] Real-time sync complete: all blocks downloaded and stored")
 
 		s.mu.Lock()
 		s.syncProgress = 1.0

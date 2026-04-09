@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -160,7 +161,10 @@ func (c *P2PClient) getConnection(ctx context.Context, peer string) (*p2pConnect
 	c.connections[peer] = pc
 	c.connMutex.Unlock()
 
-	log.Printf("P2P client: persistent connection established to %s (initialized at %v)", peer, now)
+	// Only log at debug level to reduce noise
+	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
+		log.Printf("P2P client: persistent connection established to %s (initialized at %v)", peer, now)
+	}
 	return pc, nil
 }
 
@@ -168,12 +172,16 @@ func (c *P2PClient) getConnection(ctx context.Context, peer string) (*p2pConnect
 func (c *P2PClient) performHandshake(conn net.Conn) error {
 	_ = conn.SetDeadline(time.Now().Add(c.ioTimeout))
 
-	// Log our RulesHash before sending
-	log.Printf("P2P Client Handshake: My ChainID=%d, RulesHash=%s, NodeID=%s", c.chainID, c.rulesHash, c.nodeID)
+	// Only log handshake at debug level to reduce noise
+	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
+		log.Printf("P2P Client Handshake: My ChainID=%d, RulesHash=%s, NodeID=%s", c.chainID, c.rulesHash, c.nodeID)
+	}
 
 	// Send hello
 	helloMsg := newP2PHello(c.chainID, c.rulesHash, c.nodeID)
-	log.Printf("P2P Client: sending hello with RulesHash=%s", helloMsg.RulesHash)
+	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
+		log.Printf("P2P Client: sending hello with RulesHash=%s", helloMsg.RulesHash)
+	}
 	if err := p2pWriteJSON(conn, p2pEnvelope{Type: "hello", Payload: mustJSON(helloMsg)}); err != nil {
 		log.Printf("P2P Client: failed to send hello: %v", err)
 		return err
@@ -202,7 +210,10 @@ func (c *P2PClient) performHandshake(conn net.Conn) error {
 		return err
 	}
 
-	log.Printf("P2P Client: received hello - ChainID=%d, RulesHash=%s, Protocol=%d", hello.ChainID, hello.RulesHash, hello.Protocol)
+	// Only log at debug level
+	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
+		log.Printf("P2P Client: received hello - ChainID=%d, RulesHash=%s, Protocol=%d", hello.ChainID, hello.RulesHash, hello.Protocol)
+	}
 
 	if hello.Protocol != 1 || hello.ChainID != c.chainID {
 		log.Printf("P2P Client: chain/protocol mismatch - expected ChainID=%d, got ChainID=%d, Protocol=%d", c.chainID, hello.ChainID, hello.Protocol)
@@ -214,7 +225,10 @@ func (c *P2PClient) performHandshake(conn net.Conn) error {
 		return errors.New("rules hash mismatch")
 	}
 
-	log.Printf("P2P Client: handshake successful with peer")
+	// Only log at debug level
+	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
+		log.Printf("P2P Client: handshake successful with peer")
+	}
 	return nil
 }
 
@@ -236,7 +250,10 @@ func (c *P2PClient) do(ctx context.Context, peer string, reqType string, reqPayl
 		return errors.New("empty peer")
 	}
 
-	log.Printf("[P2PClient.do] Requesting %s from peer %s (expected response: %s)", reqType, peer, expectedRespType)
+	// Only log at debug level to reduce noise (controlled by NOGO_LOG_LEVEL env var)
+	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
+		log.Printf("[P2PClient.do] Requesting %s from peer %s (expected response: %s)", reqType, peer, expectedRespType)
+	}
 
 	// Get or create persistent connection
 	conn, err := c.getConnection(ctx, peer)
@@ -247,12 +264,14 @@ func (c *P2PClient) do(ctx context.Context, peer string, reqType string, reqPayl
 	// Set deadline for this operation
 	_ = conn.conn.SetDeadline(time.Now().Add(c.ioTimeout))
 
-	// Send request
+	// Send request (only log at debug level)
 	var payload json.RawMessage
 	if reqPayload != nil {
 		payload = mustJSON(reqPayload)
 	}
-	log.Printf("[P2PClient.do] Sending request type=%s payload=%s to %s", reqType, string(payload), peer)
+	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
+		log.Printf("[P2PClient.do] Sending request type=%s payload=%s to %s", reqType, string(payload), peer)
+	}
 	if err := p2pWriteJSON(conn.conn, p2pEnvelope{Type: reqType, Payload: payload}); err != nil {
 		log.Printf("[P2PClient.do] Write failed to %s: %v - removing stale connection and retrying", peer, err)
 		// Connection is dead - remove it and retry with new connection
@@ -276,8 +295,10 @@ func (c *P2PClient) do(ctx context.Context, peer string, reqType string, reqPayl
 	}
 
 readResponse:
-	// Read response
-	log.Printf("[P2PClient.do] Waiting for response from %s", peer)
+	// Read response (only log at debug level to reduce noise)
+	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
+		log.Printf("[P2PClient.do] Waiting for response from %s", peer)
+	}
 	raw, err := p2pReadJSON(conn.conn, c.maxMsgBytes)
 	if err != nil {
 		log.Printf("[P2PClient.do] Read failed from %s: %v - removing stale connection and retrying", peer, err)
@@ -312,7 +333,10 @@ readResponse:
 		return fmt.Errorf("unmarshal response from %s failed: %w", peer, err)
 	}
 
-	log.Printf("[P2PClient.do] Received response type=%s from %s, payload=%s", env.Type, peer, string(mustJSON(env.Payload)))
+	// Only log response at debug level to reduce noise
+	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
+		log.Printf("[P2PClient.do] Received response type=%s from %s, payload=%s", env.Type, peer, string(mustJSON(env.Payload)))
+	}
 
 	if expectedRespType != "" && env.Type != expectedRespType {
 		if env.Type == "not_found" {

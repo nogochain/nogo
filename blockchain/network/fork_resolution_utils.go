@@ -25,12 +25,12 @@ import (
 func getResolutionPriority(event *core.ForkEvent) ResolutionPriority {
 	switch event.Type {
 	case core.ForkTypeDeep:
-		return PriorityCritical
+		return ResolutionPriorityCritical
 	case core.ForkTypePersistent:
-		return PriorityHigh
+		return ResolutionPriorityHigh
 	case core.ForkTypeTemporary:
-		return PriorityNormal
+		return ResolutionPriorityNormal
 	default:
-		return PriorityLow
+		return ResolutionPriorityLow
 	}
 }

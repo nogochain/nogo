@@ -25,7 +25,7 @@ docs/
 ├── Economic-Model-EN.md           # Economic Model Whitepaper (English)
 ├── Algorithm-Manual-CN.md         # Algorithm Manual (Chinese)
 ├── Algorithm-Manual-EN.md         # Algorithm Manual (English)
-├── 技术文档.md                    # Comprehensive Technical Document (Chinese)
+├── Technical-Documentation.md     # Comprehensive Technical Document (Chinese)
 ├── 技术文档-CN.md                 # Comprehensive Technical Document (Chinese)
 ├── core-types-README.md           # Core Types Documentation
 ├── nogopow-README.md              # NogoPow Algorithm Documentation
@@ -41,7 +41,7 @@ docs/
 
 ### Getting Started
 
-1. **Understand NogoChain**: Read [Technical Document](./技术文档.md)
+1. **Understand NogoChain**: Read [Technical Document](./Technical-Documentation.md)
 2. **Quick Deployment**: Refer to [Deployment Guide](./Deployment-Guide-EN.md#2-quick-start)
 3. **API Development**: Check [API Reference](./API-Reference-EN.md)
 4. **Understand Economic Model**: Read [Economic Model](./Economic-Model-EN.md)
@@ -167,7 +167,7 @@ Getting Started → Deploy Node → Call API → Deep Understanding → Contribu
 ### 5. Comprehensive Technical Document
 
 **Files**:
-- [技术文档.md](./技术文档.md) - Complete Technical Document
+- [Technical-Documentation.md](./Technical-Documentation.md) - Complete Technical Document
 - [core-types-README.md](./core-types-README.md) - Core Types Documentation
 - [nogopow-README.md](./nogopow-README.md) - NogoPow Detailed Explanation
 
@@ -195,7 +195,7 @@ Getting Started → Deploy Node → Call API → Deep Understanding → Contribu
 **Recommended Reading Order**:
 1. [API Reference - Quick Start](./API-Reference-EN.md#overview)
 2. [API Reference - Usage Examples](./API-Reference-EN.md#usage-examples)
-3. [Technical Document - Core Concepts](./技术文档.md#4-core-concepts)
+3. [Technical Document - Core Concepts](./Technical-Documentation.md#4-core-concepts)
 
 ### Use Case 3: I Want to Understand the Economic Model
 

@@ -194,7 +194,7 @@ docs/
 **推荐阅读顺序**:
 1. [API 参考 - 快速开始](./API-Reference-CN.md#概述)
 2. [API 参考 - 使用示例](./API-Reference-CN.md#使用示例)
-3. [技术文档 - 核心概念](./技术文档.md#4-核心概念)
+3. [技术文档 - 核心概念](./Technical-Documentation.md#4-core-concepts)
 
 ### 场景 3: 我想理解经济模型
 

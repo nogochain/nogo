@@ -17,12 +17,12 @@ import (
 // Production-grade: implements Bitcoin-style fast fork resolution
 // Thread-safe: uses mutex for concurrent resolution attempts
 type ForkResolutionEngine struct {
-	mu              sync.RWMutex
-	chainSelector   *core.ChainSelector
-	forkDetector    *core.ForkDetector
-	resolutionQueue chan *ResolutionRequest
-	workers         int
-	minResolutionTime time.Duration
+	mu                 sync.RWMutex
+	chainSelector      *core.ChainSelector
+	forkDetector       *core.ForkDetector
+	resolutionQueue    chan *ResolutionRequest
+	workers            int
+	minResolutionTime  time.Duration
 	fastResolutionTime time.Duration
 }
 
@@ -38,35 +38,35 @@ func (fre *ForkResolutionEngine) GetForkDetector() *core.ForkDetector {
 
 // ResolutionRequest represents a fork resolution request
 type ResolutionRequest struct {
-	LocalTip     *core.Block
-	RemoteBlock  *core.Block
-	PeerID       string
-	ReceivedAt   time.Time
-	Priority     ResolutionPriority
+	LocalTip    *core.Block
+	RemoteBlock *core.Block
+	PeerID      string
+	ReceivedAt  time.Time
+	Priority    ResolutionPriority
 }
 
 // ResolutionPriority indicates the priority of resolution
 type ResolutionPriority int
 
 const (
-	// PriorityLow indicates low priority resolution
-	PriorityLow ResolutionPriority = iota
-	// PriorityNormal indicates normal priority resolution
-	PriorityNormal
-	// PriorityHigh indicates high priority resolution
-	PriorityHigh
-	// PriorityCritical indicates critical priority (deep fork)
-	PriorityCritical
+	// ResolutionPriorityLow indicates low priority resolution
+	ResolutionPriorityLow ResolutionPriority = iota
+	// ResolutionPriorityNormal indicates normal priority resolution
+	ResolutionPriorityNormal
+	// ResolutionPriorityHigh indicates high priority resolution
+	ResolutionPriorityHigh
+	// ResolutionPriorityCritical indicates critical priority (deep fork)
+	ResolutionPriorityCritical
 )
 
 // ResolutionResult represents the result of fork resolution
 type ResolutionResult struct {
-	Resolved    bool
-	WinningBlock *core.Block
-	LosingBlock  *core.Block
+	Resolved       bool
+	WinningBlock   *core.Block
+	LosingBlock    *core.Block
 	ResolutionTime time.Duration
-	ReorgNeeded bool
-	Error       error
+	ReorgNeeded    bool
+	Error          error
 }
 
 // NewForkResolutionEngine creates a new fork resolution engine
@@ -129,10 +129,10 @@ func (fre *ForkResolutionEngine) resolutionWorker(id int) {
 // resolveFast performs fast fork resolution using work comparison
 func (fre *ForkResolutionEngine) resolveFast(request *ResolutionRequest) *ResolutionResult {
 	result := &ResolutionResult{
-		Resolved:    false,
+		Resolved:     false,
 		WinningBlock: nil,
 		LosingBlock:  nil,
-		ReorgNeeded: false,
+		ReorgNeeded:  false,
 	}
 
 	// Extract work values
@@ -278,9 +278,9 @@ type ResolutionMessage struct {
 // GetResolutionStats returns resolution statistics
 func (fre *ForkResolutionEngine) GetResolutionStats() map[string]interface{} {
 	return map[string]interface{}{
-		"queue_length":    len(fre.resolutionQueue),
-		"workers":         fre.workers,
-		"min_resolution_ms": fre.minResolutionTime.Milliseconds(),
+		"queue_length":       len(fre.resolutionQueue),
+		"workers":            fre.workers,
+		"min_resolution_ms":  fre.minResolutionTime.Milliseconds(),
 		"fast_resolution_ms": fre.fastResolutionTime.Milliseconds(),
 	}
 }
@@ -297,18 +297,18 @@ func (fre *ForkResolutionEngine) AutoResolveFork(localTip *core.Block, remoteBlo
 		RemoteBlock: remoteBlock,
 		PeerID:      peerID,
 		ReceivedAt:  time.Now(),
-		Priority:    PriorityNormal,
+		Priority:    ResolutionPriorityNormal,
 	}
 
 	// Detect fork and determine priority
 	if forkEvent := fre.forkDetector.DetectFork(localTip, remoteBlock, peerID); forkEvent != nil {
 		switch forkEvent.Type {
 		case core.ForkTypeDeep:
-			request.Priority = PriorityCritical
+			request.Priority = ResolutionPriorityCritical
 		case core.ForkTypePersistent:
-			request.Priority = PriorityHigh
+			request.Priority = ResolutionPriorityHigh
 		default:
-			request.Priority = PriorityNormal
+			request.Priority = ResolutionPriorityNormal
 		}
 	}
 
