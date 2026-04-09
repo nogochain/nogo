@@ -97,10 +97,19 @@ type FastSyncEngine struct {
 	// Network interface for fetching current chain height from peers
 	networkHeightFetcher NetworkHeightFetcher
 
+	// Block fetcher for downloading blocks from peers
+	blockFetcher BlockFetcher
+
 	// Metrics
 	blocksDownloaded uint64
-	bytesDownloaded uint64
+	bytesDownloaded  uint64
 	lastProgressUpdate time.Time
+}
+
+// BlockFetcher interface for fetching blocks from remote peers
+type BlockFetcher interface {
+	FetchBlockByHeight(ctx context.Context, peer string, height uint64) (*core.Block, error)
+	FetchBlockByHash(ctx context.Context, peer string, hashHex string) (*core.Block, error)
 }
 
 // NetworkHeightFetcher interface for getting current network height
@@ -155,6 +164,13 @@ func (fs *FastSyncEngine) SetNetworkHeightFetcher(fetcher NetworkHeightFetcher) 
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	fs.networkHeightFetcher = fetcher
+}
+
+// SetBlockFetcher sets the block fetcher for downloading blocks from peers.
+func (fs *FastSyncEngine) SetBlockFetcher(fetcher BlockFetcher) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.blockFetcher = fetcher
 }
 
 func (fs *FastSyncEngine) AddPeer(peerURL string) {
@@ -331,7 +347,34 @@ func (fs *FastSyncEngine) syncBlocksFromCheckpoint(ctx context.Context, checkpoi
 		return ErrFastSyncNoCheckpoint
 	}
 
-	startHeight := checkpoint.Height + 1
+	// Get current local chain height to avoid creating excessive orphan blocks
+	localTip := fs.blockchain.LatestBlock()
+	var localHeight uint64
+	if localTip != nil {
+		localHeight = localTip.Height
+	}
+
+	// Calculate start height: use checkpoint+1 or local height+1, whichever is higher
+	// This prevents downloading blocks with large gaps that would be orphaned
+	startHeight := localHeight + 1
+	if checkpoint.Height + 1 > localHeight + 1 {
+		startHeight = checkpoint.Height + 1
+	}
+
+	// Validate start height consistency - ensure we don't create excessive gaps
+	currentLocalHeight := fs.currentHeight()
+	
+	// Don't create gaps larger than 10% of download window to avoid orphan storms
+	maxGap := uint64(BlockDownloadWindowSize / 10)
+	if maxGap < 10 {
+		maxGap = 10 // minimum gap tolerance
+	}
+	
+	if startHeight > currentLocalHeight + maxGap {
+		log.Printf("[FastSync] Adjusting start height: local=%d, checkpoint=%d, current=%d, maxGap=%d, using start=%d", 
+			localHeight, checkpoint.Height, currentLocalHeight, maxGap, currentLocalHeight + 1)
+		startHeight = currentLocalHeight + 1
+	}
 
 	// Fetch current network height from peers to determine how many blocks to download
 	networkHeight, err := fs.fetchNetworkHeight(ctx)
@@ -410,7 +453,7 @@ func (fs *FastSyncEngine) syncBlocksFromCheckpoint(ctx context.Context, checkpoi
 	}
 
 	// Verify final sync state
-	localTip := fs.blockchain.LatestBlock()
+	localTip = fs.blockchain.LatestBlock()
 	if localTip != nil && localTip.Height >= networkHeight {
 		fs.updateStatusWithMetrics("completed", 1.0, localTip.Height, networkHeight)
 		log.Printf("[FastSync] Sync completed: height %d", localTip.Height)
@@ -420,6 +463,15 @@ func (fs *FastSyncEngine) syncBlocksFromCheckpoint(ctx context.Context, checkpoi
 	}
 
 	return nil
+}
+
+// currentHeight returns the current height of the local blockchain
+func (fs *FastSyncEngine) currentHeight() uint64 {
+	block := fs.blockchain.LatestBlock()
+	if block == nil {
+		return 0
+	}
+	return block.Height
 }
 
 // fetchNetworkHeight queries connected peers to determine current network chain height.
@@ -471,9 +523,18 @@ func (fs *FastSyncEngine) fetchNetworkHeight(ctx context.Context) (uint64, error
 
 // fetchPeerHeight queries a single peer for their current chain height.
 func (fs *FastSyncEngine) fetchPeerHeight(ctx context.Context, peer string) (uint64, error) {
-	// Placeholder - actual implementation would call peer API via JSON-RPC
-	// Returns 0 to trigger fallback to other peers
-	return 0, nil
+	// Use networkHeightFetcher if available
+	if fs.networkHeightFetcher != nil {
+		peerHeights, err := fs.networkHeightFetcher.GetPeerHeights()
+		if err != nil {
+			return 0, fmt.Errorf("get peer heights: %w", err)
+		}
+		if height, ok := peerHeights[peer]; ok {
+			return height, nil
+		}
+	}
+	// No fetcher available or peer not found - return error to trigger fallback
+	return 0, fmt.Errorf("cannot fetch height from peer %s: network height fetcher not available", peer)
 }
 
 // downloadAndProcessBlockBatch downloads a batch of blocks and processes them.
@@ -512,14 +573,29 @@ func (fs *FastSyncEngine) downloadAndProcessBlockBatch(ctx context.Context,
 			break
 		}
 
-		// Validate and add block to chain
-		_, err = fs.blockchain.AddBlock(block)
+		// Validate and add block to chain with orphan-aware logic
+		accepted, err := fs.blockchain.AddBlock(block)
 		if err != nil {
 			log.Printf("[FastSync] Block validation failed at height %d: %v", height, err)
 			// Mark peer as potentially bad
 			fs.recordBadBlock(peer, height)
 			batchSuccessful = false
 			break
+		}
+		if !accepted {
+			// Block stored as orphan - normal for fast sync with large gaps
+			log.Printf("[FastSync] Block %d stored as orphan (gap detection: expected=%d, actual=%d, gap=%d)", 
+				height, fs.currentHeight(), block.Height, block.Height - fs.currentHeight())
+			
+			// In fast sync mode with large gaps, we need to check if we should continue
+			// or adjust our synchronization strategy
+			if height - fs.currentHeight() > BlockDownloadWindowSize / 4 {
+				log.Printf("[FastSync] Large gap detected at height %d, local=%d, restarting sync from current height",
+					height, fs.currentHeight())
+				// Return false to restart batch from lowest missing height
+				return false, nil
+			}
+			// Continue processing - orphans will be connected later when parents arrive
 		}
 
 		// Update metrics
@@ -564,14 +640,21 @@ func (fs *FastSyncEngine) fetchBlockWithRetry(ctx context.Context, peer string, 
 
 // fetchBlockDirect makes a direct request to fetch a block by height.
 func (fs *FastSyncEngine) fetchBlockDirect(ctx context.Context, peer string, height uint64) (*core.Block, error) {
-	// In real implementation, this would use P2P client to fetch block
-	// The actual implementation would make HTTP/JSON-RPC call to peer
-	// For production, this should integrate with blockchain/network/p2p_client.go
+	// Use blockFetcher if available
+	fs.mu.RLock()
+	fetcher := fs.blockFetcher
+	fs.mu.RUnlock()
 
-	// Placeholder - actual implementation would call:
-	// peerAPI.FetchBlockByHeight(ctx, peer, height)
-	// Return error to trigger fallback behavior
-	return nil, fmt.Errorf("block fetch not implemented for height %d", height)
+	if fetcher != nil {
+		block, err := fetcher.FetchBlockByHeight(ctx, peer, height)
+		if err != nil {
+			return nil, fmt.Errorf("fetch block from peer %s: %w", peer, err)
+		}
+		return block, nil
+	}
+
+	// No block fetcher available - return error
+	return nil, fmt.Errorf("block fetch not available: blockFetcher not configured for height %d", height)
 }
 
 // recordBadBlock records a block fetch/validation failure for peer scoring.

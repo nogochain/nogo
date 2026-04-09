@@ -378,7 +378,26 @@ func (v *BlockValidator) ValidateBlockFast(block *Block) error {
 		return ErrEmptyBlockHash
 	}
 
-	if block.DifficultyBits == 0 {
+	// Handle difficulty field mapping from different JSON formats
+	// Remote nodes may return difficulty in "difficultyBits", "difficulty", or nested in "header"
+	difficulty := block.DifficultyBits
+	if difficulty == 0 {
+		// Try Block.Difficulty field (some nodes use this)
+		if block.Difficulty > 0 {
+			difficulty = block.Difficulty
+			block.DifficultyBits = difficulty
+		} else if block.Header.DifficultyBits > 0 {
+			// Try Header.DifficultyBits
+			difficulty = block.Header.DifficultyBits
+			block.DifficultyBits = difficulty
+		} else if block.Header.Difficulty > 0 {
+			// Try Header.Difficulty
+			difficulty = block.Header.Difficulty
+			block.DifficultyBits = difficulty
+		}
+	}
+	
+	if difficulty == 0 {
 		return ErrZeroDifficultyBits
 	}
 
@@ -606,7 +625,8 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 				return err
 			}
 			acct := state[tx.ToAddress]
-			if acct.Balance+tx.Amount < acct.Balance {
+			// Safe overflow check: use comparison instead of wraparound detection
+			if acct.Balance > math.MaxUint64-tx.Amount {
 				return errors.New("coinbase balance overflow")
 			}
 			acct.Balance += tx.Amount
@@ -632,7 +652,8 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 			state[fromAddr] = from
 
 			to := state[tx.ToAddress]
-			if to.Balance+tx.Amount < to.Balance {
+			// Safe overflow check: use comparison instead of wraparound detection
+			if to.Balance > math.MaxUint64-tx.Amount {
 				return errors.New("transfer balance overflow")
 			}
 			to.Balance += tx.Amount

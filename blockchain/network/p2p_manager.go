@@ -31,8 +31,27 @@ type P2PPeerManager struct {
 // Production-grade: initializes network listeners and peer discovery
 func (pm *P2PPeerManager) Start(ctx context.Context) error {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	log.Printf("P2P peer manager started with %d peers", len(pm.peers))
+	initialPeers := make([]string, len(pm.peers))
+	copy(initialPeers, pm.peers)
+	pm.mu.Unlock()
+
+	log.Printf("P2P peer manager started with %d peers", len(initialPeers))
+
+	// Perform initial peer discovery from bootstrap peers
+	if len(initialPeers) > 0 {
+		go func() {
+			// Wait a short time for network to stabilize
+			time.Sleep(5 * time.Second)
+
+			discoverCtx, cancel := context.WithTimeout(ctx, time.Duration(PeerDiscoveryTimeoutSec)*time.Second)
+			defer cancel()
+
+			// Discover from first bootstrap peer
+			pm.DiscoverPeersFromPeer(discoverCtx, initialPeers[0])
+			log.Printf("P2P peer manager: initial discovery completed, total peers: %d", len(pm.Peers()))
+		}()
+	}
+
 	return nil
 }
 

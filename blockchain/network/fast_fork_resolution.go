@@ -110,19 +110,19 @@ func (fre *ForkResolutionEngine) resolutionWorker(id int) {
 		// Perform fast resolution
 		result := fre.resolveFast(request)
 
-if result.Resolved && result.ReorgNeeded {
-		// Execute reorganization
-		if err := fre.executeReorg(result.WinningBlock); err != nil {
-			log.Printf("reorganization failed: worker=%d error=%v winning_block=%x",
-				id, err, result.WinningBlock.Hash,
-			)
+		if result.Resolved && result.ReorgNeeded {
+			// Execute reorganization
+			if err := fre.executeReorg(result.WinningBlock); err != nil {
+				log.Printf("reorganization failed: worker=%d error=%v winning_block=%x",
+					id, err, result.WinningBlock.Hash,
+				)
+			}
 		}
-	}
 
-	resolutionTime := time.Since(startTime)
-	log.Printf("fork resolution completed: worker=%d resolved=%v resolution_time_ms=%d reorg_needed=%v",
-		id, result.Resolved, resolutionTime.Milliseconds(), result.ReorgNeeded,
-	)
+		resolutionTime := time.Since(startTime)
+		log.Printf("fork resolution completed: worker=%d resolved=%v resolution_time_ms=%d reorg_needed=%v",
+			id, result.Resolved, resolutionTime.Milliseconds(), result.ReorgNeeded,
+		)
 	}
 }
 
@@ -217,6 +217,10 @@ func (fre *ForkResolutionEngine) resolveTieBreaker(request *ResolutionRequest) *
 
 // executeReorg executes chain reorganization
 func (fre *ForkResolutionEngine) executeReorg(newBlock *core.Block) error {
+	// Acquire lock to prevent concurrent reorg operations
+	fre.mu.Lock()
+	defer fre.mu.Unlock()
+
 	if fre.chainSelector == nil {
 		return fmt.Errorf("chain selector not initialized")
 	}

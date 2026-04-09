@@ -1102,19 +1102,19 @@ func (s *P2PServer) runPeerDiscoveryLoop(ctx context.Context) {
 
 			// Try to discover peers from the first few configured peers
 			discoverCount := 0
-			for i := range initialPeers {
+			for i, peer := range initialPeers {
 				if i >= MaxPeersDiscoverPerRound { // Limit to prevent flooding
 					break
 				}
 
 				// Create a context with timeout for discovery
-				// Note: DiscoverPeersFromPeer is only available on P2PPeerManager
-				// s.pm.DiscoverPeersFromPeer(discoverCtx, peer)
-
+				discoverCtx, cancel := context.WithTimeout(ctx, time.Duration(PeerDiscoveryTimeoutSec)*time.Second)
+				s.pm.DiscoverPeersFromPeer(discoverCtx, peer)
+				cancel()
 				discoverCount++
 			}
 
-			log.Printf("P2P peer discovery: completed %d discovery iterations, total peers: %d", discoverCount, len(s.pm.peers))
+			log.Printf("P2P peer discovery: completed %d discovery iterations, total peers: %d", discoverCount, len(s.pm.Peers()))
 		}
 	}
 }

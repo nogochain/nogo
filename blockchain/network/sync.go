@@ -356,8 +356,20 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) {
 	// Validate block
 	err := s.validator.ValidateBlockFast(block)
 	if err != nil {
+		// Check if this is corrupted block data (critical error)
+		if s.isCorruptedBlock(block) {
+			log.Printf("[Sync] CRITICAL: Corrupted block %d detected from remote node", block.Height)
+			log.Printf("[Sync]   - Hash: %s", hex.EncodeToString(block.Hash))
+			log.Printf("[Sync]   - PrevHash: %s", hex.EncodeToString(block.PrevHash))
+			log.Printf("[Sync]   - DifficultyBits: %d", block.DifficultyBits)
+			log.Printf("[Sync]   - Timestamp: %d", block.TimestampUnix)
+			log.Printf("[Sync]   - This may indicate remote node data corruption or network issues")
+			// Do not add corrupted block to orphan pool
+			return
+		}
+		
 		log.Printf("[Sync] Failed to validate block: %v", err)
-		// Try adding as orphan
+		// Try adding as orphan for non-corrupted blocks
 		s.orphanPool.AddOrphan(block)
 		return
 	}
@@ -1024,4 +1036,39 @@ func (s *SyncLoop) GetBlacklistInfo(peer string) map[string]interface{} {
 		return nil
 	}
 	return s.scorer.GetBlacklistInfo(peer)
+}
+
+// isCorruptedBlock detects if a block has corrupted or invalid data
+// This handles cases where remote nodes return malformed block data
+func (s *SyncLoop) isCorruptedBlock(block *core.Block) bool {
+	if block == nil {
+		return true
+	}
+	
+	// Block height 0 (genesis) can have empty prevHash
+	if block.Height > 0 {
+		// Non-genesis blocks must have non-empty prevHash
+		if len(block.PrevHash) == 0 {
+			return true
+		}
+	}
+	
+	// All blocks must have valid timestamp (after genesis)
+	// Genesis timestamp is around 1775044800 (April 2026)
+	if block.TimestampUnix < 1775044800 && block.Height > 0 {
+		return true
+	}
+	
+	// All blocks must have non-zero difficulty (except for special test cases)
+	// A zero difficulty indicates corrupted or malformed data
+	if block.DifficultyBits == 0 {
+		return true
+	}
+	
+	// All blocks must have valid hash
+	if len(block.Hash) == 0 {
+		return true
+	}
+	
+	return false
 }

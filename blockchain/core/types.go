@@ -209,6 +209,7 @@ type Block struct {
 
 	TimestampUnix  int64  `json:"timestampUnix"`
 	DifficultyBits uint32 `json:"difficultyBits"`
+	Difficulty     uint32 `json:"difficulty"`
 	Nonce          uint64 `json:"nonce"`
 	PrevHash       []byte `json:"prevHash"`
 }

@@ -275,6 +275,13 @@ func (n *Node) startComponents() error {
 		log.Sync("Sync Interval:   %v", 3*time.Second)
 	}
 
+	// Start P2P manager for peer discovery
+	if n.p2pManager != nil {
+		if err := n.p2pManager.Start(n.ctx); err != nil {
+			log.Error("P2P manager start error: %v", err)
+		}
+	}
+
 	n.wg.Add(1)
 	go func() {
 		defer n.wg.Done()
