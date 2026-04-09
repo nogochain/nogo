@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/config"
+	"github.com/nogochain/nogo/blockchain/consensus"
 	"github.com/nogochain/nogo/blockchain/metrics"
 	"github.com/nogochain/nogo/blockchain/utils"
 )
@@ -120,7 +121,7 @@ func TestSyncLoop_ConfigConsistency(t *testing.T) {
 	bc := &mockBlockchain{height: 100}
 	miner := &mockMiner{}
 	m := &metrics.Metrics{}
-	orphanPool := NewOrphanPool()
+	orphanPool := utils.NewOrphanPool(100, time.Hour)
 	validator := createTestValidator(m)
 
 	syncConfig := config.SyncConfig{
@@ -143,4 +144,9 @@ func TestSyncLoop_ConfigConsistency(t *testing.T) {
 	if cfg.MaxConcurrent != 8 {
 		t.Errorf("expected max concurrent 8, got %d", cfg.MaxConcurrent)
 	}
+}
+
+func createTestValidator(m *metrics.Metrics) *consensus.BlockValidator {
+	consensusParams := config.GetConsensusParams()
+	return consensus.NewBlockValidator(consensusParams, 1, m)
 }

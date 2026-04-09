@@ -49,6 +49,7 @@ type BlockchainInterface interface {
 
 	// Block operations
 	AddBlock(block *core.Block) (bool, error)
+	RollbackToHeight(height uint64) error
 
 	// Block retrieval (for fork resolution - matches core.BlockProvider)
 	GetBlockByHash(hash []byte) (*core.Block, bool)

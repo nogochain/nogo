@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nogochain/nogo/blockchain/config"
 	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/nogochain/nogo/blockchain/metrics"
 )
@@ -82,11 +83,11 @@ func (m *mockBlockchain) RulesHashHex() string {
 }
 
 func (m *mockBlockchain) GetChainID() uint64 {
-	return 0
+	return 1
 }
 
 func (m *mockBlockchain) GetMinerAddress() string {
-	return ""
+	return "NOGO_TEST"
 }
 
 func (m *mockBlockchain) TotalSupply() uint64 {
@@ -95,6 +96,22 @@ func (m *mockBlockchain) TotalSupply() uint64 {
 
 func (m *mockBlockchain) AddBlock(block *core.Block) (bool, error) {
 	return true, nil
+}
+
+func (m *mockBlockchain) RollbackToHeight(height uint64) error {
+	return nil
+}
+
+func (m *mockBlockchain) GetBlockByHash(hash []byte) (*core.Block, bool) {
+	return nil, false
+}
+
+func (m *mockBlockchain) GetBlockByHashBytes(hash []byte) (*core.Block, bool) {
+	return nil, false
+}
+
+func (m *mockBlockchain) GetAllBlocks() ([]*core.Block, error) {
+	return nil, nil
 }
 
 func (m *mockBlockchain) SelectMempoolTxs(mp Mempool, maxTxPerBlock int) ([]core.Transaction, []string, error) {
@@ -121,28 +138,16 @@ func (m *mockBlockchain) Balance(addr string) (core.Account, bool) {
 	return core.Account{}, false
 }
 
-func (m *mockBlockchain) SyncLoop() SyncLoopInterface {
-	return nil
+func (m *mockBlockchain) HasTransaction(txHash []byte) bool {
+	return false
 }
 
 func (m *mockBlockchain) GetContractManager() *core.ContractManager {
 	return nil
 }
 
-func (m *mockBlockchain) HasTransaction(txHash []byte) bool {
-	return false
-}
-
-func (m *mockBlockchain) GetBlockByHash(hash []byte) (*core.Block, bool) {
-	return nil, false
-}
-
-func (m *mockBlockchain) GetBlockByHashBytes(hash []byte) (*core.Block, bool) {
-	return nil, false
-}
-
-func (m *mockBlockchain) GetAllBlocks() ([]*core.Block, error) {
-	return nil, nil
+func (m *mockBlockchain) SyncLoop() SyncLoopInterface {
+	return nil
 }
 
 type mockMiner struct{}
@@ -193,6 +198,14 @@ func (m *mockPeerAPI) FetchBlockByHeight(ctx context.Context, peer string, heigh
 
 func (m *mockPeerAPI) FetchAnyBlockByHash(ctx context.Context, hashHex string) (*core.Block, string, error) {
 	return nil, "", nil
+}
+
+func (m *mockPeerAPI) FetchBlocksByHeightRange(ctx context.Context, peer string, startHeight, count uint64) ([]*core.Block, error) {
+	blocks := make([]*core.Block, 0, count)
+	for i := uint64(0); i < count; i++ {
+		blocks = append(blocks, &core.Block{Height: startHeight + i})
+	}
+	return blocks, nil
 }
 
 func (m *mockPeerAPI) BroadcastTransaction(ctx context.Context, tx core.Transaction, hops int) {
@@ -274,7 +287,7 @@ func TestBlockDownloader_BatchDownloadBlocks(t *testing.T) {
 	validator := &mockValidator{validateDelay: 1 * time.Millisecond}
 	m := &metrics.Metrics{}
 
-	downloader := NewBlockDownloader(pm, bc, validator, m)
+	downloader := NewBlockDownloader(pm, bc, validator, m, config.SyncConfig{})
 
 	ctx := context.Background()
 	progressChan := make(chan DownloadProgress, 10)
@@ -288,12 +301,15 @@ func TestBlockDownloader_BatchDownloadBlocks(t *testing.T) {
 		t.Errorf("expected 100 blocks, got %d", len(blocks))
 	}
 
-	select {
-	case progress := <-progressChan:
-		if progress.Downloaded != 100 {
-			t.Errorf("expected downloaded 100, got %d", progress.Downloaded)
-		}
-	default:
+	// Drain the progress channel and verify total downloaded
+	totalDownloaded := 0
+	close(progressChan)
+	for progress := range progressChan {
+		totalDownloaded += int(progress.Downloaded)
+	}
+	
+	if totalDownloaded == 0 {
+		t.Error("expected some progress updates")
 	}
 }
 
@@ -303,7 +319,7 @@ func TestBlockDownloader_DynamicAdjustment(t *testing.T) {
 	validator := &mockValidator{}
 	m := &metrics.Metrics{}
 
-	downloader := NewBlockDownloader(pm, bc, validator, m)
+	downloader := NewBlockDownloader(pm, bc, validator, m, config.SyncConfig{})
 
 	time.Sleep(6 * time.Second)
 

@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/config"
-	"github.com/nogochain/nogo/blockchain/consensus"
 	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/nogochain/nogo/blockchain/metrics"
 	"github.com/nogochain/nogo/blockchain/utils"
@@ -134,6 +133,68 @@ func (m *MockPeerAPI) BroadcastTransaction(ctx context.Context, tx core.Transact
 }
 
 func (m *MockPeerAPI) EnsureAncestors(ctx context.Context, bc BlockchainInterface, missingHashHex string) error {
+	// Mock implementation - no-op
+	return nil
+}
+
+func (m *MockPeerAPI) FetchBlockByHeight(ctx context.Context, peer string, height uint64) (*core.Block, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if failures, ok := m.failures[peer]; ok && failures > 0 {
+		m.failures[peer]--
+		return nil, utils.ErrTimeout
+	}
+
+	return &core.Block{
+		Header: core.BlockHeader{
+			Version:        1,
+			PrevHash:       []byte{1, 2, 3},
+			TimestampUnix:  time.Now().Unix(),
+			DifficultyBits: 0x1d00ffff,
+			Difficulty:     1,
+			Nonce:          0,
+		},
+		Height: height,
+	}, nil
+}
+
+func (m *MockPeerAPI) FetchBlocksByHeightRange(ctx context.Context, peer string, startHeight, count uint64) ([]*core.Block, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if failures, ok := m.failures[peer]; ok && failures > 0 {
+		m.failures[peer]--
+		return nil, utils.ErrTimeout
+	}
+
+	blocks := make([]*core.Block, 0, count)
+	for i := uint64(0); i < count; i++ {
+		blocks = append(blocks, &core.Block{
+			Header: core.BlockHeader{
+				Version:        1,
+				PrevHash:       []byte{1, 2, 3},
+				TimestampUnix:  time.Now().Unix(),
+				DifficultyBits: 0x1d00ffff,
+				Difficulty:     1,
+				Nonce:          0,
+			},
+			Height: startHeight + i,
+		})
+	}
+	return blocks, nil
+}
+
+func (m *MockPeerAPI) BroadcastBlock(ctx context.Context, block *core.Block) {
+	// Mock implementation - no-op
+}
+
+func (m *MockPeerAPI) SendBlock(ctx context.Context, peer string, block *core.Block) error {
+	// Mock implementation - no-op
+	return nil
+}
+
+func (m *MockPeerAPI) SendHeaders(ctx context.Context, peer string, headers []core.BlockHeader) error {
 	// Mock implementation - no-op
 	return nil
 }
@@ -262,6 +323,40 @@ func (m *MockBlockchainInterface) HasTransaction(txHash []byte) bool {
 	return false
 }
 
+func (m *MockBlockchainInterface) RollbackToHeight(height uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if height > m.height {
+		return fmt.Errorf("cannot rollback to future height")
+	}
+
+	m.height = height
+	return nil
+}
+
+func (m *MockBlockchainInterface) GetBlockByHash(hash []byte) (*core.Block, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	block, ok := m.blocks[string(hash)]
+	return block, ok
+}
+
+func (m *MockBlockchainInterface) GetBlockByHashBytes(hash []byte) (*core.Block, bool) {
+	return m.GetBlockByHash(hash)
+}
+
+func (m *MockBlockchainInterface) GetAllBlocks() ([]*core.Block, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	blocks := make([]*core.Block, 0, len(m.blocks))
+	for _, block := range m.blocks {
+		blocks = append(blocks, block)
+	}
+	return blocks, nil
+}
+
 // MockMiner implements Miner interface for testing
 type MockMiner struct{}
 
@@ -272,12 +367,6 @@ func (m *MockMiner) IsVerifying() bool {
 }
 func (m *MockMiner) OnBlockAdded() {}
 
-// createTestValidator creates a validator with default consensus params
-func createTestValidator(metrics *metrics.Metrics) *consensus.BlockValidator {
-	consensusParams := config.GetConsensusParams()
-	return consensus.NewBlockValidator(consensusParams, 1, metrics)
-}
-
 // TestSyncLoopWithPeerScoring tests SyncLoop with peer scoring integration
 func TestSyncLoopWithPeerScoring(t *testing.T) {
 	mockPM := NewMockPeerAPI(100)
@@ -285,7 +374,7 @@ func TestSyncLoopWithPeerScoring(t *testing.T) {
 	mockMiner := &MockMiner{}
 	metrics := &metrics.Metrics{}
 	orphanPool := utils.NewOrphanPool(100, time.Hour)
-	
+
 	validator := createTestValidator(metrics)
 	syncConfig := config.SyncConfig{
 		BatchSize:              100,
@@ -331,7 +420,7 @@ func TestSyncLoopRetryIntegration(t *testing.T) {
 	mockMiner := &MockMiner{}
 	metrics := &metrics.Metrics{}
 	orphanPool := utils.NewOrphanPool(100, time.Hour)
-	
+
 	validator := createTestValidator(metrics)
 	syncConfig := config.SyncConfig{
 		BatchSize:              100,
@@ -373,10 +462,15 @@ func TestSyncLoopPeerSwitching(t *testing.T) {
 	mockMiner := &MockMiner{}
 	metrics := &metrics.Metrics{}
 	orphanPool := utils.NewOrphanPool(100, time.Hour)
-	
-	validator := createTestValidator(metrics)
 
-	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator)
+	validator := createTestValidator(metrics)
+	syncConfig := config.SyncConfig{
+		BatchSize:              100,
+		MaxConcurrentDownloads: 8,
+		MemoryThresholdMB:      1500,
+	}
+
+	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator, syncConfig)
 
 	// Add multiple peers with different scores
 	peer1 := "192.168.1.1:9090"
@@ -440,10 +534,15 @@ func TestSyncLoopBlacklistIntegration(t *testing.T) {
 	mockMiner := &MockMiner{}
 	metrics := &metrics.Metrics{}
 	orphanPool := utils.NewOrphanPool(100, time.Hour)
-	
-	validator := createTestValidator(metrics)
 
-	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator)
+	validator := createTestValidator(metrics)
+	syncConfig := config.SyncConfig{
+		BatchSize:              100,
+		MaxConcurrentDownloads: 8,
+		MemoryThresholdMB:      1500,
+	}
+
+	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator, syncConfig)
 
 	peer := "192.168.1.200:9090"
 	mockPM.AddPeer(peer)
@@ -483,10 +582,15 @@ func TestSyncLoopMetricsCollection(t *testing.T) {
 	mockMiner := &MockMiner{}
 	metrics := &metrics.Metrics{}
 	orphanPool := utils.NewOrphanPool(100, time.Hour)
-	
-	validator := createTestValidator(metrics)
 
-	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator)
+	validator := createTestValidator(metrics)
+	syncConfig := config.SyncConfig{
+		BatchSize:              100,
+		MaxConcurrentDownloads: 8,
+		MemoryThresholdMB:      1500,
+	}
+
+	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator, syncConfig)
 
 	// Simulate some peer interactions
 	peers := []string{
@@ -549,10 +653,15 @@ func TestSyncLoopWithFailures(t *testing.T) {
 	mockMiner := &MockMiner{}
 	metrics := &metrics.Metrics{}
 	orphanPool := utils.NewOrphanPool(100, time.Hour)
-	
-	validator := createTestValidator(metrics)
 
-	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator)
+	validator := createTestValidator(metrics)
+	syncConfig := config.SyncConfig{
+		BatchSize:              100,
+		MaxConcurrentDownloads: 8,
+		MemoryThresholdMB:      1500,
+	}
+
+	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator, syncConfig)
 
 	peer := "192.168.1.50:9090"
 	mockPM.AddPeer(peer)
@@ -561,7 +670,7 @@ func TestSyncLoopWithFailures(t *testing.T) {
 	mockPM.failures[peer] = 2
 
 	ctx := context.Background()
-	
+
 	// This should succeed after retries
 	headers, err := syncLoop.fetchHeadersWithRetry(ctx, peer, 1, 5)
 	if err != nil {
@@ -594,10 +703,15 @@ func TestSyncLoopConcurrentAccess(t *testing.T) {
 	mockMiner := &MockMiner{}
 	metrics := &metrics.Metrics{}
 	orphanPool := utils.NewOrphanPool(100, time.Hour)
-	
-	validator := createTestValidator(metrics)
 
-	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator)
+	validator := createTestValidator(metrics)
+	syncConfig := config.SyncConfig{
+		BatchSize:              100,
+		MaxConcurrentDownloads: 8,
+		MemoryThresholdMB:      1500,
+	}
+
+	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator, syncConfig)
 
 	peer := "192.168.1.60:9090"
 	mockPM.AddPeer(peer)
@@ -608,13 +722,13 @@ func TestSyncLoopConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(iteration int) {
 			defer wg.Done()
-			
+
 			if iteration%2 == 0 {
 				syncLoop.scorer.RecordSuccess(peer, 100)
 			} else {
 				syncLoop.scorer.RecordFailure(peer)
 			}
-			
+
 			_ = syncLoop.GetPeerPerformance(peer)
 			_ = syncLoop.GetSyncMetrics()
 			_ = syncLoop.GetBestPeerByScore()
@@ -639,7 +753,7 @@ func TestRetryExecutorContextCancellation(t *testing.T) {
 	defer cancel()
 
 	startTime := time.Now()
-	
+
 	result := executor.ExecuteWithRetry(ctx, func(ctx context.Context, peer string) error {
 		time.Sleep(100 * time.Millisecond) // Longer than context timeout
 		return nil
@@ -663,16 +777,21 @@ func BenchmarkSyncLoopPeerScoring(b *testing.B) {
 	mockMiner := &MockMiner{}
 	metrics := &metrics.Metrics{}
 	orphanPool := utils.NewOrphanPool(100, time.Hour)
-	
-	validator := createTestValidator(metrics)
 
-	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator)
+	validator := createTestValidator(metrics)
+	syncConfig := config.SyncConfig{
+		BatchSize:              100,
+		MaxConcurrentDownloads: 8,
+		MemoryThresholdMB:      1500,
+	}
+
+	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator, syncConfig)
 
 	// Add many peers
 	for i := 0; i < 100; i++ {
 		peer := fmt.Sprintf("192.168.1.%d:9090", i)
 		mockPM.AddPeer(peer)
-		
+
 		for j := 0; j < 10; j++ {
 			syncLoop.scorer.RecordSuccess(peer, 100)
 		}
@@ -691,10 +810,15 @@ func BenchmarkSyncLoopBlacklist(b *testing.B) {
 	mockMiner := &MockMiner{}
 	metrics := &metrics.Metrics{}
 	orphanPool := utils.NewOrphanPool(100, time.Hour)
-	
-	validator := createTestValidator(metrics)
 
-	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator)
+	validator := createTestValidator(metrics)
+	syncConfig := config.SyncConfig{
+		BatchSize:              100,
+		MaxConcurrentDownloads: 8,
+		MemoryThresholdMB:      1500,
+	}
+
+	syncLoop := NewSyncLoop(mockPM, mockBC, mockMiner, metrics, orphanPool, validator, syncConfig)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

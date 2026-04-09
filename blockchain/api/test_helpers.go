@@ -124,6 +124,14 @@ func (m *mockBlockchain) AddBlock(block *core.Block) (bool, error) {
 	return true, nil
 }
 
+func (m *mockBlockchain) RollbackToHeight(height uint64) error {
+	if height >= uint64(len(m.blocks)) {
+		return nil
+	}
+	m.blocks = m.blocks[:height+1]
+	return nil
+}
+
 func (m *mockBlockchain) SelectMempoolTxs(mp network.Mempool, maxTxPerBlock int) ([]core.Transaction, []string, error) {
 	return nil, nil, nil
 }
