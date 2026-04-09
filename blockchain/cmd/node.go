@@ -402,26 +402,36 @@ func (n *Node) printStartupInfo() {
 
 	log.PrintHeader("                    NOGOCHAIN NODE STARTING UP                    ")
 
+	// Version Information
+	log.PrintSubHeader("VERSION INFORMATION")
+	log.Info("Node Version:    %s", config.NodeVersion)
+	log.Info("Protocol:        %d", config.ProtocolVersionNumber)
+	log.Info("Git Commit:      %s", config.GitCommit)
+
+	// Network Configuration
 	log.PrintSubHeader("NETWORK CONFIGURATION")
-	log.Network("Network:        %s", n.networkName)
-	log.Network("Chain ID:       %d", n.config.ChainID)
-	log.Network("Miner Address:  %s", n.minerAddr)
-	log.Network("Admin Token:    %s", maskString(n.adminToken))
-	log.Network("Auto Mining:    %v", n.autoMine)
-	log.Network("Data Directory: %s", n.config.DataDir)
+	log.Network("Network:         %s", n.networkName)
+	log.Network("Chain ID:        %d", n.config.ChainID)
+	log.Network("Miner Address:   %s", n.minerAddr)
+	log.Network("Admin Token:     %s", maskString(n.adminToken))
+	log.Network("Auto Mining:     %v", n.autoMine)
+	log.Network("Data Directory:  %s", n.config.DataDir)
 
+	// Blockchain Status
 	log.PrintSubHeader("BLOCKCHAIN STATUS")
-	log.Info("Current Height: %d", n.chain.GetHeight())
-	log.Info("Current Hash:   %x", n.chain.GetTipHash())
+	log.Info("Current Height:  %d", n.chain.GetHeight())
+	log.Info("Current Hash:    %x", n.chain.GetTipHash())
 
+	// Consensus & Mining
 	log.PrintSubHeader("CONSENSUS & MINING")
-	log.Consensus("Algorithm:      NogoPow (AI-based PoW)")
-	log.Consensus("Difficulty:     Dynamic (Smooth Adjustment)")
-	log.Consensus("Target Time:    17")
-	log.Consensus("Auto Mining:    %v", n.autoMine)
-	log.Consensus("Empty Blocks:   %v", n.config.MineForceEmptyBlocks)
-	log.Consensus("Max Tx/Block:   %d", n.config.MaxTxPerBlock)
+	log.Consensus("Algorithm:       NogoPow (AI-Enhanced Proof-of-Work)")
+	log.Consensus("Difficulty:      Dynamic Smooth Adjustment")
+	log.Consensus("Target Time:     %d seconds", config.DefaultTargetBlockTime)
+	log.Consensus("Auto Mining:     %v", n.autoMine)
+	log.Consensus("Empty Blocks:    %v", n.config.MineForceEmptyBlocks)
+	log.Consensus("Max Tx/Block:    %d", n.config.MaxTxPerBlock)
 
+	// P2P Network
 	log.PrintSubHeader("P2P NETWORK")
 	log.P2P("Listen Address:  %s", n.config.P2PListenAddr)
 	log.P2P("Max Peers:       %d", n.config.P2PMaxPeers)
@@ -429,10 +439,11 @@ func (n *Node) printStartupInfo() {
 	if n.config.P2PPeers != "" {
 		log.P2P("Bootstrap Peers: %s", n.config.P2PPeers)
 	} else {
-		log.P2P("Bootstrap Peers: %s", "(none - genesis/standalone mode)")
+		log.P2P("Bootstrap Peers: (none - genesis/standalone mode)")
 	}
 	log.P2P("Advertise Self:  %v", n.config.P2PAdvertiseSelf)
 
+	// HTTP API
 	log.PrintSubHeader("HTTP API")
 	log.HTTP("Listen Address:  %s", n.config.HTTPAddr)
 	log.HTTP("WebSocket:       %v", true)
@@ -440,6 +451,7 @@ func (n *Node) printStartupInfo() {
 	log.HTTP("Admin Token:     %s", maskString(n.adminToken))
 	log.HTTP("Trust Proxy:     %v", false)
 
+	// Monitoring
 	if n.config.MetricsEnabled {
 		log.PrintSubHeader("MONITORING")
 		log.Metrics("Metrics Enabled: %v", n.config.MetricsEnabled)
@@ -454,12 +466,12 @@ func (n *Node) printReadyInfo() {
 	log := GetGlobalFormatter()
 
 	log.PrintSubHeader("NODE READY")
-	log.Success("HTTP API:      http://%s", n.config.HTTPAddr)
-	log.Success("Miner:         %s", n.minerAddr)
+	log.Success("HTTP API:       http://%s", n.config.HTTPAddr)
+	log.Success("Miner:          %s", n.minerAddr)
 	if n.config.MetricsEnabled {
-		log.Success("Metrics:       http://%s", n.config.MetricsAddr)
+		log.Success("Metrics:        http://%s", n.config.MetricsAddr)
 	}
-	log.Success("Status:        ✅ Node is running and ready")
+	log.Success("Status:         Node is running and ready")
 
 	log.PrintHeader("                      NODE STARTED SUCCESSFULLY                      ")
 }

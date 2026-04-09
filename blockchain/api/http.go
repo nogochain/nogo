@@ -846,6 +846,24 @@ func (s *Server) handleBlockByHeight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enrich transactions with their hashes
+	enrichedTxs := make([]map[string]any, len(b.Transactions))
+	for i, tx := range b.Transactions {
+		txHash, _ := core.TxIDHex(tx)
+		enrichedTxs[i] = map[string]any{
+			"type":        tx.Type,
+			"chainId":     tx.ChainID,
+			"fromPubKey":  tx.FromPubKey,
+			"toAddress":   tx.ToAddress,
+			"amount":      tx.Amount,
+			"fee":         tx.Fee,
+			"nonce":       tx.Nonce,
+			"data":        tx.Data,
+			"signature":   tx.Signature,
+			"hash":        txHash,
+		}
+	}
+
 	// Enrich block with reward distribution details
 	blockData := map[string]any{
 		"height":         b.Height,
@@ -855,7 +873,7 @@ func (s *Server) handleBlockByHeight(w http.ResponseWriter, r *http.Request) {
 		"difficultyBits": b.DifficultyBits,
 		"nonce":          b.Nonce,
 		"minerAddress":   b.MinerAddress,
-		"transactions":   b.Transactions,
+		"transactions":   enrichedTxs,
 		"txCount":        len(b.Transactions),
 	}
 
@@ -897,7 +915,38 @@ func (s *Server) handleBlockByHashParam(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	_ = writeJSON(w, http.StatusOK, b)
+
+	// Enrich transactions with their hashes
+	enrichedTxs := make([]map[string]any, len(b.Transactions))
+	for i, tx := range b.Transactions {
+		txHash, _ := core.TxIDHex(tx)
+		enrichedTxs[i] = map[string]any{
+			"type":        tx.Type,
+			"chainId":     tx.ChainID,
+			"fromPubKey":  tx.FromPubKey,
+			"toAddress":   tx.ToAddress,
+			"amount":      tx.Amount,
+			"fee":         tx.Fee,
+			"nonce":       tx.Nonce,
+			"data":        tx.Data,
+			"signature":   tx.Signature,
+			"hash":        txHash,
+		}
+	}
+
+	blockData := map[string]any{
+		"height":         b.Height,
+		"hash":           fmt.Sprintf("%x", b.Hash),
+		"prevHash":       fmt.Sprintf("%x", b.PrevHash),
+		"timestampUnix":  b.TimestampUnix,
+		"difficultyBits": b.DifficultyBits,
+		"nonce":          b.Nonce,
+		"minerAddress":   b.MinerAddress,
+		"transactions":   enrichedTxs,
+		"txCount":        len(b.Transactions),
+	}
+
+	_ = writeJSON(w, http.StatusOK, blockData)
 }
 
 func (s *Server) handleTxByID(w http.ResponseWriter, r *http.Request) {
@@ -1910,7 +1959,8 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 	}
 
 	possiblePaths := []string{
-		"nogo/api/http/public/explorer/favicon.ico",
+		"blockchain/api/http/public/explorer/favicon.ico",
+		"../blockchain/api/http/public/explorer/favicon.ico",
 		"api/http/public/explorer/favicon.ico",
 		"favicon.ico",
 	}
@@ -1941,10 +1991,10 @@ func (s *Server) handleWallet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	walletPaths := []string{
-		"../api/http/public/webwallet/index.html",
-		"../../nogo/api/http/public/webwallet/index.html",
+		"blockchain/api/http/public/webwallet/index.html",
+		"../blockchain/api/http/public/webwallet/index.html",
+		"../../blockchain/api/http/public/webwallet/index.html",
 		"api/http/public/webwallet/index.html",
-		"nogo/api/http/public/webwallet/index.html",
 	}
 
 	var data []byte
@@ -1995,11 +2045,11 @@ func (s *Server) handleWalletBIP39(w http.ResponseWriter, r *http.Request) {
 	}
 
 	walletPaths := []string{
-		"../api/http/public/webwallet/index.html",
-		"../../api/http/public/webwallet/index.html",
-		"../../../api/http/public/webwallet/index.html",
+		"blockchain/api/http/public/webwallet/index.html",
+		"../blockchain/api/http/public/webwallet/index.html",
+		"../../blockchain/api/http/public/webwallet/index.html",
+		"../../../blockchain/api/http/public/webwallet/index.html",
 		"api/http/public/webwallet/index.html",
-		"nogo/api/http/public/webwallet/index.html",
 	}
 
 	var data []byte

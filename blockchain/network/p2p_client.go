@@ -14,6 +14,27 @@ import (
 	"github.com/nogochain/nogo/blockchain/core"
 )
 
+// Rate limiter for log messages to reduce noise
+var (
+	logRateLimitMu     sync.Mutex
+	logRateLimitLast   = make(map[string]time.Time)
+	logRateLimitWindow = 30 * time.Second
+)
+
+// rateLimitedLog logs a message only once per rate limit window per key
+func rateLimitedLog(key, format string, args ...interface{}) {
+	logRateLimitMu.Lock()
+	last, exists := logRateLimitLast[key]
+	now := time.Now()
+	if !exists || now.Sub(last) >= logRateLimitWindow {
+		logRateLimitLast[key] = now
+		logRateLimitMu.Unlock()
+		log.Printf(format, args...)
+	} else {
+		logRateLimitMu.Unlock()
+	}
+}
+
 // p2pConnection represents a persistent P2P connection with metadata
 type p2pConnection struct {
 	conn        net.Conn
@@ -101,11 +122,10 @@ func (c *P2PClient) getConnection(ctx context.Context, peer string) (*p2pConnect
 	c.connMutex.RUnlock()
 
 	// Connection doesn't exist or is stale, create new one
-	log.Printf("P2P client: establishing persistent connection to %s", peer)
 	d := net.Dialer{Timeout: c.dialTimeout}
 	netConn, err := d.DialContext(ctx, "tcp", peer)
 	if err != nil {
-		log.Printf("P2P client: failed to dial %s: %v", peer, err)
+		rateLimitedLog("dial_"+peer, "P2P client: failed to dial %s: %v", peer, err)
 		return nil, err
 	}
 
@@ -221,7 +241,6 @@ func (c *P2PClient) do(ctx context.Context, peer string, reqType string, reqPayl
 	// Get or create persistent connection
 	conn, err := c.getConnection(ctx, peer)
 	if err != nil {
-		log.Printf("[P2PClient.do] Failed to get connection to %s: %v", peer, err)
 		return err
 	}
 

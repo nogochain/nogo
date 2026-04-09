@@ -378,26 +378,13 @@ func (v *BlockValidator) ValidateBlockFast(block *Block) error {
 		return ErrEmptyBlockHash
 	}
 
-	// Handle difficulty field mapping from different JSON formats
-	// Remote nodes may return difficulty in "difficultyBits", "difficulty", or nested in "header"
-	difficulty := block.DifficultyBits
-	if difficulty == 0 {
-		// Try Block.Difficulty field (some nodes use this)
-		if block.Difficulty > 0 {
-			difficulty = block.Difficulty
-			block.DifficultyBits = difficulty
-		} else if block.Header.DifficultyBits > 0 {
-			// Try Header.DifficultyBits
-			difficulty = block.Header.DifficultyBits
-			block.DifficultyBits = difficulty
-		} else if block.Header.Difficulty > 0 {
-			// Try Header.Difficulty
-			difficulty = block.Header.Difficulty
-			block.DifficultyBits = difficulty
-		}
-	}
-	
-	if difficulty == 0 {
+	// Normalize block fields from alternative JSON formats
+	// Remote nodes may return fields at top level or nested in "header"
+	// This ensures consistent field access regardless of serialization source
+	v.normalizeBlockFields(block)
+
+	// After normalization, check for zero difficulty
+	if block.DifficultyBits == 0 {
 		return ErrZeroDifficultyBits
 	}
 
@@ -406,6 +393,42 @@ func (v *BlockValidator) ValidateBlockFast(block *Block) error {
 	}
 
 	return nil
+}
+
+// normalizeBlockFields maps fields from Header to top-level if top-level is empty
+// This handles JSON deserialization where fields may be in either location
+func (v *BlockValidator) normalizeBlockFields(block *Block) {
+	// Normalize DifficultyBits
+	if block.DifficultyBits == 0 {
+		if block.Difficulty > 0 {
+			block.DifficultyBits = block.Difficulty
+		} else if block.Header.DifficultyBits > 0 {
+			block.DifficultyBits = block.Header.DifficultyBits
+		} else if block.Header.Difficulty > 0 {
+			block.DifficultyBits = block.Header.Difficulty
+		}
+	}
+
+	// Normalize PrevHash (critical for chain continuity validation)
+	if len(block.PrevHash) == 0 && len(block.Header.PrevHash) > 0 {
+		block.PrevHash = make([]byte, len(block.Header.PrevHash))
+		copy(block.PrevHash, block.Header.PrevHash)
+	}
+
+	// Normalize TimestampUnix (critical for timestamp validation)
+	if block.TimestampUnix == 0 && block.Header.TimestampUnix > 0 {
+		block.TimestampUnix = block.Header.TimestampUnix
+	}
+
+	// Normalize Nonce
+	if block.Nonce == 0 && block.Header.Nonce > 0 {
+		block.Nonce = block.Header.Nonce
+	}
+
+	// Normalize Version
+	if block.Version == 0 && block.Header.Version > 0 {
+		block.Version = block.Header.Version
+	}
 }
 
 func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Block) error {

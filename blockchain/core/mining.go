@@ -205,30 +205,24 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	copy(parentHash[:], newBlock.PrevHash)
 
 	// Compute merkle root from transactions
-	fmt.Printf("[DEBUG] Computing merkle root for %d transactions\n", len(newBlock.Transactions))
 	leaves := make([][]byte, 0, len(newBlock.Transactions))
-	for i, tx := range newBlock.Transactions {
+	for _, tx := range newBlock.Transactions {
 		th, err := txSigningHashForConsensus(tx, c.consensus, height)
 		if err != nil {
-			fmt.Printf("[ERROR] Failed to compute tx hash for tx %d: %v\n", i, err)
 			c.mu.RUnlock()
 			return nil, fmt.Errorf("compute tx hash: %w", err)
 		}
 		leaves = append(leaves, th)
-		fmt.Printf("[DEBUG] Tx %d hash: %x\n", i, th)
 	}
 
 	merkleRoot, err := MerkleRoot(leaves)
 	if err != nil {
-		fmt.Printf("[ERROR] Failed to compute merkle root: %v\n", err)
 		c.mu.RUnlock()
 		return nil, fmt.Errorf("compute merkle root: %w", err)
 	}
-	fmt.Printf("[DEBUG] Computed merkle root: %x\n", merkleRoot)
 
 	// Set merkle root in block header
 	newBlock.Header.MerkleRoot = merkleRoot
-	fmt.Printf("[DEBUG] Set block merkle root: %x\n", newBlock.Header.MerkleRoot)
 
 	// Prepare coinbase address for POW header using reusable function
 	// This ensures consistent address conversion with validation
@@ -267,11 +261,8 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	}()
 
 	// Wait for result (no timeout for production-grade implementation)
-	fmt.Printf("[DEBUG] Waiting for Seal result...\n")
 	result, ok := <-resultCh
-	fmt.Printf("[DEBUG] Seal result received: ok=%v, result=%v\n", ok, result != nil)
 	if !ok {
-		fmt.Printf("[ERROR] Mining result channel closed\n")
 		close(stop)
 		c.mu.RUnlock()
 		return nil, fmt.Errorf("mining failed: channel closed")
@@ -279,51 +270,36 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 
 	// Extract nonce and hash from sealed header
 	sealedHeader := result.Header()
-	fmt.Printf("[DEBUG] Extracting nonce and hash from sealed header\n")
 	newBlock.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
 	newBlock.Header.Nonce = newBlock.Nonce
 	newBlock.Hash = sealedHeader.Hash().Bytes()
-	fmt.Printf("[DEBUG] Sealed block: height=%d, hash=%x, nonce=%d\n", newBlock.Height, newBlock.Hash, newBlock.Nonce)
 
 	// Release read lock and acquire write lock for state modification
-	fmt.Printf("[DEBUG] Releasing read lock and acquiring write lock\n")
 	c.mu.RUnlock()
 	c.mu.Lock()
-	fmt.Printf("[DEBUG] Write lock acquired, starting validation\n")
-	// Note: No defer here, we manually manage lock for AddBlock call
 
-	// Get parent block for validation (validateBlockLocked requires parent in blocksByHash)
-	// Note: We already hold the lock, so access c.blocks directly instead of calling GetTip()
-	fmt.Printf("[DEBUG] Getting parent block from c.blocks (len=%d)\n", len(c.blocks))
-	var parent *Block
+	// Verify parent block exists in blocks slice
+	// Note: We already hold the lock, so access c.blocks directly
 	if len(c.blocks) == 0 {
-		fmt.Printf("[ERROR] No parent block in c.blocks\n")
 		c.mu.Unlock()
 		return nil, errors.New("no parent block")
 	}
-	parent = c.blocks[len(c.blocks)-1]
-	fmt.Printf("[DEBUG] Parent block for validation: height=%d, hash=%x\n", parent.Height, parent.Hash)
 
 	// CRITICAL: Release lock before calling AddBlock to avoid deadlock
 	// AddBlock will acquire its own lock
-	fmt.Printf("[DEBUG] Releasing lock before AddBlock to prevent deadlock\n")
 	c.mu.Unlock()
 
 	// AddBlock will handle fork detection and reorganization
-	fmt.Printf("[DEBUG] Adding mined block via AddBlock for fork handling\n")
 	accepted, err := c.AddBlock(newBlock)
 	if err != nil {
-		fmt.Printf("[ERROR] AddBlock failed for mined block %d: %v\n", newBlock.Height, err)
 		return nil, fmt.Errorf("add mined block: %w", err)
 	}
 
 	if !accepted {
 		// Block was stored as fork but not added to canonical chain
 		// This means a heavier chain exists, we should mine on that chain instead
-		fmt.Printf("[INFO] Mined block not accepted to canonical chain (stored as fork)\n")
 		return nil, fmt.Errorf("mined block on fork chain, reorg needed")
 	}
-	fmt.Printf("[DEBUG] Block %d added to canonical chain successfully\n", newBlock.Height)
 
 	// Re-acquire lock for subsequent operations
 	c.mu.Lock()

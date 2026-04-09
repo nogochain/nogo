@@ -12,7 +12,7 @@
 // GNU Lesser General Public License for more details.
 //
 // You should have received a copy of the GNU Lesser General Public License
-// along with the NogoChain library. If not, see <http://www.org/licenses/>.
+// along with the NogoChain library. If not, see <http://www.gnu.org/licenses/>.
 
 package config
 
@@ -21,6 +21,28 @@ import (
 	"fmt"
 	"strings"
 )
+
+// =============================================================================
+// NODE VERSION CONSTANTS
+// =============================================================================
+
+const (
+	// NodeVersion is the current node software version
+	NodeVersion = "1.0.0"
+
+	// ProtocolVersionNumber is the P2P protocol version
+	ProtocolVersionNumber uint32 = 1
+
+	// NodeName is the human-readable node name
+	NodeName = "NogoChain"
+
+	// GitCommit will be set at build time via -ldflags
+	GitCommit = "unknown"
+)
+
+// =============================================================================
+// VERSION TYPE DEFINITIONS
+// =============================================================================
 
 // Version represents a semantic version
 type Version struct {

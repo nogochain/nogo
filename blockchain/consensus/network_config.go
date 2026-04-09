@@ -34,7 +34,7 @@ func MainnetConfig() *NetworkConfig {
 		ChainID:              1,
 		HTTPAddr:             "0.0.0.0:8080",
 		P2PListenAddr:        "0.0.0.0:9090",
-		P2PPeers:             "main.nogochain.org:9090",
+		P2PPeers:             "main.nogochain.org:9090,wallet.nogochain.org:9090,node.nogochain.org:9090",
 		P2PMaxPeers:          1000,
 		P2PMaxConnections:    50,
 		SyncEnable:           true,

@@ -327,39 +327,21 @@ func (t *NogopowEngine) verifySeal(chain ChainHeaderReader, header *Header) erro
 	// Calculate seed from parent block
 	seed := t.calcSeed(chain, header)
 
-	t.config.Log.Info("NogoPow verifySeal",
-		"number", header.Number.Uint64(),
-		"nonce", binary.LittleEndian.Uint64(header.Nonce[:8]),
-		"seed", seed.Hex(),
-		"difficulty", header.Difficulty,
-	)
-
 	// Calculate block hash with nonce
 	blockHash := t.SealHash(header)
-
-	t.config.Log.Info("NogoPow block hash",
-		"blockHash", blockHash.Hex(),
-	)
 
 	// Apply NogoPow PoW algorithm: H(blockHash, seed)
 	powHash := t.computePoW(blockHash, seed)
 
-	t.config.Log.Info("NogoPow pow hash",
-		"powHash", powHash.Hex(),
-	)
-
 	// Check if hash meets difficulty target
 	if !t.checkPow(powHash, header.Difficulty) {
 		t.config.Log.Info("NogoPow checkPow failed",
+			"number", header.Number.Uint64(),
 			"powHash", powHash.Hex(),
 			"difficulty", header.Difficulty,
 		)
 		return ErrInvalidSeal
 	}
-
-	t.config.Log.Info("NogoPow checkPow passed",
-		"powHash", powHash.Hex(),
-	)
 
 	return nil
 }
@@ -392,13 +374,6 @@ func (t *NogopowEngine) calcSeed(chain ChainHeaderReader, header *Header) Hash {
 func (t *NogopowEngine) computePoW(blockHash, seed Hash) Hash {
 	cacheData := t.cache.GetData(seed.Bytes())
 
-	t.config.Log.Info("NogoPow computePoW",
-		"seed", seed.Hex(),
-		"blockHash", blockHash.Hex(),
-		"cacheDataLen", len(cacheData),
-		"cacheDataFirst", cacheData[0],
-	)
-
 	if t.config.ReuseObjects && t.matA != nil {
 		result := mulMatrixWithPool(blockHash.Bytes(), cacheData, t.matA, t.matB, t.matRes)
 		return hashMatrix(result)
@@ -417,13 +392,6 @@ func (t *NogopowEngine) ComputePoW(blockHash, seed Hash) Hash {
 // ComputePoWWithCache computes the proof-of-work hash using provided cache data
 // Exported version for external validation with custom cache
 func (t *NogopowEngine) ComputePoWWithCache(blockHash, seed Hash, cacheData []uint32) Hash {
-	t.config.Log.Info("NogoPow computePoWWithCache",
-		"seed", seed.Hex(),
-		"blockHash", blockHash.Hex(),
-		"cacheDataLen", len(cacheData),
-		"cacheDataFirst", cacheData[0],
-	)
-
 	if t.config.ReuseObjects && t.matA != nil {
 		result := mulMatrixWithPool(blockHash.Bytes(), cacheData, t.matA, t.matB, t.matRes)
 		return hashMatrix(result)
@@ -502,15 +470,6 @@ func (t *NogopowEngine) checkPow(hash Hash, difficulty *big.Int) bool {
 	target := difficultyToTarget(difficulty)
 	hashInt := new(big.Int).SetBytes(hash.Bytes())
 	result := hashInt.Cmp(target) <= 0
-
-	t.config.Log.Info("NogoPow checkPow",
-		"hash", hash.Hex(),
-		"hashInt", hashInt.String(),
-		"target", target.String(),
-		"difficulty", difficulty.String(),
-		"result", result,
-	)
-
 	return result
 }
 

@@ -295,19 +295,16 @@ func (s *SyncLoop) performSyncStep() {
 
 	// Get current chain state
 	currentHeight := s.bc.LatestBlock().GetHeight()
-	log.Printf("[Sync] Current chain height: %d", currentHeight)
 
 	// Check peer heights
 	var maxPeerHeight uint64
 	var bestPeer string
 	for _, peer := range peers {
-		log.Printf("[Sync] Fetching chain info from peer: %s", peer)
 		info, err := s.pm.FetchChainInfo(s.ctx, peer)
 		if err != nil {
-			log.Printf("[Sync] Failed to get chain info from %s: %v", peer, err)
+			rateLimitedLog("sync_info_"+peer, "[Sync] Failed to get chain info from %s: %v", peer, err)
 			continue
 		}
-		log.Printf("[Sync] Peer %s reports height: %d", peer, info.Height)
 		if info.Height > maxPeerHeight {
 			maxPeerHeight = info.Height
 			bestPeer = peer
@@ -315,7 +312,7 @@ func (s *SyncLoop) performSyncStep() {
 	}
 
 	if maxPeerHeight == 0 {
-		log.Printf("[Sync] No peer reported valid height, cannot determine sync status")
+		rateLimitedLog("sync_no_peer", "[Sync] No peer reported valid height, cannot determine sync status")
 		return
 	}
 
@@ -1040,35 +1037,53 @@ func (s *SyncLoop) GetBlacklistInfo(peer string) map[string]interface{} {
 
 // isCorruptedBlock detects if a block has corrupted or invalid data
 // This handles cases where remote nodes return malformed block data
+// Checks both top-level fields and Header fields for data integrity
 func (s *SyncLoop) isCorruptedBlock(block *core.Block) bool {
 	if block == nil {
 		return true
 	}
-	
+
 	// Block height 0 (genesis) can have empty prevHash
 	if block.Height > 0 {
 		// Non-genesis blocks must have non-empty prevHash
-		if len(block.PrevHash) == 0 {
+		// Check both top-level and Header fields
+		hasPrevHash := len(block.PrevHash) > 0 || len(block.Header.PrevHash) > 0
+		if !hasPrevHash {
 			return true
 		}
 	}
-	
+
 	// All blocks must have valid timestamp (after genesis)
 	// Genesis timestamp is around 1775044800 (April 2026)
-	if block.TimestampUnix < 1775044800 && block.Height > 0 {
+	// Check both top-level and Header fields
+	timestamp := block.TimestampUnix
+	if timestamp == 0 {
+		timestamp = block.Header.TimestampUnix
+	}
+	if timestamp < 1775044800 && block.Height > 0 {
 		return true
 	}
-	
-	// All blocks must have non-zero difficulty (except for special test cases)
-	// A zero difficulty indicates corrupted or malformed data
-	if block.DifficultyBits == 0 {
+
+	// All blocks must have non-zero difficulty
+	// Check both top-level and Header fields, including Difficulty variant
+	difficulty := block.DifficultyBits
+	if difficulty == 0 {
+		if block.Difficulty > 0 {
+			difficulty = block.Difficulty
+		} else if block.Header.DifficultyBits > 0 {
+			difficulty = block.Header.DifficultyBits
+		} else if block.Header.Difficulty > 0 {
+			difficulty = block.Header.Difficulty
+		}
+	}
+	if difficulty == 0 {
 		return true
 	}
-	
+
 	// All blocks must have valid hash
 	if len(block.Hash) == 0 {
 		return true
 	}
-	
+
 	return false
 }

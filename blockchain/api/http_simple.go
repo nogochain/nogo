@@ -249,10 +249,10 @@ func (s *SimpleServer) handleExplorer(w http.ResponseWriter, r *http.Request) {
 	// Serve the explorer HTML file
 	// Try multiple possible paths to support different working directories
 	explorerPaths := []string{
-		"../api/http/public/explorer/index.html",
-		"../../nogo/api/http/public/explorer/index.html",
+		"blockchain/api/http/public/explorer/index.html",
+		"../blockchain/api/http/public/explorer/index.html",
+		"../../blockchain/api/http/public/explorer/index.html",
 		"api/http/public/explorer/index.html",
-		"nogo/api/http/public/explorer/index.html",
 	}
 
 	var data []byte
@@ -284,10 +284,9 @@ func (s *SimpleServer) handleFavicon(w http.ResponseWriter, r *http.Request) {
 
 	// Try multiple possible paths for favicon.ico
 	possiblePaths := []string{
-		"../api/http/public/explorer/favicon.ico",
-		"../../nogo/api/http/public/explorer/favicon.ico",
+		"blockchain/api/http/public/explorer/favicon.ico",
+		"../blockchain/api/http/public/explorer/favicon.ico",
 		"api/http/public/explorer/favicon.ico",
-		"nogo/api/http/public/explorer/favicon.ico",
 		"favicon.ico",
 	}
 

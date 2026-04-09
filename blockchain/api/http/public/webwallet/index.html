@@ -8,7 +8,7 @@
         <meta http-equiv="Pragma" content="no-cache">
         <meta http-equiv="Expires" content="0">
         <title>NogoChain Web Wallet (BIP39) v2026-04-06-FEE-FIX</title>
-        <link rel="icon" type="image/x-icon" href="../explorer/favicon.ico">
+        <link rel="icon" type="image/x-icon" href="/explorer/favicon.ico">
     <!-- BIP39 Implementation (inline for browser compatibility) -->
     <script>
         // BIP39 Wordlist (English - first 2048 words)
@@ -518,10 +518,13 @@ body {
   border-radius: 8px;
   border: 1px solid var(--border-color);
   box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-  z-index: 1000;
+  z-index: 10000;
   opacity: 0;
   transition: all 0.3s;
   font-weight: 500;
+  max-width: 500px;
+  width: auto;
+  text-align: center;
 }
 .toast.show {
   transform: translateX(-50%) translateY(0);
@@ -557,17 +560,279 @@ body {
   }
 }
     </style>
+    
+    <!-- Proposals Styles -->
+    <style>
+        .proposals-wrapper {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 30px;
+        }
+        .page-header h1 {
+            font-size: 32px;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 10px;
+        }
+        .page-header p {
+            color: var(--text-secondary);
+            font-size: 16px;
+            margin-bottom: 30px;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        .stat-card {
+            background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 25px;
+            transition: all 0.3s;
+        }
+        .stat-card:hover {
+            transform: translateY(-2px);
+            border-color: var(--accent-blue);
+            box-shadow: 0 8px 24px rgba(88, 166, 255, 0.2);
+        }
+        .stat-label {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+            font-weight: 500;
+        }
+        .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            color: var(--accent-blue);
+        }
+        .filter-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+        .filter-tab {
+            padding: 10px 20px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            transition: all 0.2s;
+        }
+        .filter-tab:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border-color: var(--accent-blue);
+        }
+        .filter-tab.active {
+            background: var(--accent-blue);
+            color: white;
+            border-color: var(--accent-blue);
+        }
+        .filter-tab.create-btn {
+            margin-left: auto;
+            background: var(--accent-blue);
+            color: white;
+            border-color: var(--accent-blue);
+        }
+        .proposals-container {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        .proposal-card {
+            padding: 25px;
+            border-bottom: 1px solid var(--border-color);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .proposal-card:last-child {
+            border-bottom: none;
+        }
+        .proposal-card:hover {
+            background: var(--bg-tertiary);
+        }
+        .proposal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            gap: 20px;
+        }
+        .proposal-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+            flex: 1;
+        }
+        .proposal-status {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            flex-shrink: 0;
+        }
+        .status-active {
+            background: rgba(63, 185, 80, 0.15);
+            color: var(--accent-green);
+            border: 1px solid rgba(63, 185, 80, 0.3);
+        }
+        .status-passed {
+            background: rgba(88, 166, 255, 0.15);
+            color: var(--accent-blue);
+            border: 1px solid rgba(88, 166, 255, 0.3);
+        }
+        .status-rejected {
+            background: rgba(248, 81, 73, 0.15);
+            color: var(--accent-red);
+            border: 1px solid rgba(248, 81, 73, 0.3);
+        }
+        .status-executed {
+            background: rgba(188, 140, 255, 0.15);
+            color: var(--accent-purple);
+            border: 1px solid rgba(188, 140, 255, 0.3);
+        }
+        .proposal-meta {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        .meta-item {
+            font-size: 13px;
+        }
+        .meta-label {
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+            font-size: 12px;
+        }
+        .meta-value {
+            color: var(--text-primary);
+        }
+        .proposal-description {
+            color: var(--text-secondary);
+            line-height: 1.6;
+            margin-bottom: 20px;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        .voting-section {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid var(--border-color);
+        }
+        .voting-stats {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 10px;
+            font-size: 13px;
+        }
+        .vote-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .vote-icon {
+            font-size: 16px;
+        }
+        .vote-number {
+            font-weight: 600;
+            color: var(--accent-blue);
+        }
+        .progress-bar {
+            height: 6px;
+            background: var(--bg-tertiary);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+            transition: width 0.3s;
+            border-radius: 3px;
+        }
+        .proposal-detail {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 30px;
+        }
+        .detail-section {
+            margin-bottom: 25px;
+        }
+        .detail-label {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .detail-value {
+            font-size: 15px;
+            color: var(--text-primary);
+            line-height: 1.6;
+            word-break: break-all;
+        }
+        .loading, .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+        .empty-state h3 {
+            font-size: 20px;
+            color: var(--text-primary);
+            margin-bottom: 10px;
+        }
+        .empty-state p {
+            font-size: 14px;
+        }
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-content {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 30px;
+            max-width: 600px;
+            width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+    </style>
 </head>
 <body>
     <!-- Header -->
-    <header class="header" style="display: block !important; visibility: visible !important;">
+    <header class="header">
         <div class="container">
             <div class="logo">NogoChain Wallet</div>
             <nav class="nav">
-                <a href="#wallet" onclick="showWalletSection(); return false;">Wallet</a>
-                <a href="#proposals" onclick="showProposalsSection(); return false;">Proposals</a>
-                <a href="../explorer/" target="_blank">Explorer</a>
-                <a href="../" target="_blank">API</a>
+                <a href="/webwallet/" onclick="sessionStorage.removeItem('activeTab');">Wallet</a>
+                <a href="javascript:void(0)" onclick="showProposalsSection(); return false;">Proposals</a>
+                <a href="/explorer/" target="_blank">Explorer</a>
+                <a href="/" target="_blank">API</a>
             </nav>
         </div>
     </header>
@@ -591,6 +856,52 @@ body {
                     <div class="icon">📥</div>
                     <h3>Import Wallet</h3>
                     <p>Restore existing wallet using mnemonic or private key</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Proposals Section -->
+        <div id="proposalsSection" style="display: none;">
+            <div class="proposals-wrapper">
+                <div class="page-header">
+                    <h1>🗳️ Community Proposals</h1>
+                    <p>Decentralized governance - Vote on community fund allocation proposals</p>
+                </div>
+                
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-label">📊 Total</div>
+                        <div class="stat-value" id="totalProposals">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">✅ Active</div>
+                        <div class="stat-value" id="activeProposals">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">🎉 Passed</div>
+                        <div class="stat-value" id="passedProposals">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">❌ Rejected</div>
+                        <div class="stat-value" id="rejectedProposals">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">✓ Executed</div>
+                        <div class="stat-value" id="executedProposals">0</div>
+                    </div>
+                </div>
+                
+                <div class="filter-tabs">
+                    <button class="filter-tab active" onclick="filterProposals('all')">All</button>
+                    <button class="filter-tab" onclick="filterProposals('active')">Active</button>
+                    <button class="filter-tab" onclick="filterProposals('passed')">Passed</button>
+                    <button class="filter-tab" onclick="filterProposals('rejected')">Rejected</button>
+                    <button class="filter-tab" onclick="filterProposals('executed')">Executed</button>
+                    <button class="filter-tab create-btn" onclick="showCreateModal()">+ Create Proposal</button>
+                </div>
+                
+                <div class="proposals-container" id="proposalsList">
+                    <div class="loading">Loading proposals...</div>
                 </div>
             </div>
         </div>
@@ -815,9 +1126,6 @@ body {
         
     </div>
     
-    <!-- Toast Notification -->
-    <div id="toast" class="toast"></div>
-    
     <!-- Password Modal -->
     <div id="passwordModal" class="modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:9999;justify-content:center;align-items:center;">
         <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:12px;padding:30px;max-width:400px;width:90%;box-shadow:0 10px 40px rgba(0,0,0,0.5);">
@@ -835,7 +1143,8 @@ body {
     </div>
     
     <script>
-        const API_BASE = 'http://localhost:8080';
+        // Dynamic API base URL - works on both localhost and public servers
+        const API_BASE = window.location.protocol + '//' + window.location.host;
         let currentWallet = null;
         let isWalletLocked = false;
         let passwordAttempts = 0;
@@ -1683,18 +1992,6 @@ body {
                 const data = await response.json();
                 const txs = data.txs || [];
                 
-                // Debug: log API response
-                console.log('=== Transaction API Response ===');
-                console.log('Full response:', data);
-                console.log('Transactions array:', txs);
-                if (txs.length > 0) {
-                    console.log('First transaction:', txs[0]);
-                    console.log('First tx type:', txs[0].type);
-                    console.log('First tx txId:', txs[0].txId);
-                    console.log('First tx location:', txs[0].location);
-                    console.log('First tx timestamp:', txs[0].timestamp);
-                }
-                
                 if (txs.length === 0) {
                     container.innerHTML = `
                         <div style="text-align: center; padding: 30px; color: var(--text-secondary);">
@@ -1704,8 +2001,33 @@ body {
                     return;
                 }
                 
-                // Sort transactions by nonce (newest first)
-                txs.sort((a, b) => b.nonce - a.nonce);
+                // Sort transactions by time (newest first)
+                txs.sort((a, b) => {
+                    // Try to get timestamp from various fields
+                    const getTime = (tx) => {
+                        if (tx.blockTime) return tx.blockTime;
+                        if (tx.timestamp) return tx.timestamp;
+                        if (tx.time) return tx.time;
+                        return 0;
+                    };
+                    const timeA = getTime(a);
+                    const timeB = getTime(b);
+                    
+                    // If both have timestamps, sort by time (newest first)
+                    if (timeA && timeB) {
+                        return timeB - timeA;
+                    }
+                    
+                    // Fallback to block height if available
+                    const heightA = a.location?.height || 0;
+                    const heightB = b.location?.height || 0;
+                    if (heightA && heightB) {
+                        return heightB - heightA;
+                    }
+                    
+                    // Final fallback to nonce
+                    return b.nonce - a.nonce;
+                });
                 
                 let html = '';
                 for (const tx of txs) {
@@ -1863,16 +2185,18 @@ body {
             }
         }
         
-        function showToast(message) {
-            const toast = document.getElementById('toast');
-            toast.textContent = message;
-            toast.classList.add('show');
-            setTimeout(() => {
-                toast.classList.remove('show');
-            }, 3000);
-        }
+        // Note: showToast function is defined later in the file (line 2815)
+        
+        // Track if a transaction is being sent
+        let isSendingTx = false;
         
         async function sendTransaction() {
+            // Prevent duplicate sends
+            if (isSendingTx) {
+                showToast('⏳ Transaction already sending...');
+                return;
+            }
+            
             const toAddress = document.getElementById('sendAddress').value.trim();
             const amountNOGO = parseFloat(document.getElementById('sendAmount').value);
             
@@ -1890,6 +2214,8 @@ body {
             }
             
             try {
+                isSendingTx = true;
+                
                 // Check if wallet is encrypted - need password to send
                 const saved = localStorage.getItem('nogoWallet');
                 const walletData = saved ? JSON.parse(saved) : null;
@@ -1922,23 +2248,22 @@ body {
                 const balanceResp = await fetch(`${API_BASE}/balance/${currentWallet.address}`);
                 const balanceData = await balanceResp.json();
                 const balance = balanceData.balance || 0;
-                let nonce = balanceData.nonce || 0;
+                let chainNonce = balanceData.nonce || 0;
+                let nonce = chainNonce;
                 let fee = 10000; // Default minimum fee
                 
-                // Estimate fee from API
+                // Estimate fee from API (using 350 bytes default size)
                 try {
-                    const feeResp = await fetch(`${API_BASE}/tx/estimate_fee?speed=average`);
+                    const feeResp = await fetch(`${API_BASE}/tx/estimate_fee?speed=average&size=350`);
                     const feeData = await feeResp.json();
-                    fee = feeData.estimatedFee || 30000;
+                    fee = feeData.estimatedFee || 45000;
                     console.log('[Fee Estimate] Estimated fee:', fee, 'for speed:', feeData.speed);
                 } catch (e) {
                     console.error('Failed to estimate fee, using default:', e);
-                    fee = 30000; // Fallback to safe default (MinFee + 200*MinFeePerByte)
+                    fee = 45000; // Fallback to safe default (MinFee + 350*MinFeePerByte)
                 }
                 
                 console.log('💰 [DEBUG] Final fee value before signing:', fee);
-                console.log('💰 [DEBUG] Nonce:', nonce);
-                console.log('💰 [DEBUG] Amount:', amount);
                 
                 // Calculate next nonce considering pending transactions in mempool
                 // First check mempool for pending transactions
@@ -1947,16 +2272,24 @@ body {
                     const mempoolData = await mempoolResp.json();
                     const pendingTxs = mempoolData.txs || [];
                     
+                    console.log(`[Nonce Debug] Mempool size: ${pendingTxs.length}`);
+                    
                     // Find pending txs from this address
                     const pendingFromThisAddress = pendingTxs.filter(tx => 
                         tx.fromAddr === currentWallet.address
                     );
+                    
+                    console.log(`[Nonce Debug] Pending txs from this address: ${pendingFromThisAddress.length}`);
+                    pendingFromThisAddress.forEach(tx => {
+                        console.log(`[Nonce Debug]   Pending tx: nonce=${tx.nonce}, txId=${tx.txId}`);
+                    });
                     
                     if (pendingFromThisAddress.length > 0) {
                         // Find the highest nonce in pending transactions
                         const maxPendingNonce = Math.max(...pendingFromThisAddress.map(tx => tx.nonce));
                         // Next transaction should use nonce = maxPendingNonce + 1
                         nonce = maxPendingNonce + 1;
+                        console.log(`[Nonce Debug] Using max pending nonce + 1: ${nonce}`);
                         
                         // Check if we're replacing a specific nonce
                         const pendingTx = pendingFromThisAddress.find(tx => tx.nonce === nonce - 1);
@@ -1966,14 +2299,18 @@ body {
                             showToast('⚠️ Replacing pending tx, increasing fee to ' + fee);
                         }
                     } else {
-                        // No pending transactions, use balance nonce + 1
-                        nonce = nonce + 1;
+                        // No pending transactions, use chain nonce + 1
+                        nonce = chainNonce + 1;
+                        console.log(`[Nonce Debug] Using chain nonce + 1: ${nonce}`);
                     }
                 } catch (e) {
                     console.error('Failed to check mempool:', e);
-                    // Fallback: use balance nonce + 1
-                    nonce = nonce + 1;
+                    // Fallback: use chain nonce + 1
+                    nonce = chainNonce + 1;
+                    console.log(`[Nonce Debug] Fallback to chain nonce + 1: ${nonce}`);
                 }
+                
+                console.log(`[Nonce Debug] Final nonce for new tx: ${nonce}`);
                 
                 const amount = Math.floor(amountNOGO * 1e8); // Convert to smallest unit
                 
@@ -2095,25 +2432,35 @@ body {
                 const message = result.message || result.Message;
                 
                 if (accepted) {
-                    showToast('✅ Transaction sent successfully! TxID: ' + txid);
+                    // Show success toast with txid
+                    const successMsg = `✅ Transaction sent! TxID: ${txid.substring(0, 16)}...${txid.substring(txid.length - 8)}`;
+                    showToast(successMsg, 'success');
+                    console.log('✅ Transaction accepted:', txid);
+                    
+                    // Clear form
                     document.getElementById('sendAddress').value = '';
                     document.getElementById('sendAmount').value = '';
+                    
+                    // Refresh wallet info
                     await loadWalletInfo();
                 } else {
                     const errorMsg = message || result.error || 'Unknown error';
                     console.error('Transaction rejected:', errorMsg);
                     
                     // Handle replacement fee error
-                    if (errorMsg.includes('replacement fee')) {
-                        showToast('⚠️ Pending transaction exists. Please wait or use higher fee.');
+                    if (errorMsg.includes('replacement fee') || errorMsg.includes('fee too low')) {
+                        showToast('⚠️ ' + errorMsg, 'error');
                     } else {
-                        showToast('❌ Transaction rejected: ' + errorMsg);
+                        showToast('❌ ' + errorMsg, 'error');
                     }
                 }
                 
             } catch (e) {
                 console.error('Send transaction failed:', e);
                 showToast('❌ Send failed: ' + e.message);
+            } finally {
+                // Reset sending flag
+                isSendingTx = false;
             }
         }
         
@@ -2149,80 +2496,233 @@ body {
             const bytes = new Uint8Array(buffer);
             return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
         }
-
-        // ==================== Proposal Management Functions ====================
         
-        // Load proposals
+        // Proposals functions
+        let allProposals = [];
+        let currentFilter = 'all';
+        
+        function showProposalsSection() {
+            document.getElementById('welcomeSection').style.display = 'none';
+            document.getElementById('createTab').style.display = 'none';
+            document.getElementById('importTab').style.display = 'none';
+            document.getElementById('walletDashboardTab').style.display = 'none';
+            document.getElementById('proposalsSection').style.display = 'block';
+            sessionStorage.setItem('activeTab', 'proposals');
+            loadProposals();
+        }
+        
+        function showWelcome() {
+            document.getElementById('proposalsSection').style.display = 'none';
+            document.getElementById('welcomeSection').style.display = 'block';
+            sessionStorage.setItem('activeTab', 'wallet');
+        }
+        
+        // Show wallet section (return from proposals to wallet dashboard)
+        function showWalletSection() {
+            document.getElementById('proposalsSection').style.display = 'none';
+            document.getElementById('welcomeSection').style.display = 'block';
+            document.getElementById('createTab').style.display = 'none';
+            document.getElementById('importTab').style.display = 'none';
+            if (window.currentWallet) {
+                document.getElementById('walletDashboardTab').style.display = 'block';
+                loadWalletInfo();
+            }
+            sessionStorage.setItem('activeTab', 'wallet');
+        }
+        
         async function loadProposals() {
             try {
                 const response = await fetch('/api/proposals');
                 const proposals = await response.json();
                 
-                const proposalsList = document.getElementById('proposalsList');
-                if (!proposals || proposals.length === 0) {
-                    proposalsList.innerHTML = '<div style="padding:20px;text-align:center;color:#6a737d;">暂无提案</div>';
-                    return;
-                }
+                allProposals = proposals || [];
+                allProposals.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
                 
-                const statusMap = {0: 'active', 1: 'passed', 2: 'rejected', 3: 'executed', 4: 'expired'};
-                const typeMap = {treasury: '💰', ecosystem: '🌱', grant: '🎁', event: '🎉'};
-                
-                // Sort by creation time (newest first)
-                proposals.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-                
-                proposalsList.innerHTML = proposals.map(p => {
-                    const status = statusMap[p.status] || 'unknown';
-                    const typeIcon = typeMap[p.type] || '📄';
-                    const votesFor = (p.votesFor || 0) / 1e8;
-                    const votesAgainst = (p.votesAgainst || 0) / 1e8;
-                    const totalVotes = votesFor + votesAgainst;
-                    const supportPercent = totalVotes > 0 ? ((votesFor / totalVotes) * 100).toFixed(1) : 0;
-                    
-                    return `
-                        <div style="background:#f6f8fa;border:1px solid #e1e4e8;border-radius:8px;padding:16px;margin-bottom:16px;">
-                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                                <div style="font-size:16px;font-weight:600;color:#24272a;">
-                                    ${typeIcon} ${p.title || '未命名提案'}
-                                </div>
-                                <span style="background:${status === 'active' ? '#28a745' : '#6a737d'};color:white;padding:4px 12px;border-radius:12px;font-size:12px;">
-                                    ${status}
-                                </span>
-                            </div>
-                            <div style="color:#6a737d;font-size:14px;margin-bottom:12px;">
-                                ${p.description || ''}
-                            </div>
-                            <div style="display:flex;gap:16px;font-size:13px;margin-bottom:12px;">
-                                <span style="color:#28a745;">👍 ${votesFor.toFixed(2)} NOGO</span>
-                                <span style="color:#d73a49;">👎 ${votesAgainst.toFixed(2)} NOGO</span>
-                                <span style="color:#0366d6;">支持率：${supportPercent}%</span>
-                            </div>
-                            ${status === 'active' ? `
-                                <div style="display:flex;gap:8px;">
-                                    <button onclick="vote('${p.id}', true)" style="flex:1;background:#28a745;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600;">
-                                        👍 赞成
-                                    </button>
-                                    <button onclick="vote('${p.id}', false)" style="flex:1;background:#d73a49;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600;">
-                                        👎 反对
-                                    </button>
-                                </div>
-                            ` : ''}
-                        </div>
-                    `;
-                }).join('');
+                updateStats();
+                renderProposals();
             } catch (e) {
                 console.error('Load proposals failed:', e);
-                document.getElementById('proposalsList').innerHTML = '<div style="padding:20px;text-align:center;color:#d73a49;">加载失败</div>';
+                document.getElementById('proposalsList').innerHTML = '<div class="empty-state"><h3>Failed to load proposals</h3><p>Please check your connection</p></div>';
             }
         }
         
-        // Vote for a proposal
-        async function vote(proposalId, support) {
-            const voter = prompt('请输入您的 NOGO 地址:');
-            if (!voter) return;
+        function updateStats() {
+            const total = allProposals.length;
+            const statusMap = {0: 'active', 1: 'passed', 2: 'rejected', 3: 'executed', 4: 'expired'};
             
-            const votingPower = prompt('请输入投票权（NOGO 数量，至少 1）:', '1');
-            if (!votingPower || parseFloat(votingPower) < 1) {
-                alert('投票权必须至少为 1 NOGO');
+            const active = allProposals.filter(p => statusMap[p.status] === 'active').length;
+            const passed = allProposals.filter(p => statusMap[p.status] === 'passed').length;
+            const rejected = allProposals.filter(p => statusMap[p.status] === 'rejected').length;
+            const executed = allProposals.filter(p => statusMap[p.status] === 'executed').length;
+            
+            document.getElementById('totalProposals').textContent = total;
+            document.getElementById('activeProposals').textContent = active;
+            document.getElementById('passedProposals').textContent = passed;
+            document.getElementById('rejectedProposals').textContent = rejected;
+            document.getElementById('executedProposals').textContent = executed;
+        }
+        
+        function filterProposals(filter) {
+            currentFilter = filter;
+            renderProposals();
+            
+            document.querySelectorAll('.filter-tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+        }
+        
+        function renderProposals() {
+            const container = document.getElementById('proposalsList');
+            
+            let filtered = allProposals;
+            if (currentFilter !== 'all') {
+                const statusMap = {0: 'active', 1: 'passed', 2: 'rejected', 3: 'executed', 4: 'expired'};
+                filtered = allProposals.filter(p => statusMap[p.status] === currentFilter);
+            }
+            
+            if (filtered.length === 0) {
+                container.innerHTML = '<div class="empty-state"><h3>No proposals</h3><p>Proposals matching your filter will appear here</p></div>';
+                return;
+            }
+            
+            container.innerHTML = filtered.map(p => {
+                const totalVotes = (p.votesFor || 0) + (p.votesAgainst || 0);
+                const approvalPercent = totalVotes > 0 ? ((p.votesFor || 0) * 100 / totalVotes).toFixed(1) : 0;
+                const statusMap = {0: 'active', 1: 'passed', 2: 'rejected', 3: 'executed', 4: 'expired'};
+                const statusStr = statusMap[p.status] || 'unknown';
+                
+                return `
+                    <div class="proposal-card" onclick="showProposalDetail('${p.id || ''}')">
+                        <div class="proposal-header">
+                            <div class="proposal-title">${escapeHtml(p.title)}</div>
+                            <div class="proposal-status status-${statusStr}">${statusStr}</div>
+                        </div>
+                        <div class="proposal-meta">
+                            <div class="meta-item">
+                                <div class="meta-label">Amount</div>
+                                <div class="meta-value">${formatAmount(p.amount)} NOGO</div>
+                            </div>
+                            <div class="meta-item">
+                                <div class="meta-label">Created</div>
+                                <div class="meta-value">${formatDate(p.createdAt)}</div>
+                            </div>
+                            <div class="meta-item">
+                                <div class="meta-label">Voting Ends</div>
+                                <div class="meta-value">${formatDate(p.votingEndTime)}</div>
+                            </div>
+                        </div>
+                        <div class="proposal-description">${escapeHtml(p.description)}</div>
+                        <div class="voting-section">
+                            <div class="voting-stats">
+                                <div class="vote-item">
+                                    <span class="vote-icon">👍</span>
+                                    <span class="vote-number">${(p.votesFor || 0) / 1e8}</span>
+                                </div>
+                                <div class="vote-item">
+                                    <span class="vote-icon">👎</span>
+                                    <span class="vote-number">${(p.votesAgainst || 0) / 1e8}</span>
+                                </div>
+                                <div class="vote-item">
+                                    <span class="vote-icon">📊</span>
+                                    <span class="vote-number">${approvalPercent}%</span>
+                                </div>
+                            </div>
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: ${approvalPercent}%"></div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        async function showProposalDetail(proposalId) {
+            try {
+                const response = await fetch('/api/proposals/' + proposalId);
+                const proposal = await response.json();
+                
+                const statusMap = {0: 'active', 1: 'passed', 2: 'rejected', 3: 'executed', 4: 'expired'};
+                const statusStr = statusMap[proposal.status] || 'unknown';
+                
+                const container = document.getElementById('proposalsList');
+                container.innerHTML = `
+                    <div style="padding: 20px;">
+                        <button onclick="loadProposals()" style="margin-bottom: 20px; padding: 10px 20px; background: var(--accent-blue); color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600;">← Back</button>
+                        <div class="proposal-detail">
+                            <div class="detail-section">
+                                <div class="detail-label">Title</div>
+                                <div class="detail-value">${escapeHtml(proposal.title)}</div>
+                            </div>
+                            <div class="detail-section">
+                                <div class="detail-label">Status</div>
+                                <div class="detail-value"><span class="proposal-status status-${statusStr}">${statusStr}</span></div>
+                            </div>
+                            <div class="detail-section">
+                                <div class="detail-label">Description</div>
+                                <div class="detail-value">${escapeHtml(proposal.description)}</div>
+                            </div>
+                            <div class="detail-section">
+                                <div class="detail-label">Amount</div>
+                                <div class="detail-value">${formatAmount(proposal.amount)} NOGO</div>
+                            </div>
+                            <div class="detail-section">
+                                <div class="detail-label">Recipient</div>
+                                <div class="detail-value">${proposal.recipient || '-'}</div>
+                            </div>
+                            <div class="detail-section">
+                                <div class="detail-label">Votes</div>
+                                <div class="detail-value">
+                                    👍 For: ${(proposal.votesFor || 0) / 1e8}<br>
+                                    👎 Against: ${(proposal.votesAgainst || 0) / 1e8}
+                                </div>
+                            </div>
+                            ${statusStr === 'active' ? `
+                            <div class="detail-section" style="margin-top: 30px; padding-top: 30px; border-top: 1px solid var(--border-color);">
+                                <div class="detail-label">Vote</div>
+                                <div style="margin-top: 15px; display: flex; gap: 10px;">
+                                    <button onclick="handleVote('${proposal.id}', true)" style="flex: 1; padding: 12px; background: var(--accent-green); color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600;">👍 For</button>
+                                    <button onclick="handleVote('${proposal.id}', false)" style="flex: 1; padding: 12px; background: var(--accent-red); color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600;">👎 Against</button>
+                                </div>
+                            </div>
+                            ` : ''}
+                        </div>
+                    </div>
+                `;
+            } catch (e) {
+                console.error('Load proposal detail failed:', e);
+                showToast('Failed to load proposal detail', 'error');
+            }
+        }
+        
+        async function handleVote(proposalId, support) {
+            // Auto-use current wallet address
+            let voter = '';
+            
+            // Try to get from currentWallet first
+            if (window.currentWallet && window.currentWallet.address) {
+                voter = window.currentWallet.address;
+            } else {
+                // Try to get from localStorage
+                try {
+                    const stored = localStorage.getItem('nogoWallet');
+                    if (stored) {
+                        const wallet = JSON.parse(stored);
+                        voter = wallet.address || '';
+                    }
+                } catch (e) {
+                    console.error('Failed to get wallet from localStorage:', e);
+                }
+            }
+            
+            if (!voter) {
+                showToast('Please import or create a wallet first', 'error');
+                return;
+            }
+            
+            const power = prompt('Enter voting power (NOGO amount):', '1');
+            if (!power || parseFloat(power) < 1) {
+                showToast('Voting power must be at least 1', 'error');
                 return;
             }
             
@@ -2234,106 +2734,197 @@ body {
                         proposalId,
                         voter,
                         support,
-                        votingPower: Math.floor(parseFloat(votingPower) * 1e8)
+                        votingPower: Math.floor(parseFloat(power) * 1e8)
                     })
                 });
                 
                 const result = await response.json();
                 if (response.ok && result.success) {
-                    alert('✅ 投票成功！');
-                    loadProposals();
+                    showToast('Vote submitted successfully!', 'success');
+                    showProposalDetail(proposalId);
                 } else {
-                    alert('❌ 投票失败：' + (result.error || '未知错误'));
+                    showToast('Error: ' + (result.error || 'Failed to vote'), 'error');
                 }
             } catch (e) {
                 console.error('Vote failed:', e);
-                alert('❌ 投票失败：' + e.message);
+                showToast('Network error: ' + e.message, 'error');
             }
         }
         
-        // Create proposal
-        async function createProposal() {
-            const proposer = prompt('请输入提案人地址:');
-            if (!proposer) return;
+        function showCreateModal() {
+            document.getElementById('createModal').style.display = 'flex';
+        }
+        
+        function closeModal() {
+            document.getElementById('createModal').style.display = 'none';
+        }
+        
+        async function handleSubmit(event) {
+            event.preventDefault();
             
-            const title = prompt('请输入提案标题:');
-            if (!title) return;
+            // Auto-use current wallet address as proposer
+            let proposer = '';
             
-            const description = prompt('请输入提案描述:');
-            if (!description) return;
+            // Try to get from currentWallet first
+            if (window.currentWallet && window.currentWallet.address) {
+                proposer = window.currentWallet.address;
+            } else {
+                // Try to get from localStorage
+                try {
+                    const stored = localStorage.getItem('nogoWallet');
+                    if (stored) {
+                        const wallet = JSON.parse(stored);
+                        proposer = wallet.address || '';
+                    }
+                } catch (e) {
+                    console.error('Failed to get wallet from localStorage:', e);
+                }
+            }
             
-            const type = prompt('提案类型 (treasury/ecosystem/grant/event):', 'event');
-            if (!type) return;
-            
-            const amount = prompt('申请金额（NOGO）:', '10');
-            if (!amount) return;
-            
-            const recipient = prompt('接收地址:');
-            if (!recipient) return;
-            
-            const deposit = prompt('押金（NOGO，至少 10）:', '10');
-            if (!deposit || parseFloat(deposit) < 10) {
-                alert('押金至少需要 10 NOGO');
+            if (!proposer) {
+                showToast('Please import or create a wallet first', 'error');
                 return;
+            }
+            
+            const formData = {
+                proposer: proposer,  // Auto-fill with current wallet address
+                title: document.getElementById('title').value,
+                description: document.getElementById('description').value,
+                type: document.getElementById('type').value,
+                amount: Math.floor(parseFloat(document.getElementById('amount').value) * 1e8),
+                recipient: document.getElementById('recipient').value,
+                deposit: Math.floor(parseFloat(document.getElementById('deposit').value) * 1e8)
+            };
+            
+            // Auto-fill recipient with current wallet address if empty
+            if (!formData.recipient) {
+                formData.recipient = proposer;
             }
             
             try {
                 const response = await fetch('/api/proposals/create', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        proposer,
-                        title,
-                        description,
-                        type,
-                        amount: Math.floor(parseFloat(amount) * 1e8),
-                        recipient,
-                        deposit: Math.floor(parseFloat(deposit) * 1e8)
-                    })
+                    body: JSON.stringify(formData)
                 });
                 
                 const result = await response.json();
                 if (response.ok && result.success) {
-                    alert('✅ 提案创建成功！\n提案 ID: ' + result.proposalId);
+                    showToast('Proposal created! ID: ' + result.proposalId, 'success');
+                    closeModal();
                     loadProposals();
                 } else {
-                    alert('❌ 创建失败：' + (result.error || '未知错误'));
+                    showToast('Error: ' + (result.error || 'Failed to create'), 'error');
                 }
             } catch (e) {
-                console.error('Create proposal failed:', e);
-                alert('❌ 创建失败：' + e.message);
+                showToast('Network error: ' + e.message, 'error');
             }
         }
         
-        // Show proposals section
-        function showProposalsSection() {
-            document.getElementById('walletSection').style.display = 'none';
-            document.getElementById('proposalsSection').style.display = 'block';
-            loadProposals();
+        function showToast(message, type = 'info') {
+            const toast = document.getElementById('toast');
+            const toastMessage = document.getElementById('toastMessage');
+            
+            // Set message
+            toastMessage.textContent = message;
+            
+            // Set color based on type
+            if (type === 'success') {
+                toast.style.background = 'var(--accent-green, #10b981)';
+            } else if (type === 'error') {
+                toast.style.background = 'var(--accent-red, #ef4444)';
+            } else {
+                toast.style.background = 'var(--accent-blue, #3b82f6)';
+            }
+            
+            // Show toast - use class-based animation
+            toast.classList.add('show');
+            toast.style.display = 'block';
+            toast.style.opacity = '1';
+            toast.style.transform = 'translateX(-50%) translateY(0)';
+            
+            // Hide after 3 seconds
+            setTimeout(() => {
+                toast.classList.remove('show');
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateX(-50%) translateY(100px)';
+                setTimeout(() => {
+                    toast.style.display = 'none';
+                }, 300);
+            }, 3000);
         }
         
-        // Show wallet section
-        function showWalletSection() {
-            document.getElementById('proposalsSection').style.display = 'none';
-            document.getElementById('walletSection').style.display = 'block';
+        function formatAmount(wei) {
+            return ((wei || 0) / 1e8).toFixed(8);
         }
         
-        console.log('Proposal management functions loaded');
+        function formatDate(timestamp) {
+            if (!timestamp) return '-';
+            return new Date(timestamp * 1000).toLocaleString();
+        }
+        
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Page load - restore last active tab
+        window.addEventListener('DOMContentLoaded', function() {
+            const activeTab = sessionStorage.getItem('activeTab');
+            if (activeTab === 'proposals') {
+                showProposalsSection();
+            }
+        });
     </script>
     
-    <!-- Proposals Section (Hidden by default) -->
-    <div id="proposalsSection" style="display: none;">
-        <div class="container" style="max-width:1200px;margin:0 auto;padding:24px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;">
-                <h1 style="font-size:28px;color:#24272a;margin:0;">📋 提案治理</h1>
-                <button class="btn btn-primary" onclick="createProposal()" style="padding:12px 24px;background:#0366d6;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:14px;">
-                    ➕ 创建提案
-                </button>
-            </div>
-            
-            <div id="proposalsList">
-                <div style="padding:20px;text-align:center;color:#6a737d;">加载中...</div>
-            </div>
+    <!-- Toast -->
+    <div id="toast" class="toast">
+        <div id="toastMessage"></div>
+    </div>
+    
+    <!-- Create Proposal Modal -->
+    <div id="createModal" class="modal-overlay">
+        <div class="modal-content">
+            <h2 style="margin-bottom: 20px; color: var(--text-primary);">📝 Create Proposal</h2>
+            <form onsubmit="handleSubmit(event)">
+                <div class="detail-section">
+                    <div class="detail-label">Title *</div>
+                    <input type="text" id="title" required style="width: 100%; padding: 10px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary);">
+                </div>
+                <div class="detail-section">
+                    <div class="detail-label">Description *</div>
+                    <textarea id="description" required rows="4" style="width: 100%; padding: 10px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary); resize: vertical;"></textarea>
+                </div>
+                <div class="detail-section">
+                    <div class="detail-label">Type *</div>
+                    <select id="type" style="width: 100%; padding: 10px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary);">
+                        <option value="treasury">Treasury</option>
+                        <option value="ecosystem">Ecosystem</option>
+                        <option value="grant">Grant</option>
+                        <option value="event">Event</option>
+                    </select>
+                </div>
+                <div class="detail-section">
+                    <div class="detail-label">Amount (NOGO) *</div>
+                    <input type="number" id="amount" required step="0.00000001" min="0" style="width: 100%; padding: 10px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary);">
+                </div>
+                <div class="detail-section">
+                    <div class="detail-label">Recipient *</div>
+                    <input type="text" id="recipient" required placeholder="NOGO... (defaults to your wallet address)" style="width: 100%; padding: 10px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary);">
+                    <div style="margin-top: 5px; font-size: 12px; color: var(--text-secondary);">Leave empty to use your current wallet address</div>
+                </div>
+                <div class="detail-section">
+                    <div class="detail-label">Deposit (NOGO) *</div>
+                    <input type="number" id="deposit" step="0.00000001" min="10" value="100" required style="width: 100%; padding: 10px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary);">
+                    <div style="margin-top: 5px; font-size: 12px; color: var(--text-secondary);">Minimum deposit: 10 NOGO (automatically deducted from your balance)</div>
+                </div>
+                <div style="display: flex; gap: 10px; margin-top: 30px;">
+                    <button type="submit" style="flex: 1; padding: 12px; background: var(--accent-blue); color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600;">Submit</button>
+                    <button type="button" onclick="closeModal()" style="flex: 1; padding: 12px; background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px; cursor: pointer; font-weight: 600;">Cancel</button>
+                </div>
+            </form>
         </div>
     </div>
 </body>

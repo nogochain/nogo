@@ -583,14 +583,11 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		return nil, errors.New("no parent block")
 	}
 
-	fmt.Printf("[DEBUG] miner.go: Calling MineTransfers with %d transactions\n", len(selected))
 	b, err := m.bc.MineTransfers(selected)
 	if err != nil {
-		fmt.Printf("[ERROR] miner.go: MineTransfers failed: %v\n", err)
 		logf(colorRed, "❌ ", fmt.Sprintf("Mine failed: %v", err))
 		return nil, err
 	}
-	fmt.Printf("[DEBUG] miner.go: MineTransfers returned block %d, hash=%x\n", b.Height, b.Hash)
 	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block mined - height=%d, hash=%x", b.Height, b.Hash))
 
 	// Redundant POW validation removed for the following reasons:

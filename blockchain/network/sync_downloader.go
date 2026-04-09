@@ -143,12 +143,10 @@ func (d *BlockDownloader) adjustConcurrency() {
 	if memStats.Alloc > d.config.MemoryThreshold {
 		if adjusted > MinMaxConcurrent {
 			adjusted--
-			log.Printf("[Downloader] Reducing concurrency to %d due to memory pressure", adjusted)
 		}
 	} else if memStats.Alloc < d.config.MemoryThreshold/2 {
 		if adjusted < MaxMaxConcurrent {
 			adjusted++
-			log.Printf("[Downloader] Increasing concurrency to %d due to low memory usage", adjusted)
 		}
 	}
 
@@ -171,13 +169,11 @@ func (d *BlockDownloader) adjustBatchSize() {
 			if adjusted < int32(MinBatchSize) {
 				adjusted = int32(MinBatchSize)
 			}
-			log.Printf("[Downloader] Reducing batch size to %d due to high failure rate %.2f%%", adjusted, failRate*100)
 		} else if failRate < 0.01 && adjusted < int32(MaxBatchSize) {
 			adjusted = int32(float64(adjusted) * 1.1)
 			if adjusted > int32(MaxBatchSize) {
 				adjusted = int32(MaxBatchSize)
 			}
-			log.Printf("[Downloader] Increasing batch size to %d due to low failure rate %.2f%%", adjusted, failRate*100)
 		}
 	}
 
@@ -265,7 +261,7 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 				atomic.AddUint64(&d.downloadedCount, uint64(len(result.Blocks)))
 			} else {
 				atomic.AddUint64(&d.failedCount, result.End-result.Start+1)
-				log.Printf("[Downloader] Batch %d-%d failed: %v", result.Start, result.End, result.Error)
+				rateLimitedLog("batch_fail", "[Downloader] Batch %d-%d failed: %v", result.Start, result.End, result.Error)
 			}
 
 			batchesCompleted++
