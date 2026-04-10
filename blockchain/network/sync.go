@@ -858,7 +858,7 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 					log.Printf("[Sync] First header prevHash mismatch! Local tip: %s, Header prevHash: %s",
 						hex.EncodeToString(localTip.Hash), hex.EncodeToString(header.PrevHash))
 					log.Printf("[Sync] This indicates a fork - need to find common ancestor")
-					
+
 					// Walk back to find common ancestor
 					syncStartHeight, err = s.findCommonAncestorHeight(ctx, p, header, currentHeight+1+uint64(i))
 					if err != nil {
@@ -867,6 +867,19 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 						syncStartHeight = currentHeight
 					} else {
 						log.Printf("[Sync] Found common ancestor at height %d", syncStartHeight)
+
+						// CRITICAL: Rollback chain to common ancestor before downloading new blocks
+						// This is essential for fork resolution - must remove orphaned blocks
+						// Production-grade: ensures clean state for accepting correct chain
+						if syncStartHeight < currentHeight {
+							log.Printf("[Sync] Rolling back chain from height %d to %d (removing %d blocks)",
+								currentHeight, syncStartHeight, currentHeight-syncStartHeight)
+							if rollbackErr := s.bc.RollbackToHeight(syncStartHeight); rollbackErr != nil {
+								log.Printf("[Sync] ERROR: Failed to rollback chain: %v", rollbackErr)
+								return fmt.Errorf("rollback chain to height %d failed: %w", syncStartHeight, rollbackErr)
+							}
+							log.Printf("[Sync] Chain rolled back successfully to height %d", syncStartHeight)
+						}
 					}
 				}
 			} else {

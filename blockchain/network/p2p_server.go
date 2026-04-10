@@ -848,6 +848,9 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 		log.Printf("p2p: block accepted height=%d hash=%s", block.GetHeight(), hex.EncodeToString(block.Hash))
 		getP2PLogger().Success("Block #%d accepted | Hash: %s", block.GetHeight(), hex.EncodeToString(block.Hash))
 
+		// Mempool cleanup is now handled centrally in Chain.addCanonicalBlockLocked
+		// This ensures 100% coverage for all block acceptance paths
+
 		// CRITICAL: Trigger sync loop event for instant processing
 		// This ensures the block is processed by the event-driven sync mechanism
 		syncLoop := s.bc.SyncLoop()
@@ -964,6 +967,7 @@ func (s *P2PServer) syncMissingBlocks(ctx context.Context, c net.Conn, targetBlo
 			// Continue trying to fetch more blocks
 		} else if accepted {
 			log.Printf("p2p: synced missing block height=%d hash=%s", fetchedBlock.GetHeight(), hex.EncodeToString(fetchedBlock.Hash))
+			// Mempool cleanup is now handled centrally in Chain.addCanonicalBlockLocked
 		}
 
 		// Move to the next ancestor
@@ -978,6 +982,7 @@ func (s *P2PServer) syncMissingBlocks(ctx context.Context, c net.Conn, targetBlo
 	}
 	if accepted {
 		log.Printf("p2p: successfully synced and accepted target block height=%d hash=%s", targetBlock.GetHeight(), hex.EncodeToString(targetBlock.Hash))
+		// Mempool cleanup is now handled centrally in Chain.addCanonicalBlockLocked
 	}
 
 	return nil

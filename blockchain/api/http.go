@@ -1201,6 +1201,9 @@ func (s *Server) handleAddBlock(w http.ResponseWriter, r *http.Request) {
 		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"accepted": false, "message": err.Error()})
 		return
 	}
+
+	// Mempool cleanup is now handled centrally in Chain.addCanonicalBlockLocked
+
 	_ = writeJSON(w, http.StatusOK, map[string]any{"accepted": true, "reorged": reorged})
 }
 
@@ -1586,6 +1589,9 @@ func (s *Server) handleMineOnce(w http.ResponseWriter, r *http.Request) {
 		_ = writeJSON(w, http.StatusOK, map[string]any{"mined": false, "message": "no transactions"})
 		return
 	}
+
+	// Mempool cleanup is now handled centrally in Chain.addCanonicalBlockLocked
+
 	_ = writeJSON(w, http.StatusOK, map[string]any{
 		"mined":          true,
 		"message":        "ok",

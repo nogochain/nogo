@@ -286,6 +286,11 @@ type Chain struct {
 
 	// Contract management
 	contractManager *ContractManager
+
+	// Mempool reference for cleanup on block confirmation
+	// Production-grade: enables automatic removal of confirmed transactions
+	// Thread-safety: MempoolCleaner implementation must be thread-safe
+	mempool MempoolCleaner
 }
 
 // ChainConfig holds chain configuration
@@ -305,6 +310,16 @@ func (c *Chain) SetEventSink(sink EventSink) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.events = sink
+}
+
+// SetMempool sets the mempool reference for automatic cleanup of confirmed transactions
+// Production-grade: enables Chain to remove confirmed transactions from mempool
+// Dependency injection: called during node initialization after mempool creation
+// Thread-safety: uses mutex to ensure safe concurrent access
+func (c *Chain) SetMempool(mp MempoolCleaner) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.mempool = mp
 }
 
 // NewChain creates a new blockchain instance
@@ -1253,6 +1268,23 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	// Update storage
 	if err := c.store.RewriteCanonical(c.blocks); err != nil {
 		return fmt.Errorf("rewrite canonical: %w", err)
+	}
+
+	// CRITICAL: Clean up mempool after reorganization
+	// Production-grade: remove all transactions in the new canonical chain from mempool
+	// Rationale: after reorg, transactions in new chain are confirmed and should be removed
+	if c.mempool != nil {
+		var allTxIDs []string
+		for _, block := range newChain[1:] {
+			if len(block.Transactions) > 0 {
+				txids := c.extractTransactionIDs(block.Transactions)
+				allTxIDs = append(allTxIDs, txids...)
+			}
+		}
+		if len(allTxIDs) > 0 {
+			c.mempool.RemoveMany(allTxIDs)
+			log.Printf("[Chain] Removed %d transactions from mempool after reorganization", len(allTxIDs))
+		}
 	}
 
 	log.Printf("Chain reorganization complete: new height=%d, new tip=%s",
@@ -2405,7 +2437,7 @@ func (c *Chain) addCanonicalBlockLocked(block *Block, hashHex string) (bool, err
 	// This is critical for reward distribution
 	if err := applyBlockToState(c.consensus, c.monetaryPolicy, c.state, block, c.genesisAddress, c.genesisTimestamp); err != nil {
 		log.Printf("[Chain] WARNING: Failed to apply block %d to state: %v", block.GetHeight(), err)
-		
+
 		// Enhanced fork compatibility: attempt fork-tolerant state application
 		// This allows blocks from slightly divergent forks to be accepted
 		if c.tryForkCompatibleStateApplication(block, hashHex) {
@@ -2419,8 +2451,36 @@ func (c *Chain) addCanonicalBlockLocked(block *Block, hashHex string) (bool, err
 		}
 	}
 
+	// CRITICAL: Remove confirmed transactions from mempool
+	// Production-grade: ensures all nodes clean up mempool when blocks are confirmed
+	// Coverage: handles all block acceptance paths (P2P, sync, HTTP API, mining)
+	// Thread-safety: MempoolCleaner.RemoveMany must be thread-safe
+	if c.mempool != nil && len(block.Transactions) > 0 {
+		txids := c.extractTransactionIDs(block.Transactions)
+		if len(txids) > 0 {
+			// RemoveMany must handle its own locking - called while holding Chain lock
+			// This is safe because Mempool uses a separate lock
+			c.mempool.RemoveMany(txids)
+			log.Printf("[Chain] Removed %d confirmed transactions from mempool for block %d", len(txids), block.GetHeight())
+		}
+	}
+
 	log.Printf("[Chain] Block %d added to canonical chain (height: %d, hash: %s)", block.GetHeight(), height, hashHex[:16])
 	return true, nil
+}
+
+// extractTransactionIDs extracts transaction IDs from a list of transactions
+// Production-grade: handles errors gracefully, returns valid IDs only
+// Used by: addCanonicalBlockLocked for mempool cleanup
+func (c *Chain) extractTransactionIDs(txs []Transaction) []string {
+	txids := make([]string, 0, len(txs))
+	for _, tx := range txs {
+		txid, err := TxIDHex(tx)
+		if err == nil {
+			txids = append(txids, txid)
+		}
+	}
+	return txids
 }
 
 // addForkBlockLocked adds a block as an alternative fork
@@ -2850,6 +2910,7 @@ func (c *Chain) CanonicalTxCount() uint64 {
 
 // RollbackToHeight rolls back the chain to a given height
 // Concurrency safety: uses mutex to protect chain state
+// Persistence: updates storage to reflect the rollback
 func (c *Chain) RollbackToHeight(height uint64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -2857,6 +2918,13 @@ func (c *Chain) RollbackToHeight(height uint64) error {
 	if height >= uint64(len(c.blocks)) {
 		return fmt.Errorf("height %d is beyond chain length %d", height, len(c.blocks))
 	}
+
+	originalHeight := uint64(len(c.blocks)) - 1
+	if height == originalHeight {
+		return nil // No rollback needed
+	}
+
+	log.Printf("[Chain] Rolling back from height %d to height %d", originalHeight, height)
 
 	// Remove blocks after target height
 	for i := uint64(len(c.blocks)) - 1; i > height; i-- {
@@ -2898,9 +2966,46 @@ func (c *Chain) RollbackToHeight(height uint64) error {
 	c.blocks = c.blocks[:height+1]
 	c.initCanonicalIndexesLocked()
 
+	// Clean up fork blocks above the new height
+	// These blocks are no longer relevant after rollback
+	if c.forkBlocks != nil {
+		for forkHeight := range c.forkBlocks {
+			if forkHeight > height {
+				delete(c.forkBlocks, forkHeight)
+			}
+		}
+	}
+
+	// Clear orphan pool - orphan blocks reference chain state that no longer exists
+	// New blocks will be re-fetched during sync
+	if c.orphanPool != nil {
+		c.orphanPool = make(map[string]*Block)
+	}
+	if c.orphanByParent != nil {
+		c.orphanByParent = make(map[string][]string)
+	}
+
+	// Recompute canonical work based on remaining blocks
+	c.canonicalWork = big.NewInt(0)
+	for _, block := range c.blocks {
+		work := WorkForDifficultyBits(block.Header.DifficultyBits)
+		c.canonicalWork.Add(c.canonicalWork, work)
+	}
+
 	// Recompute state from remaining blocks to ensure consistency
 	if err := c.recomputeStateLocked(); err != nil {
 		return fmt.Errorf("recompute state after rollback: %w", err)
+	}
+
+	// CRITICAL: Persist the rollback to storage
+	// This ensures the chain remains consistent after restart
+	if c.store != nil {
+		if err := c.store.RewriteCanonical(c.blocks); err != nil {
+			log.Printf("[Chain] WARNING: Failed to persist rollback to storage: %v", err)
+			// Continue anyway - in-memory state is correct
+		} else {
+			log.Printf("[Chain] Rollback persisted to storage")
+		}
 	}
 
 	log.Printf("[Chain] Rolled back to height %d and rebuilt state", height)

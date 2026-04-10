@@ -1023,6 +1023,16 @@ type ChainStore interface {
 	PutGenesisHash(hash []byte) error
 }
 
+// MempoolCleaner defines the interface for mempool cleanup operations
+// Production-grade: enables Chain to remove confirmed transactions without circular dependency
+// Thread-safety: all implementations must be safe for concurrent use
+type MempoolCleaner interface {
+	// RemoveMany removes multiple transactions by their IDs
+	// Called when a block is added to the canonical chain
+	// Thread-safe: implementation must handle concurrent access
+	RemoveMany(txids []string)
+}
+
 // SyncLoop represents the sync loop for P2P synchronization
 type SyncLoop struct {
 	mu sync.Mutex
