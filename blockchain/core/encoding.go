@@ -290,7 +290,7 @@ func blockHeaderPreimageBinaryV1(b *Block, nonce uint64, p ConsensusParams) ([]b
 	if err := binary.Write(&buf, binary.LittleEndian, b.Header.Version); err != nil {
 		return nil, fmt.Errorf("write version: %w", err)
 	}
-	if err := binary.Write(&buf, binary.LittleEndian, b.Height); err != nil {
+	if err := binary.Write(&buf, binary.LittleEndian, b.GetHeight()); err != nil {
 		return nil, fmt.Errorf("write height: %w", err)
 	}
 	if err := binary.Write(&buf, binary.LittleEndian, b.Header.TimestampUnix); err != nil {
@@ -334,7 +334,7 @@ func BlockHash(b *Block, p ConsensusParams) ([]byte, error) {
 	var headerBytes []byte
 	var err error
 
-	if p.BinaryEncodingActive(b.Height) {
+	if p.BinaryEncodingActive(b.GetHeight()) {
 		headerBytes, err = blockHeaderPreimageBinaryV1(b, b.Header.Nonce, p)
 	} else {
 		headerBytes, err = b.HeaderBytesForConsensus(p, b.Header.Nonce)
@@ -371,7 +371,7 @@ func EncodeBlockBinary(block *Block) ([]byte, error) {
 	if err := binary.Write(&buf, binary.LittleEndian, block.Header.Version); err != nil {
 		return nil, fmt.Errorf("encode version: %w", err)
 	}
-	if err := binary.Write(&buf, binary.LittleEndian, block.Height); err != nil {
+	if err := binary.Write(&buf, binary.LittleEndian, block.GetHeight()); err != nil {
 		return nil, fmt.Errorf("encode height: %w", err)
 	}
 	if err := binary.Write(&buf, binary.LittleEndian, block.Header.TimestampUnix); err != nil {

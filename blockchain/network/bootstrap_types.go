@@ -544,7 +544,7 @@ func (b *BlockDeduplicationTracker) getBlockHash(block *core.Block) string {
 	if block == nil {
 		return ""
 	}
-	return string(block.Height) // Simplified hash - real implementation would use actual block hash
+	return string(block.GetHeight()) // Simplified hash - real implementation would use actual block hash
 }
 
 // CleanupExpired removes expired entries from tracking

@@ -6,6 +6,7 @@ package core
 
 import (
 	"fmt"
+	"log"
 	"math/big"
 	"sync"
 	"time"
@@ -21,8 +22,10 @@ const (
 	ForkTypeTemporary
 	// ForkTypePersistent indicates a persistent fork requiring intervention
 	ForkTypePersistent
-	// ForkTypeDeep indicates a deep fork (depth > 6 blocks)
-	ForkTypeDeep
+// ForkTypeDeep indicates a deep fork (depth > 6 blocks)
+ForkTypeDeep
+// ForkTypeSymmetric indicates symmetric fork (equal work in multi-node)
+ForkTypeSymmetric
 )
 
 // ForkEvent represents a fork detection event
@@ -82,25 +85,36 @@ func (fd *ForkDetector) DetectFork(localBlock, remoteBlock *Block, peerID string
 		return nil
 	}
 
-	// Same height but different hash = fork at this height
-	if localBlock.Height == remoteBlock.Height {
-		event := &ForkEvent{
-			Type:         ForkTypePersistent,
-			DetectedAt:   time.Now(),
-			LocalHeight:  localBlock.Height,
-			LocalHash:    fmt.Sprintf("%x", localBlock.Hash),
-			RemoteHeight: remoteBlock.Height,
-			RemoteHash:   fmt.Sprintf("%x", remoteBlock.Hash),
-			Depth:        0,
-			PeerID:       peerID,
-			AlertLevel:   "HIGH",
-		}
+	// Enhanced fork detection with symmetric fork handling
+	event := &ForkEvent{
+		DetectedAt:   time.Now(),
+		LocalHeight:  localBlock.GetHeight(),
+		LocalHash:    fmt.Sprintf("%x", localBlock.Hash),
+		RemoteHeight: remoteBlock.GetHeight(),
+		RemoteHash:   fmt.Sprintf("%x", remoteBlock.Hash),
+		PeerID:       peerID,
+	}
 
-		// Parse work values
-		localWork, _ := StringToWork(localBlock.TotalWork)
-		remoteWork, _ := StringToWork(remoteBlock.TotalWork)
-		event.LocalWork = localWork
-		event.RemoteWork = remoteWork
+	// Parse work values
+	localWork, _ := StringToWork(localBlock.TotalWork)
+	remoteWork, _ := StringToWork(remoteBlock.TotalWork)
+	event.LocalWork = localWork
+	event.RemoteWork = remoteWork
+
+	// Core-Geth style: Check for symmetric fork condition
+	if localBlock.GetHeight() == remoteBlock.GetHeight() {
+		// Same height but different hash = fork at this height
+		event.Type = ForkTypePersistent
+		event.Depth = 0
+		event.AlertLevel = "HIGH"
+
+		// Enhanced symmetric fork detection
+		if localWork != nil && remoteWork != nil && localWork.Cmp(remoteWork) == 0 {
+			event.Type = ForkTypeSymmetric
+			event.AlertLevel = "CRITICAL"
+			log.Printf("CRITICAL: symmetric fork detected at height=%d local_hash=%x remote_hash=%x",
+				localBlock.GetHeight(), localBlock.Hash[:8], remoteBlock.Hash[:8])
+		}
 
 		// Determine alert level based on work difference
 		if remoteWork != nil && localWork != nil {
@@ -110,56 +124,61 @@ func (fd *ForkDetector) DetectFork(localBlock, remoteBlock *Block, peerID string
 				event.Type = ForkTypePersistent
 			}
 		}
-
-		fd.recordEvent(event)
-		fd.triggerAlert(event)
-
-		return event
-	}
-
-	// Different heights - calculate fork depth
-	var deeperBlock *Block
-	var shallowerBlock *Block
-
-	if localBlock.Height > remoteBlock.Height {
-		deeperBlock = localBlock
-		shallowerBlock = remoteBlock
 	} else {
-		deeperBlock = remoteBlock
-		shallowerBlock = localBlock
+		// Different heights - calculate fork depth
+		var deeperBlock *Block
+		var shallowerBlock *Block
+
+		if localBlock.GetHeight() > remoteBlock.GetHeight() {
+			deeperBlock = localBlock
+			shallowerBlock = remoteBlock
+		} else {
+			deeperBlock = remoteBlock
+			shallowerBlock = localBlock
+		}
+
+		// Calculate approximate fork depth
+		depth := deeperBlock.GetHeight() - shallowerBlock.GetHeight()
+		event.Depth = depth
+		event.Type = ForkTypeTemporary
+		event.AlertLevel = "MEDIUM"
+
+		// Classify fork type based on depth
+		if depth >= fd.deepForkThreshold {
+			event.Type = ForkTypeDeep
+			event.AlertLevel = "CRITICAL"
+		}
 	}
-
-	// Calculate approximate fork depth
-	depth := deeperBlock.Height - shallowerBlock.Height
-
-	event := &ForkEvent{
-		Type:         ForkTypeTemporary,
-		DetectedAt:   time.Now(),
-		LocalHeight:  localBlock.Height,
-		LocalHash:    fmt.Sprintf("%x", localBlock.Hash),
-		RemoteHeight: remoteBlock.Height,
-		RemoteHash:   fmt.Sprintf("%x", remoteBlock.Hash),
-		Depth:        depth,
-		PeerID:       peerID,
-		AlertLevel:   "MEDIUM",
-	}
-
-	// Classify fork type based on depth
-	if depth >= fd.deepForkThreshold {
-		event.Type = ForkTypeDeep
-		event.AlertLevel = "CRITICAL"
-	}
-
-	// Parse work values
-	localWork, _ := StringToWork(localBlock.TotalWork)
-	remoteWork, _ := StringToWork(remoteBlock.TotalWork)
-	event.LocalWork = localWork
-	event.RemoteWork = remoteWork
 
 	fd.recordEvent(event)
 	fd.triggerAlert(event)
 
 	return event
+}
+
+// DetectDynamicTopologyFork detects forks in dynamic node environments
+// Addresses issues where node exit causes synchronization paralysis
+func (fd *ForkDetector) DetectDynamicTopologyFork(localBlock, remoteBlock *Block, 
+	peerID string, topologyMetrics map[string]interface{}) *ForkEvent {
+	
+	// Check for dynamic topology indicators
+	if topologyMetrics != nil {
+		nodeCount, ok := topologyMetrics["active_nodes"].(int)
+		if ok && nodeCount <= 2 {
+			// Special handling for small network scenarios
+			log.Printf("dynamic topology: small_network_detected active_nodes=%d", nodeCount)
+			
+			// Enhance fork detection sensitivity for small networks
+			forkEvent := fd.DetectFork(localBlock, remoteBlock, peerID)
+			if forkEvent != nil && forkEvent.Type == ForkTypePersistent {
+				// Upgrade to critical for small networks
+				forkEvent.AlertLevel = "CRITICAL"
+			}
+			return forkEvent
+		}
+	}
+
+	return fd.DetectFork(localBlock, remoteBlock, peerID)
 }
 
 // recordEvent records a fork event

@@ -351,7 +351,7 @@ func (fs *FastSyncEngine) syncBlocksFromCheckpoint(ctx context.Context, checkpoi
 	localTip := fs.blockchain.LatestBlock()
 	var localHeight uint64
 	if localTip != nil {
-		localHeight = localTip.Height
+		localHeight = localTip.GetHeight()
 	}
 
 	// Calculate start height: use checkpoint+1 or local height+1, whichever is higher
@@ -383,7 +383,7 @@ func (fs *FastSyncEngine) syncBlocksFromCheckpoint(ctx context.Context, checkpoi
 		// Fallback to local chain height + expected window
 		localTip := fs.blockchain.LatestBlock()
 		if localTip != nil {
-			networkHeight = localTip.Height + BlockDownloadWindowSize
+			networkHeight = localTip.GetHeight() + BlockDownloadWindowSize
 		} else {
 			networkHeight = startHeight
 		}
@@ -454,12 +454,12 @@ func (fs *FastSyncEngine) syncBlocksFromCheckpoint(ctx context.Context, checkpoi
 
 	// Verify final sync state
 	localTip = fs.blockchain.LatestBlock()
-	if localTip != nil && localTip.Height >= networkHeight {
-		fs.updateStatusWithMetrics("completed", 1.0, localTip.Height, networkHeight)
-		log.Printf("[FastSync] Sync completed: height %d", localTip.Height)
+	if localTip != nil && localTip.GetHeight() >= networkHeight {
+		fs.updateStatusWithMetrics("completed", 1.0, localTip.GetHeight(), networkHeight)
+		log.Printf("[FastSync] Sync completed: height %d", localTip.GetHeight())
 	} else {
 		log.Printf("[FastSync] Sync incomplete: local=%d, target=%d",
-			localTip.Height, networkHeight)
+			localTip.GetHeight(), networkHeight)
 	}
 
 	return nil
@@ -471,7 +471,7 @@ func (fs *FastSyncEngine) currentHeight() uint64 {
 	if block == nil {
 		return 0
 	}
-	return block.Height
+	return block.GetHeight()
 }
 
 // fetchNetworkHeight queries connected peers to determine current network chain height.
@@ -585,7 +585,7 @@ func (fs *FastSyncEngine) downloadAndProcessBlockBatch(ctx context.Context,
 		if !accepted {
 			// Block stored as orphan - normal for fast sync with large gaps
 			log.Printf("[FastSync] Block %d stored as orphan (gap detection: expected=%d, actual=%d, gap=%d)", 
-				height, fs.currentHeight(), block.Height, block.Height - fs.currentHeight())
+				height, fs.currentHeight(), block.GetHeight(), block.GetHeight() - fs.currentHeight())
 			
 			// In fast sync mode with large gaps, we need to check if we should continue
 			// or adjust our synchronization strategy
@@ -790,12 +790,12 @@ func CreateFastSyncCheckpoint(block *core.Block, stateRoot string, validatorPubK
 	if block == nil {
 		return nil, fmt.Errorf("block is nil")
 	}
-	if block.Height%CheckpointInterval != 0 && block.Height != 0 {
-		return nil, fmt.Errorf("height %d is not a checkpoint height", block.Height)
+	if block.GetHeight()%CheckpointInterval != 0 && block.GetHeight() != 0 {
+		return nil, fmt.Errorf("height %d is not a checkpoint height", block.GetHeight())
 	}
 	checkpoint := &Checkpoint{
 		Version:   CheckpointVersion,
-		Height:    block.Height,
+		Height:    block.GetHeight(),
 		BlockHash: make([]byte, len(block.Hash)),
 		StateRoot: stateRoot,
 		Timestamp: block.Header.TimestampUnix,

@@ -65,8 +65,8 @@ func (obp *OptimizedBlockPropagator) HandleBlockBroadcastOptimized(c net.Conn, p
 		return fmt.Errorf("invalid block JSON: %w", err)
 	}
 
-	log.Printf("p2p: received optimized block broadcast height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
-	getP2PLogger().BlockProduced("Received optimized block broadcast | Height: %d | Hash: %s", block.Height, hex.EncodeToString(block.Hash))
+	log.Printf("p2p: received optimized block broadcast height=%d hash=%s", block.GetHeight(), hex.EncodeToString(block.Hash))
+	getP2PLogger().BlockProduced("Received optimized block broadcast | Height: %d | Hash: %s", block.GetHeight(), hex.EncodeToString(block.Hash))
 
 	// CRITICAL: Immediate mining interruption for fast chain switching
 	// Bitcoin-style: no delay, immediate response
@@ -132,9 +132,9 @@ func (obp *OptimizedBlockPropagator) evaluateBlockFast(block, currentTip *core.B
 	}
 
 	// Rule 2: Longer chain height = better
-	if block.Height > currentTip.Height {
+	if block.GetHeight() > currentTip.GetHeight() {
 		return true
-	} else if block.Height < currentTip.Height {
+	} else if block.GetHeight() < currentTip.GetHeight() {
 		return false
 	}
 
@@ -157,11 +157,11 @@ func (obp *OptimizedBlockPropagator) propagationWorker(id int) {
 		startTime := time.Now()
 
 		if err := obp.processBlockBackground(block); err != nil {
-			log.Printf("block processing failed: worker=%d height=%d error=%v", id, block.Height, err)
+			log.Printf("block processing failed: worker=%d height=%d error=%v", id, block.GetHeight(), err)
 		}
 
 		processingTime := time.Since(startTime)
-		log.Printf("block processed: worker=%d height=%d processing_time_ms=%d", id, block.Height, processingTime.Milliseconds())
+		log.Printf("block processed: worker=%d height=%d processing_time_ms=%d", id, block.GetHeight(), processingTime.Milliseconds())
 	}
 }
 
@@ -226,7 +226,7 @@ func (obp *OptimizedBlockPropagator) handleUnknownParent(block *core.Block) erro
 	// Request missing blocks from network
 	// This would integrate with sync mechanism
 	log.Printf("requesting missing ancestor blocks: block_height=%d block_hash=%x parent_hash=%x",
-		block.Height, block.Hash, block.Header.PrevHash,
+		block.GetHeight(), block.Hash, block.Header.PrevHash,
 	)
 
 	// In production, this would trigger a sync with the peer that sent this block
@@ -312,7 +312,7 @@ func (obp *OptimizedBlockPropagator) broadcastToPeers(block *core.Block, exclude
 	}
 
 	log.Printf("block broadcast initiated: block_height=%d recipients=%d excluded=%s",
-		block.Height, len(connectedPeers), excludePeer,
+		block.GetHeight(), len(connectedPeers), excludePeer,
 	)
 }
 

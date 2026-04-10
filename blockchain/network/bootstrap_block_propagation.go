@@ -152,8 +152,8 @@ func (b *BootstrapBlockPropagator) highPriorityWorker() {
 		}
 
 		// Rate limiting for network stability
-		if !b.rateLimiter.Allow(string(block.Height)) {
-			log.Printf("[BootstrapPropagator] Rate limit exceeded for high priority block %d", block.Height)
+		if !b.rateLimiter.Allow(string(block.GetHeight())) {
+			log.Printf("[BootstrapPropagator] Rate limit exceeded for high priority block %d", block.GetHeight())
 			b.handleRateLimitedBlock(block, PriorityHigh)
 			continue
 		}
@@ -187,7 +187,7 @@ func (b *BootstrapBlockPropagator) propagateBlock(ctx context.Context, block *co
 
 	// Notify coordinator of propagation attempt
 	b.coordinator.NotifySyncEvent(SyncEventBlockReceived,
-		block.Height, block.Height, "bootstrap_propagator", []*core.Block{block})
+		block.GetHeight(), block.GetHeight(), "bootstrap_propagator", []*core.Block{block})
 
 	// Use existing P2P manager for actual propagation
 	if b.peerManager != nil {
@@ -207,7 +207,7 @@ func (b *BootstrapBlockPropagator) propagateBlock(ctx context.Context, block *co
 			b.updatePropagationMetrics(len(selectedPeers), successes, block, priority)
 
 			log.Printf("BootstrapBlockPropagator: propagated block height=%d to %d/%d peers with priority=%v",
-				block.Height, successes, len(selectedPeers), priority)
+				block.GetHeight(), successes, len(selectedPeers), priority)
 
 			// Check if propagation met minimum success criteria
 			minSuccess := int(float64(len(selectedPeers)) * b.minPropagationSuccessRatio())
@@ -232,10 +232,10 @@ func (b *BootstrapBlockPropagator) propagateBlock(ctx context.Context, block *co
 				return true
 			}
 		} else {
-			log.Printf("BootstrapBlockPropagator: no peers available for block propagation height=%d", block.Height)
+			log.Printf("BootstrapBlockPropagator: no peers available for block propagation height=%d", block.GetHeight())
 		}
 	} else {
-		log.Printf("BootstrapBlockPropagator: peer manager not initialized for block height=%d", block.Height)
+		log.Printf("BootstrapBlockPropagator: peer manager not initialized for block height=%d", block.GetHeight())
 	}
 
 	return false
@@ -246,12 +246,12 @@ func (b *BootstrapBlockPropagator) determineBlockPriority(block *core.Block) Pri
 	currentHeight := b.coordinator.GetChainHeight()
 
 	// High priority for blocks close to current height (recent blocks)
-	if block.Height >= currentHeight-10 {
+	if block.GetHeight() >= currentHeight-10 {
 		return PriorityHigh
 	}
 
 	// Normal priority for blocks within recently synced range
-	if block.Height >= currentHeight-100 {
+	if block.GetHeight() >= currentHeight-100 {
 		return PriorityNormal
 	}
 
@@ -395,7 +395,7 @@ func (b *BootstrapBlockPropagator) sendBlockToPeerWithTimeout(peer string, block
 	// Serialize block
 	blockData := serializeBlockForTransmission(block)
 	if blockData == nil {
-		log.Printf("[BootstrapPropagator] Failed to serialize block %d", block.Height)
+		log.Printf("[BootstrapPropagator] Failed to serialize block %d", block.GetHeight())
 		return false
 	}
 
@@ -409,7 +409,7 @@ func (b *BootstrapBlockPropagator) sendBlockToPeerWithTimeout(peer string, block
 		b.manualBroadcast(block)
 		return true
 	} else {
-		log.Printf("[BootstrapPropagator] No P2P manager available for block %d", block.Height)
+		log.Printf("[BootstrapPropagator] No P2P manager available for block %d", block.GetHeight())
 	}
 
 	return false
@@ -513,7 +513,7 @@ func (b *BootstrapBlockPropagator) lowPriorityWorker() {
 
 func (b *BootstrapBlockPropagator) handlePropagationFailure(block *core.Block, err error, priority PriorityLevel) {
 	// Production-grade propagation failure handling with intelligent retry
-	log.Printf("[BootstrapPropagator] Block %d propagation failed: %v", block.Height, err)
+	log.Printf("[BootstrapPropagator] Block %d propagation failed: %v", block.GetHeight(), err)
 
 	// Update failure metrics
 	atomic.AddUint32(&b.metrics.BlocksLost, 1)
@@ -527,7 +527,7 @@ func (b *BootstrapBlockPropagator) handlePropagationFailure(block *core.Block, e
 	case PriorityLow:
 		// Low priority blocks may be dropped during heavy congestion
 		if b.isSystemUnderHeavyLoad() {
-			log.Printf("[BootstrapPropagator] Low priority block %d dropped due to system congestion", block.Height)
+			log.Printf("[BootstrapPropagator] Low priority block %d dropped due to system congestion", block.GetHeight())
 		} else {
 			b.delayedRetry(block, priority, 3*time.Second)
 		}
@@ -554,7 +554,7 @@ func (b *BootstrapBlockPropagator) propagateBlockWithRetry(ctx context.Context, 
 			}
 
 			log.Printf("[BootstrapPropagator] Block %d propagation attempt %d failed, retrying in %v",
-				block.Height, attempt, retryDelay)
+				block.GetHeight(), attempt, retryDelay)
 
 			time.Sleep(retryDelay)
 		}
@@ -570,7 +570,7 @@ func (b *BootstrapBlockPropagator) propagateBlockWithCongestionControl(ctx conte
 	if b.isSystemCongested() {
 		congestionDelay := b.calculateCongestionDelay()
 		log.Printf("[BootstrapPropagator] Delaying block %d propagation due to congestion: %v",
-			block.Height, congestionDelay)
+			block.GetHeight(), congestionDelay)
 
 		select {
 		case <-ctx.Done():
@@ -591,7 +591,7 @@ func (b *BootstrapBlockPropagator) handleNormalPriorityFailure(block *core.Block
 func (b *BootstrapBlockPropagator) handleLowPriorityFailure(block *core.Block) {
 	// Low priority failure handling with conservative approach
 	if b.calculateSystemLoad() > 0.8 {
-		log.Printf("[BootstrapPropagator] Low priority block %d permanently lost during high system load", block.Height)
+		log.Printf("[BootstrapPropagator] Low priority block %d permanently lost during high system load", block.GetHeight())
 	} else {
 		b.delayedRetry(block, PriorityLow, 5*time.Second)
 	}
@@ -650,7 +650,7 @@ func (b *BootstrapBlockPropagator) updatePropagationLatency(priority PriorityLev
 
 func (b *BootstrapBlockPropagator) retryWithCongestionControl(block *core.Block, priority PriorityLevel) {
 	// Production-grade congestion-controlled retry mechanism
-	log.Printf("[BootstrapPropagator] Retrying block %d with congestion control (priority %v)", block.Height, priority)
+	log.Printf("[BootstrapPropagator] Retrying block %d with congestion control (priority %v)", block.GetHeight(), priority)
 
 	go func() {
 		retryCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -658,7 +658,7 @@ func (b *BootstrapBlockPropagator) retryWithCongestionControl(block *core.Block,
 
 		success := b.propagateBlockWithCongestionControl(retryCtx, block, priority)
 		if !success {
-			log.Printf("[BootstrapPropagator] Congestion-controlled retry failed for block %d", block.Height)
+			log.Printf("[BootstrapPropagator] Congestion-controlled retry failed for block %d", block.GetHeight())
 			atomic.AddUint32(&b.metrics.BlocksLost, 1)
 		}
 	}()
@@ -667,7 +667,7 @@ func (b *BootstrapBlockPropagator) retryWithCongestionControl(block *core.Block,
 func (b *BootstrapBlockPropagator) delayedRetry(block *core.Block, priority PriorityLevel, delay time.Duration) {
 	// Production-grade delayed retry mechanism
 	log.Printf("[BootstrapPropagator] Scheduling delayed retry for block %d in %v (priority %v)",
-		block.Height, delay, priority)
+		block.GetHeight(), delay, priority)
 
 	go func() {
 		time.Sleep(delay)
@@ -678,11 +678,11 @@ func (b *BootstrapBlockPropagator) delayedRetry(block *core.Block, priority Prio
 		if b.isSystemReadyForRetry(priority) {
 			success := b.propagateBlockWithRetry(retryCtx, block, priority)
 			if !success {
-				log.Printf("[BootstrapPropagator] Delayed retry failed for block %d", block.Height)
+				log.Printf("[BootstrapPropagator] Delayed retry failed for block %d", block.GetHeight())
 				atomic.AddUint32(&b.metrics.BlocksLost, 1)
 			}
 		} else {
-			log.Printf("[BootstrapPropagator] System not ready for retry of block %d (priority %v)", block.Height, priority)
+			log.Printf("[BootstrapPropagator] System not ready for retry of block %d (priority %v)", block.GetHeight(), priority)
 			atomic.AddUint32(&b.metrics.BlocksLost, 1)
 		}
 	}()
@@ -694,7 +694,7 @@ func (b *BootstrapBlockPropagator) performPeerBroadcast(ctx context.Context, pee
 	select {
 	case <-ctx.Done():
 		// Context canceled or timed out
-		log.Printf("BootstrapBlockPropagator: broadcast timeout for peer=%s block=%d", peer, block.Height)
+		log.Printf("BootstrapBlockPropagator: broadcast timeout for peer=%s block=%d", peer, block.GetHeight())
 		return false
 	default:
 		// Simulate actual network transmission
@@ -1513,7 +1513,7 @@ type ComplianceReport struct {
 // handleRateLimitedBlock handles blocks that exceed rate limits
 func (b *BootstrapBlockPropagator) handleRateLimitedBlock(block *core.Block, priority PriorityLevel) {
 	// Log rate limiting event
-	log.Printf("[BootstrapPropagator] Block %d rate limited at priority: %v", block.Height, priority)
+	log.Printf("[BootstrapPropagator] Block %d rate limited at priority: %v", block.GetHeight(), priority)
 
 	// Update rate limiting metrics
 	b.updateRateLimitMetrics(priority)
@@ -1530,7 +1530,7 @@ func (b *BootstrapBlockPropagator) handleRateLimitedBlock(block *core.Block, pri
 // handleBackpressure handles blocks during network congestion
 func (b *BootstrapBlockPropagator) handleBackpressure(block *core.Block, priority PriorityLevel) {
 	// Log backpressure event
-	log.Printf("[BootstrapPropagator] Block %d delayed due to backpressure at priority: %v", block.Height, priority)
+	log.Printf("[BootstrapPropagator] Block %d delayed due to backpressure at priority: %v", block.GetHeight(), priority)
 
 	// Update backpressure metrics
 	b.updateBackpressureMetrics()
@@ -1653,7 +1653,7 @@ func (b *BootstrapBlockPropagator) maxConcurrentBroadcasts() int {
 // serializeBlockForTransmission prepares block for network transmission
 func serializeBlockForTransmission(block *core.Block) []byte {
 	// Implementation would serialize block
-	return []byte(fmt.Sprintf("block_%d", block.Height))
+	return []byte(fmt.Sprintf("block_%d", block.GetHeight()))
 }
 
 // isSystemUnderHeavyLoad determines if system is under heavy load
@@ -1805,7 +1805,7 @@ func (b *BootstrapBlockPropagator) triggerExternalIncidentManagement(assessment 
 
 // enqueueBlock - Simple block queuing implementation
 func (b *BootstrapBlockPropagator) enqueueBlock(block *core.Block, priority PriorityLevel) {
-	log.Printf("[ENQUEUE] Block %d queued with priority: %v", block.Height, priority)
+	log.Printf("[ENQUEUE] Block %d queued with priority: %v", block.GetHeight(), priority)
 	
 	// Route block to appropriate priority channel
 	switch priority {
@@ -1814,21 +1814,21 @@ func (b *BootstrapBlockPropagator) enqueueBlock(block *core.Block, priority Prio
 		case b.highPriorityChan <- block:
 			atomic.AddUint64(&b.metrics.TotalBlocksQueued, 1)
 		default:
-			log.Printf("[WARNING] High priority channel full, block %d dropped", block.Height)
+			log.Printf("[WARNING] High priority channel full, block %d dropped", block.GetHeight())
 		}
 	case PriorityNormal:
 		select {
 		case b.normalPriorityChan <- block:
 			atomic.AddUint64(&b.metrics.TotalBlocksQueued, 1)
 		default:
-			log.Printf("[WARNING] Normal priority channel full, block %d dropped", block.Height)
+			log.Printf("[WARNING] Normal priority channel full, block %d dropped", block.GetHeight())
 		}
 	case PriorityLow:
 		select {
 		case b.lowPriorityChan <- block:
 			atomic.AddUint64(&b.metrics.TotalBlocksQueued, 1)
 		default:
-			log.Printf("[WARNING] Low priority channel full, block %d dropped", block.Height)
+			log.Printf("[WARNING] Low priority channel full, block %d dropped", block.GetHeight())
 		}
 	}
 }

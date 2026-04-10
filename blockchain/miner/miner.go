@@ -482,7 +482,7 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 
 // handleMinedBlock handles a successfully mined block
 func (m *Miner) handleMinedBlock(ctx context.Context, block *core.Block) {
-	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block #%d mined successfully, hash=%x", block.Height, block.Hash))
+	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block #%d mined successfully, hash=%x", block.GetHeight(), block.Hash))
 	logf(colorCyan, "ℹ️ ", "Waiting for network sync")
 	time.Sleep(time.Duration(config.DefaultNetworkSyncCheckDelayMs) * time.Millisecond)
 
@@ -539,7 +539,7 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 
 	pm := m.pm
 	if isPeerAPIValid(pm) {
-		localHeight := m.bc.LatestBlock().Height
+		localHeight := m.bc.LatestBlock().GetHeight()
 		peerHeight := getPeerHeight(pm)
 
 		if peerHeight > localHeight {
@@ -590,8 +590,8 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		logf(colorRed, "❌ ", fmt.Sprintf("Mine failed: %v", err))
 		return nil, err
 	}
-	fmt.Printf("[DEBUG] miner.go: MineTransfers returned block %d, hash=%x\n", b.Height, b.Hash)
-	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block mined - height=%d, hash=%x", b.Height, b.Hash))
+	fmt.Printf("[DEBUG] miner.go: MineTransfers returned block %d, hash=%x\n", b.GetHeight(), b.Hash)
+	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block mined - height=%d, hash=%x", b.GetHeight(), b.Hash))
 
 	// Redundant POW validation removed for the following reasons:
 	// 1. POW already validated by NogoPow engine during Seal
@@ -603,7 +603,7 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		return nil, nil
 	}
 
-	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block validated and added to chain (height=%d, hash=%x)", b.Height, b.Hash))
+	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block validated and added to chain (height=%d, hash=%x)", b.GetHeight(), b.Hash))
 
 	propagationDelay := calculateAdaptivePropagationDelay(pm)
 	time.Sleep(time.Duration(propagationDelay) * time.Millisecond)
@@ -613,7 +613,7 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		peerCount = len(pm.Peers())
 	}
 
-	logf(colorCyan, "📡 ", fmt.Sprintf("Broadcasting block #%d to %d peers", b.Height, peerCount))
+	logf(colorCyan, "📡 ", fmt.Sprintf("Broadcasting block #%d to %d peers", b.GetHeight(), peerCount))
 	go m.broadcastBlock(ctx, b)
 
 	if len(selectedIDs) > 0 {
@@ -648,14 +648,14 @@ func (m *Miner) broadcastBlock(ctx context.Context, block *core.Block) {
 		return
 	}
 
-	logf(colorCyan, "📡 ", fmt.Sprintf("Broadcasting block %d (%s)", block.Height, hex.EncodeToString(block.Hash)))
+	logf(colorCyan, "📡 ", fmt.Sprintf("Broadcasting block %d (%s)", block.GetHeight(), hex.EncodeToString(block.Hash)))
 
 	// Broadcast block to peers via P2P manager
 	if m.pm != nil {
 		peerCount := len(m.pm.Peers())
 		logf(colorCyan, "📡 ", fmt.Sprintf("Starting broadcast to %d peers", peerCount))
 		m.pm.BroadcastBlock(ctx, block)
-		logf(colorBrightGreen, "✅ ", fmt.Sprintf("Broadcast completed height=%d", block.Height))
+		logf(colorBrightGreen, "✅ ", fmt.Sprintf("Broadcast completed height=%d", block.GetHeight()))
 	}
 }
 
@@ -723,8 +723,8 @@ func validateBlockPoW(consensus config.ConsensusParams, block, parent *core.Bloc
 		return errors.New("parent is nil")
 	}
 
-	if block.Height != parent.Height+1 {
-		return fmt.Errorf("invalid block height: expected %d, got %d", parent.Height+1, block.Height)
+	if block.GetHeight() != parent.GetHeight()+1 {
+		return fmt.Errorf("invalid block height: expected %d, got %d", parent.GetHeight()+1, block.GetHeight())
 	}
 
 	if string(block.Header.PrevHash) != string(parent.Hash) {
@@ -800,7 +800,7 @@ func CreateBlockTemplate(
 		totalFees += tx.Fee
 	}
 
-	coinbase, err := CreateCoinbaseTx(minerAddress, parent.Height+1, totalFees, chainID, consensus)
+	coinbase, err := CreateCoinbaseTx(minerAddress, parent.GetHeight()+1, totalFees, chainID, consensus)
 	if err != nil {
 		return nil, fmt.Errorf("create coinbase: %w", err)
 	}
@@ -813,10 +813,10 @@ func CreateBlockTemplate(
 	}
 
 	// Calculate block version based on consensus rules
-	blockVersion := getBlockVersion(consensus, parent.Height+1)
+	blockVersion := getBlockVersion(consensus, parent.GetHeight()+1)
 
 	template := &core.Block{
-		Height:       parent.Height + 1,
+		Height:       parent.GetHeight() + 1,
 		MinerAddress: minerAddress,
 		Transactions: allTxs,
 		CoinbaseTx:   coinbase,

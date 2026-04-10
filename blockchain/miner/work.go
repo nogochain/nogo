@@ -84,7 +84,7 @@ func CalculateChainWork(bc Blockchain, block *core.Block) *big.Int {
 		blockWork := GetBlockWork(current)
 		totalWork.Add(totalWork, blockWork)
 
-		if current.Height == 0 {
+		if current.GetHeight() == 0 {
 			break
 		}
 
@@ -243,7 +243,7 @@ func AdjustDifficulty(
 
 	// Create a header from the parent block
 	parentHeader := &nogopow.Header{
-		Number:     new(big.Int).SetUint64(parentBlock.Height),
+		Number:     new(big.Int).SetUint64(parentBlock.GetHeight()),
 		Difficulty: new(big.Int).SetUint64(uint64(parentBlock.Header.DifficultyBits)),
 		Time:       uint64(parentBlock.Header.TimestampUnix),
 	}
@@ -302,21 +302,21 @@ func GetBlockAtHeight(bc Blockchain, height uint64) *core.Block {
 		return nil
 	}
 
-	if latest.Height == height {
+	if latest.GetHeight() == height {
 		return latest
 	}
 
-	if height > latest.Height {
+	if height > latest.GetHeight() {
 		return nil
 	}
 
 	current := latest
-	for current != nil && current.Height > height {
+	for current != nil && current.GetHeight() > height {
 		parentHash := hex.EncodeToString(current.Header.PrevHash)
 		current = GetBlockByHash(bc, parentHash)
 	}
 
-	if current != nil && current.Height == height {
+	if current != nil && current.GetHeight() == height {
 		return current
 	}
 

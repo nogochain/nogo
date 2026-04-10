@@ -138,7 +138,7 @@ func (fh *ForkHandler) HandleBlock(block *Block) (*ForkChoiceResult, error) {
 		return nil, errors.New("nil block")
 	}
 
-	if block.Height == 0 {
+	if block.GetHeight() == 0 {
 		return nil, errors.New("external genesis blocks not accepted")
 	}
 
@@ -155,7 +155,7 @@ func (fh *ForkHandler) HandleBlock(block *Block) (*ForkChoiceResult, error) {
 	}
 	fh.mu.RUnlock()
 
-	if parent == nil && block.Height > 0 {
+	if parent == nil && block.GetHeight() > 0 {
 		return nil, ErrUnknownParent
 	}
 
@@ -167,7 +167,7 @@ func (fh *ForkHandler) HandleBlock(block *Block) (*ForkChoiceResult, error) {
 		tempPath := []*Block{parent, block}
 		if err := validateDifficultyNogoPow(fh.consensus, tempPath, 1); err != nil {
 			log.Printf("ForkHandler: rejecting block height=%d hash=%s due to difficulty validation failure: %v",
-				block.Height, hex.EncodeToString(block.Hash), err)
+				block.GetHeight(), hex.EncodeToString(block.Hash), err)
 			return nil, fmt.Errorf("difficulty validation failed: %w", err)
 		}
 	}
@@ -179,7 +179,7 @@ func (fh *ForkHandler) HandleBlock(block *Block) (*ForkChoiceResult, error) {
 		if tx.ChainID != fh.chainID {
 			return nil, fmt.Errorf("wrong chainId: %d", tx.ChainID)
 		}
-		if err := tx.VerifyForConsensus(fh.consensus, block.Height); err != nil {
+		if err := tx.VerifyForConsensus(fh.consensus, block.GetHeight()); err != nil {
 			return nil, fmt.Errorf("transaction validation failed: %w", err)
 		}
 	}
@@ -189,13 +189,13 @@ func (fh *ForkHandler) HandleBlock(block *Block) (*ForkChoiceResult, error) {
 
 	hashHex := hex.EncodeToString(block.Hash)
 	if _, exists := fh.blocksByHash[hashHex]; exists {
-		log.Printf("ForkHandler: rejecting block height=%d hash=%s (duplicate)", block.Height, hashHex)
+		log.Printf("ForkHandler: rejecting block height=%d hash=%s (duplicate)", block.GetHeight(), hashHex)
 		return nil, ErrDuplicateBlock
 	}
 
 	if _, ok := fh.blocksByHash[parentHashHex]; !ok {
 		log.Printf("ForkHandler: rejecting block height=%d hash=%s (unknown parent %s)",
-			block.Height, hashHex, parentHashHex)
+			block.GetHeight(), hashHex, parentHashHex)
 		return nil, ErrUnknownParent
 	}
 
@@ -216,7 +216,7 @@ func (fh *ForkHandler) HandleBlock(block *Block) (*ForkChoiceResult, error) {
 	choice := fh.selectForkChoice(newWork, hashHex, currentWork, currentTip)
 	if !choice.AcceptNewBlock {
 		delete(fh.blocksByHash, hashHex)
-		log.Printf("ForkHandler: block not better than current chain height=%d hash=%s", block.Height, hashHex)
+		log.Printf("ForkHandler: block not better than current chain height=%d hash=%s", block.GetHeight(), hashHex)
 		return &ForkChoiceResult{
 			SwitchedChain: false,
 			NewTipHash:    currentTip,
@@ -226,14 +226,14 @@ func (fh *ForkHandler) HandleBlock(block *Block) (*ForkChoiceResult, error) {
 
 	currentHeight := uint64(0)
 	if len(fh.blocks) > 0 {
-		currentHeight = fh.blocks[len(fh.blocks)-1].Height
+		currentHeight = fh.blocks[len(fh.blocks)-1].GetHeight()
 	}
-	wasExtension := (parentHashHex == currentTip && block.Height == currentHeight+1)
+	wasExtension := (parentHashHex == currentTip && block.GetHeight() == currentHeight+1)
 
 	result := &ForkChoiceResult{
 		SwitchedChain: !wasExtension,
 		NewTipHash:    hashHex,
-		NewHeight:     block.Height,
+		NewHeight:     block.GetHeight(),
 		NewWork:       newWork,
 		IsReorg:       !wasExtension,
 	}
@@ -242,24 +242,24 @@ func (fh *ForkHandler) HandleBlock(block *Block) (*ForkChoiceResult, error) {
 		if parent != nil {
 			result.CommonAncestor = parent
 		}
-		if block.Height > currentHeight {
-			result.ReorgDepth = block.Height - currentHeight
+		if block.GetHeight() > currentHeight {
+			result.ReorgDepth = block.GetHeight() - currentHeight
 		}
 	}
 
 	var execErr error
 	if wasExtension {
-		log.Printf("[FORKS] extending chain height=%d -> %d hash=%s", currentHeight, block.Height, hashHex)
+		log.Printf("[FORKS] extending chain height=%d -> %d hash=%s", currentHeight, block.GetHeight(), hashHex)
 		execErr = fh.appendBlockToChainLocked(block)
 	} else {
 		log.Printf("[REORG] switching from height=%d tip=%s to height=%d tip=%s",
-			currentHeight, currentTip, block.Height, hashHex)
+			currentHeight, currentTip, block.GetHeight(), hashHex)
 		execErr = fh.reorganizeChainLocked(block, parent, newWork, path, state)
 	}
 
 	if execErr != nil {
 		delete(fh.blocksByHash, hashHex)
-		log.Printf("ForkHandler: execution failed height=%d hash=%s error=%v", block.Height, hashHex, execErr)
+		log.Printf("ForkHandler: execution failed height=%d hash=%s error=%v", block.GetHeight(), hashHex, execErr)
 		return nil, fmt.Errorf("%w: %w", ErrExecutionFailed, execErr)
 	}
 
@@ -267,7 +267,7 @@ func (fh *ForkHandler) HandleBlock(block *Block) (*ForkChoiceResult, error) {
 		fh.events.Publish(WSEvent{
 			Type: "new_block",
 			Data: map[string]any{
-				"height":         block.Height,
+				"height":         block.GetHeight(),
 				"hash":           hashHex,
 				"prevHash":       parentHashHex,
 				"difficultyBits": block.Header.DifficultyBits,
@@ -330,8 +330,8 @@ func (fh *ForkHandler) selectForkChoice(newWork *big.Int, newTipHash string, cur
 }
 
 func (fh *ForkHandler) validateBlockHeader(block *Block) error {
-	if expected := blockVersionForHeight(fh.consensus, block.Height); block.Header.Version != expected {
-		return fmt.Errorf("bad block version at %d: expected %d got %d", block.Height, expected, block.Header.Version)
+	if expected := blockVersionForHeight(fh.consensus, block.GetHeight()); block.Header.Version != expected {
+		return fmt.Errorf("bad block version at %d: expected %d got %d", block.GetHeight(), expected, block.Header.Version)
 	}
 
 	if len(block.Hash) == 0 {
@@ -366,7 +366,7 @@ func (fh *ForkHandler) computeCanonicalForTipLocked(tipHashHex string) ([]*Block
 		}
 		rev = append(rev, b)
 
-		if b.Height == 0 || len(b.Header.PrevHash) == 0 {
+		if b.GetHeight() == 0 || len(b.Header.PrevHash) == 0 {
 			break
 		}
 		cur = hex.EncodeToString(b.Header.PrevHash)
@@ -382,7 +382,7 @@ func (fh *ForkHandler) computeCanonicalForTipLocked(tipHashHex string) ([]*Block
 
 	for i, b := range path {
 		if i == 0 {
-			if b.Height != 0 || len(b.Header.PrevHash) != 0 {
+			if b.GetHeight() != 0 || len(b.Header.PrevHash) != 0 {
 				return nil, nil, nil, ErrBadGenesisHeader
 			}
 			if expected := blockVersionForHeight(fh.consensus, 0); b.Header.Version != expected {
@@ -390,7 +390,7 @@ func (fh *ForkHandler) computeCanonicalForTipLocked(tipHashHex string) ([]*Block
 			}
 		} else {
 			prev := path[i-1]
-			if b.Height != prev.Height+1 {
+			if b.GetHeight() != prev.GetHeight()+1 {
 				return nil, nil, nil, ErrBadHeightLinkage
 			}
 			if !bytes.Equal(b.Header.PrevHash, prev.Hash) {
@@ -401,13 +401,13 @@ func (fh *ForkHandler) computeCanonicalForTipLocked(tipHashHex string) ([]*Block
 					return nil, nil, nil, err
 				}
 			}
-			if expected := blockVersionForHeight(fh.consensus, b.Height); b.Header.Version != expected {
-				return nil, nil, nil, fmt.Errorf("bad block version at %d: expected %d got %d", b.Height, expected, b.Header.Version)
+			if expected := blockVersionForHeight(fh.consensus, b.GetHeight()); b.Header.Version != expected {
+				return nil, nil, nil, fmt.Errorf("bad block version at %d: expected %d got %d", b.GetHeight(), expected, b.Header.Version)
 			}
 		}
 
 		if err := applyBlockToState(fh.consensus, state, b); err != nil {
-			return nil, nil, nil, fmt.Errorf("state apply failed at height %d: %w", b.Height, err)
+			return nil, nil, nil, fmt.Errorf("state apply failed at height %d: %w", b.GetHeight(), err)
 		}
 
 		work.Add(work, WorkForDifficultyBits(b.Header.DifficultyBits))
@@ -437,13 +437,13 @@ func (fh *ForkHandler) appendBlockToChainLocked(b *Block) error {
 		}
 	}
 
-	log.Printf("[FORKS] chain extended height=%d hash=%s", b.Height, hex.EncodeToString(b.Hash))
+	log.Printf("[FORKS] chain extended height=%d hash=%s", b.GetHeight(), hex.EncodeToString(b.Hash))
 	return nil
 }
 
 func (fh *ForkHandler) reorganizeChainLocked(newBlock *Block, parent *Block, newWork *big.Int, path []*Block, state map[string]Account) error {
-	currentHeight := fh.blocks[len(fh.blocks)-1].Height
-	targetHeight := parent.Height
+	currentHeight := fh.blocks[len(fh.blocks)-1].GetHeight()
+	targetHeight := parent.GetHeight()
 
 	reorgDepth := currentHeight - targetHeight
 	if reorgDepth > uint64(fh.maxReorgDepth) {
@@ -452,7 +452,7 @@ func (fh *ForkHandler) reorganizeChainLocked(newBlock *Block, parent *Block, new
 	}
 
 	log.Printf("[REORG] starting chain reorganization from height=%d to height=%d depth=%d",
-		currentHeight, newBlock.Height, reorgDepth)
+		currentHeight, newBlock.GetHeight(), reorgDepth)
 
 	if err := fh.rollbackToHeightInternalLocked(targetHeight); err != nil {
 		return fmt.Errorf("%w: %w", ErrRollbackFailed, err)
@@ -480,18 +480,18 @@ func (fh *ForkHandler) reorganizeChainLocked(newBlock *Block, parent *Block, new
 	}
 
 	log.Printf("[REORG] completed successfully new tip height=%d hash=%s work=%v",
-		newBlock.Height, hex.EncodeToString(newBlock.Hash), newWork)
+		newBlock.GetHeight(), hex.EncodeToString(newBlock.Hash), newWork)
 	return nil
 }
 
 func (fh *ForkHandler) rollbackToHeightInternalLocked(targetHeight uint64) error {
-	if targetHeight >= fh.blocks[len(fh.blocks)-1].Height {
+	if targetHeight >= fh.blocks[len(fh.blocks)-1].GetHeight() {
 		return fmt.Errorf("cannot rollback to height %d, current height is %d",
-			targetHeight, fh.blocks[len(fh.blocks)-1].Height)
+			targetHeight, fh.blocks[len(fh.blocks)-1].GetHeight())
 	}
 
 	log.Printf("[REORG] rolling back from height %d to %d",
-		fh.blocks[len(fh.blocks)-1].Height, targetHeight)
+		fh.blocks[len(fh.blocks)-1].GetHeight(), targetHeight)
 
 	for i := len(fh.blocks) - 1; i > int(targetHeight); i-- {
 		block := fh.blocks[i]
@@ -524,12 +524,12 @@ func (fh *ForkHandler) recomputeStateFromGenesisLocked() (map[string]Account, er
 
 	for _, b := range fh.blocks {
 		if err := applyBlockToState(fh.consensus, state, b); err != nil {
-			return nil, fmt.Errorf("state replay at height %d failed: %w", b.Height, err)
+			return nil, fmt.Errorf("state replay at height %d failed: %w", b.GetHeight(), err)
 		}
 	}
 
 	log.Printf("[REORG] state recomputed from genesis height=%d accounts=%d",
-		fh.blocks[len(fh.blocks)-1].Height, len(state))
+		fh.blocks[len(fh.blocks)-1].GetHeight(), len(state))
 	return state, nil
 }
 
@@ -549,13 +549,13 @@ func (fh *ForkHandler) indexTxsForBlockLocked(b *Block) {
 			continue
 		}
 
-		txid, err := TxIDHexForConsensus(tx, fh.consensus, b.Height)
+		txid, err := TxIDHexForConsensus(tx, fh.consensus, b.GetHeight())
 		if err != nil {
 			continue
 		}
 
 		fh.txIndex[txid] = TxLocation{
-			Height:       b.Height,
+			Height:       b.GetHeight(),
 			BlockHashHex: hashHex,
 			Index:        i,
 		}
@@ -573,7 +573,7 @@ func (fh *ForkHandler) indexAddressTxsForBlockLocked(b *Block) {
 			continue
 		}
 
-		txid, err := TxIDHexForConsensus(tx, fh.consensus, b.Height)
+		txid, err := TxIDHexForConsensus(tx, fh.consensus, b.GetHeight())
 		if err != nil {
 			continue
 		}
@@ -586,7 +586,7 @@ func (fh *ForkHandler) indexAddressTxsForBlockLocked(b *Block) {
 		entry := AddressTxEntry{
 			TxID: txid,
 			Location: TxLocation{
-				Height:       b.Height,
+				Height:       b.GetHeight(),
 				BlockHashHex: hashHex,
 				Index:        i,
 			},
@@ -627,7 +627,7 @@ func (fh *ForkHandler) unindexBlockLocked(b *Block) {
 		if tx.Type != TxTransfer {
 			continue
 		}
-		txid, err := TxIDHexForConsensus(tx, fh.consensus, b.Height)
+		txid, err := TxIDHexForConsensus(tx, fh.consensus, b.GetHeight())
 		if err != nil {
 			continue
 		}
@@ -698,7 +698,7 @@ func (fh *ForkHandler) GetBestTip() (string, uint64, *big.Int) {
 
 	height := uint64(0)
 	if len(fh.blocks) > 0 {
-		height = fh.blocks[len(fh.blocks)-1].Height
+		height = fh.blocks[len(fh.blocks)-1].GetHeight()
 	}
 
 	work := big.NewInt(0)
@@ -748,7 +748,7 @@ func validateDifficultyNogoPow(consensus ConsensusParams, path []*Block, idx int
 		}
 
 		parentHeader := &nogopow.Header{
-			Number:     big.NewInt(int64(parentBlock.Height)),
+			Number:     big.NewInt(int64(parentBlock.GetHeight())),
 			Time:       uint64(parentBlock.Header.TimestampUnix),
 			Difficulty: big.NewInt(int64(parentBlock.Header.DifficultyBits)),
 			ParentHash: parentHash,
@@ -765,12 +765,12 @@ func validateDifficultyNogoPow(consensus ConsensusParams, path []*Block, idx int
 
 		if actualDifficulty.Cmp(minAllowed) < 0 {
 			return fmt.Errorf("difficulty adjustment too aggressive: actual %d < min allowed %d (expected %d, block height %d)",
-				actualDifficulty.Uint64(), minAllowed.Uint64(), expectedDifficulty.Uint64(), currentBlock.Height)
+				actualDifficulty.Uint64(), minAllowed.Uint64(), expectedDifficulty.Uint64(), currentBlock.GetHeight())
 		}
 
 		if actualDifficulty.Cmp(maxAllowed) > 0 {
 			return fmt.Errorf("difficulty adjustment too aggressive: actual %d > max allowed %d (expected %d, block height %d)",
-				actualDifficulty.Uint64(), maxAllowed.Uint64(), expectedDifficulty.Uint64(), currentBlock.Height)
+				actualDifficulty.Uint64(), maxAllowed.Uint64(), expectedDifficulty.Uint64(), currentBlock.GetHeight())
 		}
 	}
 

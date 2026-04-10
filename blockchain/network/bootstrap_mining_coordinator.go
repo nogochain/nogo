@@ -162,7 +162,7 @@ func (c *BootstrapMiningCoordinator) handleSyncEvent(event SyncEvent) {
 		if len(event.RelatedBlocks) > 0 {
 			log.Printf("[BootstrapMiningCoordinator] Received %d blocks in sync", len(event.RelatedBlocks))
 			if len(event.RelatedBlocks) > 0 {
-				c.syncState.CurrentHeight = event.RelatedBlocks[len(event.RelatedBlocks)-1].Height
+				c.syncState.CurrentHeight = event.RelatedBlocks[len(event.RelatedBlocks)-1].GetHeight()
 				c.updateSyncProgress()
 			}
 		}
@@ -183,11 +183,11 @@ func (c *BootstrapMiningCoordinator) handleSyncEvent(event SyncEvent) {
 // handleBlockMined coordinates mining success with synchronization
 func (c *BootstrapMiningCoordinator) handleBlockMined(block *core.Block) {
 	// Update mining state
-	c.miningState.LastBlockMined = block.Height
+	c.miningState.LastBlockMined = block.GetHeight()
 	c.miningState.TotalBlocksMined++
 	atomic.AddUint64(&c.metrics.BlocksMined, 1)
 
-	log.Printf("[BootstrapCoordinator] Block %d mined, updating coordination state", block.Height)
+	log.Printf("[BootstrapCoordinator] Block %d mined, updating coordination state", block.GetHeight())
 
 	// Critical: Ensure block is propagated even during synchronization
 	if c.syncState.IsSyncing {

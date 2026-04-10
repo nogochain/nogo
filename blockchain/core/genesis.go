@@ -770,7 +770,7 @@ func CreateGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, 
 	genesisHeader := &nogopow.Header{
 		ParentHash: nogopow.BytesToHash(genesis.Header.PrevHash),
 		Coinbase:   stringToAddress(genesis.MinerAddress),
-		Number:     big.NewInt(int64(genesis.Height)),
+		Number:     big.NewInt(int64(genesis.GetHeight())),
 		Time:       uint64(genesis.Header.TimestampUnix),
 		Difficulty: big.NewInt(int64(genesis.Header.DifficultyBits)),
 	}
@@ -848,8 +848,8 @@ func ValidateGenesisBlock(b *Block, cfg *GenesisConfig, consensus ConsensusParam
 	if b == nil {
 		return errors.New("missing genesis block")
 	}
-	if b.Height != 0 {
-		return fmt.Errorf("invalid genesis height: %d", b.Height)
+	if b.GetHeight() != 0 {
+		return fmt.Errorf("invalid genesis height: %d", b.GetHeight())
 	}
 	if len(b.Header.PrevHash) != 0 {
 		return errors.New("invalid genesis prevHash")
@@ -904,7 +904,7 @@ func validateGenesisPoWNogoPow(consensus ConsensusParams, b *Block) error {
 	header := &nogopow.Header{
 		ParentHash: nogopow.BytesToHash(b.Header.PrevHash),
 		Coinbase:   stringToAddress(b.MinerAddress),
-		Number:     big.NewInt(int64(b.Height)),
+		Number:     big.NewInt(int64(b.GetHeight())),
 		Time:       uint64(b.Header.TimestampUnix),
 		Difficulty: big.NewInt(int64(b.Header.DifficultyBits)),
 		Nonce:      nogopow.BlockNonce{},

@@ -45,7 +45,7 @@ func (c *Chain) GetHeaderByHash(hash nogopow.Hash) *nogopow.Header {
 			return &nogopow.Header{
 				ParentHash: nogopow.BytesToHash(block.Header.PrevHash),
 				Coinbase:   coinbaseAddr,
-				Number:     big.NewInt(int64(block.Height)),
+				Number:     big.NewInt(int64(block.GetHeight())),
 				Time:       uint64(block.Header.TimestampUnix),
 				Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
 			}
@@ -85,7 +85,7 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	}
 
 	prevHash := append([]byte(nil), latest.Hash...)
-	height := latest.Height + 1
+	height := latest.GetHeight() + 1
 
 	// Use NTP synchronized time for block timestamp
 	now := getNetworkTimeUnix()
@@ -176,7 +176,7 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 
 	// Get parent header for difficulty calculation
 	parentHeader := &nogopow.Header{
-		Number:     big.NewInt(int64(latest.Height)),
+		Number:     big.NewInt(int64(latest.GetHeight())),
 		Time:       uint64(latest.Header.TimestampUnix),
 		Difficulty: big.NewInt(int64(latest.Header.DifficultyBits)),
 	}
@@ -229,7 +229,7 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	}
 
 	header := &nogopow.Header{
-		Number:     big.NewInt(int64(newBlock.Height)),
+		Number:     big.NewInt(int64(newBlock.GetHeight())),
 		Time:       uint64(newBlock.Header.TimestampUnix),
 		ParentHash: parentHash,
 		Difficulty: nextDifficulty,
@@ -309,7 +309,7 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 		event := &WSEvent{
 			Type: "new_block",
 			Data: map[string]any{
-				"height":         newBlock.Height,
+				"height":         newBlock.GetHeight(),
 				"hash":           hex.EncodeToString(newBlock.Hash),
 				"prevHash":       hex.EncodeToString(newBlock.Header.PrevHash),
 				"difficultyBits": newBlock.Header.DifficultyBits,
@@ -333,7 +333,7 @@ func (c *Chain) processIntegrityRewardsLocked(block *Block) {
 		return
 	}
 
-	height := block.Height
+	height := block.GetHeight()
 
 	// Check if it's distribution time (every 5082 blocks)
 	if c.integrityDistributor.ShouldDistribute(height) {

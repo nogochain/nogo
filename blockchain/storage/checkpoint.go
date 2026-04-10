@@ -376,7 +376,7 @@ func CheckpointFromBlock(block *core.Block, stateRoot string) *Checkpoint {
 	hashCopy := make([]byte, len(block.Hash))
 	copy(hashCopy, block.Hash)
 	return &Checkpoint{
-		Height:       block.Height,
+		Height:       block.GetHeight(),
 		BlockHash:    hex.EncodeToString(block.Hash),
 		BlockHashRaw: hashCopy,
 		Timestamp:    time.Unix(block.Header.TimestampUnix, 0),

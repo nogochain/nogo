@@ -132,7 +132,7 @@ func (v *BlockValidator) ValidateBlock(block *Block, parent *Block, state map[st
 		return fmt.Errorf("transaction validation failed: %w", err)
 	}
 
-	if state != nil && block.Height > 0 {
+	if state != nil && block.GetHeight() > 0 {
 		testState := make(map[string]Account, len(state))
 		for k, val := range state {
 			testState[k] = val
@@ -162,16 +162,16 @@ func (v *BlockValidator) validateBlockStructure(block *Block) error {
 		return fmt.Errorf("difficulty bits %d exceeds maximum %d", block.Header.DifficultyBits, maxDifficultyBits)
 	}
 
-	expectedVersion := blockVersionForHeight(v.consensus, block.Height)
+	expectedVersion := blockVersionForHeight(v.consensus, block.GetHeight())
 	if block.Header.Version != expectedVersion {
-		return fmt.Errorf("%w: expected %d got %d at height %d", ErrInvalidVersion, expectedVersion, block.Header.Version, block.Height)
+		return fmt.Errorf("%w: expected %d got %d at height %d", ErrInvalidVersion, expectedVersion, block.Header.Version, block.GetHeight())
 	}
 
 	return nil
 }
 
 func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
-	if block.Height == 0 {
+	if block.GetHeight() == 0 {
 		if block.Header.DifficultyBits != v.consensus.GenesisDifficultyBits {
 			return fmt.Errorf("%w: expected %d got %d", ErrGenesisDifficultyMismatch, v.consensus.GenesisDifficultyBits, block.Header.DifficultyBits)
 		}
@@ -203,7 +203,7 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
 		}
 
 		parentHeader := &nogopow.Header{
-			Number:     big.NewInt(int64(parent.Height)),
+			Number:     big.NewInt(int64(parent.GetHeight())),
 			Time:       uint64(parent.Header.TimestampUnix),
 			Difficulty: big.NewInt(int64(parent.Header.DifficultyBits)),
 			ParentHash: parentHash,
@@ -265,7 +265,7 @@ func (v *BlockValidator) validateTransactions(block *Block, consensus ConsensusP
 		return err
 	}
 
-	if block.Height > 0 {
+	if block.GetHeight() > 0 {
 		if err := v.validateCoinbaseEconomics(block); err != nil {
 			return fmt.Errorf("coinbase economics validation failed: %w", err)
 		}
@@ -286,7 +286,7 @@ func (v *BlockValidator) verifyTransactionsBatch(block *Block, consensus Consens
 				results[i] = true
 				continue
 			}
-			err := tx.VerifyForConsensus(consensus, block.Height)
+			err := tx.VerifyForConsensus(consensus, block.GetHeight())
 			results[i] = (err == nil)
 		}
 	} else {
@@ -306,7 +306,7 @@ func (v *BlockValidator) verifyTransactionsBatch(block *Block, consensus Consens
 				continue
 			}
 
-			h, err := txSigningHashForConsensus(tx, consensus, block.Height)
+			h, err := txSigningHashForConsensus(tx, consensus, block.GetHeight())
 			if err != nil {
 				results[i] = false
 				continue
@@ -356,7 +356,7 @@ func (v *BlockValidator) validateCoinbaseEconomics(block *Block) error {
 	policy := v.consensus.MonetaryPolicy
 	// Miner receives MinerRewardShare% of block reward
 	// Transaction fees are burned (MinerFeeShare=0) to create deflationary pressure
-	expectedAmount := policy.BlockReward(block.Height)*uint64(policy.MinerRewardShare)/100 + policy.MinerFeeAmount(totalFees)
+	expectedAmount := policy.BlockReward(block.GetHeight())*uint64(policy.MinerRewardShare)/100 + policy.MinerFeeAmount(totalFees)
 
 	coinbase := block.Transactions[0]
 	if coinbase.ToAddress != block.MinerAddress {
@@ -364,7 +364,7 @@ func (v *BlockValidator) validateCoinbaseEconomics(block *Block) error {
 	}
 
 	if coinbase.Amount != expectedAmount {
-		return fmt.Errorf("%w: expected %d got %d (height=%d)", ErrInvalidCoinbaseAmt, expectedAmount, coinbase.Amount, block.Height)
+		return fmt.Errorf("%w: expected %d got %d (height=%d)", ErrInvalidCoinbaseAmt, expectedAmount, coinbase.Amount, block.GetHeight())
 	}
 
 	return nil
@@ -397,7 +397,7 @@ func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Bl
 		return errors.New("invalid block for POW verification")
 	}
 
-	if block.Height == 0 {
+	if block.GetHeight() == 0 {
 		return nil
 	}
 
@@ -419,7 +419,7 @@ func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Bl
 	}
 
 	header := &nogopow.Header{
-		Number:     big.NewInt(int64(block.Height)),
+		Number:     big.NewInt(int64(block.GetHeight())),
 		Time:       uint64(block.Header.TimestampUnix),
 		ParentHash: parentHash,
 		Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
@@ -429,7 +429,7 @@ func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Bl
 	binary.LittleEndian.PutUint64(header.Nonce[:8], block.Header.Nonce)
 
 	if err := engine.VerifySealOnly(header); err != nil {
-		return fmt.Errorf("NogoPow seal verification failed for block %d: %w", block.Height, err)
+		return fmt.Errorf("NogoPow seal verification failed for block %d: %w", block.GetHeight(), err)
 	}
 
 	return nil
@@ -576,7 +576,7 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 		return errors.New("first tx must be coinbase")
 	}
 
-	if b.Height > 0 {
+	if b.GetHeight() > 0 {
 		if err := validateAddress(b.MinerAddress); err != nil {
 			return fmt.Errorf("invalid minerAddress: %w", err)
 		}
@@ -594,7 +594,7 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 		policy := p.MonetaryPolicy
 		// Miner receives MinerRewardShare% of block reward
 		// Transaction fees are burned (MinerFeeShare=0) to create deflationary pressure
-		expected := policy.BlockReward(b.Height)*uint64(policy.MinerRewardShare)/100 + policy.MinerFeeAmount(fees)
+		expected := policy.BlockReward(b.GetHeight())*uint64(policy.MinerRewardShare)/100 + policy.MinerFeeAmount(fees)
 		if cb.Amount != expected {
 			return fmt.Errorf("bad coinbase amount: expected %d got %d", expected, cb.Amount)
 		}
@@ -606,7 +606,7 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 			if i != 0 {
 				return errors.New("coinbase must be first")
 			}
-			if err := tx.VerifyForConsensus(p, b.Height); err != nil {
+			if err := tx.VerifyForConsensus(p, b.GetHeight()); err != nil {
 				return err
 			}
 			acct := state[tx.ToAddress]
@@ -617,7 +617,7 @@ func applyBlockToState(p ConsensusParams, state map[string]Account, b *Block) er
 			acct.Balance += tx.Amount
 			state[tx.ToAddress] = acct
 		case TxTransfer:
-			if err := tx.VerifyForConsensus(p, b.Height); err != nil {
+			if err := tx.VerifyForConsensus(p, b.GetHeight()); err != nil {
 				return err
 			}
 			fromAddr, err := tx.FromAddress()

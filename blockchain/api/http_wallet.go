@@ -237,7 +237,7 @@ func (s *Server) handleWalletSignTransaction(w http.ResponseWriter, r *http.Requ
 	}
 
 	latest := s.bc.LatestBlock()
-	nextHeight := latest.Height + 1
+	nextHeight := latest.GetHeight() + 1
 	h, err := txSigningHashForConsensus(tx, config.ConsensusParams{}, nextHeight)
 	if err != nil {
 		_ = writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})

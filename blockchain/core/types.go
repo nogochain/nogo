@@ -439,7 +439,7 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 func (b *Block) TxRootLegacyForConsensus(p ConsensusParams) ([]byte, error) {
 	h := sha256.New()
 	for _, tx := range b.Transactions {
-		th, err := txSigningHashForConsensus(tx, p, b.Height)
+		th, err := txSigningHashForConsensus(tx, p, b.GetHeight())
 		if err != nil {
 			return nil, err
 		}
@@ -454,7 +454,7 @@ func (b *Block) TxRootLegacyForConsensus(p ConsensusParams) ([]byte, error) {
 func (b *Block) MerkleRootV2ForConsensus(p ConsensusParams) ([]byte, error) {
 	leaves := make([][]byte, 0, len(b.Transactions))
 	for _, tx := range b.Transactions {
-		th, err := txSigningHashForConsensus(tx, p, b.Height)
+		th, err := txSigningHashForConsensus(tx, p, b.GetHeight())
 		if err != nil {
 			return nil, err
 		}
@@ -702,7 +702,7 @@ func (b *Block) MarshalJSON() ([]byte, error) {
 	// Build response with all fields exposed
 	response := map[string]interface{}{
 		"version":        b.Header.Version,
-		"height":         b.Height,
+		"height":         b.GetHeight(),
 		"hash":           base64.StdEncoding.EncodeToString(b.Hash),
 		"prevHash":       base64.StdEncoding.EncodeToString(b.Header.PrevHash),
 		"timestampUnix":  b.Header.TimestampUnix,

@@ -62,7 +62,7 @@ func (wc *WorkCalculator) CalculateChainWork(block *Block, getBlockByHash func(h
 	current := block
 
 	// Traverse back to genesis
-	for current.Height > 0 {
+	for current.GetHeight() > 0 {
 		prevHash := current.GetPrevHash()
 		if prevHash == nil {
 			break

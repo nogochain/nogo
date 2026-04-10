@@ -121,7 +121,7 @@ func NewP2PServer(bc BlockchainInterface, pm *P2PPeerManager, mp Mempool, listen
 		chain := cp.GetUnderlyingChain()
 		chainSelector = core.NewChainSelector(chain, bc)
 		resolutionEngine = NewForkResolutionEngine(chainSelector, forkDetector)
-		log.Printf("[P2PServer] Fork resolution engine initialized (chain_height=%d)", chain.LatestBlock().Height)
+		log.Printf("[P2PServer] Fork resolution engine initialized (chain_height=%d)", chain.LatestBlock().GetHeight())
 	} else {
 		log.Printf("[P2PServer] Warning: bc does not provide underlying chain, fork resolution disabled")
 	}
@@ -454,14 +454,14 @@ func (s *P2PServer) writeChainInfo(w io.Writer) error {
 	out := map[string]any{
 		"chainId":              s.bc.GetChainID(),
 		"rulesHash":            s.bc.RulesHashHex(),
-		"height":               latest.Height,
+		"height":               latest.GetHeight(),
 		"latestHash":           fmt.Sprintf("%x", latest.Hash),
 		"genesisHash":          fmt.Sprintf("%x", genesis.Hash),
 		"genesisTimestampUnix": genesis.Header.TimestampUnix,
 		"peersCount":           peersCount,
 		"work":                 chainWork.String(),
 	}
-	log.Printf("writeChainInfo: returning height=%d hash=%s work=%s", latest.Height, fmt.Sprintf("%x", latest.Hash), chainWork.String())
+	log.Printf("writeChainInfo: returning height=%d hash=%s work=%s", latest.GetHeight(), fmt.Sprintf("%x", latest.Hash), chainWork.String())
 	err := p2pWriteJSON(w, p2pEnvelope{Type: "chain_info", Payload: mustJSON(out)})
 	if err != nil {
 		log.Printf("writeChainInfo: failed to write response: %v", err)
@@ -597,8 +597,8 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 		return err
 	}
 
-	log.Printf("p2p: received block broadcast height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
-	getP2PLogger().BlockProduced("Received block broadcast | Height: %d | Hash: %s", block.Height, hex.EncodeToString(block.Hash))
+	log.Printf("p2p: received block broadcast height=%d hash=%s", block.GetHeight(), hex.EncodeToString(block.Hash))
+	getP2PLogger().BlockProduced("Received block broadcast | Height: %d | Hash: %s", block.GetHeight(), hex.EncodeToString(block.Hash))
 
 	// CRITICAL: Interrupt mining to ensure fast chain switching
 	// This prevents forks caused by mining on an outdated chain
@@ -627,20 +627,20 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 			})
 		}
 	} else {
-		log.Printf("[P2P] Block PoW validation passed height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
+		log.Printf("[P2P] Block PoW validation passed height=%d hash=%s", block.GetHeight(), hex.EncodeToString(block.Hash))
 	}
 
 	// CRITICAL: Enhanced fork detection with parent validation
 	// Detects forks at same height, historical heights, and orphan forks
 	currentTip := s.bc.LatestBlock()
-	log.Printf("[P2P] Fork detection: currentTip height=%d, received block height=%d", currentTip.Height, block.Height)
+	log.Printf("[P2P] Fork detection: currentTip height=%d, received block height=%d", currentTip.GetHeight(), block.GetHeight())
 
 	if currentTip != nil {
 		// Case 1: Same height fork - direct competition
-		if currentTip.Height == block.Height {
+		if currentTip.GetHeight() == block.GetHeight() {
 			if !bytes.Equal(currentTip.Hash, block.Hash) {
 				log.Printf("[P2P] Same-height fork detected at height %d! Local: %s, Remote: %s",
-					block.Height, hex.EncodeToString(currentTip.Hash), hex.EncodeToString(block.Hash))
+					block.GetHeight(), hex.EncodeToString(currentTip.Hash), hex.EncodeToString(block.Hash))
 
 				// Use fork resolution engine for automatic resolution
 				if s.resolutionEngine != nil && s.forkDetector != nil {
@@ -713,12 +713,12 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 					// Still continue to AddBlock to store as fork block
 				}
 			}
-		} else if block.Height < currentTip.Height {
+		} else if block.GetHeight() < currentTip.GetHeight() {
 			// Case 2: Historical fork - block at lower height
-			localBlock, exists := s.bc.BlockByHeight(block.Height)
+			localBlock, exists := s.bc.BlockByHeight(block.GetHeight())
 			if exists && !bytes.Equal(localBlock.Hash, block.Hash) {
 				log.Printf("[P2P] Historical fork detected at height %d! Local: %s, Remote: %s",
-					block.Height, hex.EncodeToString(localBlock.Hash), hex.EncodeToString(block.Hash))
+					block.GetHeight(), hex.EncodeToString(localBlock.Hash), hex.EncodeToString(block.Hash))
 
 				// Use fork resolution engine
 				if s.resolutionEngine != nil && s.forkDetector != nil {
@@ -751,22 +751,22 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 			
 			if !exists {
 				// Parent not found - this is an orphan block or indicates a fork
-				log.Printf("[P2P] Orphan block detected: height=%d parent=%s not found", 
-					block.Height, parentHashHex[:16])
+				log.Printf("[P2P] Orphan block detected: height=%d parent=%s not found",
+					block.GetHeight(), parentHashHex[:16])
 				// Will be handled by AddBlock which returns ErrOrphanBlock
 			} else {
 				// Parent exists - check if it's on canonical chain
 				allBlocks := s.bc.Blocks()
-				if len(allBlocks) > 0 && parent.Height < uint64(len(allBlocks)) {
-					canonicalParent := allBlocks[parent.Height]
+				if len(allBlocks) > 0 && parent.GetHeight() < uint64(len(allBlocks)) {
+					canonicalParent := allBlocks[parent.GetHeight()]
 					if canonicalParent != nil {
 						parentHashStr := hex.EncodeToString(parent.Hash)
 						canonicalHashStr := hex.EncodeToString(canonicalParent.Hash)
-						
+
 						if parentHashStr != canonicalHashStr {
 							// Parent is on a fork chain
 							log.Printf("[P2P] Fork detected: block height=%d parent height=%d (canonical tip=%d)",
-								block.Height, parent.Height, len(allBlocks)-1)
+								block.GetHeight(), parent.GetHeight(), len(allBlocks)-1)
 							log.Printf("[P2P] Parent is on fork chain, triggering resolution")
 							
 							if s.resolutionEngine != nil && s.forkDetector != nil {
@@ -800,14 +800,14 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 	if err != nil {
 		log.Printf("p2p block broadcast add result: %v", err)
 		log.Printf("p2p: block details - height=%d, hash=%s, prevHash=%s, difficulty=%d, timestamp=%d, miner=%s",
-			block.Height, hex.EncodeToString(block.Hash), hex.EncodeToString(block.Header.PrevHash),
+			block.GetHeight(), hex.EncodeToString(block.Hash), hex.EncodeToString(block.Header.PrevHash),
 			block.Header.DifficultyBits, block.Header.TimestampUnix, block.MinerAddress)
 
 		// Log parent block info if available
 		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 		if parent, ok := s.bc.BlockByHash(parentHashHex); ok {
 			log.Printf("p2p: parent block found - height=%d, hash=%s, difficulty=%d, timestamp=%d",
-				parent.Height, hex.EncodeToString(parent.Hash), parent.Header.DifficultyBits, parent.Header.TimestampUnix)
+				parent.GetHeight(), hex.EncodeToString(parent.Hash), parent.Header.DifficultyBits, parent.Header.TimestampUnix)
 		} else {
 			log.Printf("p2p: parent block NOT found in local chain")
 		}
@@ -841,19 +841,19 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 				})})
 			}
 			if accepted {
-				log.Printf("p2p: successfully synced and accepted block height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
+				log.Printf("p2p: successfully synced and accepted block height=%d hash=%s", block.GetHeight(), hex.EncodeToString(block.Hash))
 			}
 		}
 	} else if accepted {
-		log.Printf("p2p: block accepted height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
-		getP2PLogger().Success("Block #%d accepted | Hash: %s", block.Height, hex.EncodeToString(block.Hash))
+		log.Printf("p2p: block accepted height=%d hash=%s", block.GetHeight(), hex.EncodeToString(block.Hash))
+		getP2PLogger().Success("Block #%d accepted | Hash: %s", block.GetHeight(), hex.EncodeToString(block.Hash))
 
 		// CRITICAL: Trigger sync loop event for instant processing
 		// This ensures the block is processed by the event-driven sync mechanism
 		syncLoop := s.bc.SyncLoop()
 		if syncLoop != nil {
 			syncLoop.TriggerBlockEvent(&block)
-			log.Printf("p2p: triggered sync loop block event height=%d", block.Height)
+			log.Printf("p2p: triggered sync loop block event height=%d", block.GetHeight())
 		}
 
 		// CRITICAL: Wait longer before resuming mining to allow block propagation
@@ -865,7 +865,7 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 				time.Sleep(time.Duration(BlockPropagationDelayMs) * time.Millisecond)
 
 				// Before resuming, check if network has advanced further
-				currentHeight := s.bc.LatestBlock().Height
+				currentHeight := s.bc.LatestBlock().GetHeight()
 
 				// Skip peer height check if pm is not available as interface
 				// peerHeight := getPeerHeight(s.pm)
@@ -877,7 +877,7 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 				}
 
 				s.miner.ResumeMining()
-				log.Printf("p2p: mining resumed after block %d propagated (height=%d)", block.Height, currentHeight)
+				log.Printf("p2p: mining resumed after block %d propagated (height=%d)", block.GetHeight(), currentHeight)
 			}()
 		}
 	}
@@ -903,7 +903,7 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 
 // syncMissingBlocks fetches missing ancestor blocks from the peer
 func (s *P2PServer) syncMissingBlocks(ctx context.Context, c net.Conn, targetBlock *core.Block) error {
-	log.Printf("p2p: starting sync of missing blocks, target height=%d", targetBlock.Height)
+	log.Printf("p2p: starting sync of missing blocks, target height=%d", targetBlock.GetHeight())
 
 	// Walk backwards from the target block until we find a known ancestor
 	currentHash := targetBlock.Header.PrevHash
@@ -913,7 +913,7 @@ func (s *P2PServer) syncMissingBlocks(ctx context.Context, c net.Conn, targetBlo
 		// Check if this block is known
 		block, exists := s.bc.BlockByHash(hex.EncodeToString(currentHash))
 		if exists {
-			log.Printf("p2p: found known ancestor at height=%d hash=%s", block.Height, hex.EncodeToString(currentHash))
+			log.Printf("p2p: found known ancestor at height=%d hash=%s", block.GetHeight(), hex.EncodeToString(currentHash))
 			break
 		}
 
@@ -963,7 +963,7 @@ func (s *P2PServer) syncMissingBlocks(ctx context.Context, c net.Conn, targetBlo
 			log.Printf("p2p: failed to add fetched block: %v", err)
 			// Continue trying to fetch more blocks
 		} else if accepted {
-			log.Printf("p2p: synced missing block height=%d hash=%s", fetchedBlock.Height, hex.EncodeToString(fetchedBlock.Hash))
+			log.Printf("p2p: synced missing block height=%d hash=%s", fetchedBlock.GetHeight(), hex.EncodeToString(fetchedBlock.Hash))
 		}
 
 		// Move to the next ancestor
@@ -971,13 +971,13 @@ func (s *P2PServer) syncMissingBlocks(ctx context.Context, c net.Conn, targetBlo
 	}
 
 	// Now try to add the original target block again
-	log.Printf("p2p: retrying to add target block height=%d", targetBlock.Height)
+	log.Printf("p2p: retrying to add target block height=%d", targetBlock.GetHeight())
 	accepted, err := s.bc.AddBlock(targetBlock)
 	if err != nil {
 		return fmt.Errorf("still failed to add target block after sync: %w", err)
 	}
 	if accepted {
-		log.Printf("p2p: successfully synced and accepted target block height=%d hash=%s", targetBlock.Height, hex.EncodeToString(targetBlock.Hash))
+		log.Printf("p2p: successfully synced and accepted target block height=%d hash=%s", targetBlock.GetHeight(), hex.EncodeToString(targetBlock.Hash))
 	}
 
 	return nil
@@ -1236,7 +1236,7 @@ func (s *P2PServer) validateBlockPoW(block *core.Block) error {
 	}
 
 	// Genesis block doesn't need PoW validation
-	if block.Height == 0 {
+	if block.GetHeight() == 0 {
 		return nil
 	}
 

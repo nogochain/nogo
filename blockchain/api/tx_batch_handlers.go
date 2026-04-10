@@ -230,7 +230,7 @@ func (s *Server) submitSingleTransaction(tx core.Transaction, ctx context.Contex
 	if latest == nil {
 		return txSubmissionResult{err: errors.New("failed to get latest block")}
 	}
-	nextHeight := latest.Height + 1
+	nextHeight := latest.GetHeight() + 1
 
 	consensusParams := config.DefaultConfig().Consensus
 	if err := tx.VerifyForConsensus(consensusParams, nextHeight); err != nil {

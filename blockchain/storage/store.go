@@ -151,7 +151,7 @@ func (s *GobStore) RewriteCanonical(blocks []*core.Block) error {
 	enc := gob.NewEncoder(w)
 	for _, b := range blocks {
 		if err := enc.Encode(b); err != nil {
-			return fmt.Errorf("encode block at height %d: %w", b.Height, err)
+			return fmt.Errorf("encode block at height %d: %w", b.GetHeight(), err)
 		}
 	}
 	if err := w.Flush(); err != nil {
@@ -328,7 +328,7 @@ func maybeMigrateGobToBolt(bolt *BoltStore, gobPath string) error {
 	}
 	for _, b := range blocks {
 		if err := bolt.PutBlock(b); err != nil {
-			return fmt.Errorf("put block %d: %w", b.Height, err)
+			return fmt.Errorf("put block %d: %w", b.GetHeight(), err)
 		}
 	}
 	if gobPath != "" {

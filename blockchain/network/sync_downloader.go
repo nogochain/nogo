@@ -239,7 +239,7 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 			if storeFunc != nil {
 				err := storeFunc(ctx, block)
 				if err != nil {
-					log.Printf("[Downloader] Failed to store block %d: %v", block.Height, err)
+					log.Printf("[Downloader] Failed to store block %d: %v", block.GetHeight(), err)
 					atomic.AddUint64(&d.failedCount, 1)
 				} else {
 					storedInBatch++

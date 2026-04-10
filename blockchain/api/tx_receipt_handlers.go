@@ -98,7 +98,7 @@ func (s *Server) handleTxReceipt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if latestBlock.Height < location.Height {
+	if latestBlock.GetHeight() < location.Height {
 		_ = writeJSON(w, http.StatusInternalServerError, TxReceiptResponse{
 			Status: "error",
 			Error:  "inconsistent block state",
@@ -106,7 +106,7 @@ func (s *Server) handleTxReceipt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	confirmations := latestBlock.Height - location.Height + 1
+	confirmations := latestBlock.GetHeight() - location.Height + 1
 
 	block, blockFound := s.bc.BlockByHash(location.BlockHashHex)
 	var blockTime int64

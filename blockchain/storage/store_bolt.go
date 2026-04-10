@@ -150,7 +150,7 @@ func (s *BoltStore) AppendCanonical(block *core.Block) error {
 	if block == nil || len(block.Hash) == 0 {
 		return errors.New("missing block hash")
 	}
-	heightKey := u64be(block.Height)
+	heightKey := u64be(block.GetHeight())
 	hashKey := make([]byte, len(block.Hash))
 	copy(hashKey, block.Hash)
 
@@ -175,10 +175,10 @@ func (s *BoltStore) AppendCanonical(block *core.Block) error {
 			}
 		}
 
-		if block.Height > 0 {
-			prevHash := canonB.Get(u64be(block.Height - 1))
+		if block.GetHeight() > 0 {
+			prevHash := canonB.Get(u64be(block.GetHeight() - 1))
 			if prevHash == nil {
-				return fmt.Errorf("missing previous canonical block at height %d", block.Height-1)
+				return fmt.Errorf("missing previous canonical block at height %d", block.GetHeight()-1)
 			}
 			if !bytes.Equal(prevHash, block.Header.PrevHash) {
 				return errors.New("prevhash mismatch for append")
@@ -225,20 +225,20 @@ func (s *BoltStore) RewriteCanonical(blocks []*core.Block) error {
 			}
 			var buf bytes.Buffer
 			if err := gob.NewEncoder(&buf).Encode(b); err != nil {
-				return fmt.Errorf("encode block %d: %w", b.Height, err)
+				return fmt.Errorf("encode block %d: %w", b.GetHeight(), err)
 			}
 			key := make([]byte, len(b.Hash))
 			copy(key, b.Hash)
 			if existing := blocksB.Get(key); existing == nil {
 				if err := blocksB.Put(key, buf.Bytes()); err != nil {
-					return fmt.Errorf("put block %d: %w", b.Height, err)
+					return fmt.Errorf("put block %d: %w", b.GetHeight(), err)
 				}
 			}
-			if err := canonB.Put(u64be(b.Height), key); err != nil {
-				return fmt.Errorf("put canonical height %d: %w", b.Height, err)
+			if err := canonB.Put(u64be(b.GetHeight()), key); err != nil {
+				return fmt.Errorf("put canonical height %d: %w", b.GetHeight(), err)
 			}
 			tipHash = key
-			tipHeight = b.Height
+			tipHeight = b.GetHeight()
 		}
 		if tipHash == nil {
 			if err := metaB.Delete([]byte(metaTipHash)); err != nil {

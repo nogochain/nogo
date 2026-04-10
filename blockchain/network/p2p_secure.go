@@ -266,7 +266,7 @@ func (s *p2pSecureServer) handlePeerMessages(conn net.Conn, peer *securePeer) er
 				info := map[string]any{
 					"type":       "chain_info",
 					"chainId":    s.bc.GetChainID(),
-					"height":     latest.Height,
+					"height":     latest.GetHeight(),
 					"latestHash": fmt.Sprintf("%x", latest.Hash),
 					"rulesHash":  s.bc.RulesHashHex(),
 				}

@@ -255,13 +255,14 @@ func (s *Server) handleChainInfo(w http.ResponseWriter, r *http.Request) {
 
 	cp := config.GetConsensusParams()
 	policy := cp.MonetaryPolicy
-	nextHeight := latest.Height + 1
+	latestHeight := latest.GetHeight()
+	nextHeight := latestHeight + 1
 	currentReward := policy.BlockReward(nextHeight)
 	nextHalving := uint64(0)
 
 	blocksPerYear := config.GetBlocksPerYear()
 	if blocksPerYear > 0 {
-		nextHalving = (latest.Height/blocksPerYear + 1) * blocksPerYear
+		nextHalving = (latestHeight/blocksPerYear + 1) * blocksPerYear
 	}
 
 	out := map[string]any{
@@ -269,7 +270,7 @@ func (s *Server) handleChainInfo(w http.ResponseWriter, r *http.Request) {
 		"buildTime":                      buildTime,
 		"chainId":                        s.bc.GetChainID(),
 		"rulesHash":                      s.bc.RulesHashHex(),
-		"height":                         latest.Height,
+		"height":                         latestHeight,
 		"latestHash":                     fmt.Sprintf("%x", latest.Hash),
 		"genesisHash":                    fmt.Sprintf("%x", genesis.Hash),
 		"genesisTimestampUnix":           genesis.Header.TimestampUnix,
@@ -866,7 +867,7 @@ func (s *Server) handleBlockByHeight(w http.ResponseWriter, r *http.Request) {
 
 	// Enrich block with reward distribution details
 	blockData := map[string]any{
-		"height":         b.Height,
+		"height":         b.GetHeight(),
 		"hash":           fmt.Sprintf("%x", b.Hash),
 		"prevHash":       fmt.Sprintf("%x", b.Header.PrevHash),
 		"timestampUnix":  b.Header.TimestampUnix,
@@ -935,7 +936,7 @@ func (s *Server) handleBlockByHashParam(w http.ResponseWriter, r *http.Request) 
 	}
 
 	blockData := map[string]any{
-		"height":         b.Height,
+		"height":         b.GetHeight(),
 		"hash":           fmt.Sprintf("%x", b.Hash),
 		"prevHash":       fmt.Sprintf("%x", b.Header.PrevHash),
 		"timestampUnix":  b.Header.TimestampUnix,
@@ -1068,8 +1069,8 @@ func (s *Server) handleTxStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var confirmations uint64
-	if latestBlock.Height >= location.Height {
-		confirmations = latestBlock.Height - location.Height + 1
+	if latestBlock.GetHeight() >= location.Height {
+		confirmations = latestBlock.GetHeight() - location.Height + 1
 	}
 
 	// Get block details for additional information
@@ -1114,7 +1115,7 @@ func (s *Server) handleTxProof(w http.ResponseWriter, r *http.Request) {
 	)
 	for _, b := range blocks {
 		for i, tx := range b.Transactions {
-			id, err := core.TxIDHexForConsensus(tx, config.ConsensusParams{}, b.Height)
+			id, err := core.TxIDHexForConsensus(tx, config.ConsensusParams{}, b.GetHeight())
 			if err != nil {
 				continue
 			}
@@ -1141,7 +1142,7 @@ func (s *Server) handleTxProof(w http.ResponseWriter, r *http.Request) {
 
 	leaves := make([][]byte, 0, len(foundBlock.Transactions))
 	for _, tx := range foundBlock.Transactions {
-		h, err := txSigningHashForConsensus(tx, config.ConsensusParams{}, foundBlock.Height)
+		h, err := txSigningHashForConsensus(tx, config.ConsensusParams{}, foundBlock.GetHeight())
 		if err != nil {
 			http.Error(w, "tx hash failed", http.StatusInternalServerError)
 			return
@@ -1161,7 +1162,7 @@ func (s *Server) handleTxProof(w http.ResponseWriter, r *http.Request) {
 
 	_ = writeJSON(w, http.StatusOK, map[string]any{
 		"txId":        txid,
-		"blockHeight": foundBlock.Height,
+		"blockHeight": foundBlock.GetHeight(),
 		"blockHash":   blockHash,
 		"txIndex":     foundIndex,
 		"merkleRoot":  fmt.Sprintf("%x", root),
@@ -1348,7 +1349,7 @@ func (s *Server) handleSubmitTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	latest := s.bc.LatestBlock()
-	nextHeight := latest.Height + 1
+	nextHeight := latest.GetHeight() + 1
 
 	// Get consensus params from default config
 	consensusParams := config.DefaultConfig().Consensus
@@ -1588,7 +1589,7 @@ func (s *Server) handleMineOnce(w http.ResponseWriter, r *http.Request) {
 	_ = writeJSON(w, http.StatusOK, map[string]any{
 		"mined":          true,
 		"message":        "ok",
-		"height":         b.Height,
+		"height":         b.GetHeight(),
 		"blockHash":      fmt.Sprintf("%x", b.Hash),
 		"difficultyBits": b.Header.DifficultyBits,
 	})
@@ -1754,7 +1755,7 @@ func (s *Server) handleWalletSign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	latest := s.bc.LatestBlock()
-	nextHeight := latest.Height + 1
+	nextHeight := latest.GetHeight() + 1
 	h, err := txSigningHashForConsensus(tx, config.ConsensusParams{}, nextHeight)
 	if err != nil {
 		_ = writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -1842,7 +1843,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 		"version":   "1.0.0",
 		"buildTime": "unknown",
 		"chainId":   s.bc.GetChainID(),
-		"height":    s.bc.LatestBlock().Height,
+		"height":    s.bc.LatestBlock().GetHeight(),
 		"gitCommit": "unknown",
 	})
 }
@@ -1885,6 +1886,7 @@ func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
 
 	// Add absolute paths for common installations
 	possiblePaths = append(possiblePaths,
+		"/data/nogo/blockchain/api/http/public/explorer/index.html",
 		"/opt/nogo/blockchain/api/http/public/explorer/index.html",
 		"/usr/local/lib/nogochain/explorer/index.html",
 	)

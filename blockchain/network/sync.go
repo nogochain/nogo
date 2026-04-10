@@ -32,6 +32,7 @@ import (
 	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/nogochain/nogo/blockchain/metrics"
 	"github.com/nogochain/nogo/blockchain/utils"
+	"math"
 )
 
 // =============================================================================
@@ -63,26 +64,51 @@ const (
 
 	// BlocksAddedProgressInterval is how often to update progress during block processing
 	BlocksAddedProgressInterval = 50
+
+	// ForkResolutionTimeout is timeout for fork resolution arbitration
+	ForkResolutionTimeout = 2 * time.Minute
+
+	// MaxConcurrentResolutions limits simultaneous fork resolution requests
+	MaxConcurrentResolutions = 3
 )
+
+// =============================================================================
+// PEER STATE MANAGEMENT STRUCTURES
+// =============================================================================
+
+type peerChainState struct {
+	LastUpdate     time.Time
+	ChainHeight    uint64
+	ChainTipHash   []byte
+	TotalWork      string
+	QualityScore   float64
+	Responsiveness float64
+}
+
+type peerStateManager struct {
+	sync.RWMutex
+	states map[string]*peerChainState
+}
 
 // SyncLoop manages blockchain synchronization with peers
 type SyncLoop struct {
-	mu           sync.RWMutex
-	pm           PeerAPI
-	bc           BlockchainInterface
-	miner        Miner
-	metrics      *metrics.Metrics
-	orphanPool   *utils.OrphanPool
-	validator    *consensus.BlockValidator
-	scorer       *AdvancedPeerScorer
-	retryExec    *RetryExecutor
-	downloader   *BlockDownloader
-	forkDetector *core.ForkDetector
-	forkResolver *ForkResolutionEngine
-	isSyncing    bool
-	syncProgress float64
-	ctx          context.Context
-	cancel       context.CancelFunc
+	mu             sync.RWMutex
+	pm             PeerAPI
+	bc             BlockchainInterface
+	miner          Miner
+	metrics        *metrics.Metrics
+	orphanPool     *utils.OrphanPool
+	validator      *consensus.BlockValidator
+	scorer         *AdvancedPeerScorer
+	retryExec      *RetryExecutor
+	downloader     *BlockDownloader
+	forkDetector   *core.ForkDetector
+	forkResolver   *ForkResolutionEngine
+	peerStates     *peerStateManager
+	isSyncing      bool
+	syncProgress   float64
+	ctx            context.Context
+	cancel         context.CancelFunc
 	// Time tracking for sync state
 	syncStartTime  time.Time
 	lastUpdateTime time.Time
@@ -151,7 +177,7 @@ func (s *SyncLoop) Start(ctx context.Context) error {
 		chain := cp.GetUnderlyingChain()
 		chainSelector := core.NewChainSelector(chain, s.bc)
 		s.forkResolver = NewForkResolutionEngine(chainSelector, s.forkDetector)
-		log.Printf("[Sync] Fork resolution engine initialized (chain_height=%d)", chain.LatestBlock().Height)
+		log.Printf("[Sync] Fork resolution engine initialized (chain_height=%d)", chain.LatestBlock().GetHeight())
 	} else {
 		log.Printf("[Sync] Warning: bc does not provide underlying chain")
 	}
@@ -256,13 +282,257 @@ func (s *SyncLoop) getLocalHeight() uint64 {
 	if tip == nil {
 		return 0
 	}
-	return tip.Height
+	return tip.GetHeight()
 }
 
 // TriggerBlockEvent triggers a block event for miner coordination
 func (s *SyncLoop) TriggerBlockEvent(block *core.Block) {
 	// Block event handling - miner can listen for this
 	// Currently handled through direct method calls
+}
+
+// =============================================================================
+// PEER STATE MANAGEMENT IMPLEMENTATION
+// =============================================================================
+
+// newPeerStateManager creates a new peer state manager
+func newPeerStateManager() *peerStateManager {
+	return &peerStateManager{
+		states: make(map[string]*peerChainState),
+	}
+}
+
+// updatePeerStateManagement updates peer states for multi-node arbitration
+// This enables the ForkResolutionEngine to make informed decisions based on global network state
+func (s *SyncLoop) updatePeerStateManagement(block *core.Block) {
+	// Initialize peer state manager if needed
+	if s.peerStates == nil {
+		s.peerStates = newPeerStateManager()
+	}
+
+	// Update all active peers with current block information
+	if s.pm != nil {
+		activePeers := s.pm.GetActivePeers()
+		if len(activePeers) > 0 {
+			for _, peer := range activePeers {
+				s.updatePeerState(peer, block)
+			}
+
+			// Update ForkResolutionEngine with peer state information
+			if s.forkResolver != nil {
+				for _, peer := range activePeers {
+					s.forkResolver.UpdatePeerState(peer, block, int(s.getPeerQualityScore(peer)))
+				}
+			}
+		}
+	}
+}
+
+// updatePeerState updates the state for a specific peer
+func (s *SyncLoop) updatePeerState(peerID string, block *core.Block) {
+	s.peerStates.Lock()
+	defer s.peerStates.Unlock()
+
+	// Get peer's chain info
+	info, err := s.pm.FetchChainInfo(s.ctx, peerID)
+	if err != nil {
+		// Keep existing state if possible
+		if existing, exists := s.peerStates.states[peerID]; exists {
+			existing.Responsiveness -= 0.1 // Decrease responsiveness score
+			existing.QualityScore = existing.Responsiveness * 0.7 + existing.QualityScore * 0.3
+		}
+		return
+	}
+
+	// Create or update peer state
+	state := &peerChainState{
+		LastUpdate:     time.Now(),
+		ChainHeight:    info.Height,
+		ChainTipHash:   []byte(info.LatestHash),
+		TotalWork:      info.Work.String(),
+		QualityScore:   s.getPeerQualityScore(peerID),
+		Responsiveness: 0.9, // Start with good responsiveness
+	}
+
+	s.peerStates.states[peerID] = state
+
+	// Log peer state update for debugging
+	log.Printf("[Sync] Updated peer state for %s: height=%d, quality=%.2f", 
+		peerID, info.Height, state.QualityScore)
+}
+
+// resolveForkDirectly handles fork resolution when ForkResolutionEngine is unavailable
+// This is a fallback mechanism for when the full resolution engine cannot be used
+func (s *SyncLoop) resolveForkDirectly(currentTip *core.Block, block *core.Block) error {
+	log.Printf("[Sync] Direct fork resolution: tip=%d, incoming=%d", 
+		currentTip.GetHeight(), block.GetHeight())
+
+	// Compare total work first (highest work rule)
+	localWork := s.bc.CanonicalWork()
+	remoteWork, ok := core.StringToWork(block.TotalWork)
+	
+	if ok && localWork != nil {
+		if remoteWork.Cmp(localWork) > 0 {
+			log.Printf("[Sync] Remote chain has higher work: %s > %s",
+				block.TotalWork, s.bc.CanonicalWork().String())
+			
+			// Trigger reorganization to remote chain
+			if s.reorganizeToRemoteChain(block) {
+				return nil
+			}
+		} else {
+			log.Printf("[Sync] Local chain has equal or higher work, keeping local")
+			return fmt.Errorf("local chain has equal or higher work")
+		}
+	}
+
+	// Fallback to arbitration with other peers
+	s.arbitrateWithOtherPeers(currentTip, block)
+	
+	return fmt.Errorf("direct fork resolution completed")
+}
+
+// reorganizeToRemoteChain performs chain reorganization to adopt a remote chain
+func (s *SyncLoop) reorganizeToRemoteChain(targetBlock *core.Block) bool {
+	log.Printf("[Sync] Starting chain reorganization to block %d with hash %x", 
+		targetBlock.GetHeight(), targetBlock.Hash)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check if we can access blockchain reorganize functionality
+	if s.bc == nil {
+		log.Printf("[Sync] Cannot reorganize: blockchain interface not available")
+		return false
+	}
+
+	// Get current tip for comparison
+	currentTip := s.bc.LatestBlock()
+	if currentTip == nil {
+		log.Printf("[Sync] Cannot reorganize: current tip not available")
+		return false
+	}
+
+	// If target block is our current tip, no reorganization needed
+	if bytes.Equal(targetBlock.Hash, currentTip.Hash) {
+		log.Printf("[Sync] Target block is already our current tip, nothing to do")
+		return true
+	}
+
+	// Use ForkResolutionEngine if available for proper reorganization
+	if s.forkResolver != nil {
+		err := s.forkResolver.AutoResolveFork(currentTip, targetBlock, "sync-loop")
+		if err == nil {
+			log.Printf("[Sync] Reorganization completed successfully via ForkResolutionEngine AutoResolveFork")
+			return true
+		}
+		log.Printf("[Sync] ForkResolutionEngine AutoResolveFork failed: %v", err)
+	}
+
+	// Fallback to direct block-by-block reorganization
+	log.Printf("[Sync] Attempting direct reorganization to target block %d", targetBlock.GetHeight())
+	
+	// For production implementation, we would need access to the blockchain's reorganize method
+	// This is a placeholder for the actual blockchain integration
+	log.Printf("[Sync] Chain reorganization would proceed here - integration with bc.Reorganize() needed")
+	
+	// Successful reorganization would:
+	// 1. Find fork point between current tip and target block
+	// 2. Validate the new chain section
+	// 3. Switch canonical chain at the fork point
+	// 4. Update all related data structures
+	
+	return false // Return false for now until full integration is complete
+}
+
+// arbitrateWithOtherPeers performs basic arbitration with other network peers
+func (s *SyncLoop) arbitrateWithOtherPeers(currentTip *core.Block, block *core.Block) {
+	if s.pm == nil {
+		return
+	}
+
+	activePeers := s.pm.GetActivePeers()
+	if len(activePeers) < 2 {
+		log.Printf("[Sync] Not enough peers for arbitration (got %d, need at least 2)", len(activePeers))
+		return
+	}
+
+	// Count peers for each chain
+	localChainVotes := 0
+	remoteChainVotes := 0
+	
+	for _, peer := range activePeers {
+		if s.votesForChain(peer, currentTip, block) {
+			localChainVotes++
+		} else {
+			remoteChainVotes++
+		}
+	}
+
+	log.Printf("[Sync] Arbitration result: Local=%d, Remote=%d", 
+		localChainVotes, remoteChainVotes)
+	
+	if remoteChainVotes > localChainVotes {
+		log.Printf("[Sync] Majority favors remote chain (%d vote advantage), initiating reorganization", 
+			remoteChainVotes - localChainVotes)
+		
+		// Actually trigger reorganization when majority favors remote chain
+		if s.reorganizeToRemoteChain(block) {
+			log.Printf("[Sync] Reorganization completed successfully after peer arbitration")
+		} else {
+			log.Printf("[Sync] Reorganization failed after peer arbitration")
+		}
+	} else {
+		log.Printf("[Sync] Majority favors local chain, keeping current")
+	}
+}
+
+// votesForChain determines if a peer votes for the local or remote chain
+func (s *SyncLoop) votesForChain(peerID string, currentTip *core.Block, remoteBlock *core.Block) bool {
+	// Get peer's tip hash for comparison
+	info, err := s.pm.FetchChainInfo(s.ctx, peerID)
+	if err != nil {
+		// On error, assume votes for local chain
+		return true
+	}
+
+	// Check if peer's tip matches local or remote
+	if bytes.Equal([]byte(info.LatestHash), currentTip.Hash) {
+		return true // Votes for local chain
+	} else if bytes.Equal([]byte(info.LatestHash), remoteBlock.Hash) {
+		return false // Votes for remote chain
+	}
+
+	// Unknown chain, use quality score to decide
+	score := s.getPeerQualityScore(peerID)
+	return score < 50.0 // Only trust high-quality peers for remote chain
+}
+
+// getPeerQualityScore calculates a quality score for a peer
+func (s *SyncLoop) getPeerQualityScore(peerID string) float64 {
+	if s.scorer == nil {
+		return 50.0 // Default neutral score
+	}
+
+	score := s.scorer.GetPeerScore(peerID)
+	stats := s.scorer.GetPeerDetailedStats(peerID)
+	
+	if stats == nil {
+		return score
+	}
+
+	// Weight score with trust level and reliability
+	trustLevel := stats["trust_level"].(float64)
+	isReliable := stats["is_reliable"].(bool)
+	successRate := stats["recent_success_rate"].(float64)
+	
+	averageScore := (score * 0.4) + (trustLevel * 0.3) + (successRate * 0.3)
+	
+	if isReliable {
+		averageScore *= 1.2 // Boost for reliable peers
+	}
+	
+	return math.Max(0.0, math.Min(100.0, averageScore))
 }
 
 // SyncProgress returns current sync progress (0.0 to 1.0)
@@ -361,7 +631,7 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 	if err != nil {
 		// Check if this is corrupted block data (critical error)
 		if s.isCorruptedBlock(block) {
-			log.Printf("[Sync] CRITICAL: Corrupted block %d detected from remote node", block.Height)
+			log.Printf("[Sync] CRITICAL: Corrupted block %d detected from remote node", block.GetHeight())
 			log.Printf("[Sync]   - Hash: %s", hex.EncodeToString(block.Hash))
 			log.Printf("[Sync]   - PrevHash: %s", hex.EncodeToString(block.Header.PrevHash))
 			log.Printf("[Sync]   - DifficultyBits: %d", block.Header.DifficultyBits)
@@ -385,10 +655,10 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 	// Comprehensive fork detection for sync path
 	if currentTip != nil {
 		// Case 1: Same height fork - direct competition
-		if currentTip.Height == block.Height {
+		if currentTip.GetHeight() == block.GetHeight() {
 			if !bytes.Equal(currentTip.Hash, block.Hash) {
 				log.Printf("[Sync] Same-height fork detected at height %d! Local: %s, Remote: %s",
-					block.Height, hex.EncodeToString(currentTip.Hash), hex.EncodeToString(block.Hash))
+					block.GetHeight(), hex.EncodeToString(currentTip.Hash), hex.EncodeToString(block.Hash))
 
 				// Use fork resolution engine for automatic resolution
 				if s.forkResolver != nil {
@@ -424,12 +694,12 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 					return fmt.Errorf("local chain has equal or more work")
 				}
 			}
-		} else if block.Height < currentTip.Height {
+		} else if block.GetHeight() < currentTip.GetHeight() {
 			// Case 2: Historical fork - block at lower height
-			localBlock, exists := s.bc.BlockByHeight(block.Height)
+			localBlock, exists := s.bc.BlockByHeight(block.GetHeight())
 			if exists && !bytes.Equal(localBlock.Hash, block.Hash) {
 				log.Printf("[Sync] Historical fork detected at height %d! Local: %s, Remote: %s",
-					block.Height, hex.EncodeToString(localBlock.Hash), hex.EncodeToString(block.Hash))
+					block.GetHeight(), hex.EncodeToString(localBlock.Hash), hex.EncodeToString(block.Hash))
 
 				// Use fork resolution engine
 				if s.forkResolver != nil {
@@ -461,12 +731,12 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 			if exists {
 				// Check if parent is on canonical chain
 				allBlocks := s.bc.Blocks()
-				if len(allBlocks) > 0 && parent.Height < uint64(len(allBlocks)) {
-					canonicalParent := allBlocks[parent.Height]
+				if len(allBlocks) > 0 && parent.GetHeight() < uint64(len(allBlocks)) {
+					canonicalParent := allBlocks[parent.GetHeight()]
 					if canonicalParent != nil && !bytes.Equal(parent.Hash, canonicalParent.Hash) {
 						// Parent is on fork chain
-						log.Printf("[Sync] Fork detected: block height=%d parent height=%d (canonical tip=%d)",
-							block.Height, parent.Height, len(allBlocks)-1)
+					log.Printf("[Sync] Fork detected: block height=%d parent height=%d (canonical tip=%d)",
+						block.GetHeight(), parent.GetHeight(), len(allBlocks)-1)
 						log.Printf("[Sync] Parent is on fork chain, triggering resolution")
 
 						if s.forkResolver != nil {
@@ -648,15 +918,15 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		storeFunc := func(ctx context.Context, block *core.Block) error {
 			// Validate chain continuity first
 			expectedPrevHash := []byte{}
-			if block.Height > syncStartHeight {
-				if block.Height == syncStartHeight+1 {
+			if block.GetHeight() > syncStartHeight {
+				if block.GetHeight() == syncStartHeight+1 {
 					localTip := s.bc.LatestBlock()
 					if localTip != nil {
 						expectedPrevHash = localTip.Hash
 					}
 				} else {
 					// Get block at previous height for prevHash check
-					prevBlock, exists := s.bc.BlockByHeight(block.Height - 1)
+					prevBlock, exists := s.bc.BlockByHeight(block.GetHeight() - 1)
 					if exists && prevBlock != nil {
 						expectedPrevHash = prevBlock.Hash
 					}
@@ -664,9 +934,9 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 			}
 
 			if len(expectedPrevHash) > 0 && !bytes.Equal(block.Header.PrevHash, expectedPrevHash) {
-				log.Printf("[Sync] Chain discontinuity at height %d: expected prevHash %x, got %x",
-					block.Height, expectedPrevHash[:8], block.Header.PrevHash[:8])
-				return fmt.Errorf("chain discontinuity at height %d", block.Height)
+			log.Printf("[Sync] Chain discontinuity at height %d: expected prevHash %x, got %x",
+				block.GetHeight(), expectedPrevHash[:8], block.Header.PrevHash[:8])
+			return fmt.Errorf("chain discontinuity at height %d", block.GetHeight())
 			}
 
 			// Add block to chain via handleNewBlock for proper validation and fork handling
@@ -775,6 +1045,11 @@ func (s *SyncLoop) fetchBlockWithRetry(ctx context.Context, peer string, prevHas
 		result.Attempts, result.TotalDuration)
 
 	return block, nil
+}
+
+// GetForkResolver returns the ForkResolutionEngine instance for external access
+func (s *SyncLoop) GetForkResolver() *ForkResolutionEngine {
+	return s.forkResolver
 }
 
 // findCommonAncestorHeight finds the common ancestor height between local chain and peer chain
@@ -1079,7 +1354,7 @@ func (s *SyncLoop) isCorruptedBlock(block *core.Block) bool {
 	}
 
 	// Block height 0 (genesis) can have empty prevHash
-	if block.Height > 0 {
+	if block.GetHeight() > 0 {
 		// Non-genesis blocks must have non-empty prevHash
 		if len(block.Header.PrevHash) == 0 {
 			return true
@@ -1088,7 +1363,7 @@ func (s *SyncLoop) isCorruptedBlock(block *core.Block) bool {
 
 	// All blocks must have valid timestamp (after genesis)
 	// Genesis timestamp is around 1775044800 (April 2026)
-	if block.Header.TimestampUnix < 1775044800 && block.Height > 0 {
+	if block.Header.TimestampUnix < 1775044800 && block.GetHeight() > 0 {
 		return true
 	}
 

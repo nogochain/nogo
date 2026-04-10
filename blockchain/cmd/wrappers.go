@@ -53,7 +53,7 @@ func (w *chainWrapper) SelectMempoolTxs(mp miner.Mempool, maxTxPerBlock int) ([]
 		if tx.ChainID == 0 {
 			tx.ChainID = w.chain.GetChainID()
 		}
-		if err := tx.VerifyForConsensus(w.chain.GetConsensus(), w.chain.LatestBlock().Height+1); err != nil {
+		if err := tx.VerifyForConsensus(w.chain.GetConsensus(), w.chain.LatestBlock().GetHeight()+1); err != nil {
 			continue
 		}
 
@@ -116,7 +116,7 @@ func (w *chainWrapper) SelectMempoolTxsNetwork(mp network.Mempool, maxTxPerBlock
 		if tx.ChainID == 0 {
 			tx.ChainID = w.chain.GetChainID()
 		}
-		if err := tx.VerifyForConsensus(w.chain.GetConsensus(), w.chain.LatestBlock().Height+1); err != nil {
+		if err := tx.VerifyForConsensus(w.chain.GetConsensus(), w.chain.LatestBlock().GetHeight()+1); err != nil {
 			continue
 		}
 

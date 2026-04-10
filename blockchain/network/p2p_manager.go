@@ -560,7 +560,7 @@ func (pm *P2PPeerManager) BroadcastBlock(ctx context.Context, block *core.Block)
 	pm.mu.RUnlock()
 
 	if len(peers) == 0 {
-		log.Printf("P2P peer manager: no peers to broadcast block height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
+		log.Printf("P2P peer manager: no peers to broadcast block height=%d hash=%s", block.GetHeight(), hex.EncodeToString(block.Hash))
 		return
 	}
 
@@ -570,7 +570,7 @@ func (pm *P2PPeerManager) BroadcastBlock(ctx context.Context, block *core.Block)
 	fmt.Printf(ColorGreen + ColorBold + "╔═══════════════════════════════════════════════════════════╗\n" + ColorReset)
 	fmt.Printf(ColorGreen + "║" + ColorReset + ColorWhite + "  ⛏️  BLOCK BROADCAST                                          " + ColorReset + ColorGreen + "║\n" + ColorReset)
 	fmt.Printf(ColorGreen + "╠═══════════════════════════════════════════════════════════╣\n" + ColorReset)
-	fmt.Printf(ColorGreen+"║"+ColorReset+ColorYellow+"  Height: %-52d"+ColorReset+ColorGreen+"║\n"+ColorReset, block.Height)
+	fmt.Printf(ColorGreen+"║"+ColorReset+ColorYellow+"  Height: %-52d"+ColorReset+ColorGreen+"║\n"+ColorReset, block.GetHeight())
 	fmt.Printf(ColorGreen+"║"+ColorReset+ColorYellow+"  Hash: %-54s"+ColorReset+ColorGreen+"║\n"+ColorReset, blockHashStr+"...")
 	fmt.Printf(ColorGreen+"║"+ColorReset+ColorYellow+"  Tx Count: %-50d"+ColorReset+ColorGreen+"║\n"+ColorReset, len(block.Transactions))
 	fmt.Printf(ColorGreen+"║"+ColorReset+ColorYellow+"  Timestamp: %-49s"+ColorReset+ColorGreen+"║\n"+ColorReset, time.Unix(block.Header.TimestampUnix, 0).Format("2006-01-02 15:04:05"))
@@ -590,7 +590,7 @@ func (pm *P2PPeerManager) BroadcastBlock(ctx context.Context, block *core.Block)
 		}(peer)
 	}
 	wg.Wait()
-	log.Printf("P2P peer manager: block broadcast completed height=%d hash=%s", block.Height, hex.EncodeToString(block.Hash))
+	log.Printf("P2P peer manager: block broadcast completed height=%d hash=%s", block.GetHeight(), hex.EncodeToString(block.Hash))
 }
 
 // formatAddress formats an address for display

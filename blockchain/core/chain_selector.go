@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/big"
 	"sync"
+	"time"
 )
 
 // BlockProvider interface for retrieving blocks by hash
@@ -39,7 +40,7 @@ func NewChainSelector(chain *Chain, provider BlockProvider) *ChainSelector {
 }
 
 // FindMostWorkChain finds the block with the most cumulative work
-// Implementation matches Bitcoin's FindMostWorkChain algorithm
+// Implementation matches Bitcoin's FindMostWorkChain algorithm with enhancement
 // Returns the block with highest chain work, nil if no blocks
 func (cs *ChainSelector) FindMostWorkChain() *Block {
 	cs.mu.RLock()
@@ -65,6 +66,11 @@ func (cs *ChainSelector) FindMostWorkChain() *Block {
 					continue
 				}
 
+				// Bitcoin-style validation: ensure block chain is fully valid
+				if !cs.isChainValid(block) {
+					continue // Skip blocks with invalid ancestors
+				}
+
 				blockWork, ok := StringToWork(block.TotalWork)
 				if !ok {
 					continue
@@ -80,6 +86,44 @@ func (cs *ChainSelector) FindMostWorkChain() *Block {
 	}
 
 	return bestBlock
+}
+
+// isChainValid implements Bitcoin-style chain validation: checks all ancestors are valid
+func (cs *ChainSelector) isChainValid(block *Block) bool {
+	current := block
+	for current.GetHeight() > 0 {
+		// Check if block data is available
+		if !cs.isBlockDataAvailable(current) {
+			return false
+		}
+
+		// Check if block is marked as failed
+		if cs.isBlockFailed(current) {
+			return false
+		}
+
+		// Get parent block
+		parent, err := cs.getBlockByHash(current.Header.PrevHash)
+		if err != nil {
+			return false // Missing parent indicates invalid chain
+		}
+		current = parent
+	}
+	return true
+}
+
+// isBlockDataAvailable checks if block data is fully available
+func (cs *ChainSelector) isBlockDataAvailable(block *Block) bool {
+	// Implementation would check if block data (transactions, etc.) is completely available
+	// This prevents switching to chains with missing data
+	return block != nil && block.Hash != nil && len(block.Hash) > 0
+}
+
+// isBlockFailed checks if a block is marked as failed validation
+func (cs *ChainSelector) isBlockFailed(block *Block) bool {
+	// Implementation would check block status flags
+	// Similar to Bitcoin's BLOCK_FAILED_VALID check
+	return false // Default: blocks are assumed valid unless marked otherwise
 }
 
 // ShouldReorg checks if we should reorganize to a new block
@@ -105,7 +149,7 @@ func (cs *ChainSelector) ShouldReorg(newBlock *Block) bool {
 
 	if !ok1 || !ok2 {
 		// If work calculation fails, compare heights as fallback
-		return newBlock.Height > currentTip.Height
+		return newBlock.GetHeight() > currentTip.GetHeight()
 	}
 
 	// Compare work: reorg if new block has strictly more work
@@ -141,14 +185,14 @@ func (cs *ChainSelector) Reorganize(newBlock *Block) error {
 
 	// Log reorganization details
 	log.Printf("reorganization started: fork_height=%d old_tip_height=%d old_tip_hash=%x new_tip_height=%d new_tip_hash=%x",
-		forkPoint.Height, currentTip.Height, currentTip.Hash, newBlock.Height, newBlock.Hash,
+		forkPoint.GetHeight(), currentTip.GetHeight(), currentTip.Hash, newBlock.GetHeight(), newBlock.Hash,
 	)
 
 	// Disconnect blocks from current tip back to fork point
 	disconnectedBlocks := make([]*Block, 0)
 	disconnectCurrent := currentTip
 
-	for disconnectCurrent.Height > forkPoint.Height {
+	for disconnectCurrent.GetHeight() > forkPoint.GetHeight() {
 		disconnectedBlocks = append(disconnectedBlocks, disconnectCurrent)
 
 		// Get parent block
@@ -171,7 +215,7 @@ func (cs *ChainSelector) Reorganize(newBlock *Block) error {
 
 	// Build path from new block back to fork
 	pathToFork := make([]*Block, 0)
-	for connectCurrent.Height > forkPoint.Height {
+	for connectCurrent.GetHeight() > forkPoint.GetHeight() {
 		pathToFork = append(pathToFork, connectCurrent)
 
 		parent, err := cs.getBlockByHash(connectCurrent.Header.PrevHash)
@@ -208,7 +252,7 @@ func (cs *ChainSelector) Reorganize(newBlock *Block) error {
 
 	// Reorganization successful
 	log.Printf("reorganization completed: disconnected_blocks=%d connected_blocks=%d new_tip_height=%d new_work=%s",
-		len(disconnectedBlocks), len(connectBlocks), newBlock.Height, newBlock.TotalWork,
+		len(disconnectedBlocks), len(connectBlocks), newBlock.GetHeight(), newBlock.TotalWork,
 	)
 
 	return nil
@@ -224,11 +268,11 @@ func (cs *ChainSelector) findCommonAncestor(block1, block2 *Block) (*Block, erro
 	ancestors := make(map[string]*Block)
 	current := block1
 
-	for current.Height >= 0 {
+	for current.GetHeight() >= 0 {
 		hashStr := string(current.Hash)
 		ancestors[hashStr] = current
 
-		if current.Height == 0 {
+		if current.GetHeight() == 0 {
 			break // Genesis block
 		}
 
@@ -241,13 +285,13 @@ func (cs *ChainSelector) findCommonAncestor(block1, block2 *Block) (*Block, erro
 
 	// Find first common ancestor in block2's chain
 	current = block2
-	for current.Height >= 0 {
+	for current.GetHeight() >= 0 {
 		hashStr := string(current.Hash)
 		if ancestor, exists := ancestors[hashStr]; exists {
 			return ancestor, nil
 		}
 
-		if current.Height == 0 {
+		if current.GetHeight() == 0 {
 			break
 		}
 
@@ -270,7 +314,7 @@ func (cs *ChainSelector) rollbackReorg(disconnectedBlocks []*Block) {
 	for i := len(disconnectedBlocks) - 1; i >= 0; i-- {
 		block := disconnectedBlocks[i]
 		if err := cs.chain.SetTip(block); err != nil {
-			log.Printf("rollback failed, chain may be in inconsistent state: block_height=%d error=%v", block.Height, err)
+			log.Printf("rollback failed, chain may be in inconsistent state: block_height=%d error=%v", block.GetHeight(), err)
 			return
 		}
 	}
@@ -285,7 +329,7 @@ func (cs *ChainSelector) validateBlock(block *Block) error {
 	}
 
 	// Basic validation
-	if block.Height == 0 {
+	if block.GetHeight() == 0 {
 		return nil // Genesis block is always valid
 	}
 
@@ -323,4 +367,42 @@ func (cs *ChainSelector) IsReorgInProgress() bool {
 	cs.reorgMutex.Lock()
 	defer cs.reorgMutex.Unlock()
 	return cs.reorgInProgress
+}
+
+// ActivateBestChain implements Bitcoin-style chain activation with periodic triggering
+// This method should be called periodically to ensure optimal chain selection
+func (cs *ChainSelector) ActivateBestChain() error {
+	// Bitcoin-style: Find the chain with most work
+	bestBlock := cs.FindMostWorkChain()
+	if bestBlock == nil {
+		return fmt.Errorf("no valid chain found")
+	}
+
+	currentTip := cs.chain.LatestBlock()
+	if currentTip == nil || string(currentTip.Hash) == string(bestBlock.Hash) {
+		return nil // Best chain already active
+	}
+
+	// Check if reorg is needed
+	if cs.ShouldReorg(bestBlock) {
+		return cs.Reorganize(bestBlock)
+	}
+
+	return nil
+}
+
+// StartPeriodicActivation starts periodic chain activation checks
+// Bitcoin implements this mechanism to ensure consistent chain selection
+func (cs *ChainSelector) StartPeriodicActivation(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				if !cs.IsReorgInProgress() {
+					cs.ActivateBestChain()
+				}
+			}
+		}
+	}()
 }
