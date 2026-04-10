@@ -8,11 +8,11 @@
 本文档提供 NogoChain 区块链的完整部署说明，涵盖开发、测试网和生产环境部署。所有内容均基于最新代码实现，确保准确性和可执行性。
 
 **代码参考:**
-- 主配置：[`blockchain/config/config.go`](file:///d:/NogoChain/nogo/blockchain/config/config.go)
-- 环境变量：[`blockchain/config/env.go`](file:///d:/NogoChain/nogo/blockchain/config/env.go)
-- 配置管理：[`config/config.go`](file:///d:/NogoChain/nogo/config/config.go)
-- 共识参数：[`blockchain/config/consensus.go`](file:///d:/NogoChain/nogo/blockchain/config/consensus.go)
-- 货币政策：[`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go)
+- 主配置：[`blockchain/config/config.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/config.go)
+- 环境变量：[`blockchain/config/env.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/env.go)
+- 类型定义：[`blockchain/config/types.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/types.go)
+- 共识参数：[`blockchain/config/consensus.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/consensus.go)
+- 货币政策：[`blockchain/config/monetary_policy.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/monetary_policy.go)
 
 ---
 
@@ -1412,7 +1412,7 @@ curl -X POST http://localhost:8080/tx/submit \
 - **官方网站**: https://nogochain.org
 - **GitHub**: https://github.com/NogoChain/NogoChain
 - **文档**: https://docs.nogochain.org
-- **Discord**: https://discord.gg/nogochain
+- **Discord**: https://discord.gg/HxEFPqJMEV
 - **Twitter**: https://twitter.com/nogochain
 
 ---

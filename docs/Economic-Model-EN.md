@@ -5,9 +5,13 @@
 **Network:** Mainnet (ChainID: 1)
 **Audit Status:** ✅ Parameters verified against code
 **Code References:**
-- Monetary Policy: [`blockchain/config/monetary_policy.go`](https://github.com/nogochain/nogo/tree/main/blockchain/config/monetary_policy.go)
-- Consensus Parameters: [`blockchain/config/config.go`](https://github.com/nogochain/nogo/tree/main/blockchain/config/config.go)
-- Constants: [`blockchain/config/constants.go`](https://github.com/nogochain/nogo/tree/main/blockchain/config/constants.go)
+- Monetary Policy: [`monetary_policy.go`](https://github.com/nogochain/nogo/blob/main/blockchain/config/monetary_policy.go)
+- Consensus Parameters: [`config.go`](https://github.com/nogochain/nogo/blob/main/blockchain/config/config.go)
+- Fee Checker: [`fee_checker.go`](https://github.com/nogochain/nogo/blob/main/blockchain/core/fee_checker.go)
+- Mining Rewards: [`mining.go`](https://github.com/nogochain/nogo/blob/main/blockchain/core/mining.go)
+- Difficulty Adjustment: [`difficulty_adjustment.go`](https://github.com/nogochain/nogo/blob/main/blockchain/nogopow/difficulty_adjustment.go)
+- Integrity Rewards: [`integrity_rewards.go`](https://github.com/nogochain/nogo/blob/main/blockchain/core/integrity_rewards.go)
+- Community Fund: [`community_fund_governance.go`](https://github.com/nogochain/nogo/blob/main/blockchain/contracts/community_fund_governance.go)
 
 ---
 
@@ -46,12 +50,12 @@ Each block reward is distributed as follows:
 
 | Recipient | Percentage | Description |
 |-----------|------------|-------------|
-| Miner | 96% | Block reward + all transaction fees |
+| Miner | 96% | Block reward (transaction fees burned separately) |
 | Community Fund | 2% | Community governance proposal pool |
 | Genesis Address | 1% | Founding team and early supporters |
 | Integrity Pool | 1% | Integrity node reward pool |
 
-**Note:** Transaction fees are 100% allocated to miners (via coinbase transaction).
+**Note:** Transaction fees are 100% burned (deflationary mechanism), not distributed to any party. This creates deflationary pressure when network usage is high.
 
 ---
 
@@ -67,8 +71,14 @@ Where:
 - $R(h)$: Block reward at height $h$ (in wei)
 - $R_0 = 8 \times 10^8$ wei (8 NOGO)
 - $r = 0.10$ (10% annual reduction)
-- $B_{year} = \frac{365.25 \times 24 \times 60 \times 60}{17} \approx 1,856,329$ blocks
+- $B_{year} = \frac{365 \times 24 \times 60 \times 60}{17} = 1,856,329$ blocks (using 365 days, not 365.25)
 - $R_{min} = 0.1 \times 10^8 = 10^7$ wei (0.1 NOGO)
+
+**Implementation Details:**
+- Uses integer arithmetic (`reward * 9 / 10`) to avoid floating-point errors
+- Checks minimum reward floor annually (prevents underflow)
+- Includes overflow protection for large heights
+- All calculations use `big.Int` for arbitrary precision
 
 ### 2.2 Code Implementation
 
@@ -142,6 +152,79 @@ genesisReward := baseReward * uint64(policy.GenesisShare) / 100       // 1%
 integrityPool := baseReward * uint64(policy.IntegrityPoolShare) / 100 // 1%
 ```
 
+### 2.5 Uncle Block Reward (Dynamic Calculation)
+
+NogoChain implements a dynamic uncle reward mechanism to incentivize timely inclusion of orphaned blocks.
+
+**Uncle Reward Formula:**
+
+$$R_{uncle}(d) = R(h) \times \frac{8-d}{8}$$
+
+Where:
+- $R_{uncle}(d)$: Uncle block reward at distance $d$
+- $R(h)$: Current block reward at height $h$
+- $d = \text{nephewHeight} - \text{uncleHeight}$: Distance between nephew and uncle block ($1 \leq d \leq 7$)
+
+**Reward Schedule:**
+
+| Uncle Distance (d) | Reward Multiplier | Example (8 NOGO base) |
+|--------------------|-------------------|----------------------|
+| 1 | 7/8 = 87.5% | 7.00 NOGO |
+| 2 | 6/8 = 75.0% | 6.00 NOGO |
+| 3 | 5/8 = 62.5% | 5.00 NOGO |
+| 4 | 4/8 = 50.0% | 4.00 NOGO |
+| 5 | 3/8 = 37.5% | 3.00 NOGO |
+| 6 | 2/8 = 25.0% | 2.00 NOGO |
+| 7 | 1/8 = 12.5% | 1.00 NOGO |
+| ≥8 | 0% | 0 NOGO (no reward) |
+
+**Nephew Bonus:**
+
+Miners who include uncle blocks receive a bonus:
+
+$$R_{nephew} = R(h) \times \frac{1}{32} \times \min(\text{uncleCount}, 2)$$
+
+Where:
+- Maximum 2 uncles per block
+- Each uncle gives 1/32 (3.125%) of block reward as bonus
+
+**Code Implementation:**
+
+```go
+// monetary_policy.go - Dynamic uncle reward calculation
+func (p MonetaryPolicy) GetUncleReward(nephewHeight, uncleHeight uint64, blockReward uint64) uint64 {
+    distance := nephewHeight - uncleHeight
+    if distance == 0 || distance > 7 {
+        return 0  // No reward for same height or too distant
+    }
+    
+    // Dynamic multiplier: (8 - distance) / 8
+    multiplier := 8 - distance
+    rewardBig := new(big.Int).SetUint64(blockReward)
+    rewardBig.Mul(rewardBig, big.NewInt(int64(multiplier)))
+    rewardBig.Div(rewardBig, big.NewInt(8))
+    
+    return rewardBig.Uint64()
+}
+
+// GetNephewBonus calculates bonus for including uncles
+func (p MonetaryPolicy) GetNephewBonus(blockReward uint64, uncleCount int) uint64 {
+    if uncleCount <= 0 {
+        return 0
+    }
+    if uncleCount > 2 {
+        uncleCount = 2  // Maximum 2 uncles
+    }
+    return uint64(uncleCount) * (blockReward / 32)
+}
+```
+
+**Economic Rationale:**
+1. **Dynamic rewards encourage timely inclusion:** Closer uncles receive higher rewards
+2. **Prevents stale block waste:** Orphaned blocks still contribute to network security
+3. **Limits maximum uncle depth:** No reward beyond distance 7 prevents chain quality degradation
+4. **Caps uncle per block:** Maximum 2 uncles per block maintains block quality
+
 ---
 
 ## 3. Difficulty Adjustment Mechanism
@@ -162,9 +245,12 @@ $$D_{new} = D_{parent} \times (1 + \text{output})$$
 
 Where:
 - $T_{target} = 17$ seconds (target block time)
-- $K_p = 0.5$ (proportional gain)
-- $K_i = 0.1$ (integral gain)
+- $K_p = \text{MaxDifficultyChangePercent} / 100$ (configurable, default 0.5)
+- $K_i = 0.1$ (integral gain, fixed)
 - $\text{clamp}(x, -10, 10)$: Limits integral to [-10, 10] to prevent saturation
+
+**Configuration:**
+The proportional gain $K_p$ is configurable via `MaxDifficultyChangePercent` parameter (default 50%, giving $K_p = 0.5$). This allows network parameter tuning without code changes.
 
 ### 3.2 Boundary Conditions
 
@@ -274,27 +360,34 @@ func EstimateSmartFee(txSize uint64, mempoolSize int, speed string) uint64 {
 
 ### 5.1 Distribution Rules
 
-NogoChain's fee distribution is elegantly simple:
+NogoChain implements a deflationary fee burning mechanism:
 
 | Source | Recipient | Percentage | Implementation |
 |--------|-----------|------------|----------------|
-| Transaction Fees | Miner | 100% | Coinbase transaction includes total fees |
+| Transaction Fees | **Burned** | 100% | Fees removed from circulation (deflationary) |
 | Block Reward | Miner | 96% | Via `MinerRewardShare` |
 | Block Reward | Community Fund | 2% | Via `CommunityFundShare` |
 | Block Reward | Genesis Address | 1% | Via `GenesisShare` |
 | Block Reward | Integrity Pool | 1% | Via `IntegrityPoolShare` |
 
+**Economic Rationale:**
+- Fee burning creates deflationary pressure when network usage is high
+- Miners are incentivized through block rewards (96% of total emission)
+- Net inflation rate is reduced by burned fees: $\text{NetInflation} = \frac{\text{BlockReward} - \text{TotalFees}}{\text{TotalSupply}}$
+- When $\text{TotalFees} > \text{BlockReward}$, the network enters deflationary territory
+
 ### 5.2 Coinbase Transaction Structure
 
 ```go
 // mining.go - Create coinbase transaction
-minerTotal := minerReward + fees  // Miner receives 96% block reward + 100% fees
+// Miner receives 96% of block reward only (fees are burned, not distributed)
+minerReward := baseReward * uint64(policy.MinerRewardShare) / 100
 
 coinbase := Transaction{
     Type:      TxCoinbase,
     ChainID:   c.chainID,
     ToAddress: c.minerAddress,
-    Amount:    minerTotal,
+    Amount:    minerReward,  // Miner receives 96% block reward (fees burned)
     Data:      coinbaseData,  // Contains reward distribution info
 }
 ```
@@ -304,18 +397,38 @@ coinbase := Transaction{
 block reward (height=H, miner=M, community=C, genesis=G, integrity=I)
 ```
 
-### 5.3 Fee Burning Mechanism
+### 5.3 Fee Burning Implementation
 
-Although fees are distributed to miners, economically speaking, fees are effectively "burned" from circulating supply:
+Transaction fees in NogoChain are explicitly burned (removed from circulation):
 
-1. **Fees are not paid from newly minted tokens:** Fees come from sender's existing balance
-2. **Miners receive newly minted rewards:** Block rewards are newly issued tokens
-3. **Net Effect:** Fee portion is effectively removed from circulation, while block rewards increase supply
+1. **Fees are collected from transaction sender:** Deducted from sender's balance
+2. **Fees are not distributed to anyone:** Unlike traditional PoW chains, fees are not given to miners
+3. **Fees are effectively removed from supply:** The fee amount is never reissued
 
-**Net Inflation Rate:**
-$$\text{NetInflation} = \frac{\text{BlockReward} - \text{TotalFees}}{\text{TotalSupply}}$$
+**Code Implementation:**
+```go
+// mining.go - Fee burning mechanism
+// Transaction fees are 100% burned (deflationary mechanism)
+// This creates deflationary pressure when network usage is high
+// Fees are effectively removed from circulation, reducing total supply
+coinbase := Transaction{
+    Type:      TxCoinbase,
+    ChainID:   c.chainID,
+    ToAddress: c.minerAddress,
+    Amount:    minerReward,  // Only block reward share, fees NOT included
+    Data:      coinbaseData,
+}
+```
 
-When $\text{TotalFees} > \text{BlockReward}$, the network enters deflationary territory.
+**Economic Impact:**
+- **Low network usage:** Fees < Block Rewards → Positive net inflation
+- **High network usage:** Fees > Block Rewards → Net deflation
+- **Long-term equilibrium:** As block rewards decrease, fees become dominant factor
+
+**Net Supply Change:**
+$$\Delta\text{Supply} = \text{BlockReward} - \text{TotalFees}$$
+
+When $\text{TotalFees} > \text{BlockReward}$, $\Delta\text{Supply} < 0$ (deflation).
 
 ---
 
@@ -1005,13 +1118,36 @@ $$\text{InflationRate}_3 = \frac{10,826,111}{151,071,325} \times 100\% = 7.17\%$
 
 All formulas and mechanisms are implemented in the following code files:
 
-1. **Monetary Policy:** `blockchain/config/monetary_policy.go`
-2. **Mining Rewards:** `blockchain/core/mining.go`
-3. **Fee Checker:** `blockchain/core/fee_checker.go`
-4. **Integrity Rewards:** `blockchain/core/integrity_rewards.go`
-5. **Community Fund:** `blockchain/contracts/community_fund_governance.go`
-6. **Difficulty Adjustment:** `blockchain/nogopow/difficulty_adjustment.go`
-7. **Constants Configuration:** `config/constants.go`
+1. **Monetary Policy:** [`monetary_policy.go`](https://github.com/nogochain/nogo/blob/main/blockchain/config/monetary_policy.go)
+   - Block reward calculation: Lines 133-169
+   - Uncle reward: Lines 172-201
+   - Nephew bonus: Lines 203-215
+   - Fee distribution: Lines 229-236
+
+2. **Mining Rewards:** [`mining.go`](https://github.com/nogochain/nogo/blob/main/blockchain/core/mining.go)
+   - Coinbase transaction: Lines 154-162
+   - Reward distribution: Lines 141-145
+
+3. **Fee Checker:** [`fee_checker.go`](https://github.com/nogochain/nogo/blob/main/blockchain/core/fee_checker.go)
+   - Fee calculation: Lines 95-129
+   - Congestion adjustment: Lines 110-122
+
+4. **Integrity Rewards:** [`integrity_rewards.go`](https://github.com/nogochain/nogo/blob/main/blockchain/core/integrity_rewards.go)
+   - Reward pool: Lines 84-98
+   - Distribution: Lines 117-236
+
+5. **Community Fund:** [`community_fund_governance.go`](https://github.com/nogochain/nogo/blob/main/blockchain/contracts/community_fund_governance.go)
+   - Contract deployment: Lines 173-207
+   - Proposal creation: Lines 238-305
+   - Voting: Lines 307-363
+
+6. **Difficulty Adjustment:** [`difficulty_adjustment.go`](https://github.com/nogochain/nogo/blob/main/blockchain/nogopow/difficulty_adjustment.go)
+   - PI controller: Lines 128-186
+   - Boundary conditions: Lines 189-219
+
+7. **Configuration:** [`config.go`](https://github.com/nogochain/nogo/blob/main/blockchain/config/config.go)
+   - Consensus parameters: Lines 123-152
+   - Blocks per year: Lines 350-354
 
 ---
 

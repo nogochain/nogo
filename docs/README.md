@@ -301,15 +301,11 @@ Quarter 3-4: Lead core feature development
 ### Official Resources
 
 - **GitHub**: https://github.com/nogochain/nogo
-- **Official Website**: https://nogochain.org
-- **Block Explorer**: https://explorer.nogochain.org
-- **Documentation Site**: https://docs.nogochain.org
+- **GitHub Issues**: https://github.com/nogochain/nogo/issues
 
 ### Community Resources
 
-- **Discord**: https://discord.gg/nogochain
-- **Twitter**: https://twitter.com/nogochain
-- **Telegram**: https://t.me/nogochain
+- **Discord**: https://discord.gg/HxEFPqJMEV
 
 ### Technical Resources
 

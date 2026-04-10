@@ -476,7 +476,7 @@ sudo journalctl -u nogochain | grep -i mining
 - **文档**: https://docs.nogochain.org
 - **GitHub**: https://github.com/NogoChain/NogoChain
 - **Issue 追踪**: https://github.com/NogoChain/NogoChain/issues
-- **Discord**: https://discord.gg/nogochain
+- **Discord**: https://discord.gg/HxEFPqJMEV
 
 ### 提交 Bug
 

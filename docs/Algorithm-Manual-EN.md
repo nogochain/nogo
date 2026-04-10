@@ -1,14 +1,16 @@
 # NogoChain Algorithm Technical Manual
 
-**Version**: 1.0.0  
-**Generated**: 2026-04-07  
+**Version**: 2.0.0  
+**Generated**: 2026-04-10  
 **Applicable Version**: NogoChain v1.0+
-**Audit Status:** ✅ Algorithms verified against implementation
+**Audit Status:** ✅ Algorithms fully verified against implementation (2026-04-10)
 **Code References:**
 - NogoPow Algorithm: [`blockchain/nogopow/nogopow.go`](https://github.com/nogochain/nogo/tree/main/blockchain/nogopow/nogopow.go)
 - Difficulty Adjustment: [`blockchain/nogopow/difficulty_adjustment.go`](https://github.com/nogochain/nogo/tree/main/blockchain/nogopow/difficulty_adjustment.go)
-- Crypto (Ed25519): [`blockchain/crypto/`](https://github.com/nogochain/nogo/tree/main/blockchain/crypto/)
+- Matrix Operations: [`blockchain/nogopow/matrix.go`](https://github.com/nogochain/nogo/tree/main/blockchain/nogopow/matrix.go)
+- Crypto (Ed25519): [`blockchain/crypto/wallet.go`](https://github.com/nogochain/nogo/tree/main/blockchain/crypto/wallet.go)
 - Merkle Tree: [`blockchain/core/merkle.go`](https://github.com/nogochain/nogo/tree/main/blockchain/core/merkle.go)
+- Verification Report: [`docs/Algorithm-Verification-Report-CN.md`](https://github.com/nogochain/nogo/tree/main/docs/Algorithm-Verification-Report-CN.md)
 
 ---
 
@@ -163,7 +165,7 @@ func (t *NogopowEngine) computePoW(blockHash, seed Hash) Hash {
 
 ### 2.1 Algorithm Overview
 
-NogoChain employs a PI (Proportional-Integral) controller-based difficulty adjustment algorithm to ensure block time stabilizes at the target value (default 10 seconds).
+NogoChain employs a PI (Proportional-Integral) controller-based difficulty adjustment algorithm to ensure block time stabilizes at the target value (default 15 seconds).
 
 **Mathematical Foundation**:
 ```
@@ -173,9 +175,10 @@ new_difficulty = parent_difficulty × (1 + Kp × error + Ki × integral)
 ```
 
 **Parameters**:
-- Kp (Proportional Gain): 0.5 (default)
+- Kp (Proportional Gain): `MaxDifficultyChangePercent / 100.0` (default 0.2)
 - Ki (Integral Gain): 0.1 (fixed)
-- Target Block Time: 17 seconds (Mainnet) / 15 seconds (Testnet)
+- Target Block Time: 15 seconds (configurable via `BlockTimeTargetSeconds`)
+- **Note**: This is a pure PI controller; the derivative term (Kd) is not used in the implementation
 
 ### 2.2 Algorithm Flow
 
@@ -211,7 +214,14 @@ new_difficulty = parent_difficulty × multiplier
 new_difficulty = max(new_difficulty, min_difficulty)
 new_difficulty = min(new_difficulty, max_difficulty)
 new_difficulty = min(new_difficulty, parent_difficulty × 2)  // Max 100% increase
+new_difficulty = max(new_difficulty, 1)  // Ensure difficulty >= 1
 ```
+
+**Implementation Details** (from [`enforceBoundaryConditions()`](https://github.com/nogochain/nogo/tree/main/blockchain/nogopow/difficulty_adjustment.go#L188-L219)):
+1. Minimum difficulty: `MinDifficulty` from consensus params
+2. Maximum difficulty: 2^256
+3. Maximum increase: 100% per block (new ≤ 2 × parent)
+4. Minimum value: 1 (prevents zero difficulty)
 
 ### 2.3 Pseudocode
 
@@ -272,9 +282,23 @@ function calculateDifficulty(currentTime, parent):
 // File: blockchain/nogopow/difficulty_adjustment.go
 
 // CalcDifficulty calculates difficulty for next block using adaptive PI controller
+// PI Controller Mathematical Derivation:
+//   error = (targetTime - actualTime) / targetTime
+//   integral += error (with anti-windup clamping to [-10, 10])
+//   newDifficulty = parentDifficulty * (1 + Kp * error + Ki * integral)
+// Where:
+//   - Kp (proportional gain): config.AdjustmentSensitivity (default 0.2)
+//   - Ki (integral gain): 0.1 (fixed for stable convergence)
+//   - error: normalized time deviation (positive = blocks too slow)
+//   - integral: accumulated error over time (eliminates steady-state offset)
 func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header) *big.Int {
+    // Guard clause: validate parent header
     if parent == nil || parent.Difficulty == nil {
-        return big.NewInt(int64(da.config.MinimumDifficulty))
+        minDiff := big.NewInt(1)
+        if da.consensusParams.MinDifficulty > 0 {
+            minDiff = big.NewInt(int64(da.consensusParams.MinDifficulty))
+        }
+        return minDiff
     }
     
     parentDiff := new(big.Int).Set(parent.Difficulty)
@@ -283,35 +307,36 @@ func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header)
         timeDiff = int64(currentTime - parent.Time)
     }
     
-    targetTime := int64(da.config.TargetBlockTime)
+    targetTime := int64(da.consensusParams.BlockTimeTargetSeconds)
     
-    // PI controller calculation
+    // PI Controller calculation with high-precision arithmetic
     newDifficulty := da.calculatePIDifficulty(timeDiff, targetTime, parentDiff)
     
-    // Apply boundary conditions
+    // Enforce production boundary conditions
     newDifficulty = da.enforceBoundaryConditions(newDifficulty, parentDiff, timeDiff, targetTime)
     
     return newDifficulty
 }
 
 // calculatePIDifficulty implements core PI controller algorithm
+// Note: This is a pure PI controller (no derivative term)
 func (da *DifficultyAdjuster) calculatePIDifficulty(timeDiff, targetTime int64, parentDiff *big.Int) *big.Int {
     // Convert to high-precision floating-point
     actualTimeFloat := new(big.Float).SetInt64(timeDiff)
     targetTimeFloat := new(big.Float).SetInt64(targetTime)
     parentDiffFloat := new(big.Float).SetInt(parentDiff)
     
-    // Calculate normalized error
+    // Calculate normalized error: error = (targetTime - actualTime) / targetTime
     one := big.NewFloat(1.0)
     timeRatio := new(big.Float).Quo(actualTimeFloat, targetTimeFloat)
     error := new(big.Float).Sub(one, timeRatio)
     
-    // Update integral accumulator (with anti-windup)
+    // Update integral accumulator with anti-windup protection
     if error.Cmp(big.NewFloat(0.0)) != 0 {
         da.integralAccumulator.Add(da.integralAccumulator, error)
     }
     
-    // Anti-windup clamping
+    // Anti-windup clamping to [-10, 10]
     integralMin := big.NewFloat(-10.0)
     integralMax := big.NewFloat(10.0)
     if da.integralAccumulator.Cmp(integralMax) > 0 {
@@ -322,19 +347,25 @@ func (da *DifficultyAdjuster) calculatePIDifficulty(timeDiff, targetTime int64, 
     }
     
     // Calculate PI controller output
-    proportionalGain := big.NewFloat(da.config.AdjustmentSensitivity)
+    // Proportional term: Kp * error (Kp = MaxDifficultyChangePercent / 100.0)
+    proportionalGain := big.NewFloat(float64(da.consensusParams.MaxDifficultyChangePercent) / 100.0)
     proportionalTerm := new(big.Float).Mul(error, proportionalGain)
     
+    // Integral term: Ki * integral (Ki = 0.1)
     integralGain := big.NewFloat(da.integralGain)
     integralTerm := new(big.Float).Mul(da.integralAccumulator, integralGain)
     
+    // Combined PI output: Kp * error + Ki * integral
     piOutput := new(big.Float).Add(proportionalTerm, integralTerm)
     
-    // Apply multiplier
+    // Calculate final multiplier: 1 + PI output
     multiplier := new(big.Float).Add(one, piOutput)
+    
+    // Apply multiplier to parent difficulty
     newDiffFloat := new(big.Float).Mul(parentDiffFloat, multiplier)
     newDifficulty, _ := newDiffFloat.Int(nil)
     
+    // Ensure non-negative result
     if newDifficulty.Sign() < 0 {
         newDifficulty = big.NewInt(0)
     }

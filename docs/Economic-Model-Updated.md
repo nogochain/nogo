@@ -55,7 +55,7 @@
 **文档公式**:
 $$R(h) = \max(R_0 \times (1-r)^{\lfloor \frac{h}{B_{year}} \rfloor}, R_{min})$$
 
-**代码实现** ([`monetary_policy.go`](d:\NogoChain\nogo\blockchain\config\monetary_policy.go#L77-99)):
+**代码实现** ([`monetary_policy.go`](d:\NogoChain\nogo\blockchain\config\monetary_policy.go#L133-169)):
 ```go
 func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
     // 计算年数：height / 每年区块数
@@ -91,6 +91,7 @@ func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
 2. 整数运算：`reward * 9 / 10` 而非浮点数
 3. 每年检查最小奖励下限
 4. 向下取整避免超发
+5. $B_{year} = 365 \times 24 \times 60 \times 60 / 17 = 1,856,329$（使用 365 天）
 
 **数值示例**（已验证）:
 
@@ -102,6 +103,48 @@ func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
 | 5,568,987 - 7,425,315 | 3 | 5.83 | 8 × 0.9³ |
 | ... | ... | ... | ... |
 | 高度极大时 | n | 0.10 | 最小奖励下限 |
+
+### 2.5 叔叔区块奖励（动态计算）（已更新）
+
+**重要更新**: 叔叔区块奖励采用动态计算，非固定 7/8。
+
+**文档公式**:
+$$R_{uncle}(d) = R(h) \times \frac{8-d}{8}$$
+
+其中 $d = \text{nephewHeight} - \text{uncleHeight}$（距离范围 1-7）
+
+**代码实现** ([`monetary_policy.go`](d:\NogoChain\nogo\blockchain\config\monetary_policy.go#L172-201)):
+```go
+func (p MonetaryPolicy) GetUncleReward(nephewHeight, uncleHeight uint64, blockReward uint64) uint64 {
+    distance := nephewHeight - uncleHeight
+    if distance == 0 || distance > 7 {
+        return 0  // 同高度或距离太远无奖励
+    }
+    
+    // 动态乘数：(8 - distance) / 8
+    multiplier := 8 - distance
+    rewardBig := new(big.Int).SetUint64(blockReward)
+    rewardBig.Mul(rewardBig, big.NewInt(int64(multiplier)))
+    rewardBig.Div(rewardBig, big.NewInt(8))
+    
+    return rewardBig.Uint64()
+}
+```
+
+**奖励时间表**:
+
+| 叔叔距离 (d) | 奖励乘数 | 示例（8 NOGO 基础） |
+|-------------|---------|-------------------|
+| 1 | 7/8 = 87.5% | 7.00 NOGO |
+| 2 | 6/8 = 75.0% | 6.00 NOGO |
+| 3 | 5/8 = 62.5% | 5.00 NOGO |
+| 4 | 4/8 = 50.0% | 4.00 NOGO |
+| 5 | 3/8 = 37.5% | 3.00 NOGO |
+| 6 | 2/8 = 25.0% | 2.00 NOGO |
+| 7 | 1/8 = 12.5% | 1.00 NOGO |
+| ≥8 | 0% | 0 NOGO（无奖励） |
+
+**验证结果**: ✅ 动态计算已验证
 
 ---
 
@@ -163,32 +206,50 @@ func (p MonetaryPolicy) GetNephewBonus(height uint64) uint64 {
 
 ---
 
-## 5. 费用分配机制（已补充）
+## 5. 费用分配机制（已更新）
 
-### 5.1 费用分配公式
+### 5.1 费用燃烧机制
+
+**重要更正**: NogoChain 实施费用燃烧机制，而非分配给矿工。
 
 **文档公式**:
-$$Fee_{miner} = Fee_{total} \times \frac{MinerFeeShare}{100}$$
+$$\Delta\text{Supply} = \text{BlockReward} - \text{TotalFees}$$
 
-**代码实现** ([`monetary_policy.go`](d:\NogoChain\nogo\blockchain\config\monetary_policy.go#L129-137)):
+**经济原理**:
+- 交易费用 100% 燃烧（从流通中永久移除）
+- 矿工仅获得区块奖励的 96%
+- 当网络使用率高时产生通缩压力
+
+**代码实现** ([`mining.go`](d:\NogoChain\nogo\blockchain\core\mining.go#L154-L162)):
 ```go
-func (p MonetaryPolicy) MinerFeeAmount(totalFees uint64) uint64 {
-    // 矿工费用 = 总费用 × 矿工费用分享比例 / 100
-    return totalFees * uint64(p.MinerFeeShare) / 100
+// mining.go - Coinbase 交易创建
+// 交易费用 100% 燃烧（通缩机制）
+// 矿工仅获得 96% 区块奖励（费用不分配）
+coinbase := Transaction{
+    Type:      TxCoinbase,
+    ChainID:   c.chainID,
+    ToAddress: c.minerAddress,
+    Amount:    minerReward,  // 仅区块奖励，费用燃烧
+    Data:      coinbaseData,
 }
 ```
 
-**验证结果**: ✅ 完全一致
+**验证结果**: ✅ 代码实现费用燃烧
 
 ### 5.2 费用分配结构
 
-| 接收方 | 比例 | 代码参数 |
-|--------|------|---------|
-| 矿工 | 100% | `MinerFeeShare = 100` |
-| 社区基金 | 0% | 通过区块奖励分配 |
-| 其他 | 0% | - |
+| 接收方 | 比例 | 代码参数 | 说明 |
+|--------|------|---------|------|
+| 交易费用 | **燃烧** | 100% | 从流通中永久移除 |
+| 区块奖励 | 矿工 | 96% | `MinerRewardShare = 96` |
+| 区块奖励 | 社区基金 | 2% | `CommunityFundShare = 2` |
+| 区块奖励 | 创世地址 | 1% | `GenesisShare = 1` |
+| 区块奖励 | 完整性池 | 1% | `IntegrityPoolShare = 1` |
 
-**注意**: 交易费用 100% 归矿工所有，社区基金通过区块奖励的 2% 分配
+**经济影响**:
+- 低网络使用率：费用 < 区块奖励 → 正净通胀
+- 高网络使用率：费用 > 区块奖励 → 净通缩
+- 长期均衡：随着区块奖励减少，费用成为主导因素
 
 ---
 

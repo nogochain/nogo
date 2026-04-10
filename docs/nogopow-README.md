@@ -24,7 +24,7 @@
 
 NogoPow (Nogo Proof of Work) is the original consensus algorithm of NogoChain, combining matrix operations and hash functions to achieve ASIC-resistant properties.
 
-**Source Code**: [`blockchain/nogopow/`](file:///d:/NogoChain/nogo/blockchain/nogopow/)
+**Source Code**: [`blockchain/nogopow/`](https://github.com/nogochain/nogo/tree/main/nogo/blockchain/nogopow/)
 
 **Key Features**:
 - **ASIC-Resistant**: Matrix operations require large memory, increasing ASIC development difficulty
@@ -118,25 +118,54 @@ func New(config *Config) *NogopowEngine {
 
 ### 3.1 Algorithm Flow
 
+**Matrix Parameters**:
+- **matSize**: Matrix dimension (matSize × matSize matrices)
+- **matNum**: Number of precomputed matrices in cache
+- **Fixed-Point Factor**: 2^30 for high-precision arithmetic (int64 representation)
+- **Parallel Threads**: 4 goroutines for matrix computation
+
+**Algorithm Flow**:
+
 ```
-Input: Block header hash blockHash, seed (parent block hash)
-Output: PoW hash powHash
+Input: Block header hash blockHash (32 bytes), seed (parent block hash)
+Output: PoW hash powHash (32 bytes)
 
 1. Get matrix data from cache
    cacheData = Cache.Get(seed)
+   // Cache data: []uint32 array with matNum × matSize × matSize / 4 elements
 
-2. Construct input matrix
-   A = blockHash converted to matrix (matSize × matSize)
+2. Construct input matrix from blockHash
+   // blockHash used to generate sequence for matrix selection
+   // Sequence generated via SHA3-256 hash of blockHash segments
 
-3. Matrix multiplication
-   Result = A × cacheData
+3. Matrix multiplication with fixed-point arithmetic
+   // Uses int64 fixed-point representation (FixedPointFactor = 2^30)
+   // Multiple matrix multiplications in sequence (32 iterations per thread)
+   // 4 parallel goroutines process different segments
+   Result = mulMatrix(blockHash.Bytes(), cacheData)
+   // Each iteration: localMatA = localMatA × selectedMatrix
+   // Fixed-point rounding: (prod + FixedPointHalf) >> FixedPointShift
 
-4. Hash result
+4. Accumulate results from all threads
+   // Sum results from 4 goroutines
+   tmp[row][col] += maArr[i][row][col]
+
+5. Convert result to uint8 and hash
    powHash = SHA3-256(Result)
+   // Result matrix (matSize × matSize) converted to uint8
+   // Flattened and hashed using Keccak256
 
-5. Difficulty check
-   Requirement: powHash < target (difficulty target)
+6. Difficulty check
+   Requirement: powHash < target
+   // target = (2^256 - 1) / difficulty
 ```
+
+**Optimization Techniques**:
+- **Object Pool**: Reuse matrices to reduce GC pressure
+- **Cache**: LRU cache with singleflight to avoid redundant computations
+- **Parallel Computation**: 4 goroutines for matrix operations
+- **Fixed-Point Arithmetic**: int64 fixed-point for precision and performance
+- **Blocked Matrix Multiplication**: Cache-friendly memory access pattern
 
 ### 3.2 PoW Computation
 
@@ -255,88 +284,129 @@ func (t *NogopowEngine) Seal(chain ChainHeaderReader, block *Block, results chan
 
 ### 4.1 PI Controller Algorithm
 
-**Code**: [`difficulty_adjustment.go:L106-L176`](file:///d:/NogoChain/nogo/blockchain/nogopow/difficulty_adjustment.go#L106-L176)
+**Source Code**: [`difficulty_adjustment.go`](https://github.com/nogochain/nogo/tree/main/nogo/blockchain/nogopow/difficulty_adjustment.go)
+
+**PI Controller Mathematical Foundation**:
+
+NogoChain uses a Proportional-Integral (PI) controller for precise block time stabilization.
+
+**Control Theory**:
+- **Proportional term (Kp)**: Responds to current error (deviation from target)
+- **Integral term (Ki)**: Accumulates past errors to eliminate steady-state offset
+- **Formula**: `output = Kp × error + Ki × integral`
+- **Anti-windup**: Integral clamped to [-10, 10] to prevent overshoot
+
+**Calculation Flow**:
 
 ```go
-func (d *DifficultyAdjuster) calculatePIDifficulty(parent *Header, currentTime uint64) *big.Int {
-    // Calculate time difference
-    timeDiff := int64(currentTime) - int64(parent.Time)
-    if timeDiff <= 0 {
-        timeDiff = 1
-    }
+func (da *DifficultyAdjuster) calculatePIDifficulty(timeDiff, targetTime int64, parentDiff *big.Int) *big.Int {
+    // Calculate normalized error: error = (targetTime - actualTime) / targetTime
+    // Positive error: blocks too slow (need to decrease difficulty)
+    // Negative error: blocks too fast (need to increase difficulty)
+    error = (targetTime - timeDiff) / targetTime
     
-    // Target block time
-    targetTime := d.config.TargetBlockTime.Seconds()
+    // Update integral accumulator with anti-windup protection
+    da.integralAccumulator += error
+    // Clamp integral to [-10.0, 10.0]
     
-    // Error calculation
-    error := targetTime - float64(timeDiff)
+    // Proportional term: Kp × error
+    // Kp = MaxDifficultyChangePercent / 100 (default 0.2)
+    proportionalTerm = error × Kp
     
-    // Proportional term
-    pTerm := d.config.Kp * error
+    // Integral term: Ki × integral
+    // Ki = 0.1 (fixed for stable convergence)
+    integralTerm = da.integralAccumulator × Ki
     
-    // Integral term (accumulated)
-    d.integral += error
-    iTerm := d.config.Ki * d.integral
+    // Combined PI output
+    piOutput = proportionalTerm + integralTerm
     
-    // Derivative term (rate of change)
-    dTerm := d.config.Kd * (error - d.prevError)
-    d.prevError = error
+    // Calculate new difficulty
+    multiplier = 1 + piOutput
+    newDifficulty = parentDiff × multiplier
     
-    // Calculate adjustment
-    adjustment := pTerm + iTerm + dTerm
-    
-    // Apply to parent difficulty
-    parentDiff := float64(parent.Difficulty.Uint64())
-    newDifficulty := parentDiff * (1.0 + adjustment)
-    
-    return big.NewInt(int64(newDifficulty))
+    return newDifficulty
 }
 ```
 
 **PI Controller Formula**:
 ```
-error = targetTime - actualTime
-adjustment = Kp × error + Ki × integral + Kd × derivative
+error = (targetTime - actualTime) / targetTime
+integral = integral + error (clamped to [-10, 10])
+adjustment = Kp × error + Ki × integral
 newDifficulty = parentDifficulty × (1 + adjustment)
 ```
 
 **Parameters**:
-- **Kp**: Proportional gain
-- **Ki**: Integral gain
-- **Kd**: Derivative gain
-- **TargetBlockTime**: Target block interval (default 10s)
+- **Kp (Proportional Gain)**: MaxDifficultyChangePercent / 100 (default 0.2)
+- **Ki (Integral Gain)**: 0.1 (fixed for stable convergence)
+- **TargetBlockTime**: 15 seconds
+- **Integral Anti-windup**: [-10.0, 10.0] (prevents saturation)
+
+**Economic Properties**:
+1. **Proportional term**: Immediate response to block time deviation
+2. **Integral term**: Eliminates long-term bias, ensures target convergence
+3. **Anti-windup**: Prevents integral saturation during extreme conditions
+4. **Minimum difficulty floor**: Ensures network liveness
+
+**Example Scenarios**:
+- **Blocks too slow** (30s vs 15s target): 
+  - error = (15-30)/15 = -1.0 
+  - adjustment = 0.2 × (-1.0) + 0.1 × integral 
+  - difficulty decreases
+- **Blocks too fast** (5s vs 15s target): 
+  - error = (15-5)/15 = 0.67 
+  - adjustment = 0.2 × 0.67 + 0.1 × integral 
+  - difficulty increases
+- **Blocks on target** (15s): 
+  - error = 0 
+  - adjustment = 0 (if integral = 0) 
+  - no change
 
 ### 4.2 Boundary Enforcement
 
-**Code**: [`difficulty_adjustment.go:L178-L209`](file:///d:/NogoChain/nogo/blockchain/nogopow/difficulty_adjustment.go#L178-L209)
+**Source Code**: [`difficulty_adjustment.go`](https://github.com/nogochain/nogo/tree/main/nogo/blockchain/nogopow/difficulty_adjustment.go)
 
 ```go
-func (d *DifficultyAdjuster) enforceBoundaryConditions(difficulty *big.Int) *big.Int {
-    // Minimum difficulty
-    if difficulty.Cmp(d.config.MinimumDifficulty) < 0 {
-        return new(big.Int).Set(d.config.MinimumDifficulty)
+func (da *DifficultyAdjuster) enforceBoundaryConditions(newDifficulty, parentDiff *big.Int, timeDiff, targetTime int64) *big.Int {
+    // Constraint 1: Enforce minimum difficulty (network liveness guarantee)
+    minDiff := big.NewInt(int64(consensusParams.MinDifficulty))
+    if newDifficulty.Cmp(minDiff) < 0 {
+        newDifficulty.Set(minDiff)
     }
     
-    // Maximum adjustment (200% increase, 50% decrease)
-    maxIncrease := new(big.Int).Mul(d.parentDifficulty, big.NewInt(2))
-    maxDecrease := new(big.Int).Div(d.parentDifficulty, big.NewInt(2))
-    
-    if difficulty.Cmp(maxIncrease) > 0 {
-        return new(big.Int).Set(maxIncrease)
+    // Constraint 2: Enforce maximum difficulty (prevent overflow)
+    maxDiff := new(big.Int).Lsh(big.NewInt(1), 256) // 2^256
+    if newDifficulty.Cmp(maxDiff) > 0 {
+        newDifficulty.Set(maxDiff)
     }
     
-    if difficulty.Cmp(maxDecrease) < 0 {
-        return new(big.Int).Set(maxDecrease)
+    // Constraint 3: Enforce maximum adjustment (prevent shock therapy)
+    // Maximum 100% increase per block
+    maxAllowed := new(big.Int).Mul(parentDiff, big.NewInt(2))
+    if newDifficulty.Cmp(maxAllowed) > 0 {
+        newDifficulty.Set(maxAllowed)
     }
     
-    return difficulty
+    // Constraint 4: Ensure difficulty never decreases below 1
+    if newDifficulty.Cmp(big.NewInt(1)) < 0 {
+        newDifficulty.Set(big.NewInt(1))
+    }
+    
+    return newDifficulty
 }
 ```
 
 **Safety Limits**:
-- **Minimum**: Configured minimum difficulty
-- **Maximum Increase**: 200% of parent difficulty
-- **Maximum Decrease**: 50% of parent difficulty
+- **Minimum Difficulty**: Configured MinDifficulty (default 1)
+- **Maximum Difficulty**: 2^256 (prevent overflow)
+- **Maximum Increase**: 100% per block (2× parent difficulty)
+- **Absolute Minimum**: 1 (ensures network liveness)
+
+**Rationale**:
+1. **Minimum difficulty**: Ensures network can always produce blocks
+2. **Maximum difficulty**: Prevents overflow in uint256 representation
+3. **Maximum adjustment**: Prevents "shock therapy" - sudden difficulty swings
+4. **Absolute floor**: Guarantees difficulty is always positive
 
 ### 4.3 Public Interface
 
@@ -727,9 +797,10 @@ hitRate := cache.HitRate()
 
 ## 11. Related Documentation
 
-- [Core Data Structures](./core-types-README.md)
-- [Validator Documentation](./validator-README.md)
-- [Network Protocol](./network-README.md)
+- [Core Data Structures](https://github.com/nogochain/nogo/tree/main/nogo/docs/core-types-README.md)
+- [Validator Documentation](https://github.com/nogochain/nogo/tree/main/nogo/docs/validator-README.md)
+- [Network Protocol](https://github.com/nogochain/nogo/tree/main/nogo/docs/network-README.md)
+- [Main Documentation](https://github.com/nogochain/nogo/tree/main/nogo/docs)
 
 ---
 

@@ -300,15 +300,11 @@ go build -o nogo ./blockchain/cmd
 ### 官方资源
 
 - **GitHub**: https://github.com/nogochain/nogo
-- **官方网站**: https://nogochain.org
-- **区块浏览器**: https://explorer.nogochain.org
-- **文档站点**: https://docs.nogochain.org
+- **GitHub Issues**: https://github.com/nogochain/nogo/issues
 
 ### 社区资源
 
-- **Discord**: https://discord.gg/nogochain
-- **Twitter**: https://twitter.com/nogochain
-- **Telegram**: https://t.me/nogochain
+- **Discord**: https://discord.gg/HxEFPqJMEV
 
 ### 技术资源
 
@@ -323,16 +319,15 @@ go build -o nogo ./blockchain/cmd
 
 ### 发现错误？
 
-1. 在 GitHub 提交 Issue
+1. 在 GitHub 提交 Issue: https://github.com/nogochain/nogo/issues
 2. 提交 Pull Request 修正
-3. 联系文档维护团队
+3. 联系文档维护团队（Discord）
 
 ### 改进建议？
 
 我们欢迎所有改进建议！请通过以下方式反馈：
-- GitHub Issues
+- GitHub Issues: https://github.com/nogochain/nogo/issues
 - Discord 文档频道
-- 邮件：docs@nogochain.org
 
 ### 翻译文档？
 
@@ -430,8 +425,8 @@ A: 下载整个 `docs/` 目录，或使用 `wget` 批量下载。
 
 1. **文档问题**: 查看 [常见问题](#常见问题)
 2. **技术问题**: 阅读相关技术文档
-3. **社区支持**: 加入 Discord 或 Telegram
-4. **商业合作**: 联系 business@nogochain.org
+3. **社区支持**: 加入 Discord: https://discord.gg/HxEFPqJMEV
+4. **GitHub Issues**: https://github.com/nogochain/nogo/issues
 
 ---
 

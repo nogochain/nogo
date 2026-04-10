@@ -2,13 +2,13 @@
 
 This document provides complete deployment instructions for the NogoChain blockchain, covering development, testnet, and production environments.
 
-**Last Updated**: 2026-04-07  
+**Last Updated**: 2026-04-10  
 **Audit Status:** ✅ Configuration options verified against code  
 **Code References:**
-- Configuration: [`blockchain/config/config.go`](https://github.com/nogochain/nogo/tree/main/blockchain/config/config.go)
-- Environment Variables: [`blockchain/cmd/env.go`](https://github.com/nogochain/nogo/tree/main/blockchain/cmd/env.go)
-- Node Startup: [`blockchain/cmd/node.go`](https://github.com/nogochain/nogo/tree/main/blockchain/cmd/node.go)
-- Main Entry: [`blockchain/cmd/main.go`](https://github.com/nogochain/nogo/tree/main/blockchain/cmd/main.go)
+- Configuration: [`blockchain/config/config.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/config.go)
+- Environment Variables: [`blockchain/config/env.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/env.go)
+- Types: [`blockchain/config/types.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/types.go)
+- Node Startup: [`blockchain/cmd/node.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/cmd/node.go)
 
 ---
 
@@ -179,9 +179,10 @@ docker compose down
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `CHAIN_ID` | Chain ID (1=mainnet, 2=testnet, 3=smoke test) | `1` | `1` |
-| `GENESIS_PATH` | Genesis file path | `genesis/mainnet.json` | `genesis/testnet.json` |
+| `CHAIN_ID` | Chain ID (1=mainnet, 2=testnet) | `1` | `1` |
+| `NETWORK_NAME` | Network name | `mainnet` | `mainnet` |
 | `DATA_DIR` | Data storage directory | `./data` | `/var/lib/nogochain` |
+| `LOG_DIR` | Log storage directory | `./logs` | `/var/log/nogochain` |
 | `MINER_ADDRESS` | Miner address (NOGO prefix) | Empty | `NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048` |
 | `ADMIN_TOKEN` | Admin authentication token (min 16 chars) | Empty | `your_secure_token_123` |
 
@@ -189,58 +190,55 @@ docker compose down
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `NODE_PORT` | HTTP server port | `8080` | `8080` |
 | `P2P_PORT` | P2P network port | `9090` | `9090` |
-| `P2P_ENABLE` | Enable P2P networking | `true` | `true` |
-| `P2P_PEERS` | P2P node addresses | Empty | `node1.nogochain.org:9090,node2.nogochain.org:9090` |
-| `P2P_SEEDS` | Seed node addresses | Empty | `seed.nogochain.org:9090` |
-| `MAX_PEERS` | Maximum P2P connections | `50` | `100` |
-| `MAX_POOL_CONNS` | Maximum connection pool connections | `100` | `200` |
-| `MAX_CONNS_PER_PEER` | Maximum connections per peer | `3` | `5` |
+| `HTTP_PORT` | HTTP API port | `8080` | `8080` |
+| `WS_PORT` | WebSocket port | `8081` | `8081` |
+| `P2P_MAX_PEERS` | Maximum P2P connections | `100` | `200` |
+| `P2P_MAX_CONNECTIONS` | Maximum connection pool connections | `50` | `100` |
+| `BOOT_NODES` | Bootstrap node addresses | Empty | `node1.nogochain.org:9090,node2.nogochain.org:9090` |
+| `DNS_DISCOVERY` | DNS discovery domains | Empty | `dns1.nogochain.org,dns2.nogochain.org` |
 
 #### HTTP Service Configuration
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `HTTP_ADDR` | HTTP listen address | `127.0.0.1:8080` | `0.0.0.0:8080` |
-| `WS_ENABLE` | Enable WebSocket | `true` | `true` |
-| `WS_MAX_CONNECTIONS` | Maximum WebSocket connections | `100` | `500` |
-| `RATE_LIMIT_REQUESTS` | Requests per second limit | `0` (unlimited) | `100` |
-| `RATE_LIMIT_BURST` | Request burst limit | `0` | `200` |
-| `HTTP_TIMEOUT_SECONDS` | HTTP timeout (seconds) | `10` | `30` |
-| `HTTP_MAX_HEADER_BYTES` | HTTP header max bytes | `8192` | `16384` |
+| `HTTP_ADDR` | HTTP listen address | `0.0.0.0:8080` | `0.0.0.0:8080` |
+| `WS_ENABLE` | Enable WebSocket | `false` | `true` |
+| `RATE_LIMIT_REQUESTS` | Requests per second limit | `100` | `100` |
+| `RATE_LIMIT_BURST` | Request burst limit | `50` | `50` |
 | `TRUST_PROXY` | Trust X-Forwarded-For headers | `false` | `true` |
-| `ENABLE_CORS` | Enable CORS | `false` | `true` |
 
 #### Mining Configuration
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `MINING_ENABLED` | Enable mining | `false` | `true` |
-| `MINING_THREADS` | Mining thread count | `1` | `4` |
-| `AUTO_MINE` | Auto mining | `false` | `true` |
+| `MINING_ENABLE` | Enable mining | `false` | `true` |
+| `MINER_ADDRESS` | Miner address (NOGO prefix) | Empty | `NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048` |
 | `MINE_INTERVAL_MS` | Mining interval (milliseconds) | `1000` | `17000` |
+| `MAX_TX_PER_BLOCK` | Maximum transactions per block | `1000` | `1000` |
 | `MINE_FORCE_EMPTY_BLOCKS` | Force mine empty blocks | `false` | `true` |
+| `MINER_CONVERGENCE_BASE_DELAY_MS` | Convergence base delay | `100` | `100` |
+| `MINER_CONVERGENCE_VARIABLE_DELAY_MS` | Convergence variable delay | `256` | `256` |
 
 #### Sync Configuration
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `SYNC_ENABLE` | Enable sync | `true` | `true` |
-| `SYNC_INTERVAL_MS` | Sync interval (milliseconds) | `3000` | `5000` |
-| `SYNC_WORKERS` | Sync worker count | `8` | `16` |
-| `SYNC_BATCH_SIZE` | Sync batch size | `100` | `200` |
-| `NOGO_SYNC_HEARTBEAT_INTERVAL` | Sync heartbeat interval (seconds) | `30` | `60` |
-| `NOGO_SYNC_WORKERS` | Sync worker count | `8` | `16` |
-| `NOGO_SYNC_MAX_PENDING_BLOCKS` | Max pending blocks | `100` | `500` |
+| `SYNC_BATCH_SIZE` | Sync batch size | `100` | `100` |
+| `MAX_REORG_DEPTH` | Maximum rollback depth | `100` | `100` |
+| `LONG_FORK_THRESHOLD` | Long fork threshold | `10` | `10` |
+| `MAX_SYNC_RANGE` | Maximum sync range | `1000` | `1000` |
+| `PEER_HEIGHT_POLL_INTERVAL_MS` | Peer height poll interval | `1000` | `1000` |
+| `NETWORK_SYNC_CHECK_DELAY_MS` | Network sync check delay | `2000` | `2000` |
 
 #### Mempool Configuration
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `MEMPOOL_MAX_SIZE` | Max transactions in mempool | `50000` | `100000` |
-| `MEMPOOL_MIN_FEE_RATE` | Minimum fee rate | `1` | `10` |
-| `MEMPOOL_TTL` | Transaction TTL | `24h` | `48h` |
+| `MEMPOOL_MAX_TRANSACTIONS` | Max transactions in mempool | `10000` | `10000` |
+| `MEMPOOL_MAX_MEMORY_MB` | Max memory usage (MB) | `100` | `200` |
+| `MEMPOOL_MIN_FEE_RATE` | Minimum fee rate | `100` | `100` |
+| `MEMPOOL_TTL` | Transaction TTL | `24h` | `24h` |
 
 #### Cache Configuration
 
@@ -264,126 +262,137 @@ docker compose down
 |----------|-------------|---------|---------|
 | `LOG_LEVEL` | Log level | `info` | `debug` |
 | `METRICS_ENABLED` | Enable metrics collection | `true` | `true` |
-| `METRICS_PORT` | Metrics port | `0` (disabled) | `9100` |
+| `METRICS_PORT` | Metrics port | `9090` | `9100` |
 
 #### Security Configuration
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
+| `ADMIN_TOKEN` | Admin authentication token | Empty | `your_secure_token` |
+| `TLS_ENABLE` | Enable TLS | `true` | `true` |
 | `TLS_CERT_FILE` | TLS certificate file path | Empty | `/etc/ssl/nogochain.crt` |
 | `TLS_KEY_FILE` | TLS key file path | Empty | `/etc/ssl/nogochain.key` |
-| `KEYSTORE_DIR` | Keystore directory | `./keystore` | `/var/lib/nogochain/keystore` |
+| `RATE_LIMIT_REQUESTS` | Rate limit requests | `100` | `100` |
+| `RATE_LIMIT_BURST` | Rate limit burst | `50` | `50` |
+| `TRUST_PROXY` | Trust proxy headers | `false` | `true` |
 
-#### Orphan Pool Configuration
-
-| Variable | Description | Default | Example |
-|----------|-------------|---------|---------|
-| `NOGO_ORPHAN_POOL_MAX_SIZE` | Orphan pool max size | `100` | `500` |
-| `NOGO_ORPHAN_POOL_TTL` | Orphan pool TTL (hours) | `24` | `48` |
-
-#### Mining Stability Configuration
+#### NTP Configuration
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `NOGO_MINING_STABILITY_WAIT` | Stability wait time (seconds) | `300` | `600` |
-| `NOGO_MINING_SYNC_PAUSE` | Pause mining during sync | `true` | `false` |
+| `NTP_ENABLE` | Enable NTP sync | `true` | `true` |
+| `NTP_SERVERS` | NTP servers | `pool.ntp.org,time.google.com,time.cloudflare.com` | `pool.ntp.org` |
+| `NTP_SYNC_INTERVAL_MS` | Sync interval (ms) | `600000` | `600000` |
+| `NTP_MAX_DRIFT_MS` | Max clock drift | `100` | `100` |
 
-#### Other Configuration
+#### Governance Configuration
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `AI_AUDITOR_URL` | AI auditor service URL | Empty | `http://localhost:8000` |
-| `STRATUM_ENABLED` | Enable Stratum mining protocol | `false` | `true` |
-| `STRATUM_ADDR` | Stratum listen address | `:3333` | `:3333` |
-| `ENABLE_PROTOBUF` | Enable Protocol Buffers | `true` | `true` |
-| `BRAND_PREFIX` | Docker container prefix | `mybrand` | `nogochain` |
-| `DOCKER_UID` | Docker user ID | `1000` | `1000` |
-| `DOCKER_GID` | Docker group ID | `1000` | `1000` |
+| `GOVERNANCE_MIN_QUORUM` | Minimum quorum | `1000000` | `1000000` |
+| `GOVERNANCE_APPROVAL_THRESHOLD_PERCENT` | Approval threshold (%) | `60` | `60` |
+| `GOVERNANCE_VOTING_PERIOD_DAYS` | Voting period (days) | `7` | `7` |
+| `GOVERNANCE_PROPOSAL_DEPOSIT` | Proposal deposit | `100000000000` | `100000000000` |
+| `GOVERNANCE_EXECUTION_DELAY_BLOCKS` | Execution delay (blocks) | `100` | `100` |
+
+#### Feature Flags
+
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `ENABLE_AI_AUDITOR` | Enable AI auditor | `false` | `false` |
+| `ENABLE_DNS_REGISTRY` | Enable DNS registry | `true` | `true` |
+| `ENABLE_GOVERNANCE` | Enable governance | `true` | `true` |
+| `ENABLE_PRICE_ORACLE` | Enable price oracle | `true` | `true` |
+| `ENABLE_SOCIAL_RECOVERY` | Enable social recovery | `true` | `true` |
 
 ### Configuration Files
 
-#### YAML Configuration File Example
+#### JSON Configuration File Example
 
-Create `config.yaml`:
+Create `config.json`:
 
-```yaml
-# Core Configuration
-chain_id: 1
-genesis_path: genesis/mainnet.json
-data_dir: /var/lib/nogochain
-miner_address: NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048
-admin_token: your_secure_admin_token
-
-# Network Configuration
-node_port: 8080
-p2p_port: 9090
-p2p_enable: true
-max_peers: 100
-
-# HTTP Service Configuration
-http_addr: 0.0.0.0:8080
-ws_enable: true
-ws_max_connections: 500
-rate_limit_requests: 100
-rate_limit_burst: 200
-http_timeout_seconds: 30
-trust_proxy: true
-enable_cors: true
-
-# Mining Configuration
-mining_enabled: true
-mining_threads: 4
-auto_mine: true
-mine_interval_ms: 17000
-
-# Sync Configuration
-sync_enable: true
-sync_interval_ms: 5000
-sync_workers: 16
-sync_batch_size: 200
-
-# Mempool Configuration
-mempool_max_size: 100000
-mempool_min_fee_rate: 10
-mempool_ttl: 48h
-
-# Cache Configuration
-cache_max_blocks: 50000
-cache_max_balances: 500000
-cache_max_proofs: 50000
-
-# Storage Configuration
-prune_depth: 10000
-store_mode: pruned
-checkpoint_interval: 1000
-
-# Logging and Monitoring
-log_level: info
-metrics_enabled: true
-metrics_port: 9100
-
-# Security Configuration
-tls_cert_file: /etc/ssl/nogochain.crt
-tls_key_file: /etc/ssl/nogochain.key
-keystore_dir: /var/lib/nogochain/keystore
+```json
+{
+  "network": {
+    "name": "mainnet",
+    "chainId": 1,
+    "p2pPort": 9090,
+    "httpPort": 8080,
+    "wsPort": 8081,
+    "enableWS": false,
+    "maxPeers": 100,
+    "maxConnections": 50,
+    "bootNodes": [],
+    "dnsDiscovery": []
+  },
+  "consensus": {
+    "difficultyEnable": true,
+    "blockTimeTargetSeconds": 15,
+    "difficultyAdjustmentInterval": 100,
+    "maxBlockTimeDriftSeconds": 7200,
+    "merkleEnable": true,
+    "monetaryPolicy": {
+      "initialBlockReward": 800000000,
+      "annualReductionPercent": 10,
+      "minimumBlockReward": 10000000,
+      "minerRewardShare": 96,
+      "communityFundShare": 2,
+      "genesisShare": 1,
+      "integrityPoolShare": 1,
+      "minerFeeShare": 0
+    }
+  },
+  "mining": {
+    "enabled": true,
+    "minerAddress": "NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048",
+    "mineInterval": 1000000000,
+    "maxTxPerBlock": 1000,
+    "forceEmptyBlocks": false
+  },
+  "sync": {
+    "batchSize": 100,
+    "maxRollbackDepth": 100,
+    "longForkThreshold": 10,
+    "maxSyncRange": 1000
+  },
+  "security": {
+    "adminToken": "your_secure_admin_token",
+    "rateLimitReqs": 100,
+    "rateLimitBurst": 50,
+    "trustProxy": false,
+    "tlsEnabled": true,
+    "tlsCertFile": "/etc/ssl/nogochain.crt",
+    "tlsKeyFile": "/etc/ssl/nogochain.key"
+  },
+  "mempool": {
+    "maxTransactions": 10000,
+    "maxMemoryMB": 100,
+    "minFeeRate": 100,
+    "ttl": 86400000000000
+  },
+  "dataDir": "./data",
+  "logDir": "./logs",
+  "httpAddr": "0.0.0.0:8080",
+  "wsEnabled": false
+}
 ```
 
 Start with configuration file:
 ```bash
-./nogo -config config.yaml server
+./nogo -config config.json server
 ```
 
 ### Command-Line Flags
 
 ```bash
-./nogo server <miner_address> [mine] [test]
+./nogo server [mine] [test]
 ```
 
 #### Command-Line Options
 
 | Flag | Description | Example |
 |------|-------------|---------|
-| `-config` | YAML configuration file path | `-config config.yaml` |
+| `-config` | JSON configuration file path | `-config config.json` |
 | `-port` | HTTP server port | `-port 8080` |
 | `-p2p-port` | P2P network port | `-p2p-port 9090` |
 | `-data-dir` | Data storage directory | `-data-dir /var/lib/nogochain` |
@@ -392,17 +401,16 @@ Start with configuration file:
 | `-max-peers` | Maximum P2P connections | `-max-peers 100` |
 | `-log-level` | Log level | `-log-level debug` |
 | `-chain-id` | Chain ID | `-chain-id 1` |
-| `-genesis` | Genesis file path | `-genesis genesis/mainnet.json` |
 | `-miner-address` | Miner address | `-miner-address NOGO00...` |
 | `-admin-token` | Admin token | `-admin-token your_token` |
 | `-p2p` | Enable P2P networking | `-p2p` |
 | `-ws` | Enable WebSocket | `-ws` |
-| `-ws-max-conns` | Maximum WebSocket connections | `-ws-max-conns 500` |
+| `-ws-max-conns` | Maximum WebSocket connections | `-ws-max-conns 100` |
 | `-ai-auditor-url` | AI auditor service URL | `-ai-auditor-url http://localhost:8000` |
 | `-rpc-port` | RPC server port | `-rpc-port 8080` |
 | `-cors` | Enable CORS | `-cors` |
 | `-rate-limit-rps` | Requests per second limit | `-rate-limit-rps 100` |
-| `-rate-limit-burst` | Request burst limit | `-rate-limit-burst 200` |
+| `-rate-limit-burst` | Request burst limit | `-rate-limit-burst 50` |
 | `-keystore-dir` | Keystore directory | `-keystore-dir /var/lib/nogochain/keystore` |
 | `-trust-proxy` | Trust proxy | `-trust-proxy` |
 
@@ -410,16 +418,16 @@ Start with configuration file:
 
 ```bash
 # Mainnet node (with mining)
-./nogo server NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048 mine
+./nogo server mine
 
 # Testnet node (with mining)
-./nogo server NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048 mine test
+./nogo server mine test
 
 # Sync-only node (no mining)
-./nogo server NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048
+./nogo server
 
 # Start with configuration file
-./nogo -config config.yaml server
+./nogo -config config.json server
 ```
 
 ---
@@ -450,12 +458,11 @@ cd nogo
 go build -o nogo ./blockchain/cmd
 
 # 2. Set environment variables
-export CHAIN_ID=3
-export GENESIS_PATH=genesis/smoke.json
+export CHAIN_ID=2
 export DATA_DIR=./data
-export MINING_ENABLED=true
+export MINING_ENABLE=true
 export MINER_ADDRESS=NOGO0049c3cf477a9fce2622d18245d04f011f788f7b2e248bdeb38d4ef459c37857be3d0293c3
-export P2P_ENABLE=true
+export P2P_MAX_PEERS=100
 export WS_ENABLE=true
 export LOG_LEVEL=debug
 
@@ -484,17 +491,16 @@ docker compose logs -f blockchain
 ```bash
 # 1. Set environment variables
 export CHAIN_ID=2
-export GENESIS_PATH=genesis/testnet.json
 export DATA_DIR=./data-testnet
 export MINER_ADDRESS=NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048
 export ADMIN_TOKEN=your_testnet_admin_token
-export P2P_ENABLE=true
-export P2P_PEERS=test.nogochain.org:9090
-export AUTO_MINE=true
+export BOOT_NODES=test.nogochain.org:9090
+export MINING_ENABLE=true
 export MINE_INTERVAL_MS=15000
+export LOG_LEVEL=info
 
 # 2. Start node
-./nogo server
+./nogo server mine
 ```
 
 #### Multi-Node Testnet (Docker Compose)
@@ -537,24 +543,27 @@ start-local.bat
 # 1. Create environment file
 cat > .env.mainnet << EOF
 CHAIN_ID=1
-GENESIS_PATH=genesis/mainnet.json
+NETWORK_NAME=mainnet
 DATA_DIR=/var/lib/nogochain
+LOG_DIR=/var/log/nogochain
 MINER_ADDRESS=NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048
 ADMIN_TOKEN=your_very_secure_admin_token_minimum_16_chars
-P2P_ENABLE=true
-P2P_PEERS=main.nogochain.org:9090
-AUTO_MINE=true
+BOOT_NODES=main.nogochain.org:9090
+MINING_ENABLE=true
 MINE_INTERVAL_MS=17000
 LOG_LEVEL=info
 RATE_LIMIT_REQUESTS=100
 RATE_LIMIT_BURST=50
+TLS_ENABLE=true
+TLS_CERT_FILE=/etc/ssl/nogochain.crt
+TLS_KEY_FILE=/etc/ssl/nogochain.key
 EOF
 
 # 2. Load environment variables
 source .env.mainnet
 
 # 3. Start node
-./nogo server
+./nogo server mine
 ```
 
 #### Production Docker Deployment
@@ -586,23 +595,35 @@ Create service file `/etc/systemd/system/nogochain.service`:
 [Unit]
 Description=NogoChain Blockchain Node
 After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
 User=nogochain
 Group=nogochain
 WorkingDirectory=/opt/nogochain
-Environment="CHAIN_ID=1"
-Environment="MINER_ADDRESS=NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048"
-Environment="ADMIN_TOKEN=your_secure_admin_token"
-Environment="P2P_ENABLE=true"
-Environment="P2P_PEERS=main.nogochain.org:9090"
-Environment="AUTO_MINE=true"
-Environment="LOG_LEVEL=info"
-ExecStart=/opt/nogochain/nogo server
+EnvironmentFile=/etc/nogochain/.env
+ExecStart=/opt/nogochain/nogo server mine
 Restart=always
 RestartSec=10
 LimitNOFILE=65535
+LimitNPROC=65535
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nogochain /var/log/nogochain
+
+# Environment variables
+Environment="CHAIN_ID=1"
+Environment="MINER_ADDRESS=NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048"
+Environment="ADMIN_TOKEN=your_secure_admin_token"
+Environment="BOOT_NODES=main.nogochain.org:9090"
+Environment="MINING_ENABLE=true"
+Environment="LOG_LEVEL=info"
+Environment="TLS_ENABLE=true"
 
 [Install]
 WantedBy=multi-user.target
@@ -1233,11 +1254,11 @@ curl -X POST http://localhost:8080/tx/submit \
 
 - **Official Website**: https://nogochain.org
 - **GitHub**: https://github.com/NogoChain/NogoChain
-- **Documentation**: https://docs.nogochain.org
-- **Discord**: https://discord.gg/nogochain
+- **Documentation**: https://github.com/NogoChain/NogoChain/tree/main/nogo/docs
+- **Discord**: https://discord.gg/HxEFPqJMEV
 - **Twitter**: https://twitter.com/nogochain
 
 ---
 
-**Last Updated**: 2026-04-06
+**Last Updated**: 2026-04-10
 **Version**: 1.0.0

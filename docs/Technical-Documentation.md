@@ -468,6 +468,12 @@ txid, replaced, _, _ := mempool.ReplaceByFee(newTx)
 
 NogoPow is NogoChain's original PoW algorithm, combining matrix operations and hash functions.
 
+**Key Features**:
+- **ASIC-Resistant**: Matrix operations require large memory (matSize × matSize × matNum entries)
+- **Verifiable**: Verification requires only one matrix multiplication and hash
+- **Deterministic**: Same input produces same output, no randomness
+- **Cache Optimized**: LRU cache with singleflight for concurrent safety
+
 **Algorithm Flow**:
 
 ```
@@ -476,19 +482,36 @@ Output: PoW hash powHash
 
 1. Get matrix data from cache
    cacheData = Cache.Get(seed)
+   // Cache data: []uint32 array with matNum × matSize × matSize / 4 elements
 
-2. Construct input matrix
-   A = blockHash converted to matrix
+2. Construct input matrix from blockHash
+   // blockHash (32 bytes) used to generate sequence for matrix selection
 
-3. Matrix multiplication
-   Result = A × cacheData
+3. Matrix multiplication with fixed-point arithmetic
+   // Uses int64 fixed-point representation (FixedPointFactor = 2^30)
+   // Multiple matrix multiplications in sequence (32 iterations per thread)
+   Result = mulMatrix(blockHash.Bytes(), cacheData)
+   // Computation uses 4 parallel goroutines for performance
 
 4. Hash result
    powHash = SHA3-256(Result)
+   // Result matrix flattened and hashed using Keccak256
 
 5. Difficulty check
    Requirement: powHash < target (difficulty target)
+   // target = (2^256 - 1) / difficulty
 ```
+
+**Matrix Parameters**:
+- **matSize**: Matrix dimension (matSize × matSize matrices)
+- **matNum**: Number of precomputed matrices in cache
+- **Fixed-Point Factor**: 2^30 for high-precision arithmetic
+- **Parallel Threads**: 4 goroutines for matrix computation
+
+**Cache Mechanism**:
+- **LRU Eviction**: Automatically evicts least recently used entries
+- **Singleflight**: Prevents duplicate computations for same seed
+- **Size**: Configurable (default 1000 entries)
 
 **Mining Code**:
 ```go
@@ -516,22 +539,46 @@ for nonce := uint64(0); ; nonce++ {
 
 ### 7.2 Difficulty Adjustment
 
-Difficulty adjustment goal: Maintain stable block time at target interval (default 10 seconds)
+Difficulty adjustment goal: Maintain stable block time at target interval (default 15 seconds)
 
-**Adjustment Formula**:
+**PI Controller Algorithm**:
+
+NogoChain uses a Proportional-Integral (PI) controller for precise block time stabilization.
+
+**Formula**:
 ```
-newDifficulty = parentDifficulty × (targetTime / actualTime)
+error = (targetTime - actualTime) / targetTime
+integral = integral + error (clamped to [-10, 10])
+adjustment = Kp × error + Ki × integral
+newDifficulty = parentDifficulty × (1 + adjustment)
 ```
+
+**Parameters**:
+- **Kp (Proportional Gain)**: MaxDifficultyChangePercent / 100 (default 0.2)
+- **Ki (Integral Gain)**: 0.1 (fixed for stable convergence)
+- **TargetBlockTime**: 15 seconds
+- **Integral Anti-windup**: [-10.0, 10.0] (prevents saturation)
 
 **Adjustment Limits**:
-- Maximum increase: 200%
-- Maximum decrease: 50%
-- Minimum difficulty: Configured MinimumDifficulty
+- Minimum difficulty: Configured MinDifficulty (default 1)
+- Maximum increase: 100% per block
+- Maximum difficulty: 2^256
+
+**Economic Properties**:
+1. **Proportional term**: Immediate response to block time deviation
+2. **Integral term**: Eliminates long-term bias, ensures target convergence
+3. **Anti-windup**: Prevents integral saturation during extreme conditions
+4. **Minimum difficulty floor**: Ensures network liveness
 
 ```go
-adjuster := nogopow.NewDifficultyAdjuster(config)
+adjuster := nogopow.NewDifficultyAdjuster(consensusParams)
 newDiff := adjuster.CalcDifficulty(currentTime, parentHeader)
 ```
+
+**Example Scenarios**:
+- Blocks too slow (30s vs 15s target): error = (15-30)/15 = -1.0 → difficulty decreases
+- Blocks too fast (5s vs 15s target): error = (15-5)/15 = 0.67 → difficulty increases
+- Blocks on target (15s): error = 0 → no adjustment
 
 ### 7.3 Fork Selection
 
@@ -1022,13 +1069,14 @@ A: Public nodes have rate limits; running your own node is recommended.
 ### B. Links
 
 - **Website**: https://nogochain.org
-- **GitHub**: https://github.com/nogochain/nogo
-- **Documentation**: https://docs.nogochain.org
-- **Block Explorer**: https://explorer.nogochain.org
+- **GitHub Repository**: https://github.com/nogochain/nogo
+- **Documentation**: https://github.com/nogochain/nogo/tree/main/nogo/docs
+- **Block Explorer**: https://explorer.nogochain.org (TBD)
+- **Issue Tracker**: https://github.com/nogochain/nogo/issues
 
 ### C. Community
 
-- **Discord**: https://discord.gg/nogochain
+- **Discord**: https://discord.gg/HxEFPqJMEV
 - **Twitter**: https://twitter.com/nogochain
 - **Telegram**: https://t.me/nogochain
 

@@ -29,10 +29,10 @@ NogoChain provides a complete RESTful HTTP API and real-time WebSocket API for i
 **Supported Formats**: JSON
 
 **Implementation Reference**: 
-- HTTP API routes: [`blockchain/api/http.go`](https://github.com/nogochain/nogo/tree/main/blockchain/api/http.go)
-- WebSocket server: [`blockchain/api/ws.go`](https://github.com/nogochain/nogo/tree/main/blockchain/api/ws.go)
-- Error codes: [`blockchain/api/error_codes.go`](https://github.com/nogochain/nogo/tree/main/blockchain/api/error_codes.go)
-- Rate limiter: [`blockchain/api/rate_limiter.go`](https://github.com/nogochain/nogo/tree/main/blockchain/api/rate_limiter.go)
+- HTTP API routes: [`blockchain/api/http.go`](../blockchain/api/http.go)
+- WebSocket server: [`blockchain/api/ws.go`](../blockchain/api/ws.go)
+- Error codes: [`blockchain/api/error_codes.go`](../blockchain/api/error_codes.go)
+- Rate limiter: [`blockchain/api/rate_limiter.go`](../blockchain/api/rate_limiter.go)
 
 **Verified Endpoints**: All documented endpoints have been verified against the source code as of 2026-04-07.
 
@@ -84,6 +84,8 @@ curl http://localhost:8080/version
   "gitCommit": "unknown"
 }
 ```
+
+**Code Reference**: [`handleVersion`](../blockchain/api/http.go#L1846-L1858)
 
 ---
 
@@ -1436,6 +1438,7 @@ ws.onmessage = (event) => {
 | 404 | Not Found | Resource does not exist (block, transaction, etc.) |
 | 405 | Method Not Allowed | Wrong HTTP method used |
 | 409 | Conflict | Resource conflict (e.g., Merkle proof for v1 blocks) |
+| 429 | Too Many Requests | Rate limit exceeded |
 | 500 | Internal Server Error | Internal processing failed |
 
 ### Error Response Format
@@ -1443,12 +1446,19 @@ ws.onmessage = (event) => {
 ```json
 {
   "error": {
-    "code": 400,
-    "message": "Invalid address format",
-    "details": "Address must start with 'NOGO'"
+    "code": "INVALID_ADDRESS",
+    "message": "invalid address format",
+    "details": {
+      "field": "address",
+      "value": "INVALID",
+      "expected": "NOGO prefix, 78 characters total"
+    },
+    "requestId": "req_abc123"
   }
 }
 ```
+
+**Error Codes Reference**: See [Error_Codes_Reference.md](./API/Error_Codes_Reference.md) for complete error code list.
 
 ---
 

@@ -5,9 +5,13 @@
 **网络:** Mainnet (ChainID: 1)
 **审计状态:** ✅ 参数已与代码验证
 **代码参考:**
-- 货币政策：[`blockchain/config/monetary_policy.go`](https://github.com/nogochain/nogo/tree/main/blockchain/config/monetary_policy.go)
-- 共识参数：[`blockchain/config/config.go`](https://github.com/nogochain/nogo/tree/main/blockchain/config/config.go)
-- 常量定义：[`blockchain/config/constants.go`](https://github.com/nogochain/nogo/tree/main/blockchain/config/constants.go)
+- 货币政策：[`monetary_policy.go`](https://github.com/nogochain/nogo/blob/main/blockchain/config/monetary_policy.go)
+- 共识参数：[`config.go`](https://github.com/nogochain/nogo/blob/main/blockchain/config/config.go)
+- 费用检查：[`fee_checker.go`](https://github.com/nogochain/nogo/blob/main/blockchain/core/fee_checker.go)
+- 挖矿奖励：[`mining.go`](https://github.com/nogochain/nogo/blob/main/blockchain/core/mining.go)
+- 难度调整：[`difficulty_adjustment.go`](https://github.com/nogochain/nogo/blob/main/blockchain/nogopow/difficulty_adjustment.go)
+- 完整性奖励：[`integrity_rewards.go`](https://github.com/nogochain/nogo/blob/main/blockchain/core/integrity_rewards.go)
+- 社区基金：[`community_fund_governance.go`](https://github.com/nogochain/nogo/blob/main/blockchain/contracts/community_fund_governance.go)
 
 ---
 
@@ -46,12 +50,12 @@
 
 | 接收方 | 比例 | 说明 |
 |--------|------|------|
-| 矿工 | 96% | 区块奖励 + 全部交易费用 |
+| 矿工 | 96% | 区块奖励（交易费用单独燃烧） |
 | 社区基金 | 2% | 社区治理提案资金池 |
 | 创世地址 | 1% | 创始团队与早期支持者 |
 | 完整性池 | 1% | 完整性节点奖励池 |
 
-**注意:** 交易费用 100% 分配给矿工（通过 coinbase 交易实现）。
+**注意:** 交易费用 100% 燃烧（通缩机制），不分配给任何一方。当网络使用率高时，这会产生通缩压力。
 
 ---
 
@@ -67,8 +71,14 @@ $$R(h) = \max\left(R_0 \times (1-r)^{\lfloor \frac{h}{B_{year}} \rfloor}, R_{min
 - $R(h)$: 高度 $h$ 处的区块奖励（单位：wei）
 - $R_0 = 8 \times 10^8$ wei (8 NOGO)
 - $r = 0.10$ (10% 年度递减)
-- $B_{year} = \frac{365.25 \times 24 \times 60 \times 60}{17} \approx 1,856,329$ 区块
+- $B_{year} = \frac{365 \times 24 \times 60 \times 60}{17} = 1,856,329$ 区块（使用 365 天，非 365.25）
 - $R_{min} = 0.1 \times 10^8 = 10^7$ wei (0.1 NOGO)
+
+**实现细节:**
+- 使用整数运算（`reward * 9 / 10`）避免浮点数误差
+- 每年检查最小奖励下限（防止下溢）
+- 包含大高度值的溢出保护
+- 所有计算使用 `big.Int` 实现任意精度
 
 ### 2.2 代码实现
 
@@ -142,6 +152,79 @@ genesisReward := baseReward * uint64(policy.GenesisShare) / 100       // 1%
 integrityPool := baseReward * uint64(policy.IntegrityPoolShare) / 100 // 1%
 ```
 
+### 2.5 叔叔区块奖励（动态计算）
+
+NogoChain 实施动态叔叔奖励机制，以激励及时包含孤块。
+
+**叔叔奖励公式:**
+
+$$R_{uncle}(d) = R(h) \times \frac{8-d}{8}$$
+
+其中：
+- $R_{uncle}(d)$: 距离 $d$ 处的叔叔区块奖励
+- $R(h)$: 高度 $h$ 处的当前区块奖励
+- $d = \text{nephewHeight} - \text{uncleHeight}$: 侄子区块与叔叔区块的距离（$1 \leq d \leq 7$）
+
+**奖励时间表:**
+
+| 叔叔距离 (d) | 奖励乘数 | 示例（8 NOGO 基础） |
+|-------------|---------|-------------------|
+| 1 | 7/8 = 87.5% | 7.00 NOGO |
+| 2 | 6/8 = 75.0% | 6.00 NOGO |
+| 3 | 5/8 = 62.5% | 5.00 NOGO |
+| 4 | 4/8 = 50.0% | 4.00 NOGO |
+| 5 | 3/8 = 37.5% | 3.00 NOGO |
+| 6 | 2/8 = 25.0% | 2.00 NOGO |
+| 7 | 1/8 = 12.5% | 1.00 NOGO |
+| ≥8 | 0% | 0 NOGO（无奖励） |
+
+**侄子奖励:**
+
+包含叔叔区块的矿工获得奖励：
+
+$$R_{nephew} = R(h) \times \frac{1}{32} \times \min(\text{uncleCount}, 2)$$
+
+其中：
+- 每块最多 2 个叔叔
+- 每个叔叔给予区块奖励的 1/32 (3.125%) 作为奖励
+
+**代码实现:**
+
+```go
+// monetary_policy.go - 动态叔叔奖励计算
+func (p MonetaryPolicy) GetUncleReward(nephewHeight, uncleHeight uint64, blockReward uint64) uint64 {
+    distance := nephewHeight - uncleHeight
+    if distance == 0 || distance > 7 {
+        return 0  // 同高度或距离太远无奖励
+    }
+    
+    // 动态乘数：(8 - distance) / 8
+    multiplier := 8 - distance
+    rewardBig := new(big.Int).SetUint64(blockReward)
+    rewardBig.Mul(rewardBig, big.NewInt(int64(multiplier)))
+    rewardBig.Div(rewardBig, big.NewInt(8))
+    
+    return rewardBig.Uint64()
+}
+
+// GetNephewBonus 计算包含叔叔的奖励
+func (p MonetaryPolicy) GetNephewBonus(blockReward uint64, uncleCount int) uint64 {
+    if uncleCount <= 0 {
+        return 0
+    }
+    if uncleCount > 2 {
+        uncleCount = 2  // 最多 2 个叔叔
+    }
+    return uint64(uncleCount) * (blockReward / 32)
+}
+```
+
+**经济原理:**
+1. **动态奖励鼓励及时包含:** 距离越近的叔叔获得越高奖励
+2. **防止孤块浪费:** 孤块仍为网络安全做贡献
+3. **限制最大叔叔深度:** 距离超过 7 无奖励防止链质量下降
+4. **限制每块叔叔数:** 每块最多 2 个叔叔保持区块质量
+
 ---
 
 ## 3. 难度调整机制
@@ -162,9 +245,12 @@ $$D_{new} = D_{parent} \times (1 + \text{output})$$
 
 其中：
 - $T_{target} = 17$ 秒（目标区块时间）
-- $K_p = 0.5$（比例增益）
-- $K_i = 0.1$（积分增益）
+- $K_p = \text{MaxDifficultyChangePercent} / 100$（可配置，默认 0.5）
+- $K_i = 0.1$（积分增益，固定）
 - $\text{clamp}(x, -10, 10)$: 将积分限制在 [-10, 10] 防止饱和
+
+**配置说明:**
+比例增益 $K_p$ 可通过 `MaxDifficultyChangePercent` 参数配置（默认 50%，即 $K_p = 0.5$）。这允许在不修改代码的情况下调整网络参数。
 
 ### 3.2 边界条件
 
@@ -274,27 +360,34 @@ func EstimateSmartFee(txSize uint64, mempoolSize int, speed string) uint64 {
 
 ### 5.1 分配规则
 
-NogoChain 的费用分配机制极为简洁：
+NogoChain 实施通缩型费用燃烧机制：
 
 | 来源 | 接收方 | 比例 | 实现方式 |
 |------|--------|------|----------|
-| 交易费用 | 矿工 | 100% | Coinbase 交易包含费用总额 |
+| 交易费用 | **燃烧** | 100% | 费用从流通中移除（通缩） |
 | 区块奖励 | 矿工 | 96% | 通过 `MinerRewardShare` 分配 |
 | 区块奖励 | 社区基金 | 2% | 通过 `CommunityFundShare` 分配 |
 | 区块奖励 | 创世地址 | 1% | 通过 `GenesisShare` 分配 |
 | 区块奖励 | 完整性池 | 1% | 通过 `IntegrityPoolShare` 分配 |
 
+**经济原理:**
+- 费用燃烧在网络使用率高时产生通缩压力
+- 矿工通过区块奖励获得激励（总排放量的 96%）
+- 净通胀率因燃烧的费用而降低：$\text{NetInflation} = \frac{\text{BlockReward} - \text{TotalFees}}{\text{TotalSupply}}$
+- 当 $\text{TotalFees} > \text{BlockReward}$ 时，网络进入通缩状态
+
 ### 5.2 Coinbase 交易结构
 
 ```go
 // mining.go - 创建 coinbase 交易
-minerTotal := minerReward + fees  // 矿工获得 96% 区块奖励 + 100% 费用
+// 矿工仅获得 96% 区块奖励（费用被燃烧，不分配）
+minerReward := baseReward * uint64(policy.MinerRewardShare) / 100
 
 coinbase := Transaction{
     Type:      TxCoinbase,
     ChainID:   c.chainID,
     ToAddress: c.minerAddress,
-    Amount:    minerTotal,
+    Amount:    minerReward,  // 矿工获得 96% 区块奖励（费用燃烧）
     Data:      coinbaseData,  // 包含奖励分配信息
 }
 ```
@@ -304,18 +397,38 @@ coinbase := Transaction{
 block reward (height=H, miner=M, community=C, genesis=G, integrity=I)
 ```
 
-### 5.3 费用燃烧机制
+### 5.3 费用燃烧实现
 
-虽然费用分配给矿工，但从经济学角度，费用实际上是从流通供应中"燃烧"的：
+NogoChain 中的交易费用被明确燃烧（从流通中移除）：
 
-1. **费用不从新发行代币支付:** 费用来自交易发起者已有的代币
-2. **矿工获得新发行奖励:** 区块奖励是新增发的代币
-3. **净效应:** 费用部分相当于从流通中移除，而新区块奖励增加供应
+1. **费用从交易发送者收取:** 从发送者余额中扣除
+2. **费用不分配给任何人:** 与传统 PoW 链不同，费用不给予矿工
+3. **费用从供应中永久移除:** 费用数量永不重新发行
 
-**净通胀率计算:**
-$$\text{NetInflation} = \frac{\text{BlockReward} - \text{TotalFees}}{\text{TotalSupply}}$$
+**代码实现:**
+```go
+// mining.go - 费用燃烧机制
+// 交易费用 100% 燃烧（通缩机制）
+// 当网络使用率高时，这会产生通缩压力
+// 费用实际上从流通中移除，减少总供应量
+coinbase := Transaction{
+    Type:      TxCoinbase,
+    ChainID:   c.chainID,
+    ToAddress: c.minerAddress,
+    Amount:    minerReward,  // 仅区块奖励份额，不包含费用
+    Data:      coinbaseData,
+}
+```
 
-当 $\text{TotalFees} > \text{BlockReward}$ 时，网络进入通缩状态。
+**经济影响:**
+- **低网络使用率:** 费用 < 区块奖励 → 正净通胀
+- **高网络使用率:** 费用 > 区块奖励 → 净通缩
+- **长期均衡:** 随着区块奖励减少，费用成为主导因素
+
+**净供应变化:**
+$$\Delta\text{Supply} = \text{BlockReward} - \text{TotalFees}$$
+
+当 $\text{TotalFees} > \text{BlockReward}$ 时，$\Delta\text{Supply} < 0$（通缩）。
 
 ---
 
@@ -1005,13 +1118,36 @@ $$\text{InflationRate}_3 = \frac{10,826,111}{151,071,325} \times 100\% = 7.17\%$
 
 所有公式和机制均在以下代码文件中实现：
 
-1. **货币政策:** `blockchain/config/monetary_policy.go`
-2. **挖矿奖励:** `blockchain/core/mining.go`
-3. **费用检查:** `blockchain/core/fee_checker.go`
-4. **完整性奖励:** `blockchain/core/integrity_rewards.go`
-5. **社区基金:** `blockchain/contracts/community_fund_governance.go`
-6. **难度调整:** `blockchain/nogopow/difficulty_adjustment.go`
-7. **常量配置:** `config/constants.go`
+1. **货币政策:** [`monetary_policy.go`](https://github.com/nogochain/nogo/blob/main/blockchain/config/monetary_policy.go)
+   - 区块奖励计算：133-169 行
+   - 叔叔奖励：172-201 行
+   - 侄子奖励：203-215 行
+   - 费用分配：229-236 行
+
+2. **挖矿奖励:** [`mining.go`](https://github.com/nogochain/nogo/blob/main/blockchain/core/mining.go)
+   - Coinbase 交易：154-162 行
+   - 奖励分配：141-145 行
+
+3. **费用检查:** [`fee_checker.go`](https://github.com/nogochain/nogo/blob/main/blockchain/core/fee_checker.go)
+   - 费用计算：95-129 行
+   - 拥堵调整：110-122 行
+
+4. **完整性奖励:** [`integrity_rewards.go`](https://github.com/nogochain/nogo/blob/main/blockchain/core/integrity_rewards.go)
+   - 奖励池：84-98 行
+   - 分配：117-236 行
+
+5. **社区基金:** [`community_fund_governance.go`](https://github.com/nogochain/nogo/blob/main/blockchain/contracts/community_fund_governance.go)
+   - 合约部署：173-207 行
+   - 提案创建：238-305 行
+   - 投票：307-363 行
+
+6. **难度调整:** [`difficulty_adjustment.go`](https://github.com/nogochain/nogo/blob/main/blockchain/nogopow/difficulty_adjustment.go)
+   - PI 控制器：128-186 行
+   - 边界条件：189-219 行
+
+7. **配置:** [`config.go`](https://github.com/nogochain/nogo/blob/main/blockchain/config/config.go)
+   - 共识参数：123-152 行
+   - 每年区块数：350-354 行
 
 ---
 

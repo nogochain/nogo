@@ -25,7 +25,7 @@
 
 This document describes the core data structures of NogoChain, including definitions and implementations of blocks, transactions, accounts, and other fundamental types.
 
-**Source Code**: [`blockchain/core/types.go`](file:///d:/NogoChain/nogo/blockchain/core/types.go)
+**Source Code**: [`blockchain/core/types.go`](https://github.com/nogochain/nogo/tree/main/nogo/blockchain/core/types.go)
 
 ---
 
@@ -715,9 +715,10 @@ All balance and nonce operations have overflow checks:
 
 ## 11. Related Documentation
 
-- [NogoPow Consensus Engine](./nogopow-README.md)
-- [Validator Documentation](./validator-README.md)
-- [Network Protocol Documentation](./network-README.md)
+- [NogoPow Consensus Engine](https://github.com/nogochain/nogo/tree/main/nogo/docs/nogopow-README.md)
+- [Validator Documentation](https://github.com/nogochain/nogo/tree/main/nogo/docs/validator-README.md)
+- [Network Protocol Documentation](https://github.com/nogochain/nogo/tree/main/nogo/docs/network-README.md)
+- [Main Documentation](https://github.com/nogochain/nogo/tree/main/nogo/docs)
 
 ---
 

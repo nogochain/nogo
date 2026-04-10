@@ -2,13 +2,13 @@
 
 本文档提供 NogoChain 区块链的完整部署说明，涵盖开发、测试网和生产环境部署。
 
-**最后更新**: 2026-04-07  
+**最后更新**: 2026-04-10  
 **审计状态:** ✅ 配置选项已与代码验证  
 **代码参考:**
-- 配置：[`blockchain/config/config.go`](https://github.com/nogochain/nogo/tree/main/blockchain/config/config.go)
-- 环境变量：[`blockchain/cmd/env.go`](https://github.com/nogochain/nogo/tree/main/blockchain/cmd/env.go)
-- 节点启动：[`blockchain/cmd/node.go`](https://github.com/nogochain/nogo/tree/main/blockchain/cmd/node.go)
-- 主入口：[`blockchain/cmd/main.go`](https://github.com/nogochain/nogo/tree/main/blockchain/cmd/main.go)
+- 配置：[`blockchain/config/config.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/config.go)
+- 环境变量：[`blockchain/config/env.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/env.go)
+- 类型定义：[`blockchain/config/types.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/types.go)
+- 节点启动：[`blockchain/cmd/node.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/cmd/node.go)
 
 ---
 
@@ -179,9 +179,10 @@ docker compose down
 
 | 变量名 | 说明 | 默认值 | 示例 |
 |--------|------|--------|------|
-| `CHAIN_ID` | 链 ID（1=主网，2=测试网，3=烟雾测试） | `1` | `1` |
-| `GENESIS_PATH` | 创世块文件路径 | `genesis/mainnet.json` | `genesis/testnet.json` |
+| `CHAIN_ID` | 链 ID（1=主网，2=测试网） | `1` | `1` |
+| `NETWORK_NAME` | 网络名称 | `mainnet` | `mainnet` |
 | `DATA_DIR` | 数据存储目录 | `./data` | `/var/lib/nogochain` |
+| `LOG_DIR` | 日志存储目录 | `./logs` | `/var/log/nogochain` |
 | `MINER_ADDRESS` | 矿工地址（NOGO 前缀） | 空 | `NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048` |
 | `ADMIN_TOKEN` | 管理员认证令牌（最少 16 字符） | 空 | `your_secure_token_123` |
 
@@ -189,58 +190,55 @@ docker compose down
 
 | 变量名 | 说明 | 默认值 | 示例 |
 |--------|------|--------|------|
-| `NODE_PORT` | HTTP 服务端口 | `8080` | `8080` |
 | `P2P_PORT` | P2P 网络端口 | `9090` | `9090` |
-| `P2P_ENABLE` | 启用 P2P 网络 | `true` | `true` |
-| `P2P_PEERS` | P2P 节点地址列表 | 空 | `node1.nogochain.org:9090,node2.nogochain.org:9090` |
-| `P2P_SEEDS` | 种子节点地址 | 空 | `seed.nogochain.org:9090` |
-| `MAX_PEERS` | 最大 P2P 连接数 | `50` | `100` |
-| `MAX_POOL_CONNS` | 最大连接池连接数 | `100` | `200` |
-| `MAX_CONNS_PER_PEER` | 每个节点最大连接数 | `3` | `5` |
+| `HTTP_PORT` | HTTP API 端口 | `8080` | `8080` |
+| `WS_PORT` | WebSocket 端口 | `8081` | `8081` |
+| `P2P_MAX_PEERS` | 最大 P2P 连接数 | `100` | `200` |
+| `P2P_MAX_CONNECTIONS` | 最大连接池连接数 | `50` | `100` |
+| `BOOT_NODES` | 启动节点地址列表 | 空 | `node1.nogochain.org:9090,node2.nogochain.org:9090` |
+| `DNS_DISCOVERY` | DNS 发现域名 | 空 | `dns1.nogochain.org,dns2.nogochain.org` |
 
 #### HTTP 服务配置
 
 | 变量名 | 说明 | 默认值 | 示例 |
 |--------|------|--------|------|
-| `HTTP_ADDR` | HTTP 监听地址 | `127.0.0.1:8080` | `0.0.0.0:8080` |
-| `WS_ENABLE` | 启用 WebSocket | `true` | `true` |
-| `WS_MAX_CONNECTIONS` | 最大 WebSocket 连接数 | `100` | `500` |
-| `RATE_LIMIT_REQUESTS` | 每秒请求数限制 | `0`（无限制） | `100` |
-| `RATE_LIMIT_BURST` | 请求突发限制 | `0` | `200` |
-| `HTTP_TIMEOUT_SECONDS` | HTTP 超时时间（秒） | `10` | `30` |
-| `HTTP_MAX_HEADER_BYTES` | HTTP 头部最大字节数 | `8192` | `16384` |
+| `HTTP_ADDR` | HTTP 监听地址 | `0.0.0.0:8080` | `0.0.0.0:8080` |
+| `WS_ENABLE` | 启用 WebSocket | `false` | `true` |
+| `RATE_LIMIT_REQUESTS` | 每秒请求数限制 | `100` | `100` |
+| `RATE_LIMIT_BURST` | 请求突发限制 | `50` | `50` |
 | `TRUST_PROXY` | 信任 X-Forwarded-For 头 | `false` | `true` |
-| `ENABLE_CORS` | 启用 CORS | `false` | `true` |
 
 #### 挖矿配置
 
 | 变量名 | 说明 | 默认值 | 示例 |
 |--------|------|--------|------|
-| `MINING_ENABLED` | 启用挖矿 | `false` | `true` |
-| `MINING_THREADS` | 挖矿线程数 | `1` | `4` |
-| `AUTO_MINE` | 自动挖矿 | `false` | `true` |
+| `MINING_ENABLE` | 启用挖矿 | `false` | `true` |
+| `MINER_ADDRESS` | 矿工地址（NOGO 前缀） | 空 | `NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048` |
 | `MINE_INTERVAL_MS` | 挖矿间隔（毫秒） | `1000` | `17000` |
+| `MAX_TX_PER_BLOCK` | 每区块最大交易数 | `1000` | `1000` |
 | `MINE_FORCE_EMPTY_BLOCKS` | 强制挖空块 | `false` | `true` |
+| `MINER_CONVERGENCE_BASE_DELAY_MS` | 收敛基础延迟 | `100` | `100` |
+| `MINER_CONVERGENCE_VARIABLE_DELAY_MS` | 收敛可变延迟 | `256` | `256` |
 
 #### 同步配置
 
 | 变量名 | 说明 | 默认值 | 示例 |
 |--------|------|--------|------|
-| `SYNC_ENABLE` | 启用同步 | `true` | `true` |
-| `SYNC_INTERVAL_MS` | 同步间隔（毫秒） | `3000` | `5000` |
-| `SYNC_WORKERS` | 同步工作线程数 | `8` | `16` |
-| `SYNC_BATCH_SIZE` | 同步批次大小 | `100` | `200` |
-| `NOGO_SYNC_HEARTBEAT_INTERVAL` | 同步心跳间隔（秒） | `30` | `60` |
-| `NOGO_SYNC_WORKERS` | 同步工作线程数 | `8` | `16` |
-| `NOGO_SYNC_MAX_PENDING_BLOCKS` | 最大待处理区块数 | `100` | `500` |
+| `SYNC_BATCH_SIZE` | 同步批次大小 | `100` | `100` |
+| `MAX_REORG_DEPTH` | 最大重组深度 | `100` | `100` |
+| `LONG_FORK_THRESHOLD` | 长链分叉阈值 | `10` | `10` |
+| `MAX_SYNC_RANGE` | 最大同步范围 | `1000` | `1000` |
+| `PEER_HEIGHT_POLL_INTERVAL_MS` | 节点高度轮询间隔 | `1000` | `1000` |
+| `NETWORK_SYNC_CHECK_DELAY_MS` | 网络同步检查延迟 | `2000` | `2000` |
 
 #### 交易池配置
 
 | 变量名 | 说明 | 默认值 | 示例 |
 |--------|------|--------|------|
-| `MEMPOOL_MAX_SIZE` | 交易池最大交易数 | `50000` | `100000` |
-| `MEMPOOL_MIN_FEE_RATE` | 最小手续费率 | `1` | `10` |
-| `MEMPOOL_TTL` | 交易存活时间 | `24h` | `48h` |
+| `MEMPOOL_MAX_TRANSACTIONS` | 交易池最大交易数 | `10000` | `10000` |
+| `MEMPOOL_MAX_MEMORY_MB` | 最大内存使用（MB） | `100` | `200` |
+| `MEMPOOL_MIN_FEE_RATE` | 最小手续费率 | `100` | `100` |
+| `MEMPOOL_TTL` | 交易存活时间 | `24h` | `24h` |
 
 #### 缓存配置
 
@@ -264,126 +262,137 @@ docker compose down
 |--------|------|--------|------|
 | `LOG_LEVEL` | 日志级别 | `info` | `debug` |
 | `METRICS_ENABLED` | 启用指标收集 | `true` | `true` |
-| `METRICS_PORT` | 指标端口 | `0`（禁用） | `9100` |
+| `METRICS_PORT` | 指标端口 | `9090` | `9100` |
 
 #### 安全配置
 
 | 变量名 | 说明 | 默认值 | 示例 |
 |--------|------|--------|------|
+| `ADMIN_TOKEN` | 管理员认证令牌 | 空 | `your_secure_token` |
+| `TLS_ENABLE` | 启用 TLS | `true` | `true` |
 | `TLS_CERT_FILE` | TLS 证书文件路径 | 空 | `/etc/ssl/nogochain.crt` |
 | `TLS_KEY_FILE` | TLS 密钥文件路径 | 空 | `/etc/ssl/nogochain.key` |
-| `KEYSTORE_DIR` | 密钥库目录 | `./keystore` | `/var/lib/nogochain/keystore` |
+| `RATE_LIMIT_REQUESTS` | 每秒请求数限制 | `100` | `100` |
+| `RATE_LIMIT_BURST` | 请求突发限制 | `50` | `50` |
+| `TRUST_PROXY` | 信任 X-Forwarded-For 头 | `false` | `true` |
 
-#### 孤儿池配置
-
-| 变量名 | 说明 | 默认值 | 示例 |
-|--------|------|--------|------|
-| `NOGO_ORPHAN_POOL_MAX_SIZE` | 孤儿池最大大小 | `100` | `500` |
-| `NOGO_ORPHAN_POOL_TTL` | 孤儿池存活时间（小时） | `24` | `48` |
-
-#### 挖矿稳定性配置
+#### NTP 配置
 
 | 变量名 | 说明 | 默认值 | 示例 |
 |--------|------|--------|------|
-| `NOGO_MINING_STABILITY_WAIT` | 稳定性等待时间（秒） | `300` | `600` |
-| `NOGO_MINING_SYNC_PAUSE` | 同步时暂停挖矿 | `true` | `false` |
+| `NTP_ENABLE` | 启用 NTP 同步 | `true` | `true` |
+| `NTP_SERVERS` | NTP 服务器列表 | `pool.ntp.org,time.google.com,time.cloudflare.com` | `pool.ntp.org` |
+| `NTP_SYNC_INTERVAL_MS` | 同步间隔（毫秒） | `600000` | `600000` |
+| `NTP_MAX_DRIFT_MS` | 最大时间漂移 | `100` | `100` |
 
-#### 其他配置
+#### 治理配置
 
 | 变量名 | 说明 | 默认值 | 示例 |
 |--------|------|--------|------|
-| `AI_AUDITOR_URL` | AI 审计服务 URL | 空 | `http://localhost:8000` |
-| `STRATUM_ENABLED` | 启用 Stratum 挖矿协议 | `false` | `true` |
-| `STRATUM_ADDR` | Stratum 监听地址 | `:3333` | `:3333` |
-| `ENABLE_PROTOBUF` | 启用 Protocol Buffers | `true` | `true` |
-| `BRAND_PREFIX` | Docker 容器前缀 | `mybrand` | `nogochain` |
-| `DOCKER_UID` | Docker 用户 ID | `1000` | `1000` |
-| `DOCKER_GID` | Docker 组 ID | `1000` | `1000` |
+| `GOVERNANCE_MIN_QUORUM` | 最小法定人数 | `1000000` | `1000000` |
+| `GOVERNANCE_APPROVAL_THRESHOLD_PERCENT` | 通过阈值百分比 | `60` | `60` |
+| `GOVERNANCE_VOTING_PERIOD_DAYS` | 投票周期（天） | `7` | `7` |
+| `GOVERNANCE_PROPOSAL_DEPOSIT` | 提案押金 | `100000000000` | `100000000000` |
+| `GOVERNANCE_EXECUTION_DELAY_BLOCKS` | 执行延迟区块数 | `100` | `100` |
+
+#### 功能开关
+
+| 变量名 | 说明 | 默认值 | 示例 |
+|--------|------|--------|------|
+| `ENABLE_AI_AUDITOR` | 启用 AI 审计 | `false` | `false` |
+| `ENABLE_DNS_REGISTRY` | 启用 DNS 注册表 | `true` | `true` |
+| `ENABLE_GOVERNANCE` | 启用治理 | `true` | `true` |
+| `ENABLE_PRICE_ORACLE` | 启用价格预言机 | `true` | `true` |
+| `ENABLE_SOCIAL_RECOVERY` | 启用社交恢复 | `true` | `true` |
 
 ### 配置文件
 
-#### YAML 配置文件示例
+#### JSON 配置文件示例
 
-创建 `config.yaml`：
+创建 `config.json`：
 
-```yaml
-# 核心配置
-chain_id: 1
-genesis_path: genesis/mainnet.json
-data_dir: /var/lib/nogochain
-miner_address: NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048
-admin_token: your_secure_admin_token
-
-# 网络配置
-node_port: 8080
-p2p_port: 9090
-p2p_enable: true
-max_peers: 100
-
-# HTTP 服务配置
-http_addr: 0.0.0.0:8080
-ws_enable: true
-ws_max_connections: 500
-rate_limit_requests: 100
-rate_limit_burst: 200
-http_timeout_seconds: 30
-trust_proxy: true
-enable_cors: true
-
-# 挖矿配置
-mining_enabled: true
-mining_threads: 4
-auto_mine: true
-mine_interval_ms: 17000
-
-# 同步配置
-sync_enable: true
-sync_interval_ms: 5000
-sync_workers: 16
-sync_batch_size: 200
-
-# 交易池配置
-mempool_max_size: 100000
-mempool_min_fee_rate: 10
-mempool_ttl: 48h
-
-# 缓存配置
-cache_max_blocks: 50000
-cache_max_balances: 500000
-cache_max_proofs: 50000
-
-# 存储配置
-prune_depth: 10000
-store_mode: pruned
-checkpoint_interval: 1000
-
-# 日志与监控
-log_level: info
-metrics_enabled: true
-metrics_port: 9100
-
-# 安全配置
-tls_cert_file: /etc/ssl/nogochain.crt
-tls_key_file: /etc/ssl/nogochain.key
-keystore_dir: /var/lib/nogochain/keystore
+```json
+{
+  "network": {
+    "name": "mainnet",
+    "chainId": 1,
+    "p2pPort": 9090,
+    "httpPort": 8080,
+    "wsPort": 8081,
+    "enableWS": false,
+    "maxPeers": 100,
+    "maxConnections": 50,
+    "bootNodes": [],
+    "dnsDiscovery": []
+  },
+  "consensus": {
+    "difficultyEnable": true,
+    "blockTimeTargetSeconds": 15,
+    "difficultyAdjustmentInterval": 100,
+    "maxBlockTimeDriftSeconds": 7200,
+    "merkleEnable": true,
+    "monetaryPolicy": {
+      "initialBlockReward": 800000000,
+      "annualReductionPercent": 10,
+      "minimumBlockReward": 10000000,
+      "minerRewardShare": 96,
+      "communityFundShare": 2,
+      "genesisShare": 1,
+      "integrityPoolShare": 1,
+      "minerFeeShare": 0
+    }
+  },
+  "mining": {
+    "enabled": true,
+    "minerAddress": "NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048",
+    "mineInterval": 1000000000,
+    "maxTxPerBlock": 1000,
+    "forceEmptyBlocks": false
+  },
+  "sync": {
+    "batchSize": 100,
+    "maxRollbackDepth": 100,
+    "longForkThreshold": 10,
+    "maxSyncRange": 1000
+  },
+  "security": {
+    "adminToken": "your_secure_admin_token",
+    "rateLimitReqs": 100,
+    "rateLimitBurst": 50,
+    "trustProxy": false,
+    "tlsEnabled": true,
+    "tlsCertFile": "/etc/ssl/nogochain.crt",
+    "tlsKeyFile": "/etc/ssl/nogochain.key"
+  },
+  "mempool": {
+    "maxTransactions": 10000,
+    "maxMemoryMB": 100,
+    "minFeeRate": 100,
+    "ttl": 86400000000000
+  },
+  "dataDir": "./data",
+  "logDir": "./logs",
+  "httpAddr": "0.0.0.0:8080",
+  "wsEnabled": false
+}
 ```
 
 使用配置文件启动：
 ```bash
-./nogo -config config.yaml server
+./nogo -config config.json server
 ```
 
 ### 命令行参数
 
 ```bash
-./nogo server <miner_address> [mine] [test]
+./nogo server [mine] [test]
 ```
 
 #### 命令行选项
 
 | 参数 | 说明 | 示例 |
 |------|------|------|
-| `-config` | YAML 配置文件路径 | `-config config.yaml` |
+| `-config` | JSON 配置文件路径 | `-config config.json` |
 | `-port` | HTTP 服务端口 | `-port 8080` |
 | `-p2p-port` | P2P 网络端口 | `-p2p-port 9090` |
 | `-data-dir` | 数据存储目录 | `-data-dir /var/lib/nogochain` |
@@ -392,17 +401,16 @@ keystore_dir: /var/lib/nogochain/keystore
 | `-max-peers` | 最大 P2P 连接数 | `-max-peers 100` |
 | `-log-level` | 日志级别 | `-log-level debug` |
 | `-chain-id` | 链 ID | `-chain-id 1` |
-| `-genesis` | 创世块文件路径 | `-genesis genesis/mainnet.json` |
 | `-miner-address` | 矿工地址 | `-miner-address NOGO00...` |
 | `-admin-token` | 管理员令牌 | `-admin-token your_token` |
 | `-p2p` | 启用 P2P 网络 | `-p2p` |
 | `-ws` | 启用 WebSocket | `-ws` |
-| `-ws-max-conns` | 最大 WebSocket 连接数 | `-ws-max-conns 500` |
+| `-ws-max-conns` | 最大 WebSocket 连接数 | `-ws-max-conns 100` |
 | `-ai-auditor-url` | AI 审计服务 URL | `-ai-auditor-url http://localhost:8000` |
 | `-rpc-port` | RPC 服务端口 | `-rpc-port 8080` |
 | `-cors` | 启用 CORS | `-cors` |
 | `-rate-limit-rps` | 每秒请求数限制 | `-rate-limit-rps 100` |
-| `-rate-limit-burst` | 请求突发限制 | `-rate-limit-burst 200` |
+| `-rate-limit-burst` | 请求突发限制 | `-rate-limit-burst 50` |
 | `-keystore-dir` | 密钥库目录 | `-keystore-dir /var/lib/nogochain/keystore` |
 | `-trust-proxy` | 信任代理 | `-trust-proxy` |
 
@@ -410,16 +418,16 @@ keystore_dir: /var/lib/nogochain/keystore
 
 ```bash
 # 主网节点（带挖矿）
-./nogo server NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048 mine
+./nogo server mine
 
 # 测试网节点（带挖矿）
-./nogo server NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048 mine test
+./nogo server mine test
 
 # 仅同步节点（无挖矿）
-./nogo server NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048
+./nogo server
 
 # 使用配置文件启动
-./nogo -config config.yaml server
+./nogo -config config.json server
 ```
 
 ---
@@ -450,12 +458,11 @@ cd nogo
 go build -o nogo ./blockchain/cmd
 
 # 2. 设置环境变量
-export CHAIN_ID=3
-export GENESIS_PATH=genesis/smoke.json
+export CHAIN_ID=2
 export DATA_DIR=./data
-export MINING_ENABLED=true
+export MINING_ENABLE=true
 export MINER_ADDRESS=NOGO0049c3cf477a9fce2622d18245d04f011f788f7b2e248bdeb38d4ef459c37857be3d0293c3
-export P2P_ENABLE=true
+export P2P_MAX_PEERS=100
 export WS_ENABLE=true
 export LOG_LEVEL=debug
 
@@ -484,17 +491,16 @@ docker compose logs -f blockchain
 ```bash
 # 1. 设置环境变量
 export CHAIN_ID=2
-export GENESIS_PATH=genesis/testnet.json
 export DATA_DIR=./data-testnet
 export MINER_ADDRESS=NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048
 export ADMIN_TOKEN=your_testnet_admin_token
-export P2P_ENABLE=true
-export P2P_PEERS=test.nogochain.org:9090
-export AUTO_MINE=true
+export BOOT_NODES=test.nogochain.org:9090
+export MINING_ENABLE=true
 export MINE_INTERVAL_MS=15000
+export LOG_LEVEL=info
 
 # 2. 启动节点
-./nogo server
+./nogo server mine
 ```
 
 #### 多节点测试网（Docker Compose）
@@ -537,24 +543,27 @@ start-local.bat
 # 1. 创建环境变量文件
 cat > .env.mainnet << EOF
 CHAIN_ID=1
-GENESIS_PATH=genesis/mainnet.json
+NETWORK_NAME=mainnet
 DATA_DIR=/var/lib/nogochain
+LOG_DIR=/var/log/nogochain
 MINER_ADDRESS=NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048
 ADMIN_TOKEN=your_very_secure_admin_token_minimum_16_chars
-P2P_ENABLE=true
-P2P_PEERS=main.nogochain.org:9090
-AUTO_MINE=true
+BOOT_NODES=main.nogochain.org:9090
+MINING_ENABLE=true
 MINE_INTERVAL_MS=17000
 LOG_LEVEL=info
 RATE_LIMIT_REQUESTS=100
 RATE_LIMIT_BURST=50
+TLS_ENABLE=true
+TLS_CERT_FILE=/etc/ssl/nogochain.crt
+TLS_KEY_FILE=/etc/ssl/nogochain.key
 EOF
 
 # 2. 加载环境变量
 source .env.mainnet
 
 # 3. 启动节点
-./nogo server
+./nogo server mine
 ```
 
 #### 生产环境 Docker 部署
@@ -586,23 +595,35 @@ docker compose logs -f blockchain
 [Unit]
 Description=NogoChain Blockchain Node
 After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
 User=nogochain
 Group=nogochain
 WorkingDirectory=/opt/nogochain
-Environment="CHAIN_ID=1"
-Environment="MINER_ADDRESS=NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048"
-Environment="ADMIN_TOKEN=your_secure_admin_token"
-Environment="P2P_ENABLE=true"
-Environment="P2P_PEERS=main.nogochain.org:9090"
-Environment="AUTO_MINE=true"
-Environment="LOG_LEVEL=info"
-ExecStart=/opt/nogochain/nogo server
+EnvironmentFile=/etc/nogochain/.env
+ExecStart=/opt/nogochain/nogo server mine
 Restart=always
 RestartSec=10
 LimitNOFILE=65535
+LimitNPROC=65535
+
+# 安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nogochain /var/log/nogochain
+
+# 环境变量
+Environment="CHAIN_ID=1"
+Environment="MINER_ADDRESS=NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048"
+Environment="ADMIN_TOKEN=your_secure_admin_token"
+Environment="BOOT_NODES=main.nogochain.org:9090"
+Environment="MINING_ENABLE=true"
+Environment="LOG_LEVEL=info"
+Environment="TLS_ENABLE=true"
 
 [Install]
 WantedBy=multi-user.target
@@ -1233,11 +1254,11 @@ curl -X POST http://localhost:8080/tx/submit \
 
 - **官方网站**: https://nogochain.org
 - **GitHub**: https://github.com/NogoChain/NogoChain
-- **文档**: https://docs.nogochain.org
-- **Discord**: https://discord.gg/nogochain
+- **文档**: https://github.com/NogoChain/NogoChain/tree/main/nogo/docs
+- **Discord**: https://discord.gg/HxEFPqJMEV
 - **Twitter**: https://twitter.com/nogochain
 
 ---
 
-**最后更新**: 2026-04-06
+**最后更新**: 2026-04-10
 **版本**: 1.0.0

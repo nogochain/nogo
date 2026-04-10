@@ -1,14 +1,16 @@
 # NogoChain 算法技术手册
 
-**版本**: 1.0.0  
-**生成日期**: 2026-04-07  
+**版本**: 2.0.0  
+**生成日期**: 2026-04-10  
 **适用版本**: NogoChain v1.0+
-**审计状态:** ✅ 算法已与实现验证
+**审计状态:** ✅ 算法已完全验证并与代码一致 (2026-04-10)
 **代码参考:**
 - NogoPow 算法：[`blockchain/nogopow/nogopow.go`](https://github.com/nogochain/nogo/tree/main/blockchain/nogopow/nogopow.go)
 - 难度调整：[`blockchain/nogopow/difficulty_adjustment.go`](https://github.com/nogochain/nogo/tree/main/blockchain/nogopow/difficulty_adjustment.go)
-- 加密算法（Ed25519）：[`blockchain/crypto/`](https://github.com/nogochain/nogo/tree/main/blockchain/crypto/)
+- 矩阵运算：[`blockchain/nogopow/matrix.go`](https://github.com/nogochain/nogo/tree/main/blockchain/nogopow/matrix.go)
+- 加密算法（Ed25519）：[`blockchain/crypto/wallet.go`](https://github.com/nogochain/nogo/tree/main/blockchain/crypto/wallet.go)
 - Merkle 树：[`blockchain/core/merkle.go`](https://github.com/nogochain/nogo/tree/main/blockchain/core/merkle.go)
+- 验证报告：[`docs/Algorithm-Verification-Report-CN.md`](https://github.com/nogochain/nogo/tree/main/docs/Algorithm-Verification-Report-CN.md)
 
 ---
 
@@ -163,7 +165,7 @@ func (t *NogopowEngine) computePoW(blockHash, seed Hash) Hash {
 
 ### 2.1 算法概述
 
-NogoChain 采用基于 PI（比例 - 积分）控制器的难度调整算法，确保区块时间稳定在目标值（默认 10 秒）。
+NogoChain 采用基于 PI（比例 - 积分）控制器的难度调整算法，确保区块时间稳定在目标值（默认 15 秒）。
 
 **数学基础**:
 ```
@@ -173,9 +175,10 @@ new_difficulty = parent_difficulty × (1 + Kp × error + Ki × integral)
 ```
 
 **参数**:
-- Kp (比例增益): 0.5（默认）
+- Kp (比例增益): `MaxDifficultyChangePercent / 100.0`（默认 0.2）
 - Ki (积分增益): 0.1（固定）
-- 目标区块时间：17 秒（主网）/ 15 秒（测试网）
+- 目标区块时间：15 秒（可通过 `BlockTimeTargetSeconds` 配置）
+- **注意**: 这是纯 PI 控制器，实现中未使用微分项 (Kd)
 
 ### 2.2 算法流程
 
@@ -211,7 +214,14 @@ new_difficulty = parent_difficulty × multiplier
 new_difficulty = max(new_difficulty, min_difficulty)
 new_difficulty = min(new_difficulty, max_difficulty)
 new_difficulty = min(new_difficulty, parent_difficulty × 2)  // 最大增幅 100%
+new_difficulty = max(new_difficulty, 1)  // 确保难度 >= 1
 ```
+
+**实现细节** (来自 [`enforceBoundaryConditions()`](https://github.com/nogochain/nogo/tree/main/blockchain/nogopow/difficulty_adjustment.go#L188-L219)):
+1. 最小难度：来自共识参数的 `MinDifficulty`
+2. 最大难度：2^256
+3. 最大增幅：每区块 100%（新难度 ≤ 2 × 父区块难度）
+4. 最小值：1（防止零难度）
 
 ### 2.3 伪代码
 
