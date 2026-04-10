@@ -1,0 +1,1164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>NogoChain API Reference</title>
+<link rel="icon" type="image/x-icon" href="/explorer/favicon.ico">
+<style>
+/* ==================== Global Styles ==================== */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #21262d;
+  --border-color: #30363d;
+  --text-primary: #c9d1d9;
+  --text-secondary: #8b949e;
+  --accent-blue: #58a6ff;
+  --accent-green: #3fb950;
+  --accent-purple: #bc8cff;
+  --accent-orange: #d29922;
+  --accent-red: #f85149;
+}
+body { 
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; 
+  background: var(--bg-primary); 
+  color: var(--text-primary); 
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+/* ==================== Header ==================== */
+.header { 
+  background: var(--bg-secondary); 
+  border-bottom: 1px solid var(--border-color);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  backdrop-filter: blur(10px);
+}
+.header .container { 
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 15px 30px;
+  display: flex; 
+  align-items: center; 
+  justify-content: space-between;
+  gap: 30px;
+}
+.logo { 
+  font-size: 24px; 
+  font-weight: 700; 
+  color: var(--accent-blue);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+}
+.logo::before {
+  content: '🔗';
+  font-size: 28px;
+}
+.nav { 
+  display: flex; 
+  gap: 25px; 
+}
+.nav a { 
+  color: var(--text-secondary); 
+  text-decoration: none; 
+  font-size: 14px; 
+  font-weight: 500;
+  padding: 8px 12px;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+.nav a:hover, .nav a.active { 
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+/* ==================== Main Layout ==================== */
+.main-container {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 30px;
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 40px;
+}
+
+/* ==================== Sidebar ==================== */
+.sidebar {
+  position: sticky;
+  top: 90px;
+  height: calc(100vh - 120px);
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 20px;
+}
+.sidebar h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 15px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+.sidebar ul {
+  list-style: none;
+  margin-bottom: 25px;
+}
+.sidebar li {
+  margin-bottom: 8px;
+}
+.sidebar a {
+  color: var(--text-primary);
+  text-decoration: none;
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  display: block;
+  transition: all 0.2s;
+}
+.sidebar a:hover {
+  background: var(--bg-tertiary);
+  color: var(--accent-blue);
+}
+.sidebar a.active {
+  background: var(--accent-blue);
+  color: white;
+}
+
+/* ==================== Content ==================== */
+.content {
+  min-width: 0;
+}
+.api-section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 30px;
+  margin-bottom: 30px;
+}
+.api-section h2 {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 20px;
+  padding-bottom: 15px;
+  border-bottom: 2px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.api-section h2::before {
+  content: '📚';
+  font-size: 28px;
+}
+.api-endpoint {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 20px;
+  transition: all 0.3s;
+}
+.api-endpoint:hover {
+  border-color: var(--accent-blue);
+  transform: translateX(5px);
+}
+.endpoint-header {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  margin-bottom: 15px;
+  flex-wrap: wrap;
+}
+.http-method {
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.http-method.get {
+  background: rgba(63, 185, 80, 0.2);
+  color: var(--accent-green);
+}
+.http-method.post {
+  background: rgba(88, 166, 255, 0.2);
+  color: var(--accent-blue);
+}
+.endpoint-path {
+  font-family: 'Courier New', monospace;
+  font-size: 14px;
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+.endpoint-description {
+  color: var(--text-secondary);
+  font-size: 14px;
+  margin-bottom: 15px;
+  line-height: 1.6;
+}
+.endpoint-details {
+  background: var(--bg-primary);
+  border-radius: 6px;
+  padding: 15px;
+  margin-top: 15px;
+}
+.endpoint-details h4 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+.code-block {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 15px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.parameter-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+}
+.parameter-table th,
+.parameter-table td {
+  padding: 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 13px;
+}
+.parameter-table th {
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+.parameter-table td:first-child {
+  font-family: 'Courier New', monospace;
+  color: var(--accent-blue);
+}
+.example-link {
+  color: var(--accent-blue);
+  text-decoration: none;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 10px;
+}
+.example-link:hover {
+  text-decoration: underline;
+}
+
+/* ==================== Info Boxes ==================== */
+.info-box {
+  background: rgba(88, 166, 255, 0.1);
+  border: 1px solid var(--accent-blue);
+  border-radius: 8px;
+  padding: 15px;
+  margin-bottom: 20px;
+}
+.info-box.warning {
+  background: rgba(248, 81, 73, 0.1);
+  border-color: var(--accent-red);
+}
+.info-box.success {
+  background: rgba(63, 185, 80, 0.1);
+  border-color: var(--accent-green);
+}
+.info-box h4 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.info-box p {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+/* ==================== Responsive ==================== */
+@media (max-width: 1200px) {
+  .main-container {
+    grid-template-columns: 1fr;
+  }
+  .sidebar {
+    position: static;
+    height: auto;
+  }
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <div class="container">
+    <a href="/explorer/" class="logo">NogoChain</a>
+    <nav class="nav">
+      <a href="/explorer/">Explorer</a>
+      <a href="/api/" class="active">API Reference</a>
+      <a href="/webwallet/">Wallet</a>
+      <a href="/proposals/">Proposals</a>
+    </nav>
+  </div>
+</header>
+
+<!-- Main Content -->
+<div class="main-container">
+  <!-- Sidebar Navigation -->
+  <aside class="sidebar">
+    <h3>📖 API Categories</h3>
+    <ul>
+      <li><a href="#chain-info">Chain Information</a></li>
+      <li><a href="#blocks">Blocks</a></li>
+      <li><a href="#transactions">Transactions</a></li>
+      <li><a href="#addresses">Addresses</a></li>
+      <li><a href="#mempool">Mempool</a></li>
+      <li><a href="#mining">Mining</a></li>
+      <li><a href="#wallet">Wallet</a></li>
+      <li><a href="#network">Network</a></li>
+      <li><a href="#proposals">Proposals</a></li>
+      <li><a href="#utils">Utilities</a></li>
+    </ul>
+    
+    <h3>🔧 Quick Links</h3>
+    <ul>
+      <li><a href="https://github.com/nogochain/nogo" target="_blank">GitHub</a></li>
+      <li><a href="/docs/" target="_blank">Documentation</a></li>
+      <li><a href="https://docs.nogochain.org" target="_blank">Developer Docs</a></li>
+    </ul>
+  </aside>
+
+  <!-- API Content -->
+  <main class="content">
+    
+    <!-- Introduction -->
+    <div class="api-section">
+      <h2>NogoChain API Reference</h2>
+      <div class="info-box success">
+        <h4>✅ Production-Ready API</h4>
+        <p>Complete RESTful API for interacting with NogoChain blockchain. All endpoints return JSON responses. Base URL: <code>http://localhost:8080</code></p>
+      </div>
+      
+      <div class="info-box">
+        <h4>📝 Authentication</h4>
+        <p>Most endpoints are public. Admin endpoints require <code>X-Admin-Token</code> header with valid miner address.</p>
+      </div>
+    </div>
+
+    <!-- Chain Information -->
+    <div id="chain-info" class="api-section">
+      <h2>Chain Information</h2>
+      
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/chain/info</span>
+        </div>
+        <p class="endpoint-description">Get comprehensive blockchain information including height, supply, difficulty, and network stats.</p>
+        <div class="endpoint-details">
+          <h4>Response Example</h4>
+          <div class="code-block">{
+  "version": "1.0.0",
+  "chainId": 1,
+  "height": 12345,
+  "latestHash": "abc123...",
+  "genesisHash": "def456...",
+  "totalSupply": 100000000000000000,
+  "peersCount": 50,
+  "difficultyBits": 123456789,
+  "blockReward": 5000000000,
+  "nextHalving": 525600
+}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/chain/special_addresses</span>
+        </div>
+        <p class="endpoint-description">Get special system addresses (Community Fund, Integrity Pool, Genesis).</p>
+        <div class="endpoint-details">
+          <h4>Response Example</h4>
+          <div class="code-block">{
+  "communityFund": {
+    "address": "NOGO00...",
+    "balance": 50000000000000
+  },
+  "integrityPool": {
+    "address": "NOGO01...",
+    "balance": 10000000000000
+  },
+  "genesis": {
+    "address": "NOGO02...",
+    "balance": 100000000000000
+  }
+}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/version</span>
+        </div>
+        <p class="endpoint-description">Get node version and build information.</p>
+      </div>
+    </div>
+
+    <!-- Blocks -->
+    <div id="blocks" class="api-section">
+      <h2>Blocks</h2>
+      
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/block/height/{height}</span>
+        </div>
+        <p class="endpoint-description">Get block by height with full transaction details.</p>
+        <div class="endpoint-details">
+          <h4>Parameters</h4>
+          <table class="parameter-table">
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+            <tr>
+              <td>height</td>
+              <td>uint64</td>
+              <td>Block height (path parameter)</td>
+            </tr>
+          </table>
+          <h4>Response Example</h4>
+          <div class="code-block">{
+  "height": 12345,
+  "hash": "abc123...",
+  "prevHash": "def456...",
+  "timestampUnix": 1234567890,
+  "difficultyBits": 123456789,
+  "nonce": 987654321,
+  "minerAddress": "NOGO00...",
+  "transactions": [...],
+  "coinbase": {
+    "minerReward": 4800000000,
+    "fee": 200000000,
+    "data": "block reward: community=100000000, genesis=50000000, integrity=50000000"
+  }
+}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/block/hash/{hash}</span>
+        </div>
+        <p class="endpoint-description">Get block by hash with full transaction details.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/blocks/from/{height}</span>
+        </div>
+        <p class="endpoint-description">Get multiple blocks starting from a height (pagination supported).</p>
+        <div class="endpoint-details">
+          <h4>Query Parameters</h4>
+          <table class="parameter-table">
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+            <tr>
+              <td>limit</td>
+              <td>int</td>
+              <td>Number of blocks to return (default: 10, max: 100)</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/headers/from/{height}</span>
+        </div>
+        <p class="endpoint-description">Get block headers only (lighter than full blocks) from a height.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/block</span>
+        </div>
+        <p class="endpoint-description">Submit a new block to the network (for miners).</p>
+        <div class="endpoint-details">
+          <h4>Authentication Required</h4>
+          <p>Requires <code>X-Admin-Token</code> header with valid miner address.</p>
+          <h4>Request Body</h4>
+          <div class="code-block">{
+  "height": 12345,
+  "prevHash": "abc123...",
+  "timestampUnix": 1234567890,
+  "difficultyBits": 123456789,
+  "nonce": 987654321,
+  "minerAddress": "NOGO00...",
+  "transactions": [...],
+  "totalWork": "1234567890"
+}</div>
+          <h4>Response</h4>
+          <div class="code-block">{
+  "accepted": true,
+  "reorged": false
+}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Transactions -->
+    <div id="transactions" class="api-section">
+      <h2>Transactions</h2>
+      
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/tx/{txid}</span>
+        </div>
+        <p class="endpoint-description">Get transaction details by transaction ID.</p>
+        <div class="endpoint-details">
+          <h4>Response Example</h4>
+          <div class="code-block">{
+  "transaction": {
+    "type": "transfer",
+    "fromPubKey": "base64...",
+    "toAddress": "NOGO00...",
+    "amount": 1000000000,
+    "fee": 1000000,
+    "nonce": 5,
+    "data": "",
+    "signature": "base64..."
+  },
+  "location": {
+    "height": 12345,
+    "blockHashHex": "abc123...",
+    "index": 2
+  },
+  "txId": "txid123..."
+}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/tx</span>
+        </div>
+        <p class="endpoint-description">Broadcast a signed transaction to the network.</p>
+        <div class="endpoint-details">
+          <h4>Request Body</h4>
+          <div class="code-block">{
+  "type": "transfer",
+  "fromPubKey": "base64...",
+  "toAddress": "NOGO00...",
+  "amount": 1000000000,
+  "fee": 1000000,
+  "nonce": 5,
+  "signature": "base64..."
+}</div>
+          <h4>Response</h4>
+          <div class="code-block">{
+  "txId": "abc123...",
+  "accepted": true
+}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/tx/batch</span>
+        </div>
+        <p class="endpoint-description">Broadcast multiple transactions in a single request.</p>
+        <div class="endpoint-details">
+          <h4>Request Body</h4>
+          <div class="code-block">{
+  "transactions": [
+    { "type": "transfer", ... },
+    { "type": "transfer", ... }
+  ]
+}</div>
+          <h4>Response</h4>
+          <div class="code-block">{
+  "results": [
+    { "txId": "abc...", "accepted": true },
+    { "txId": "def...", "accepted": true }
+  ]
+}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/tx/receipt/{txid}</span>
+        </div>
+        <p class="endpoint-description">Get transaction receipt and execution status.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/tx/status/{txid}</span>
+        </div>
+        <p class="endpoint-description">Get transaction status (pending/confirmed).</p>
+      </div>
+    </div>
+
+    <!-- Addresses -->
+    <div id="addresses" class="api-section">
+      <h2>Addresses</h2>
+      
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/balance/{address}</span>
+        </div>
+        <p class="endpoint-description">Get account balance and nonce for an address.</p>
+        <div class="endpoint-details">
+          <h4>Response Example</h4>
+          <div class="code-block">{
+  "address": "NOGO00...",
+  "balance": 10000000000,
+  "nonce": 42
+}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/address/{address}/txs</span>
+        </div>
+        <p class="endpoint-description">Get transaction history for an address with pagination.</p>
+        <div class="endpoint-details">
+          <h4>Query Parameters</h4>
+          <table class="parameter-table">
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+            <tr>
+              <td>limit</td>
+              <td>int</td>
+              <td>Number of transactions (default: 20, max: 100)</td>
+            </tr>
+            <tr>
+              <td>offset</td>
+              <td>int</td>
+              <td>Pagination offset</td>
+            </tr>
+          </table>
+          <h4>Response Example</h4>
+          <div class="code-block">{
+  "address": "NOGO00...",
+  "balance": 10000000000,
+  "nonce": 42,
+  "transactions": [
+    {
+      "txId": "abc123...",
+      "type": "transfer",
+      "amount": 1000000000,
+      "timestamp": 1234567890,
+      "direction": "in"
+    }
+  ],
+  "total": 150,
+  "limit": 20,
+  "offset": 0
+}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mempool -->
+    <div id="mempool" class="api-section">
+      <h2>Mempool</h2>
+      
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/mempool</span>
+        </div>
+        <p class="endpoint-description">Get current mempool status and pending transactions.</p>
+        <div class="endpoint-details">
+          <h4>Response Example</h4>
+          <div class="code-block">{
+  "size": 150,
+  "txs": [
+    {
+      "txId": "abc123...",
+      "type": "transfer",
+      "amount": 1000000000,
+      "fee": 1000000,
+      "timestamp": 1234567890
+    }
+  ]
+}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mining -->
+    <div id="mining" class="api-section">
+      <h2>Mining</h2>
+      
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/mining/info</span>
+        </div>
+        <p class="endpoint-description">Get current mining information and network difficulty.</p>
+        <div class="endpoint-details">
+          <h4>Response Example</h4>
+          <div class="code-block">{
+  "difficulty": 123456789,
+  "difficultyBits": 123456789,
+  "networkHashrate": "1.5 TH/s",
+  "blockReward": 5000000000,
+  "nextDifficultyAdjustment": 1000,
+  "blocksUntilHalving": 513255
+}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/block/template</span>
+        </div>
+        <p class="endpoint-description">Get block template for mining (for mining pools).</p>
+        <div class="endpoint-details">
+          <h4>Query Parameters</h4>
+          <table class="parameter-table">
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+            <tr>
+              <td>miner</td>
+              <td>string</td>
+              <td>Miner address to receive reward</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/mining/submit</span>
+        </div>
+        <p class="endpoint-description">Submit mined block solution (for mining pools).</p>
+        <div class="endpoint-details">
+          <h4>Request Body</h4>
+          <div class="code-block">{
+  "height": 12345,
+  "nonce": 987654321,
+  "minerAddress": "NOGO00...",
+  "extraNonce": "optional"
+}</div>
+          <h4>Response</h4>
+          <div class="code-block">{
+  "accepted": true,
+  "reward": 5000000000
+}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/mine/once</span>
+        </div>
+        <p class="endpoint-description">Mine a single block immediately (for testing).</p>
+        <div class="endpoint-details">
+          <h4>Authentication Required</h4>
+          <p>Requires <code>X-Admin-Token</code> header.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Wallet -->
+    <div id="wallet" class="api-section">
+      <h2>Wallet</h2>
+      
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/wallet/balance/{address}</span>
+        </div>
+        <p class="endpoint-description">Get wallet balance for an address.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/wallet/sign</span>
+        </div>
+        <p class="endpoint-description">Sign a message with private key.</p>
+        <div class="endpoint-details">
+          <h4>Request Body</h4>
+          <div class="code-block">{
+  "address": "NOGO00...",
+  "password": "secure_password",
+  "message": "message_to_sign"
+}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/wallet/sign_tx</span>
+        </div>
+        <p class="endpoint-description">Sign a transaction with private key.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/wallet/verify</span>
+        </div>
+        <p class="endpoint-description">Verify an address format.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/wallet/derive</span>
+        </div>
+        <p class="endpoint-description">Derive address from seed and index.</p>
+        <div class="endpoint-details">
+          <h4>Query Parameters</h4>
+          <table class="parameter-table">
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+            <tr>
+              <td>seed</td>
+              <td>string</td>
+              <td>BIP39 seed phrase</td>
+            </tr>
+            <tr>
+              <td>index</td>
+              <td>uint32</td>
+              <td>Derivation index</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/wallet/addresses</span>
+        </div>
+        <p class="endpoint-description">Derive multiple addresses from seed.</p>
+        <div class="endpoint-details">
+          <h4>Query Parameters</h4>
+          <table class="parameter-table">
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+            <tr>
+              <td>seed</td>
+              <td>string</td>
+              <td>BIP39 seed phrase</td>
+            </tr>
+            <tr>
+              <td>start</td>
+              <td>uint32</td>
+              <td>Start index</td>
+            </tr>
+            <tr>
+              <td>count</td>
+              <td>uint32</td>
+              <td>Number of addresses</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Network -->
+    <div id="network" class="api-section">
+      <h2>Network</h2>
+      
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/p2p/getaddr</span>
+        </div>
+        <p class="endpoint-description">Get list of known peer addresses.</p>
+        <div class="endpoint-details">
+          <h4>Response Example</h4>
+          <div class="code-block">{
+  "peers": [
+    {
+      "address": "103.112.185.5:9090",
+      "lastSeen": 1234567890,
+      "services": ["full_node", "miner"]
+    }
+  ]
+}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/p2p/addr</span>
+        </div>
+        <p class="endpoint-description">Announce peer addresses to the network.</p>
+      </div>
+    </div>
+
+    <!-- Proposals -->
+    <div id="proposals" class="api-section">
+      <h2>Community Proposals</h2>
+      
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/api/proposals</span>
+        </div>
+        <p class="endpoint-description">Get all community governance proposals.</p>
+        <div class="endpoint-details">
+          <h4>Query Parameters</h4>
+          <table class="parameter-table">
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+            <tr>
+              <td>status</td>
+              <td>string</td>
+              <td>Filter by status: active, passed, rejected, completed</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/api/proposals/{id}</span>
+        </div>
+        <p class="endpoint-description">Get details of a specific proposal.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/api/proposals/create</span>
+        </div>
+        <p class="endpoint-description">Create a new community proposal.</p>
+        <div class="endpoint-details">
+          <h4>Authentication Required</h4>
+          <p>Requires signed transaction with minimum deposit.</p>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/api/proposals/vote</span>
+        </div>
+        <p class="endpoint-description">Vote on an active proposal.</p>
+        <div class="endpoint-details">
+          <h4>Request Body</h4>
+          <div class="code-block">{
+  "proposalId": 1,
+  "vote": "yes",
+  "voterAddress": "NOGO00...",
+  "signature": "base64..."
+}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/api/proposals/deposit</span>
+        </div>
+        <p class="endpoint-description">Create a deposit for proposal submission.</p>
+      </div>
+    </div>
+
+    <!-- Utilities -->
+    <div id="utils" class="api-section">
+      <h2>Utilities</h2>
+      
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/health</span>
+        </div>
+        <p class="endpoint-description">Health check endpoint for monitoring.</p>
+        <div class="endpoint-details">
+          <h4>Response</h4>
+          <div class="code-block">{
+  "status": "ok"
+}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/audit/chain</span>
+        </div>
+        <p class="endpoint-description">Audit entire blockchain integrity (admin only).</p>
+        <div class="endpoint-details">
+          <h4>Authentication Required</h4>
+          <p>Requires <code>X-Admin-Token</code> header.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Error Codes -->
+    <div class="api-section">
+      <h2>Error Codes</h2>
+      <div class="info-box warning">
+        <h4>⚠️ Standard Error Response Format</h4>
+        <div class="code-block">{
+  "error": {
+    "code": "TX_INVALID_SIGNATURE",
+    "message": "Transaction signature verification failed",
+    "details": {...}
+  }
+}</div>
+      </div>
+      
+      <table class="parameter-table">
+        <tr>
+          <th>Code</th>
+          <th>HTTP Status</th>
+          <th>Description</th>
+        </tr>
+        <tr>
+          <td>TX_INVALID_SIGNATURE</td>
+          <td>400</td>
+          <td>Transaction signature verification failed</td>
+        </tr>
+        <tr>
+          <td>TX_INSUFFICIENT_BALANCE</td>
+          <td>400</td>
+          <td>Account has insufficient balance</td>
+        </tr>
+        <tr>
+          <td>TX_NONCE_TOO_LOW</td>
+          <td>400</td>
+          <td>Transaction nonce is too low (replay)</td>
+        </tr>
+        <tr>
+          <td>BLOCK_INVALID</td>
+          <td>400</td>
+          <td>Block validation failed</td>
+        </tr>
+        <tr>
+          <td>BLOCK_ORPHAN</td>
+          <td>400</td>
+          <td>Block is orphaned (missing parent)</td>
+        </tr>
+        <tr>
+          <td>NOT_FOUND</td>
+          <td>404</td>
+          <td>Resource not found</td>
+        </tr>
+        <tr>
+          <td>UNAUTHORIZED</td>
+          <td>401</td>
+          <td>Authentication required</td>
+        </tr>
+        <tr>
+          <td>INTERNAL_ERROR</td>
+          <td>500</td>
+          <td>Internal server error</td>
+        </tr>
+      </table>
+    </div>
+
+  </main>
+</div>
+
+<script>
+// Smooth scrolling for anchor links
+document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+  anchor.addEventListener('click', function (e) {
+    e.preventDefault();
+    const target = document.querySelector(this.getAttribute('href'));
+    if (target) {
+      target.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start'
+      });
+    }
+  });
+});
+
+// Highlight active section in sidebar
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      const id = entry.target.id;
+      document.querySelectorAll('.sidebar a').forEach(a => {
+        a.classList.remove('active');
+        if (a.getAttribute('href') === '#' + id) {
+          a.classList.add('active');
+        }
+      });
+    }
+  });
+}, { threshold: 0.2 });
+
+document.querySelectorAll('.api-section').forEach(section => {
+  observer.observe(section);
+});
+</script>
+</body>
+</html>

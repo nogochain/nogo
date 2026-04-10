@@ -212,6 +212,9 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("/explorer/", mw.Wrap("explorer", false, 0, s.handleExplorer))
 
+	mux.HandleFunc("/api/", mw.Wrap("api_docs", false, 0, s.handleAPIDocs))
+	mux.HandleFunc("/explorer/api.html", mw.Wrap("api_docs", false, 0, s.handleAPIDocs))
+
 	mux.HandleFunc("/explorer/favicon.ico", mw.Wrap("favicon", false, 0, s.handleFavicon))
 	mux.HandleFunc("/favicon.ico", mw.Wrap("favicon", false, 0, s.handleFavicon))
 
@@ -1861,6 +1864,52 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/explorer/", http.StatusTemporaryRedirect)
+}
+
+func (s *Server) handleAPIDocs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Set cache control headers to prevent caching
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	// Try multiple possible paths
+	possiblePaths := []string{
+		"blockchain/api/http/public/explorer/api.html",
+		"api/http/public/explorer/api.html",
+		"public/explorer/api.html",
+	}
+
+	// Add path relative to executable
+	if exePath, exeErr := os.Executable(); exeErr == nil {
+		exeDir := filepath.Dir(exePath)
+		possiblePaths = append(possiblePaths,
+			filepath.Join(exeDir, "../blockchain/api/http/public/explorer/api.html"),
+			filepath.Join(exeDir, "api/http/public/explorer/api.html"),
+		)
+	}
+
+	// Add absolute paths for common installations
+	possiblePaths = append(possiblePaths,
+		"/data/nogo/blockchain/api/http/public/explorer/api.html",
+		"/opt/nogo/blockchain/api/http/public/explorer/api.html",
+		"/usr/local/lib/nogochain/api.html",
+	)
+
+	for _, path := range possiblePaths {
+		if data, err := os.ReadFile(path); err == nil {
+			_, _ = w.Write(data)
+			return
+		}
+	}
+
+	// Fallback: return error with tried paths
+	http.Error(w, fmt.Sprintf("API documentation not found. Tried: %s", strings.Join(possiblePaths, ", ")), http.StatusNotFound)
 }
 
 func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
