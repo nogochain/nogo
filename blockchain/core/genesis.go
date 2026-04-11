@@ -791,7 +791,6 @@ func CreateGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, 
 
 	sealedHeader := result.Header()
 	genesis.Header.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
-	genesis.Header.Nonce = genesis.Header.Nonce
 	genesis.Header.TimestampUnix = int64(sealedHeader.Time)
 	genesis.Header.DifficultyBits = uint32(sealedHeader.Difficulty.Uint64())
 	hashBytes := sealedHeader.Hash().Bytes()

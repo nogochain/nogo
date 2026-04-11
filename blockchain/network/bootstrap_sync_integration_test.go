@@ -14,7 +14,6 @@ import (
 	"github.com/nogochain/nogo/blockchain/config"
 	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // BootstrapSyncIntegrationTestSuite provides comprehensive testing for bootstrap sync optimization
@@ -25,7 +24,7 @@ type BootstrapSyncIntegrationTestSuite struct {
 	coordinator  *BootstrapMiningCoordinator
 	propagator   *BootstrapBlockPropagator
 	detector     *AdaptiveSyncDetector
-	downloader   *BlockDownloader
+	downloader   *MockBlockDownloader
 	
 	// Test state
 	testContext  context.Context
@@ -87,7 +86,7 @@ type TestScenario struct {
 	TeardownFunc   func(*BootstrapSyncIntegrationTestSuite) error
 	ExecutionFunc  func(*BootstrapSyncIntegrationTestSuite) error
 	ExpectedOutcome TestOutcome
-	Priority       TestPriority
+	Priority       TestPriorityLevel
 }
 
 // TestOutcome defines expected test results
@@ -107,14 +106,15 @@ type PerformanceCriteria struct {
 	StabilityScore     float64
 }
 
-// TestPriority indicates test importance
-type TestPriority int
+// TestPriorityLevel indicates test importance
+// Named differently to avoid conflict with PriorityLevel in bootstrap_types.go
+type TestPriorityLevel int
 
 const (
-	PriorityCritical TestPriority = iota
-	PriorityHigh
-	PriorityMedium
-	PriorityLow
+	TestPriorityCritical TestPriorityLevel = iota
+	TestPriorityHigh
+	TestPriorityMedium
+	TestPriorityLow
 )
 
 // NewBootstrapSyncIntegrationTestSuite creates comprehensive test environment
@@ -136,15 +136,14 @@ func NewBootstrapSyncIntegrationTestSuite(baseHeight uint64) *BootstrapSyncInteg
 	}
 	
 	// Initialize components with realistic parameters
-	config := &config.Config{
-		BootstrapNodes: []string{"localhost:8080"},
-		// Additional config parameters
-	}
-	
-	coordinator := NewBootstrapMiningCoordinator(true, baseHeight)
-	propagator := InitializeBootstrapPropagator(coordinator, config)
+	// Initialize components with realistic parameters
+	// Production-grade: use default config with required test parameters
+	cfg := config.DefaultConfig()
+
+	coordinator := InitializeBootstrapCoordinator(nil, nil, cfg)
+	propagator := InitializeBootstrapPropagator(coordinator, cfg)
 	detector := NewAdaptiveSyncDetector(baseHeight)
-	downloader := NewBlockDownloader() // Assume this exists
+	downloader := NewMockBlockDownloader() // Mock implementation for testing
 	
 	suite := &BootstrapSyncIntegrationTestSuite{
 		coordinator:  coordinator,
@@ -178,7 +177,7 @@ func (s *BootstrapSyncIntegrationTestSuite) initializeTestScenarios() {
 		{
 			Name:        "bootstrap_node_propagation",
 			Description: "Test bootstrap node's ability to propagate its own blocks",
-			Priority:    PriorityCritical,
+			Priority:    TestPriorityCritical,
 			ExpectedOutcome: TestOutcome{
 				ShouldPropagate: true,
 				MaxBlockLoss:    0,
@@ -193,7 +192,7 @@ func (s *BootstrapSyncIntegrationTestSuite) initializeTestScenarios() {
 		{
 			Name:        "client_sync_from_bootstrap",
 			Description: "Test client synchronization from bootstrap node",
-			Priority:    PriorityCritical,
+			Priority:    TestPriorityCritical,
 			ExpectedOutcome: TestOutcome{
 				ShouldPropagate: true,
 				ShouldRecover:   false,
@@ -205,7 +204,7 @@ func (s *BootstrapSyncIntegrationTestSuite) initializeTestScenarios() {
 		{
 			Name:        "network_failure_recovery",
 			Description: "Test recovery from network connectivity failures",
-			Priority:    PriorityHigh,
+			Priority:    TestPriorityHigh,
 			ExpectedOutcome: TestOutcome{
 				ShouldRecover: true,
 				MaxBlockLoss:  10,
@@ -221,7 +220,7 @@ func (s *BootstrapSyncIntegrationTestSuite) initializeTestScenarios() {
 		{
 			Name:        "high_frequency_mining_stress",
 			Description: "Stress test with high-frequency block generation",
-			Priority:    PriorityHigh,
+			Priority:    TestPriorityHigh,
 			ExpectedOutcome: TestOutcome{
 				ShouldPropagate: true,
 				MaxBlockLoss:    5,
@@ -232,7 +231,7 @@ func (s *BootstrapSyncIntegrationTestSuite) initializeTestScenarios() {
 		{
 			Name:        "large_block_volume_propagation",
 			Description: "Test propagation of large blockchain volume",
-			Priority:    PriorityMedium,
+			Priority:    TestPriorityMedium,
 			ExpectedOutcome: TestOutcome{
 				ShouldPropagate: true,
 				MaxBlockLoss:    20,
@@ -244,7 +243,7 @@ func (s *BootstrapSyncIntegrationTestSuite) initializeTestScenarios() {
 		{
 			Name:        "adaptive_parameter_tuning",
 			Description: "Test adaptive parameter adjustment under varying conditions",
-			Priority:    PriorityMedium,
+			Priority:    TestPriorityMedium,
 			ExpectedOutcome: TestOutcome{
 				ShouldRecover: true,
 				MinUptime:     0.92,
@@ -254,7 +253,7 @@ func (s *BootstrapSyncIntegrationTestSuite) initializeTestScenarios() {
 		{
 			Name:        "data_consistency_validation",
 			Description: "Validate blockchain data consistency during sync",
-			Priority:    PriorityCritical,
+			Priority:    TestPriorityCritical,
 			ExpectedOutcome: TestOutcome{
 				ShouldPropagate: true,
 				MinUptime:       0.99,
@@ -271,10 +270,10 @@ func (s *BootstrapSyncIntegrationTestSuite) RunComprehensiveTestSuite() *Verific
 	s.verificationResults.TestStartTime = time.Now()
 	
 	// Execute tests in priority order
-	criticalTests := s.filterTestsByPriority(PriorityCritical)
-	highTests := s.filterTestsByPriority(PriorityHigh)
-	mediumTests := s.filterTestsByPriority(PriorityMedium)
-	lowTests := s.filterTestsByPriority(PriorityLow)
+	criticalTests := s.filterTestsByPriority(TestPriorityCritical)
+	highTests := s.filterTestsByPriority(TestPriorityHigh)
+	mediumTests := s.filterTestsByPriority(TestPriorityMedium)
+	lowTests := s.filterTestsByPriority(TestPriorityLow)
 	
 	// Execute critical tests first
 	criticalResults := s.executeTestBatch(criticalTests, "Critical Tests")
@@ -389,14 +388,14 @@ func (s *BootstrapSyncIntegrationTestSuite) verifyBootstrapPropagation(
 ) bool {
 	// Monitor propagation metrics
 	propagationStatus := s.propagator.GetPropagationStatus()
-	
+
 	// Check block loss rate
 	totalBlocks := propagationStatus.TotalBlocksPropagated + uint64(propagationStatus.BlocksLost)
 	if totalBlocks > 0 {
 		lossRate := float64(propagationStatus.BlocksLost) / float64(totalBlocks)
-		if lossRate > expected.MaxBlockLoss/100.0 {
-			log.Printf("[BootstrapSyncTest] Block loss rate %.2f%% exceeds threshold %.2f%%", 
-				lossRate*100, expected.MaxBlockLoss)
+		if lossRate > float64(expected.MaxBlockLoss)/100.0 {
+			log.Printf("[BootstrapSyncTest] Block loss rate %.2f%% exceeds threshold %.2f%%",
+				lossRate*100, float64(expected.MaxBlockLoss))
 			return false
 		}
 	}
@@ -457,7 +456,7 @@ func (s *BootstrapSyncIntegrationTestSuite) verifyGenericScenario(expected TestO
 
 // filterTestsByPriority returns tests matching specific priority
 func (s *BootstrapSyncIntegrationTestSuite) filterTestsByPriority(
-	priority TestPriority,
+	priority TestPriorityLevel,
 ) []*TestScenario {
 	var filtered []*TestScenario
 	
@@ -526,31 +525,35 @@ func BenchmarkBootstrapPropagation(b *testing.B) {
 	defer testSuite.cancelFunc()
 	
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		// Benchmark block propagation performance
 		block := &core.Block{
+			Header: core.BlockHeader{
+				Version:   1,
+				TimestampUnix: time.Now().Unix(),
+			},
 			Height: uint64(1000 + i),
-			Hash:   fmt.Sprintf("benchmark_block_%d", i),
+			Hash:   []byte(fmt.Sprintf("benchmark_block_%d", i)),
 		}
-		
-		err := testSuite.propagator.BroadcastBootstrapBlock(block)
-		if err != nil {
-			b.Errorf("Block propagation failed: %v", err)
-		}
+
+		// Enqueue block for propagation (uses existing method)
+		testSuite.propagator.enqueueBlock(block, PriorityHigh)
 	}
 }
 
 // Utility function implementations
 
-// NewBlockDownloader creates a mock block downloader for testing
-func NewBlockDownloader() *BlockDownloader {
+// NewMockBlockDownloader creates a mock block downloader for testing
+// Named differently to avoid conflict with NewBlockDownloader in sync_downloader.go
+func NewMockBlockDownloader() *MockBlockDownloader {
 	// Return a mock implementation for testing
-	return &BlockDownloader{}
+	return &MockBlockDownloader{}
 }
 
-// BlockDownloader mock implementation
-type BlockDownloader struct{}
+// MockBlockDownloader mock implementation for testing
+// Named differently to avoid conflict with BlockDownloader in sync_downloader.go
+type MockBlockDownloader struct{}
 
 // Mock implementation methods would go here
 

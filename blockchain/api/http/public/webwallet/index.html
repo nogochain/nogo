@@ -41,13 +41,48 @@
 
         // BIP39 implementation
         window.bip39 = {
-            generateMnemonic: function() {
-                const words = [];
-                const randomBytes = new Uint8Array(16);
-                window.crypto.getRandomValues(randomBytes);
+            generateMnemonic: async function() {
+                // BIP39 standard: 128 bits of entropy for 12 words
+                // Generate 16 bytes (128 bits) of cryptographically secure random entropy
+                const entropyBytes = new Uint8Array(16);
+                window.crypto.getRandomValues(entropyBytes);
                 
+                // Calculate checksum: first 4 bits of SHA256(entropy)
+                // For 128 bits entropy, checksum length = 128 / 32 = 4 bits
+                const hashBuffer = await window.crypto.subtle.digest('SHA-256', entropyBytes);
+                const hashBytes = new Uint8Array(hashBuffer);
+                
+                // Combine entropy + checksum (first 4 bits of hash)
+                // Total: 128 + 4 = 132 bits = 11 bits * 12 words
+                const entropyWithChecksum = new Uint8Array(17); // 16 + 1 byte for checksum
+                entropyWithChecksum.set(entropyBytes, 0);
+                entropyWithChecksum[16] = hashBytes[0]; // First byte of hash contains 4-bit checksum
+                
+                // Convert to 11-bit indices (2^11 = 2048 words)
+                const words = [];
                 for (let i = 0; i < 12; i++) {
-                    const index = randomBytes[i] % 2048;
+                    // Each word uses 11 bits
+                    // Position in bits: i * 11
+                    // Position in bytes: floor(i * 11 / 8)
+                    // Bit offset within byte: (i * 11) % 8
+                    
+                    const bitPosition = i * 11;
+                    const byteIndex = Math.floor(bitPosition / 8);
+                    const bitOffset = bitPosition % 8;
+                    
+                    // Extract 11 bits starting from bitPosition
+                    // Need to handle bits that span across bytes
+                    let index = 0;
+                    
+                    if (bitOffset <= 5) {
+                        // 11 bits fit in 2 bytes (current + next)
+                        // Shift left to align, then mask with 0x7FF (11 bits)
+                        index = ((entropyWithChecksum[byteIndex] << 8) | entropyWithChecksum[byteIndex + 1]) >> (5 - bitOffset) & 0x7FF;
+                    } else {
+                        // 11 bits span 3 bytes
+                        index = ((entropyWithChecksum[byteIndex] << 16) | (entropyWithChecksum[byteIndex + 1] << 8) | entropyWithChecksum[byteIndex + 2]) >> (13 - bitOffset) & 0x7FF;
+                    }
+                    
                     words.push(BIP39_WORDLIST[index]);
                 }
                 
@@ -1493,7 +1528,7 @@ body {
                 }
                 
                 // Generate mnemonic using BIP39 standard
-                const mnemonic = window.bip39.generateMnemonic();
+                const mnemonic = await window.bip39.generateMnemonic();
                 
                 // Derive seed from mnemonic (BIP39 standard: PBKDF2-HMAC-SHA512, 2048 iterations)
                 // Using async version since PBKDF2 requires Web Crypto API

@@ -292,13 +292,12 @@ func TestBlockDownloader_BatchDownloadBlocks(t *testing.T) {
 	ctx := context.Background()
 	progressChan := make(chan DownloadProgress, 10)
 
-	blocks, err := downloader.BatchDownloadBlocks(ctx, "peer1", 101, 100, progressChan)
+	// Create a no-op store function for testing
+	storeFunc := func(ctx context.Context, block *core.Block) error { return nil }
+
+	err := downloader.BatchDownloadBlocks(ctx, "peer1", 101, 100, progressChan, storeFunc)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
-	}
-
-	if len(blocks) != 100 {
-		t.Errorf("expected 100 blocks, got %d", len(blocks))
 	}
 
 	// Drain the progress channel and verify total downloaded

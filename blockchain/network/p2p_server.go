@@ -54,6 +54,9 @@ type P2PServer struct {
 	// Optimized block propagation
 	blockPropagator *OptimizedBlockPropagator
 
+	// Gossip protocol for efficient message propagation
+	gossipProtocol *GossipProtocol
+
 	// Chain selector for work-based decisions
 	chainSelector *core.ChainSelector
 
@@ -62,6 +65,9 @@ type P2PServer struct {
 
 	// Resolution engine for automatic fork resolution
 	resolutionEngine *ForkResolutionEngine
+
+	// Network topology for path optimization
+	topology *NetworkTopology
 }
 
 // NewP2PServer creates a new P2P server instance
@@ -126,6 +132,9 @@ func NewP2PServer(bc BlockchainInterface, pm *P2PPeerManager, mp Mempool, listen
 		log.Printf("[P2PServer] Warning: bc does not provide underlying chain, fork resolution disabled")
 	}
 
+	// Initialize network topology for path optimization
+	topology := NewNetworkTopology(nodeID, NodeRoleFullNode)
+
 	s := &P2PServer{
 		bc:            bc,
 		pm:            pm, // Interface passed by value - safe as interfaces are reference types
@@ -147,6 +156,7 @@ func NewP2PServer(bc BlockchainInterface, pm *P2PPeerManager, mp Mempool, listen
 		chainSelector:    chainSelector,
 		resolutionEngine: resolutionEngine,
 		blockPropagator:  nil, // Will be initialized in Serve()
+		topology:         topology,
 	}
 	if s.maxConns <= 0 {
 		s.maxConns = DefaultP2PMaxConnections
@@ -183,12 +193,16 @@ func (s *P2PServer) Serve(ctx context.Context) error {
 	getP2PLogger().P2P("Listening on %s | Node ID: %s", s.listenAddr, s.nodeID)
 
 	// Initialize block propagator if resolution engine is available
-	if s.resolutionEngine != nil && s.chainSelector != nil && s.forkDetector != nil {
-		s.blockPropagator = NewOptimizedBlockPropagator(s, s.chainSelector, s.forkDetector, s.resolutionEngine)
-		log.Printf("[P2PServer] Block propagator initialized with independent fork resolution")
+	if s.resolutionEngine != nil && s.chainSelector != nil && s.forkDetector != nil && s.topology != nil {
+		s.blockPropagator = NewOptimizedBlockPropagator(s, s.chainSelector, s.forkDetector, s.resolutionEngine, s.topology)
+		log.Printf("[P2PServer] Block propagator initialized with independent fork resolution and path optimization")
 	} else {
 		log.Printf("[P2PServer] Warning: fork resolution components not available, block propagator disabled")
 	}
+
+	// Initialize Gossip protocol
+	s.gossipProtocol = NewGossipProtocol(s, s.topology)
+	log.Printf("[P2PServer] Gossip protocol initialized for efficient message propagation")
 
 	// Start peer discovery loop if peer manager is available
 	if s.pm.peers != nil {
@@ -412,6 +426,8 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 			handleErr = s.handlePing(c, env.Payload)
 		case "pong":
 			handleErr = s.handlePong(c, env.Payload)
+		case "gossip":
+			handleErr = s.handleGossipMessage(c, env.Payload)
 		default:
 			handleErr = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "unknown_type"})})
 		}
@@ -720,27 +736,32 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 				log.Printf("[P2P] Historical fork detected at height %d! Local: %s, Remote: %s",
 					block.GetHeight(), hex.EncodeToString(localBlock.Hash), hex.EncodeToString(block.Hash))
 
-				// Use fork resolution engine
+				// Use enhanced fork resolution with predictive analytics
+				// Production-grade: comprehensive assessment with risk prediction
 				if s.resolutionEngine != nil && s.forkDetector != nil {
 					forkEvent := s.forkDetector.DetectFork(localBlock, &block, "p2p_broadcast")
 					if forkEvent != nil {
 						log.Printf("[P2P] Fork event created: type=%v alert_level=%s",
 							forkEvent.Type, forkEvent.AlertLevel)
 
-						request := &ResolutionRequest{
-							LocalTip:    currentTip,
-							RemoteBlock: &block,
-							PeerID:      "p2p_broadcast",
-							ReceivedAt:  time.Now(),
-							Priority:    getResolutionPriority(forkEvent),
+						// Perform comprehensive assessment with impact analysis
+						request := s.assessAndHandleFork(forkEvent, currentTip, &block, "p2p_broadcast")
+						if request == nil {
+							// Fallback to basic request if assessment fails
+							request = &ResolutionRequest{
+								LocalTip:    currentTip,
+								RemoteBlock: &block,
+								PeerID:      "p2p_broadcast",
+								ReceivedAt:  time.Now(),
+								Priority:    getResolutionPriority(forkEvent),
+							}
 						}
 
 						if err := s.resolutionEngine.SubmitResolution(request); err != nil {
-						log.Printf("[P2P] Failed to submit fork resolution: %v", err)
-					} else {
-						log.Printf("[P2P] Fork resolution submitted to engine")
-						// Continue to AddBlock - the resolution engine will handle reorg if needed
-					}
+							log.Printf("[P2P] Failed to submit fork resolution: %v", err)
+						} else {
+							log.Printf("[P2P] Fork resolution submitted to engine (priority=%d)", request.Priority)
+						}
 					}
 				}
 			}
@@ -768,23 +789,29 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 							log.Printf("[P2P] Fork detected: block height=%d parent height=%d (canonical tip=%d)",
 								block.GetHeight(), parent.GetHeight(), len(allBlocks)-1)
 							log.Printf("[P2P] Parent is on fork chain, triggering resolution")
-							
+
+							// Use enhanced fork resolution with predictive analytics
+							// Production-grade: comprehensive assessment with impact analysis
 							if s.resolutionEngine != nil && s.forkDetector != nil {
 								forkEvent := s.forkDetector.DetectFork(canonicalParent, &block, "p2p_broadcast")
 								if forkEvent != nil {
-									request := &ResolutionRequest{
-										LocalTip:    currentTip,
-										RemoteBlock: &block,
-										PeerID:      "p2p_broadcast",
-										ReceivedAt:  time.Now(),
-										Priority:    getResolutionPriority(forkEvent),
+									// Perform comprehensive assessment with impact analysis
+									request := s.assessAndHandleFork(forkEvent, currentTip, &block, "p2p_broadcast")
+									if request == nil {
+										// Fallback to basic request if assessment fails
+										request = &ResolutionRequest{
+											LocalTip:    currentTip,
+											RemoteBlock: &block,
+											PeerID:      "p2p_broadcast",
+											ReceivedAt:  time.Now(),
+											Priority:    getResolutionPriority(forkEvent),
+										}
 									}
-									
+
 									if err := s.resolutionEngine.SubmitResolution(request); err != nil {
 										log.Printf("[P2P] Failed to submit fork resolution: %v", err)
 									} else {
-										log.Printf("[P2P] Fork resolution submitted to engine")
-										// Continue to AddBlock - the resolution engine will handle reorg if needed
+										log.Printf("[P2P] Fork resolution submitted to engine (priority=%d)", request.Priority)
 									}
 								}
 							}
@@ -1264,4 +1291,167 @@ func (s *P2PServer) validateBlockPoW(block *core.Block) error {
 	}
 
 	return nil
+}
+
+// handleGossipMessage handles incoming gossip messages
+func (s *P2PServer) handleGossipMessage(c net.Conn, payload json.RawMessage) error {
+	var gossipMsg GossipMessage
+	if err := json.Unmarshal(payload, &gossipMsg); err != nil {
+		_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "invalid_gossip_message"})})
+		return fmt.Errorf("failed to unmarshal gossip message: %w", err)
+	}
+
+	// Get peer ID from connection
+	peerID := c.RemoteAddr().String()
+
+	// Handle the gossip message using the gossip protocol
+	if s.gossipProtocol != nil {
+		if err := s.gossipProtocol.HandleGossipMessage(peerID, &gossipMsg); err != nil {
+			log.Printf("Failed to handle gossip message: %v", err)
+			// Don't return error - just log and continue
+		}
+	}
+
+	// Send acknowledgment
+	return p2pWriteJSON(c, p2pEnvelope{Type: "gossip_ack", Payload: mustJSON(map[string]any{"message_id": gossipMsg.MessageID})})
+}
+
+// collectNetworkMetrics gathers current network metrics for fork risk prediction
+// Production-grade: real-time metrics collection for predictive analytics
+func (s *P2PServer) collectNetworkMetrics() map[string]interface{} {
+	metrics := make(map[string]interface{})
+
+	// Active node count from peer manager
+	if s.pm != nil {
+		peers := s.pm.Peers()
+		metrics["active_nodes"] = len(peers)
+	}
+
+	// Network topology metrics
+	if s.topology != nil {
+		stats := s.topology.GetTopologyStats()
+		metrics["topology_nodes"] = stats.TotalNodes
+		metrics["topology_relay_nodes"] = stats.RelayNodes
+		metrics["topology_partitions"] = stats.Partitions
+	}
+
+	// Chain metrics
+	if s.bc != nil {
+		latestBlock := s.bc.LatestBlock()
+		if latestBlock != nil {
+			metrics["chain_height"] = latestBlock.GetHeight()
+			metrics["chain_difficulty"] = latestBlock.Header.Difficulty
+		}
+	}
+
+	return metrics
+}
+
+// performForkRiskAssessment executes comprehensive fork risk analysis
+// Production-grade: combines prediction, detection, and impact assessment
+// Returns risk level and recommended priority for resolution
+func (s *P2PServer) performForkRiskAssessment(currentHeight uint64) (core.ForkRiskLevel, int) {
+	if s.forkDetector == nil {
+		return core.ForkRiskLow, 0
+	}
+
+	// Collect network metrics for prediction
+	networkMetrics := s.collectNetworkMetrics()
+
+	// Predict fork risk based on historical data and network conditions
+	prediction := s.forkDetector.PredictForkRisk(currentHeight, networkMetrics)
+	if prediction == nil {
+		return core.ForkRiskLow, 0
+	}
+
+	// Log prediction results for monitoring
+	log.Printf("[P2P] Fork risk prediction: level=%s confidence=%.2f factors=%v",
+		prediction.RiskLevel, prediction.Confidence, prediction.ContributingFactors)
+
+	// Map risk level to resolution priority
+	priority := 0
+	switch prediction.RiskLevel {
+	case core.ForkRiskCritical:
+		priority = 100 // Highest priority
+		log.Printf("[P2P] CRITICAL fork risk detected! Actions: %v", prediction.SuggestedActions)
+	case core.ForkRiskHigh:
+		priority = 75
+		log.Printf("[P2P] HIGH fork risk detected. Actions: %v", prediction.SuggestedActions)
+	case core.ForkRiskMedium:
+		priority = 50
+	case core.ForkRiskLow:
+		priority = 25
+	}
+
+	return prediction.RiskLevel, priority
+}
+
+// assessAndHandleFork performs complete fork assessment with impact analysis
+// Production-grade: comprehensive fork handling with predictive analytics
+// Integrates dynamic topology detection for small network scenarios
+func (s *P2PServer) assessAndHandleFork(forkEvent *core.ForkEvent, localTip *core.Block, remoteBlock *core.Block, peerID string) *ResolutionRequest {
+	if forkEvent == nil || s.forkDetector == nil {
+		return nil
+	}
+
+	// Collect network metrics for dynamic topology analysis
+	networkMetrics := s.collectNetworkMetrics()
+
+	// Use dynamic topology fork detection for enhanced sensitivity in small networks
+	// Production-grade: adapts detection sensitivity based on network conditions
+	enhancedEvent := s.forkDetector.DetectDynamicTopologyFork(localTip, remoteBlock, peerID, networkMetrics)
+	if enhancedEvent != nil && enhancedEvent.AlertLevel == "CRITICAL" {
+		log.Printf("[P2P] Dynamic topology fork detected: small network scenario - upgrading to CRITICAL")
+		forkEvent = enhancedEvent
+	}
+
+	// Perform impact assessment
+	impact := s.forkDetector.AssessForkImpact(*forkEvent, networkMetrics)
+
+	if impact != nil {
+		log.Printf("[P2P] Fork impact assessment: affected_blocks=%d affected_nodes=%d recovery_time=%v",
+			impact.AffectedBlocks, impact.AffectedNodes, impact.RecoveryTime)
+		log.Printf("[P2P] Network impact: %s, Financial impact: %s", impact.NetworkImpact, impact.FinancialImpact)
+
+		// Log recommended actions for operators
+		if len(impact.RecommendedActions) > 0 {
+			log.Printf("[P2P] Recommended actions: %v", impact.RecommendedActions)
+		}
+	}
+
+	// Determine priority based on fork type and impact
+	priority := getResolutionPriority(forkEvent)
+
+	// Adjust priority based on impact severity
+	priorityAdjustment := 0
+	if impact != nil {
+		if impact.AffectedBlocks > 100 {
+			priorityAdjustment += 20 // Deep fork requires higher priority
+		}
+		if impact.AffectedNodes > 10 {
+			priorityAdjustment += 15 // Widespread fork requires faster resolution
+		}
+		if impact.RecoveryTime > 5*time.Minute {
+			priorityAdjustment += 10 // Long recovery time needs attention
+		}
+	}
+
+	// Perform risk assessment for future prevention
+	riskLevel, riskPriority := s.performForkRiskAssessment(localTip.GetHeight())
+	_ = riskLevel // Used for logging above
+
+	// Combine priorities with risk assessment
+	// Convert ResolutionPriority to int for calculation
+	finalPriority := int(priority) + priorityAdjustment + riskPriority/2
+	if finalPriority > 100 {
+		finalPriority = 100 // Cap at max priority
+	}
+
+	return &ResolutionRequest{
+		LocalTip:    localTip,
+		RemoteBlock: remoteBlock,
+		PeerID:      peerID,
+		ReceivedAt:  time.Now(),
+		Priority:    ResolutionPriority(finalPriority),
+	}
 }
