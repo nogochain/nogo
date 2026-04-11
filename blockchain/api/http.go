@@ -156,24 +156,6 @@ func (s *Server) routes() http.Handler {
 		handler = s.auditLog.AuditMiddleware(handler)
 	}
 
-	// Add global CORS middleware
-	corsHandler := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID")
-			
-			// Handle preflight requests
-			if r.Method == http.MethodOptions {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-			
-			next.ServeHTTP(w, r)
-		})
-	}
-	handler = corsHandler(handler)
-
 	mux.HandleFunc("/health", mw.Wrap("health", false, 0, s.handleHealth))
 	// Metrics endpoint disabled - metrics package interface mismatch
 	// if s.metrics != nil {

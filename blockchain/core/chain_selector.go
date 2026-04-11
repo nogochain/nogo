@@ -7,27 +7,10 @@ package core
 import (
 	"fmt"
 	"log"
-	"math"
 	"math/big"
 	"sync"
 	"time"
 )
-
-// TopologyStats represents network topology statistics
-// Production-grade: decoupled from network package to avoid import cycles
-type TopologyStats struct {
-	TotalNodes   int
-	RelayNodes   int
-	Partitions   int
-	AvgLatency   float64
-	NetworkScore float64
-}
-
-// TopologyProvider interface for network topology access
-// Production-grade: interface-based design for loose coupling
-type TopologyProvider interface {
-	GetTopologyStats() TopologyStats
-}
 
 // BlockProvider interface for retrieving blocks by hash
 type BlockProvider interface {
@@ -45,17 +28,6 @@ type ChainSelector struct {
 	workCalculator  *WorkCalculator
 	reorgInProgress bool
 	reorgMutex      sync.Mutex
-	// Optimization: Track candidate chains for incremental reorg
-	candidateChains map[string]*Block
-	candidateMutex  sync.RWMutex
-	// Network topology for intelligent chain selection
-	topology        TopologyProvider
-	// Block propagation information
-	propagationStats map[string]interface{}
-	// Chain health metrics
-	chainHealthMetrics map[string]float64
-	// Last network analysis time
-	lastNetworkAnalysis time.Time
 }
 
 // NewChainSelector creates a new chain selector
@@ -64,10 +36,6 @@ func NewChainSelector(chain *Chain, provider BlockProvider) *ChainSelector {
 		chain:          chain,
 		blockProvider:  provider,
 		workCalculator: NewWorkCalculator(),
-		candidateChains: make(map[string]*Block),
-		propagationStats: make(map[string]interface{}),
-		chainHealthMetrics: make(map[string]float64),
-		lastNetworkAnalysis: time.Now(),
 	}
 }
 
@@ -75,371 +43,49 @@ func NewChainSelector(chain *Chain, provider BlockProvider) *ChainSelector {
 // Implementation matches Bitcoin's FindMostWorkChain algorithm with enhancement
 // Returns the block with highest chain work, nil if no blocks
 func (cs *ChainSelector) FindMostWorkChain() *Block {
-	// First, get the current best block with read lock
 	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+
 	bestBlock := cs.chain.LatestBlock()
 	if bestBlock == nil {
-		cs.mu.RUnlock()
 		return nil
 	}
 
-	// Get current best health metrics
-	bestHealth := cs.calculateChainHealth(bestBlock)
 	bestWork, ok := StringToWork(bestBlock.TotalWork)
 	if !ok {
 		bestWork = new(big.Int)
 	}
 
-	// Optimization: Check only candidate chains instead of all blocks
-	cs.candidateMutex.RLock()
-	candidates := make([]*Block, 0, len(cs.candidateChains))
-	for _, block := range cs.candidateChains {
-		candidates = append(candidates, block)
-	}
-	cs.candidateMutex.RUnlock()
-	cs.mu.RUnlock()
+	// Check all blocks in storage for potential better chains
+	// This handles cases where we have multiple chain branches
+	if cs.blockProvider != nil {
+		allBlocks, err := cs.blockProvider.GetAllBlocks()
+		if err == nil {
+			for _, block := range allBlocks {
+				if block == nil {
+					continue
+				}
 
-	// Check candidate chains
-	for _, block := range candidates {
-		if block == nil {
-			continue
-		}
+				// Bitcoin-style validation: ensure block chain is fully valid
+				if !cs.isChainValid(block) {
+					continue // Skip blocks with invalid ancestors
+				}
 
-		// Bitcoin-style validation: ensure block chain is fully valid
-		if !cs.isChainValid(block) {
-			// Remove invalid candidate
-			cs.candidateMutex.Lock()
-			delete(cs.candidateChains, string(block.Hash))
-			cs.candidateMutex.Unlock()
-			continue
-		}
+				blockWork, ok := StringToWork(block.TotalWork)
+				if !ok {
+					continue
+				}
 
-		blockWork, ok := StringToWork(block.TotalWork)
-		if !ok {
-			continue
-		}
-
-		// Calculate health metrics for candidate chain
-		cs.mu.RLock()
-		blockHealth := cs.calculateChainHealth(block)
-		cs.mu.RUnlock()
-
-		// Smart chain selection: compare based on work and health
-		if cs.shouldPreferChain(blockWork, blockHealth, bestWork, bestHealth) {
-			bestWork = blockWork
-			bestHealth = blockHealth
-			bestBlock = block
+				// Compare work: if this block has more work, it's a better chain
+				if blockWork.Cmp(bestWork) > 0 {
+					bestWork = blockWork
+					bestBlock = block
+				}
+			}
 		}
 	}
-
-	// Update chain health metrics
-	cs.mu.Lock()
-	cs.chainHealthMetrics = bestHealth
-	cs.lastNetworkAnalysis = time.Now()
-	cs.mu.Unlock()
 
 	return bestBlock
-}
-
-// shouldPreferChain determines if a candidate chain should be preferred over the current best
-func (cs *ChainSelector) shouldPreferChain(
-	candidateWork *big.Int,
-	candidateHealth map[string]float64,
-	currentWork *big.Int,
-	currentHealth map[string]float64,
-) bool {
-	// First check: work difference
-	workDiff := candidateWork.Cmp(currentWork)
-
-	// If candidate has significantly more work, prefer it
-	if workDiff > 0 {
-		// If work is at least 5% higher, always prefer
-		workRatio := new(big.Float).Quo(
-			new(big.Float).SetInt(candidateWork),
-			new(big.Float).SetInt(currentWork),
-		)
-		ratio, _ := workRatio.Float64()
-		if ratio > 1.05 {
-			return true
-		}
-
-		// If work is slightly higher, consider health
-		if candidateHealth["total_score"] >= currentHealth["total_score"]-5 {
-			return true
-		}
-	}
-
-	// If work is equal, prefer based on health
-	if workDiff == 0 {
-		return candidateHealth["total_score"] > currentHealth["total_score"]
-	}
-
-	// If work is lower but health is significantly better, consider it
-	if workDiff < 0 {
-		workRatio := new(big.Float).Quo(
-			new(big.Float).SetInt(candidateWork),
-			new(big.Float).SetInt(currentWork),
-		)
-		ratio, _ := workRatio.Float64()
-		// Only consider if work is within 95% of current and health is at least 10 points higher
-		if ratio > 0.95 && candidateHealth["total_score"] > currentHealth["total_score"]+10 {
-			return true
-		}
-	}
-
-	return false
-}
-
-// AddCandidateChain adds a block to the candidate chains for incremental reorg
-func (cs *ChainSelector) AddCandidateChain(block *Block) {
-	if block == nil || block.Hash == nil {
-		return
-	}
-
-	cs.candidateMutex.Lock()
-	defer cs.candidateMutex.Unlock()
-
-	// Only add if not already in candidates
-	hashStr := string(block.Hash)
-	if _, exists := cs.candidateChains[hashStr]; !exists {
-		cs.candidateChains[hashStr] = block
-	}
-}
-
-// SetTopology sets the network topology for intelligent chain selection
-// Production-grade: uses interface for loose coupling
-func (cs *ChainSelector) SetTopology(topology TopologyProvider) {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	cs.topology = topology
-}
-
-// UpdatePropagationStats updates block propagation statistics
-func (cs *ChainSelector) UpdatePropagationStats(stats map[string]interface{}) {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	cs.propagationStats = stats
-}
-
-// RemoveCandidateChain removes a block from the candidate chains
-func (cs *ChainSelector) RemoveCandidateChain(blockHash []byte) {
-	if blockHash == nil {
-		return
-	}
-
-	cs.candidateMutex.Lock()
-	defer cs.candidateMutex.Unlock()
-
-	delete(cs.candidateChains, string(blockHash))
-}
-
-// calculateChainHealth calculates chain health metrics
-func (cs *ChainSelector) calculateChainHealth(block *Block) map[string]float64 {
-	metrics := make(map[string]float64)
-
-	// 1. Work-based score
-	work, ok := StringToWork(block.TotalWork)
-	if !ok {
-		metrics["work_score"] = 0
-	} else {
-		// Normalize work score (using log scale)
-		// Float64() returns (float64, Accuracy) - we only need the value
-		workFloat, _ := work.Float64()
-		workScore := math.Log10(workFloat)
-		metrics["work_score"] = math.Min(100, workScore*10)
-	}
-
-	// 2. Network health score
-	networkScore := 70.0 // Default score
-	if cs.topology != nil {
-		stats := cs.topology.GetTopologyStats()
-		if stats.NetworkScore > 0 {
-			networkScore = stats.NetworkScore * 100
-		}
-	}
-	metrics["network_score"] = networkScore
-
-	// 3. Propagation speed score
-	propagationScore := 80.0 // Default score
-	if queueLength, ok := cs.propagationStats["queue_length"].(int); ok {
-		// Lower queue length means better propagation
-		if queueLength < 10 {
-			propagationScore = 95
-		} else if queueLength < 50 {
-			propagationScore = 85
-		} else if queueLength < 100 {
-			propagationScore = 70
-		} else {
-			propagationScore = 50
-		}
-	}
-	metrics["propagation_score"] = propagationScore
-
-	// 4. Chain stability score
-	// Production-grade: stability based on reorg frequency and depth
-	stabilityScore := 90.0 // Base score for stable chain
-	if cs.topology != nil {
-		stats := cs.topology.GetTopologyStats()
-		// Lower score if network has many partitions (indicates instability)
-		if stats.Partitions > 3 {
-			stabilityScore -= float64(stats.Partitions) * 5
-		}
-		// Lower score if latency is high (indicates network issues)
-		if stats.AvgLatency > 500 {
-			stabilityScore -= 10
-		}
-		// Ensure minimum score
-		if stabilityScore < 50 {
-			stabilityScore = 50
-		}
-	}
-	metrics["stability_score"] = stabilityScore
-
-	// 5. Get dynamic weights based on network conditions
-	// Default weights
-	strategy := map[string]float64{
-		"work_weight":        0.4,
-		"network_weight":     0.3,
-		"propagation_weight": 0.2,
-		"stability_weight":   0.1,
-	}
-
-	// Adjust strategy based on network conditions
-	if cs.topology != nil {
-		connectivity := cs.topology.GetTopologyStats()
-		healthScore := connectivity.NetworkScore * 100
-
-		// If network health is poor, prioritize work and stability
-		if healthScore < 60 {
-			strategy["work_weight"] = 0.5
-			strategy["stability_weight"] = 0.2
-			strategy["network_weight"] = 0.2
-			strategy["propagation_weight"] = 0.1
-		}
-
-		// If network health is excellent, prioritize propagation speed
-		if healthScore > 90 {
-			strategy["propagation_weight"] = 0.3
-			strategy["work_weight"] = 0.35
-			strategy["network_weight"] = 0.25
-			strategy["stability_weight"] = 0.1
-		}
-	}
-
-	// Adjust based on propagation queue length
-	if queueLength, ok := cs.propagationStats["queue_length"].(int); ok {
-		// If queue is long, prioritize propagation speed
-		if queueLength > 50 {
-			strategy["propagation_weight"] = 0.3
-			strategy["work_weight"] = 0.4
-			strategy["network_weight"] = 0.2
-			strategy["stability_weight"] = 0.1
-		}
-	}
-
-	// 6. Calculate total health score using dynamic weights
-	totalScore := metrics["work_score"]*strategy["work_weight"] +
-		metrics["network_score"]*strategy["network_weight"] +
-		metrics["propagation_score"]*strategy["propagation_weight"] +
-		metrics["stability_score"]*strategy["stability_weight"]
-	metrics["total_score"] = totalScore
-
-	// 7. Add additional health indicators
-	metrics["block_height"] = float64(block.GetHeight())
-	metrics["network_health_age"] = cs.GetNetworkAnalysisAge().Seconds()
-
-	return metrics
-}
-
-// GetChainHealthMetrics returns the current chain health metrics
-func (cs *ChainSelector) GetChainHealthMetrics() map[string]float64 {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-
-	metrics := make(map[string]float64)
-	for k, v := range cs.chainHealthMetrics {
-		metrics[k] = v
-	}
-
-	return metrics
-}
-
-// ChainSelectionStrategy represents the strategy for chain selection
-// Dynamic: adjusts based on network conditions
-func (cs *ChainSelector) GetChainSelectionStrategy() map[string]float64 {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-
-	// Default weights
-	strategy := map[string]float64{
-		"work_weight":        0.4,
-		"network_weight":     0.3,
-		"propagation_weight": 0.2,
-		"stability_weight":   0.1,
-	}
-
-	// Adjust strategy based on network conditions
-	if cs.topology != nil {
-		connectivity := cs.topology.GetTopologyStats()
-		healthScore := connectivity.NetworkScore * 100
-
-		// If network health is poor, prioritize work and stability
-		if healthScore < 60 {
-			strategy["work_weight"] = 0.5
-			strategy["stability_weight"] = 0.2
-			strategy["network_weight"] = 0.2
-			strategy["propagation_weight"] = 0.1
-		}
-
-		// If network health is excellent, prioritize propagation speed
-		if healthScore > 90 {
-			strategy["propagation_weight"] = 0.3
-			strategy["work_weight"] = 0.35
-			strategy["network_weight"] = 0.25
-			strategy["stability_weight"] = 0.1
-		}
-	}
-
-	// Adjust based on propagation queue length
-	if queueLength, ok := cs.propagationStats["queue_length"].(int); ok {
-		// If queue is long, prioritize propagation speed
-		if queueLength > 50 {
-			strategy["propagation_weight"] = 0.3
-			strategy["work_weight"] = 0.4
-			strategy["network_weight"] = 0.2
-			strategy["stability_weight"] = 0.1
-		}
-	}
-
-	return strategy
-}
-
-// UpdateChainHealthMetrics updates the chain health metrics based on current network conditions
-func (cs *ChainSelector) UpdateChainHealthMetrics() {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	currentTip := cs.chain.LatestBlock()
-	if currentTip != nil {
-		cs.chainHealthMetrics = cs.calculateChainHealth(currentTip)
-		cs.lastNetworkAnalysis = time.Now()
-	}
-}
-
-// GetNetworkAnalysisAge returns the age of the last network analysis
-func (cs *ChainSelector) GetNetworkAnalysisAge() time.Duration {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-
-	return time.Since(cs.lastNetworkAnalysis)
-}
-
-// ClearCandidateChains clears all candidate chains
-func (cs *ChainSelector) ClearCandidateChains() {
-	cs.candidateMutex.Lock()
-	defer cs.candidateMutex.Unlock()
-
-	cs.candidateChains = make(map[string]*Block)
 }
 
 // isChainValid implements Bitcoin-style chain validation: checks all ancestors are valid
@@ -588,41 +234,12 @@ func (cs *ChainSelector) Reorganize(newBlock *Block) error {
 	}
 	connectBlocks = pathToFork
 
-	// Validate all blocks to be connected in parallel
-	if len(connectBlocks) > 0 {
-		errors := make(chan error, len(connectBlocks))
-		var wg sync.WaitGroup
-
-		// Limit concurrency to avoid overwhelming system resources
-		concurrencyLimit := 4
-		semaphore := make(chan struct{}, concurrencyLimit)
-
-		for _, block := range connectBlocks {
-			wg.Add(1)
-			go func(b *Block) {
-				defer wg.Done()
-
-				// Acquire semaphore
-				semaphore <- struct{}{}
-				defer func() { <-semaphore }()
-
-				if err := cs.validateBlock(b); err != nil {
-					errors <- err
-				}
-			}(block)
-		}
-
-		// Wait for all validations to complete
-		wg.Wait()
-		close(errors)
-
-		// Check for validation errors
-		for err := range errors {
-			if err != nil {
-				// Reorganization failed, rollback to old chain
-				cs.rollbackReorg(disconnectedBlocks)
-				return fmt.Errorf("block validation failed during reorg: %w", err)
-			}
+	// Validate all blocks to be connected
+	for _, block := range connectBlocks {
+		if err := cs.validateBlock(block); err != nil {
+			// Reorganization failed, rollback to old chain
+			cs.rollbackReorg(disconnectedBlocks)
+			return fmt.Errorf("block validation failed during reorg: %w", err)
 		}
 	}
 
@@ -642,57 +259,47 @@ func (cs *ChainSelector) Reorganize(newBlock *Block) error {
 }
 
 // findCommonAncestor finds the common ancestor of two blocks
-// Optimized: Adjusts blocks to same height first, then searches in parallel
 func (cs *ChainSelector) findCommonAncestor(block1, block2 *Block) (*Block, error) {
 	if block1 == nil || block2 == nil {
 		return nil, fmt.Errorf("cannot find ancestor of nil block")
 	}
 
-	// Get heights
-	height1 := block1.GetHeight()
-	height2 := block2.GetHeight()
+	// Build map of ancestors for block1
+	ancestors := make(map[string]*Block)
+	current := block1
 
-	// Adjust both blocks to the same height
-	current1 := block1
-	current2 := block2
+	for current.GetHeight() >= 0 {
+		hashStr := string(current.Hash)
+		ancestors[hashStr] = current
 
-	// Move block1 up if it's higher
-	for height1 > height2 {
-		parent, err := cs.getBlockByHash(current1.Header.PrevHash)
+		if current.GetHeight() == 0 {
+			break // Genesis block
+		}
+
+		parent, err := cs.getBlockByHash(current.Header.PrevHash)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get parent block: %w", err)
-		}
-		current1 = parent
-		height1--
-	}
-
-	// Move block2 up if it's higher
-	for height2 > height1 {
-		parent, err := cs.getBlockByHash(current2.Header.PrevHash)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get parent block: %w", err)
-		}
-		current2 = parent
-		height2--
-	}
-
-	// Now both blocks are at the same height, search for common ancestor
-	for current1.GetHeight() >= 0 {
-		// Check if blocks are the same
-		if string(current1.Hash) == string(current2.Hash) {
-			return current1, nil
-		}
-
-		// Move both up one level
-		parent1, err1 := cs.getBlockByHash(current1.Header.PrevHash)
-		parent2, err2 := cs.getBlockByHash(current2.Header.PrevHash)
-
-		if err1 != nil || err2 != nil {
 			break // Reached genesis or missing parent
 		}
+		current = parent
+	}
 
-		current1 = parent1
-		current2 = parent2
+	// Find first common ancestor in block2's chain
+	current = block2
+	for current.GetHeight() >= 0 {
+		hashStr := string(current.Hash)
+		if ancestor, exists := ancestors[hashStr]; exists {
+			return ancestor, nil
+		}
+
+		if current.GetHeight() == 0 {
+			break
+		}
+
+		parent, err := cs.getBlockByHash(current.Header.PrevHash)
+		if err != nil {
+			break
+		}
+		current = parent
 	}
 
 	// No common ancestor found (should not happen in valid blockchain)

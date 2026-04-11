@@ -152,7 +152,7 @@ func (b *BootstrapBlockPropagator) highPriorityWorker() {
 		}
 
 		// Rate limiting for network stability
-		if !b.rateLimiter.Allow(fmt.Sprintf("%d", block.GetHeight())) {
+		if !b.rateLimiter.Allow(string(block.GetHeight())) {
 			log.Printf("[BootstrapPropagator] Rate limit exceeded for high priority block %d", block.GetHeight())
 			b.handleRateLimitedBlock(block, PriorityHigh)
 			continue
@@ -303,11 +303,11 @@ func (b *BootstrapBlockPropagator) calculateOptimalPeerCount() int {
 
 	// Reduce peer count under high system load
 	if systemLoad > 0.8 {
-		return intMax(4, baseCount) // Minimum 4 peers even under load
+		return max(4, baseCount) // Minimum 4 peers even under load
 	}
 
 	// Increase peer count for better redundancy
-	return intMin(20, baseCount) // Maximum 20 peers
+	return min(20, baseCount) // Maximum 20 peers
 }
 
 func (b *BootstrapBlockPropagator) calculatePeerScore(peer string) float64 {
@@ -456,10 +456,16 @@ func (b *BootstrapBlockPropagator) updatePropagationMetrics(totalPeers, successC
 	}
 }
 
-// intMax and intMin are helper functions for integer operations
-// Named differently to avoid conflict with Go 1.21+ built-in max/min
-func intMax(a, b int) int {
+// Helper functions for utility operations
+func max(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
@@ -1774,7 +1780,7 @@ func (b *BootstrapBlockPropagator) escalateToEnterpriseIncidentManager(assessmen
 // logCriticalIncidentDetails logs comprehensive incident information
 func (b *BootstrapBlockPropagator) logCriticalIncidentDetails(assessment *HealthAssessmentReport) {
 	log.Printf("CRITICAL INCIDENT DETAILS:")
-	log.Printf("  - Node ID: %s", b.nodeID())
+	log.Printf("  - Node ID: %s", b.nodeID)
 	log.Printf("  - Timestamp: %v", time.Now())
 	log.Printf("  - Overall Score: %.3f", assessment.OverallScore)
 
@@ -1854,24 +1860,4 @@ func (b *BootstrapBlockPropagator) fixPriorityConstants() {
 	_ = HighPriority
 	_ = NormalPriority
 	_ = LowPriority
-}
-
-// GetPropagationStatus returns the current propagation status
-// Production-grade: provides status for monitoring and testing
-func (b *BootstrapBlockPropagator) GetPropagationStatus() *PropagationStatus {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	backPressureLevel := 0.0
-	if b.backPressure != nil && b.backPressure.IsCongested() {
-		backPressureLevel = 1.0 // Indicate congested state
-	}
-
-	return &PropagationStatus{
-		TotalBlocksPropagated: b.metrics.TotalBlocksPropagated,
-		BlocksLost:            b.metrics.BlocksLost,
-		ChannelUtilization:    b.metrics.ChannelUtilization,
-		RateLimiterActive:     b.rateLimiter != nil,
-		BackPressureLevel:     backPressureLevel,
-	}
 }

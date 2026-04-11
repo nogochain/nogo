@@ -267,6 +267,7 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	// Extract nonce and hash from sealed header
 	sealedHeader := result.Header()
 	newBlock.Header.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
+	newBlock.Header.Nonce = newBlock.Header.Nonce
 	newBlock.Hash = sealedHeader.Hash().Bytes()
 
 	// Release read lock and acquire write lock for state modification

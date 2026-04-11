@@ -37,7 +37,6 @@ type P2PPeerManager struct {
 	peerFailCounts map[string]int // Track consecutive connection failures
 	maxPeers       int
 	client         *P2PClient
-	topology       *NetworkTopology // Network topology analyzer
 }
 
 // Start starts the P2P manager
@@ -49,9 +48,6 @@ func (pm *P2PPeerManager) Start(ctx context.Context) error {
 	pm.mu.Unlock()
 
 	log.Printf("P2P peer manager started with %d peers", len(initialPeers))
-
-	// Start topology manager
-	pm.topology.StartTopologyManager(ctx)
 
 	// Perform initial peer discovery from bootstrap peers
 	if len(initialPeers) > 0 {
@@ -120,7 +116,6 @@ func NewP2PPeerManager(chainID uint64, rulesHash string, nodeID string, peers []
 		peerFailCounts: make(map[string]int, len(peers)),
 		maxPeers:       maxPeers,
 		client:         NewP2PClient(chainID, rulesHash, nodeID),
-		topology:       NewNetworkTopology(nodeID, NodeRoleFullNode),
 	}
 
 	// Initialize with configured peers (validate format only, allow private IPs)
@@ -130,19 +125,6 @@ func NewP2PPeerManager(chainID uint64, rulesHash string, nodeID string, peers []
 			pm.peers = append(pm.peers, peer)
 			pm.peerTimestamps[peer] = now
 			pm.peerFailCounts[peer] = 0
-			
-			// Add peer to topology
-			peerInfo := &NodePeerInfo{
-				ID:          peer,
-				Address:     peer,
-				ConnectedAt: time.Now(),
-				LastSeen:    time.Now(),
-				Role:        NodeRoleUnknown,
-				LatencyMs:   0,
-				Failures:    0,
-				SuccessRate: 0.5,
-			}
-			pm.topology.AddPeer(peerInfo)
 		} else {
 			log.Printf("P2P peer manager: skipping invalid peer %s: %v", peer, err)
 		}
@@ -230,19 +212,6 @@ func (pm *P2PPeerManager) AddPeer(addr string) {
 			// Move to end of list (most recently seen)
 			pm.peers = append(pm.peers[:i], pm.peers[i+1:]...)
 			pm.peers = append(pm.peers, addr)
-			
-			// Update peer in topology
-			peerInfo := &NodePeerInfo{
-				ID:          addr,
-				Address:     addr,
-				ConnectedAt: time.Now(),
-				LastSeen:    time.Now(),
-				Role:        NodeRoleUnknown,
-				LatencyMs:   0,
-				Failures:    0,
-				SuccessRate: 0.5,
-			}
-			pm.topology.AddPeer(peerInfo)
 			return
 		}
 	}
@@ -254,7 +223,6 @@ func (pm *P2PPeerManager) AddPeer(addr string) {
 		pm.peers = pm.peers[1:]
 		delete(pm.peerTimestamps, oldestPeer)
 		delete(pm.peerFailCounts, oldestPeer)
-		pm.topology.RemovePeer(oldestPeer)
 		log.Printf("P2P peer manager: removed oldest peer %s (maxPeers=%d reached)", oldestPeer, pm.maxPeers)
 	}
 
@@ -262,20 +230,6 @@ func (pm *P2PPeerManager) AddPeer(addr string) {
 	pm.peers = append(pm.peers, addr)
 	pm.peerTimestamps[addr] = time.Now().Unix()
 	pm.peerFailCounts[addr] = 0
-	
-	// Add peer to topology
-	peerInfo := &NodePeerInfo{
-		ID:          addr,
-		Address:     addr,
-		ConnectedAt: time.Now(),
-		LastSeen:    time.Now(),
-		Role:        NodeRoleUnknown,
-		LatencyMs:   0,
-		Failures:    0,
-		SuccessRate: 0.5,
-	}
-	pm.topology.AddPeer(peerInfo)
-	
 	log.Printf("P2P peer manager: added peer %s (total=%d/%d)", addr, len(pm.peers), pm.maxPeers)
 }
 
@@ -560,16 +514,13 @@ func (pm *P2PPeerManager) FetchAnyBlockByHash(ctx context.Context, hashHex strin
 	return nil, "", lastErr
 }
 
-// BroadcastTransaction broadcasts a transaction to all peers concurrently with priority
+// BroadcastTransaction broadcasts a transaction to all peers concurrently
 func (pm *P2PPeerManager) BroadcastTransaction(ctx context.Context, tx core.Transaction, _ int) {
 	peers := pm.GetActivePeers()
 	if len(peers) == 0 {
 		log.Printf("P2P peer manager: no active peers to broadcast transaction")
 		return
 	}
-
-	// Calculate transaction priority
-	priority := pm.calculateTransactionPriority(&tx)
 
 	// Print transaction broadcast header with box and color
 	txHash, err := tx.SigningHash()
@@ -584,62 +535,25 @@ func (pm *P2PPeerManager) BroadcastTransaction(ctx context.Context, tx core.Tran
 	fmt.Printf(ColorCyan+"║"+ColorReset+ColorYellow+"  Hash: %-54s"+ColorReset+ColorCyan+"║\n"+ColorReset, txHashStr+"...")
 	fmt.Printf(ColorCyan+"║"+ColorReset+ColorYellow+"  To:   %-54s"+ColorReset+ColorCyan+"║\n"+ColorReset, tx.ToAddress)
 	fmt.Printf(ColorCyan+"║"+ColorReset+ColorYellow+"  Amount: %-52d NOGO"+ColorReset+ColorCyan+"║\n"+ColorReset, tx.Amount)
-	fmt.Printf(ColorCyan+"║"+ColorReset+ColorYellow+"  Fee: %-54d NOGO"+ColorReset+ColorCyan+"║\n"+ColorReset, tx.Fee)
-	fmt.Printf(ColorCyan+"║"+ColorReset+ColorGreen+"  Priority: %-51d"+ColorReset+ColorCyan+"║\n"+ColorReset, priority)
 	fmt.Printf(ColorCyan+"║"+ColorReset+ColorGreen+"  Peers: %-53d"+ColorReset+ColorCyan+"║\n"+ColorReset, len(peers))
 	fmt.Printf(ColorCyan + "╚═══════════════════════════════════════════════════════════╝\n" + ColorReset)
 	fmt.Printf("\n")
 
-	// Broadcast with priority-based scheduling
-	pm.broadcastWithPriority(ctx, peers, tx, priority)
-}
-
-// calculateTransactionPriority calculates priority for a transaction
-func (pm *P2PPeerManager) calculateTransactionPriority(tx *core.Transaction) int {
-	// Rule 1: Higher fee rate = higher priority
-	if tx.Fee > 1000000 {
-		return 2 // High priority
-	} else if tx.Fee > 100000 {
-		return 1 // Medium priority
-	}
-	return 0 // Low priority
-}
-
-// broadcastWithPriority broadcasts a transaction with priority-based scheduling
-func (pm *P2PPeerManager) broadcastWithPriority(ctx context.Context, peers []string, tx core.Transaction, priority int) {
 	var wg sync.WaitGroup
-	
-	// Prioritize high-priority transactions by using more workers
-	workerCount := intMin(len(peers), 8)
-	if priority == 2 {
-		workerCount = intMin(len(peers), 16) // Use more workers for high priority
-	}
-	
-	// Create a channel to distribute peers
-	peerChan := make(chan string, len(peers))
 	for _, peer := range peers {
-		peerChan <- peer
-	}
-	close(peerChan)
-	
-	// Start workers
-	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
-		go func(workerID int) {
+		go func(p string) {
 			defer wg.Done()
-			for peer := range peerChan {
-				_, err := pm.client.BroadcastTransaction(ctx, peer, tx)
-				if err != nil {
-					log.Printf("p2p broadcast tx to %s failed: %v", peer, err)
-				}
+			_, err := pm.client.BroadcastTransaction(ctx, p, tx)
+			if err != nil {
+				log.Printf("p2p broadcast tx to %s failed: %v", p, err)
 			}
-		}(i)
+		}(peer)
 	}
-
 	wg.Wait()
 }
 
-// BroadcastBlock broadcasts a block to all peers concurrently with priority
+// BroadcastBlock broadcasts a block to all peers concurrently
 func (pm *P2PPeerManager) BroadcastBlock(ctx context.Context, block *core.Block) {
 	pm.mu.RLock()
 	peers := append([]string(nil), pm.peers...)
@@ -649,9 +563,6 @@ func (pm *P2PPeerManager) BroadcastBlock(ctx context.Context, block *core.Block)
 		log.Printf("P2P peer manager: no peers to broadcast block height=%d hash=%s", block.GetHeight(), hex.EncodeToString(block.Hash))
 		return
 	}
-
-	// Calculate block priority (simplified for now)
-	priority := 2 // All blocks get high priority
 
 	// Print block broadcast header with box and color
 	blockHashStr := hex.EncodeToString(block.Hash[:8])
@@ -663,45 +574,23 @@ func (pm *P2PPeerManager) BroadcastBlock(ctx context.Context, block *core.Block)
 	fmt.Printf(ColorGreen+"║"+ColorReset+ColorYellow+"  Hash: %-54s"+ColorReset+ColorGreen+"║\n"+ColorReset, blockHashStr+"...")
 	fmt.Printf(ColorGreen+"║"+ColorReset+ColorYellow+"  Tx Count: %-50d"+ColorReset+ColorGreen+"║\n"+ColorReset, len(block.Transactions))
 	fmt.Printf(ColorGreen+"║"+ColorReset+ColorYellow+"  Timestamp: %-49s"+ColorReset+ColorGreen+"║\n"+ColorReset, time.Unix(block.Header.TimestampUnix, 0).Format("2006-01-02 15:04:05"))
-	fmt.Printf(ColorGreen+"║"+ColorReset+ColorGreen+"  Priority: %-51d"+ColorReset+ColorGreen+"║\n"+ColorReset, priority)
 	fmt.Printf(ColorGreen+"║"+ColorReset+ColorCyan+"  Peers: %-53d"+ColorReset+ColorGreen+"║\n"+ColorReset, len(peers))
 	fmt.Printf(ColorGreen + "╚═══════════════════════════════════════════════════════════╝\n" + ColorReset)
 	fmt.Printf("\n")
 
-	// Broadcast with priority-based scheduling
-	pm.broadcastBlockWithPriority(ctx, peers, block, priority)
-	log.Printf("P2P peer manager: block broadcast completed height=%d hash=%s", block.GetHeight(), hex.EncodeToString(block.Hash))
-}
-
-// broadcastBlockWithPriority broadcasts a block with priority-based scheduling
-func (pm *P2PPeerManager) broadcastBlockWithPriority(ctx context.Context, peers []string, block *core.Block, priority int) {
 	var wg sync.WaitGroup
-	
-	// Use maximum workers for blocks (high priority)
-	workerCount := min(len(peers), 16)
-	
-	// Create a channel to distribute peers
-	peerChan := make(chan string, len(peers))
 	for _, peer := range peers {
-		peerChan <- peer
-	}
-	close(peerChan)
-	
-	// Start workers
-	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
-		go func(workerID int) {
+		go func(p string) {
 			defer wg.Done()
-			for peer := range peerChan {
-				_, err := pm.client.BroadcastBlock(ctx, peer, block)
-				if err != nil {
-					log.Printf("p2p broadcast block to %s failed: %v", peer, err)
-				}
+			_, err := pm.client.BroadcastBlock(ctx, p, block)
+			if err != nil {
+				log.Printf("p2p broadcast block to %s failed: %v", p, err)
 			}
-		}(i)
+		}(peer)
 	}
-	
 	wg.Wait()
+	log.Printf("P2P peer manager: block broadcast completed height=%d hash=%s", block.GetHeight(), hex.EncodeToString(block.Hash))
 }
 
 // formatAddress formats an address for display

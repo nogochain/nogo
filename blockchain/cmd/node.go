@@ -68,11 +68,6 @@ type Node struct {
 	orphanPool *utils.OrphanPool
 	validator  *consensus.BlockValidator
 
-	// Fork detection and auto-recovery components
-	forkDetector     *core.ForkDetector
-	chainSelector    *core.ChainSelector
-	forkAutoHandler  *core.ForkAutoHandler
-
 	networkChainWrapper *networkChainWrapper
 
 	ctx    context.Context
@@ -188,13 +183,6 @@ func (n *Node) initializeComponents() error {
 	metricsP2PWrapper := newMetricsPeerManager(n.p2pManager)
 
 	n.p2pServer = network.NewP2PServer(n.networkChainWrapper, n.p2pManager, mempoolWrapper, n.config.P2PListenAddr, nodeID)
-
-	// Initialize fork detection and auto-recovery system
-	// Production-grade: creates integrated fork handling pipeline
-	n.forkDetector = core.NewForkDetector()
-	n.chainSelector = core.NewChainSelector(n.chain, n.networkChainWrapper)
-	n.forkAutoHandler = core.NewForkAutoHandler(n.forkDetector, n.chainSelector, n.chain)
-	log.Info("Fork auto-handler initialized with 6 detection mechanisms")
 
 	n.syncLoop = network.NewSyncLoop(
 		n.p2pManager,
@@ -314,13 +302,6 @@ func (n *Node) startComponents() error {
 		}
 	}()
 
-	// Start fork auto-handler for automated fork detection and recovery
-	// Production-grade: runs background fork monitoring with 30-second recovery interval
-	if n.forkAutoHandler != nil {
-		n.forkAutoHandler.Start()
-		log.Info("Fork auto-handler started (monitoring interval: 30s)")
-	}
-
 	if n.autoMine && n.miner != nil {
 		// Sync loop handles fork detection and rollback automatically
 		// No need for manual chain validity check - sync.go handles this
@@ -404,12 +385,6 @@ func (n *Node) Shutdown() {
 
 	if n.syncLoop != nil {
 		n.syncLoop.Stop()
-	}
-
-	// Stop fork auto-handler
-	if n.forkAutoHandler != nil {
-		n.forkAutoHandler.Stop()
-		log.Info("Fork auto-handler stopped")
 	}
 
 	if n.p2pManager != nil {
