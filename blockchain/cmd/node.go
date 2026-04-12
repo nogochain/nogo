@@ -193,7 +193,7 @@ func (n *Node) initializeComponents() error {
 		n.validator,
 		n.config.Sync,
 	)
-	
+
 	// Set sync loop reference after creation
 	n.networkChainWrapper.SetSyncLoop(n.syncLoop)
 
@@ -224,6 +224,17 @@ func (n *Node) initializeComponents() error {
 	// Production-grade: ensures all block acceptance paths trigger mempool cleanup
 	// Coverage: P2P broadcast, sync, HTTP API, and mining all benefit from this centralized cleanup
 	n.chain.SetMempool(n.mempool)
+
+	// CRITICAL: Set block added callback for broadcasting blocks from mining pool
+	// Production-grade: enables automatic broadcast of blocks added via API
+	// When a block is submitted through the API (e.g., from mining pool), this callback
+	// ensures the block is broadcast to all P2P peers for network propagation
+	if n.p2pManager != nil {
+		n.chain.SetOnBlockAdded(func(block *core.Block) {
+			log.Printf("[Node] Broadcasting block %d from API (mining pool)", block.GetHeight())
+			n.p2pManager.BroadcastBlock(context.Background(), block)
+		})
+	}
 
 	n.metrics, err = metrics.NewMetrics(metricsChainWrapper, metricsMempoolWrapper, metricsP2PWrapper, nil, nodeID, n.config.ChainID)
 	if err != nil {

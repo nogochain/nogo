@@ -61,9 +61,13 @@ type BlockchainInterface interface {
 
 	// Mining operations
 	MineTransfers(txs []core.Transaction) (*core.Block, error)
+	CalcNextDifficulty(latest *core.Block, currentTime int64) uint32
 
 	// Chain audit
 	AuditChain() error
+
+	// Reorg protection
+	IsReorgInProgress() bool
 
 	// Transaction queries
 	TxByID(txid string) (*core.Transaction, *core.TxLocation, bool)

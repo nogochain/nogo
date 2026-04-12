@@ -422,6 +422,16 @@ func (w *networkChainWrapper) RollbackToHeight(height uint64) error {
 	return w.chain.RollbackToHeight(height)
 }
 
+// CalcNextDifficulty calculates the difficulty for the next block
+func (w *networkChainWrapper) CalcNextDifficulty(latest *core.Block, currentTime int64) uint32 {
+	return w.chain.CalcNextDifficulty(latest, currentTime)
+}
+
+// IsReorgInProgress returns whether a reorganization is in progress
+func (w *networkChainWrapper) IsReorgInProgress() bool {
+	return w.chain.IsReorgInProgress()
+}
+
 // mempoolWrapper wraps mempool.Mempool to implement network.Mempool
 type mempoolWrapper struct {
 	mp *mempool.Mempool

@@ -157,6 +157,11 @@ func (m *mockBlockchainForIntegration) RulesHashHex() string {
 	return "test-rules"
 }
 
+// IsReorgInProgress returns false for mock (no reorg in tests)
+func (m *mockBlockchainForIntegration) IsReorgInProgress() bool {
+	return false
+}
+
 func createIntegrationTestServer() (*Server, *mockBlockchainForIntegration, *mempool.Mempool) {
 	bc := newMockBlockchainForIntegration()
 

@@ -178,6 +178,14 @@ func (m *mockBlockchain) SyncLoop() network.SyncLoopInterface {
 	return nil
 }
 
+func (m *mockBlockchain) CalcNextDifficulty(latest *core.Block, currentTime int64) uint32 {
+	// Simple mock implementation: return fixed difficulty for tests
+	if latest == nil {
+		return 8
+	}
+	return latest.Header.DifficultyBits
+}
+
 func (m *mockBlockchain) GetBlockByHash(hash []byte) (*core.Block, bool) {
 	return nil, false
 }
@@ -188,6 +196,11 @@ func (m *mockBlockchain) GetBlockByHashBytes(hash []byte) (*core.Block, bool) {
 
 func (m *mockBlockchain) GetAllBlocks() ([]*core.Block, error) {
 	return nil, nil
+}
+
+// IsReorgInProgress returns false for mock (no reorg in tests)
+func (m *mockBlockchain) IsReorgInProgress() bool {
+	return false
 }
 
 // createTestServer creates a test server with mock dependencies

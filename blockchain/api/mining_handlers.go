@@ -34,6 +34,14 @@ func (s *Server) handleGetBlockTemplate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// CRITICAL FIX: Check if chain is currently reorganizing
+	// Prevent serving templates during reorg to avoid PrevHash instability
+	// This fixes infinite reorg loop caused by unstable LatestBlock()
+	if s.bc.IsReorgInProgress() {
+		http.Error(w, "chain reorganizing, please retry", http.StatusServiceUnavailable)
+		return
+	}
+
 	// Get latest block
 	latest := s.bc.LatestBlock()
 	if latest == nil {
@@ -41,6 +49,11 @@ func (s *Server) handleGetBlockTemplate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Calculate difficulty for next block (CRITICAL: use PI controller from consensus engine!)
+	// This ensures miners use the correct difficulty that matches consensus rules
+	currentTime := time.Now().Unix()
+	nextDifficulty := s.bc.CalcNextDifficulty(latest, currentTime)
+	
 	// Create merkle root (empty for now, will be filled with transactions)
 	merkleRoot := make([]byte, 32)
 
@@ -49,11 +62,11 @@ func (s *Server) handleGetBlockTemplate(w http.ResponseWriter, r *http.Request) 
 		Height:         latest.GetHeight() + 1,
 		PrevHash:       hex.EncodeToString(latest.Hash),
 		MerkleRoot:     hex.EncodeToString(merkleRoot),
-		Timestamp:      time.Now().Unix(),
-		DifficultyBits: latest.GetDifficultyBits(),
+		Timestamp:      currentTime,
+		DifficultyBits: nextDifficulty,
 		MinerAddress:   minerAddress,
 		ChainID:        s.bc.GetChainID(),
-		Target:         difficultyBitsToTarget(latest.GetDifficultyBits()),
+		Target:         difficultyBitsToTarget(nextDifficulty),
 		ExtraNonce:     hex.EncodeToString(make([]byte, 4)),
 	}
 

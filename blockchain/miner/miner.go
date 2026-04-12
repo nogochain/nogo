@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"math/big"
 	"os"
@@ -481,14 +482,37 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 }
 
 // handleMinedBlock handles a successfully mined block
+// Fixed: Broadcast block before checking network work
 func (m *Miner) handleMinedBlock(ctx context.Context, block *core.Block) {
 	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block #%d mined successfully, hash=%x", block.GetHeight(), block.Hash))
-	logf(colorCyan, "ℹ️ ", "Waiting for network sync")
-	time.Sleep(time.Duration(config.DefaultNetworkSyncCheckDelayMs) * time.Millisecond)
 
+	// Broadcast block to network (non-blocking)
 	if m.syncLoop != nil && m.pm != nil {
+		m.broadcastBlockAsync(ctx, block)
+		// Check network work after broadcast
 		m.checkNetworkWork(ctx, block)
 	}
+}
+
+// broadcastBlockAsync broadcasts block asynchronously to prevent blocking mining
+func (m *Miner) broadcastBlockAsync(ctx context.Context, block *core.Block) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[Miner] broadcastBlockAsync recovered from panic: %v", r)
+			}
+		}()
+
+		logf(colorCyan, "📡 ", fmt.Sprintf("Broadcasting block %d (%s)", block.GetHeight(), hex.EncodeToString(block.Hash)))
+
+		// Broadcast block to peers via P2P manager
+		if m.pm != nil {
+			peerCount := len(m.pm.Peers())
+			logf(colorCyan, "📡 ", fmt.Sprintf("Starting broadcast to %d peers", peerCount))
+			m.pm.BroadcastBlock(ctx, block)
+			logf(colorBrightGreen, "✅ ", fmt.Sprintf("Broadcast completed height=%d", block.GetHeight()))
+		}
+	}()
 }
 
 // checkNetworkWork checks if network has more work and triggers sync if needed

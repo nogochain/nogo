@@ -1201,7 +1201,14 @@ func (s *Server) handleAddBlock(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
-		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"accepted": false, "message": err.Error()})
+		// Log detailed error for debugging
+		log.Printf("[API] Block submission failed: %v", err)
+		errMsg := err.Error()
+		if errMsg == "" {
+			errMsg = "unknown error (empty error message)"
+			log.Printf("[API] WARNING: Error has empty message, type: %T", err)
+		}
+		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"accepted": false, "message": errMsg})
 		return
 	}
 

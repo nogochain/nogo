@@ -279,10 +279,19 @@ type Chain struct {
 	syncLoop       *SyncLoop
 	peerBlockchain *peerRef
 
+	// Block added callback - called when block is added to canonical chain
+	// Used for broadcasting blocks added via API (e.g., from mining pool)
+	onBlockAdded func(*Block)
+	onBlockMu    sync.RWMutex
+
 	// Integrity reward system
 	integrityManager     *NodeIntegrityManager
 	integrityDistributor *IntegrityRewardDistributor
 	scoreCalculator      *ScoreCalculator
+
+	// Reorg protection - prevent template generation during reorg
+	reorgInProgress bool
+	reorgMu         sync.Mutex
 
 	// Contract management
 	contractManager *ContractManager
@@ -320,6 +329,60 @@ func (c *Chain) SetMempool(mp MempoolCleaner) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.mempool = mp
+}
+
+// SetOnBlockAdded sets the callback function to be called when a block is added
+// Production-grade: enables broadcasting of blocks added via API (e.g., from mining pool)
+func (c *Chain) SetOnBlockAdded(callback func(*Block)) {
+	c.onBlockMu.Lock()
+	defer c.onBlockMu.Unlock()
+	c.onBlockAdded = callback
+}
+
+// GetOnBlockAdded returns the current callback function
+func (c *Chain) GetOnBlockAdded() func(*Block) {
+	c.onBlockMu.RLock()
+	defer c.onBlockMu.RUnlock()
+	return c.onBlockAdded
+}
+
+// CalcNextDifficulty calculates the difficulty for the next block
+// Production-grade: uses PI controller from consensus engine for accurate difficulty adjustment
+// Parameters:
+//   - latest: the parent block (latest block in the chain)
+//   - currentTime: Unix timestamp for the new block
+// Returns:
+//   - uint32: difficulty bits for the next block
+func (c *Chain) CalcNextDifficulty(latest *Block, currentTime int64) uint32 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Guard clause: no parent block, return minimum difficulty
+	if latest == nil {
+		return uint32(c.consensus.MinDifficulty)
+	}
+
+	// Create difficulty calculator with consensus parameters
+	// CRITICAL: Must use same parameters as consensus engine to ensure consistency
+	calc := nogopow.NewDifficultyCalculator(&config.ConsensusParams{
+		BlockTimeTargetSeconds:     c.consensus.BlockTimeTargetSeconds,
+		MaxDifficultyChangePercent: c.consensus.MaxDifficultyChangePercent,
+		MinDifficulty:              c.consensus.MinDifficulty,
+	})
+
+	// Convert block to BlockHeader format
+	parentHeader := &nogopow.BlockHeader{
+		Height:         latest.GetHeight(),
+		TimestampUnix:  latest.Header.TimestampUnix,
+		DifficultyBits: latest.Header.DifficultyBits,
+		PrevHash:       latest.Header.PrevHash,
+		Hash:           latest.Hash,
+	}
+
+	// Calculate next difficulty using PI controller
+	nextDifficulty := calc.CalcNextDifficulty(parentHeader, uint64(currentTime))
+
+	return nextDifficulty
 }
 
 // NewChain creates a new blockchain instance
@@ -1395,6 +1458,18 @@ func (c *Chain) validateCoinbaseLocked(block *Block) error {
 // Production-grade: implements longest chain rule
 // Concurrency safety: assumes lock is held
 func (c *Chain) handleReorganizationLocked(newBlock *Block) error {
+	// Set reorg flag to prevent template generation during reorg
+	c.reorgMu.Lock()
+	c.reorgInProgress = true
+	c.reorgMu.Unlock()
+	
+	// Ensure flag is cleared on exit
+	defer func() {
+		c.reorgMu.Lock()
+		c.reorgInProgress = false
+		c.reorgMu.Unlock()
+	}()
+	
 	// Find common ancestor
 	ancestor, forkBlocks, err := c.findCommonAncestorLocked(newBlock)
 	if err != nil {
@@ -1422,6 +1497,14 @@ func (c *Chain) handleReorganizationLocked(newBlock *Block) error {
 	}
 
 	return nil
+}
+
+// IsReorgInProgress returns whether a reorganization is currently in progress
+// Thread-safe: uses separate mutex to avoid blocking chain operations
+func (c *Chain) IsReorgInProgress() bool {
+	c.reorgMu.Lock()
+	defer c.reorgMu.Unlock()
+	return c.reorgInProgress
 }
 
 // findCommonAncestorLocked finds common ancestor between chains
@@ -2749,6 +2832,12 @@ func (c *Chain) addCanonicalBlockLocked(block *Block, hashHex string) (bool, err
 	}
 
 	log.Printf("[Chain] Block %d added to canonical chain (height: %d, hash: %s)", block.GetHeight(), height, hashHex[:16])
+	
+	// Call onBlockAdded callback if set (e.g., for broadcasting blocks from mining pool)
+	if callback := c.GetOnBlockAdded(); callback != nil {
+		go callback(block)
+	}
+	
 	return true, nil
 }
 
@@ -2774,8 +2863,17 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 	// Store in fork blocks
 	c.forkBlocks[height] = append(c.forkBlocks[height], block)
 
+	// Fix: Check bounds before accessing c.blocks[height]
+	var canonicalHash string
+	if int(height) < len(c.blocks) && c.blocks[height] != nil {
+		canonicalHash = fmt.Sprintf("%x", c.blocks[height].Hash)
+	} else {
+		// No canonical block at this height yet
+		canonicalHash = "N/A (height not yet in canonical chain)"
+	}
+
 	log.Printf("[Chain] Fork block %d stored (hash: %s, canonical hash: %s)",
-		height, hashHex[:16], c.blocks[height].Hash)
+		height, hashHex[:16], canonicalHash)
 
 	// Check if this fork has more work and should become canonical
 	if c.shouldReorgToLocked(block) {
