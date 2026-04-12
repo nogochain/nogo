@@ -187,13 +187,11 @@ func average(fees []uint64) uint64 {
 	return sum / uint64(len(fees))
 }
 
-// getBalance retrieves sender balance from state
-// Note: This method is intentionally left unimplemented here
-// Balance checks are performed in the state transition layer
-// where the state database is properly accessible
-func (f *FeeChecker) getBalance(address string) uint64 {
-	panic("getBalance should not be called - balance checks are in state transition layer")
-}
+// getBalance should not be implemented in FeeChecker.
+// Balance checks are performed in the state transition layer where the state
+// database is properly accessible. FeeChecker focuses on fee calculations only.
+// If you need balance checking, use state.StateDB.GetBalance() instead.
+
 
 // CalculateMinFee calculates minimum fee for transaction size and mempool congestion
 // Exported function for external use

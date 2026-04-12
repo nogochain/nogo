@@ -55,6 +55,22 @@ func (mw *RouteMiddleware) Wrap(route string, admin bool, maxBodyBytes int64, h 
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
+		// Set CORS headers for all responses (wallet compatibility)
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			origin = "*"
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, HEAD")
+		w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Requested-With, X-Request-ID, X-Relay-Hops")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
+		// Handle preflight OPTIONS request
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		reqID := newRequestID()
 		ctx := context.WithValue(r.Context(), requestIDKey, reqID)
 		r = r.WithContext(ctx)

@@ -127,16 +127,17 @@ type BlockchainInterface interface {
 
 // NewFastSyncEngine creates a new fast sync engine with proper initialization.
 // All parameters are configurable and validated.
+// Returns error if required parameters are nil instead of panicking.
 func NewFastSyncEngine(
 	checkpointMgr *CheckpointManager,
 	store storage.ChainStore,
 	blockchain BlockchainInterface,
-) *FastSyncEngine {
+) (*FastSyncEngine, error) {
 	if checkpointMgr == nil {
-		panic("checkpoint manager cannot be nil")
+		return nil, fmt.Errorf("checkpoint manager cannot be nil")
 	}
 	if blockchain == nil {
-		panic("blockchain interface cannot be nil")
+		return nil, fmt.Errorf("blockchain interface cannot be nil")
 	}
 
 	engine := &FastSyncEngine{
@@ -156,7 +157,7 @@ func NewFastSyncEngine(
 		snapshotURLs:       make([]string, 0),
 	}
 
-	return engine
+	return engine, nil
 }
 
 // SetNetworkHeightFetcher sets the network interface for fetching chain heights.

@@ -432,17 +432,54 @@ func (s *SyncLoop) reorganizeToRemoteChain(targetBlock *core.Block) bool {
 	// Fallback to direct block-by-block reorganization
 	log.Printf("[Sync] Attempting direct reorganization to target block %d", targetBlock.GetHeight())
 	
-	// For production implementation, we would need access to the blockchain's reorganize method
-	// This is a placeholder for the actual blockchain integration
-	log.Printf("[Sync] Chain reorganization would proceed here - integration with bc.Reorganize() needed")
+	// Production-grade chain reorganization implementation
+	// Step 1: Find common ancestor between current chain and new chain
+	ancestor, err := s.findCommonAncestor(currentTip, targetBlock)
+	if err != nil {
+		log.Printf("[Sync] Failed to find common ancestor: %v", err)
+		return false
+	}
 	
-	// Successful reorganization would:
-	// 1. Find fork point between current tip and target block
-	// 2. Validate the new chain section
-	// 3. Switch canonical chain at the fork point
-	// 4. Update all related data structures
+	if ancestor == nil {
+		log.Printf("[Sync] No common ancestor found, cannot reorganize")
+		return false
+	}
 	
-	return false // Return false for now until full integration is complete
+	log.Printf("[Sync] Found common ancestor at height %d", ancestor.GetHeight())
+	
+	// Step 2: Collect new chain blocks from ancestor to target
+	newChain, err := s.collectNewChain(ancestor, targetBlock)
+	if err != nil {
+		log.Printf("[Sync] Failed to collect new chain: %v", err)
+		return false
+	}
+	
+	// Step 3: Validate new chain section
+	if !s.validateNewChain(newChain) {
+		log.Printf("[Sync] New chain validation failed")
+		return false
+	}
+	
+	// Step 4: Rollback current chain to ancestor height
+	err = s.bc.RollbackToHeight(ancestor.GetHeight())
+	if err != nil {
+		log.Printf("[Sync] Failed to rollback chain: %v", err)
+		return false
+	}
+	
+	// Step 5: Add new chain blocks
+	for _, block := range newChain {
+		_, err := s.bc.AddBlock(block)
+		if err != nil {
+			log.Printf("[Sync] Failed to add block %d: %v", block.GetHeight(), err)
+			// Attempt to recover by re-adding old chain
+			s.recoverChain(currentTip, ancestor)
+			return false
+		}
+	}
+	
+	log.Printf("[Sync] Chain reorganization completed successfully to height %d", targetBlock.GetHeight())
+	return true
 }
 
 // arbitrateWithOtherPeers performs basic arbitration with other network peers
@@ -1391,4 +1428,212 @@ func (s *SyncLoop) isCorruptedBlock(block *core.Block) bool {
 	}
 
 	return false
+}
+
+// findCommonAncestor finds the common ancestor between two chains
+// Used for chain reorganization during fork resolution
+func (s *SyncLoop) findCommonAncestor(currentTip, targetBlock *core.Block) (*core.Block, error) {
+	if currentTip == nil || targetBlock == nil {
+		return nil, fmt.Errorf("nil block provided")
+	}
+	
+	// Build chain from current tip backwards
+	currentChain := make(map[uint64]*core.Block)
+	current := currentTip
+	maxIterations := 1000 // Safety limit
+	iterations := 0
+	
+	for current != nil && iterations < maxIterations {
+		currentChain[current.GetHeight()] = current
+		iterations++
+		
+		// Check if target is in current chain
+		if block, exists := s.bc.BlockByHeight(current.GetHeight()); exists {
+			if bytes.Equal(block.Hash, current.Hash) {
+				// Found a match in canonical chain
+				break
+			}
+		}
+		
+		// Move to parent
+		if current.GetHeight() == 0 {
+			break
+		}
+		parent, exists := s.bc.BlockByHeight(current.GetHeight() - 1)
+		if !exists {
+			break
+		}
+		current = parent
+	}
+	
+	// Find common ancestor by walking target chain backwards
+	target := targetBlock
+	iterations = 0
+	for target != nil && iterations < maxIterations {
+		iterations++
+		
+		// Check if this height exists in current chain
+		if block, exists := currentChain[target.GetHeight()]; exists {
+			if bytes.Equal(block.Hash, target.Hash) {
+				return block, nil
+			}
+		}
+		
+		// Check canonical chain
+		if block, exists := s.bc.BlockByHeight(target.GetHeight()); exists {
+			if bytes.Equal(block.Hash, target.Hash) {
+				return block, nil
+			}
+		}
+		
+		// Move to parent
+		if target.GetHeight() == 0 {
+			break
+		}
+		parent, exists := s.bc.BlockByHeight(target.GetHeight() - 1)
+		if !exists {
+			break
+		}
+		target = parent
+	}
+	
+	return nil, fmt.Errorf("no common ancestor found")
+}
+
+// collectNewChain collects all blocks from ancestor to target
+func (s *SyncLoop) collectNewChain(ancestor, target *core.Block) ([]*core.Block, error) {
+	if ancestor == nil || target == nil {
+		return nil, fmt.Errorf("nil block provided")
+	}
+	
+	var newChain []*core.Block
+	current := target
+	maxIterations := 1000 // Safety limit
+	iterations := 0
+	
+	// Walk backwards from target to ancestor
+	for current != nil && iterations < maxIterations {
+		iterations++
+		
+		// Stop if we reached ancestor
+		if current.GetHeight() <= ancestor.GetHeight() {
+			if bytes.Equal(current.Hash, ancestor.Hash) {
+				break
+			}
+		}
+		
+		// Add block to chain (will be reversed later)
+		newChain = append(newChain, current)
+		
+		// Move to parent
+		if current.GetHeight() == 0 {
+			break
+		}
+		parent, exists := s.bc.BlockByHeight(current.GetHeight() - 1)
+		if !exists {
+			// Try to get from orphan pool
+			parentHex := hex.EncodeToString(current.Header.PrevHash)
+			orphans := s.orphanPool.GetOrphansByParent(parentHex)
+			if len(orphans) > 0 {
+				parent = orphans[0] // Use first matching orphan
+			}
+			if parent == nil {
+				return nil, fmt.Errorf("missing parent block at height %d", current.GetHeight()-1)
+			}
+		}
+		current = parent
+	}
+	
+	// Reverse the chain to get correct order (ancestor -> target)
+	for i, j := 0, len(newChain)-1; i < j; i, j = i+1, j-1 {
+		newChain[i], newChain[j] = newChain[j], newChain[i]
+	}
+	
+	return newChain, nil
+}
+
+// validateNewChain validates a chain section before reorganization
+func (s *SyncLoop) validateNewChain(chain []*core.Block) bool {
+	if len(chain) == 0 {
+		return false
+	}
+	
+	// Validate each block
+	for i, block := range chain {
+		// Basic validation
+		if block == nil {
+			log.Printf("[Sync] Nil block at index %d", i)
+			return false
+		}
+		
+		// Validate block with consensus rules
+		if err := s.validator.ValidateBlockFast(block); err != nil {
+			log.Printf("[Sync] Block %d validation failed: %v", block.GetHeight(), err)
+			return false
+		}
+		
+		// Check chain continuity
+		if i > 0 {
+			prevBlock := chain[i-1]
+			if !bytes.Equal(block.Header.PrevHash, prevBlock.Hash) {
+				log.Printf("[Sync] Chain discontinuity at height %d", block.GetHeight())
+				return false
+			}
+		}
+	}
+	
+	log.Printf("[Sync] Validated new chain section (%d blocks)", len(chain))
+	return true
+}
+
+// recoverChain attempts to recover the original chain after failed reorganization
+func (s *SyncLoop) recoverChain(originalTip, ancestor *core.Block) {
+	log.Printf("[Sync] Attempting to recover original chain")
+	
+	// Rollback to ancestor
+	if err := s.bc.RollbackToHeight(ancestor.GetHeight()); err != nil {
+		log.Printf("[Sync] CRITICAL: Failed to rollback for recovery: %v", err)
+		return
+	}
+	
+	// Re-add original chain blocks
+	current := originalTip
+	var blocksToAdd []*core.Block
+	maxIterations := 1000
+	iterations := 0
+	
+	for current != nil && iterations < maxIterations {
+		iterations++
+		
+		if current.GetHeight() <= ancestor.GetHeight() {
+			break
+		}
+		
+		blocksToAdd = append(blocksToAdd, current)
+		
+		// Move to parent
+		if current.GetHeight() == 0 {
+			break
+		}
+		parent, exists := s.bc.BlockByHeight(current.GetHeight() - 1)
+		if !exists {
+			break
+		}
+		current = parent
+	}
+	
+	// Reverse and add blocks
+	for i, j := 0, len(blocksToAdd)-1; i < j; i, j = i+1, j-1 {
+		blocksToAdd[i], blocksToAdd[j] = blocksToAdd[j], blocksToAdd[i]
+	}
+	
+	for _, block := range blocksToAdd {
+		_, err := s.bc.AddBlock(block)
+		if err != nil {
+			log.Printf("[Sync] CRITICAL: Failed to recover block %d: %v", block.GetHeight(), err)
+			return
+		}
+	}
+	
+	log.Printf("[Sync] Successfully recovered original chain")
 }

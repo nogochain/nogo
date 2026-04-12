@@ -21,6 +21,7 @@ import (
 	"errors"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/sha3"
@@ -296,8 +297,9 @@ func (t *NogopowEngine) mineBlock(chain ChainHeaderReader, block *Block, results
 			}
 		}
 
-		// Update hashrate
-		t.hashrate++
+		// Update hashrate with atomic operation for thread safety
+		// Production-grade: prevents race conditions when multiple threads increment
+		atomic.AddUint64(&t.hashrate, 1)
 
 		// Log progress every 1000 nonces
 		if nonce%1000 == 0 && nonce > 0 {
@@ -461,8 +463,9 @@ func (t *NogopowEngine) Close() error {
 }
 
 // HashRate returns current hashrate
+// Production-grade: uses atomic load for thread-safe read access
 func (t *NogopowEngine) HashRate() uint64 {
-	return t.hashrate
+	return atomic.LoadUint64(&t.hashrate)
 }
 
 // checkPow verifies if hash meets difficulty target

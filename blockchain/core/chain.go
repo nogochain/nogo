@@ -500,29 +500,312 @@ func (c *Chain) validateRulesHashLocked() error {
 
 // tryForkCompatibleStateApplication attempts to apply block state with fork tolerance
 // This handles legitimate blocks from network forks that have minor parameter differences
+// Production-grade: maintains strict validation with minimal tolerance for security
 // Caller must hold c.mu lock
 func (c *Chain) tryForkCompatibleStateApplication(block *Block, hashHex string) bool {
 	log.Printf("[Chain] Attempting fork-compatible state application for block %d", block.GetHeight())
 	
-	// First attempt: re-apply with current state but skip strict economic validation
+	// Strict validation: verify block structure and cryptographic integrity
+	if err := c.validateBlockStructure(block); err != nil {
+		log.Printf("[Chain] Fork-tolerant application failed: invalid block structure: %v", err)
+		return false
+	}
+	
+	// Verify proof-of-work is valid
+	if err := c.validateBlockPoW(block); err != nil {
+		log.Printf("[Chain] Fork-tolerant application failed: invalid PoW: %v", err)
+		return false
+	}
+	
+	// Attempt to apply state with strict fork tolerance
 	tempState := make(map[string]Account)
-	err := applyBlockToStateWithTolerance(c.consensus, c.monetaryPolicy, tempState, block, c.genesisAddress, c.genesisTimestamp)
+	err := applyBlockToStateWithStrictTolerance(c.consensus, c.monetaryPolicy, tempState, block, c.genesisAddress, c.genesisTimestamp, c.state)
 	if err == nil {
-		// Merge temp state with canonical state, handling account differences
-		c.mergeStatesWithForkAwareness(tempState)
+		// Validate state integrity before merging
+		if err := c.validateStateIntegrity(tempState); err != nil {
+			log.Printf("[Chain] Fork-tolerant state validation failed: %v", err)
+			return false
+		}
+		
+		// Merge temp state with canonical state
+		c.mergeStatesWithStrictValidation(tempState)
 		log.Printf("[Chain] Fork-tolerant application successful for block %d", block.GetHeight())
 		return true
 	}
 	
-	// Second attempt: use minimal validation for emergency synchronization
-	log.Printf("[Chain] Primary tolerance failed, attempting emergency sync mode")
-	if c.emergencySyncStateApplication(block, hashHex) {
-		log.Printf("[Chain] Emergency sync mode succeeded for block %d", block.GetHeight())
-		return true
+	log.Printf("[Chain] Fork-tolerant application failed: %v", err)
+	return false
+}
+
+// validateBlockStructure performs strict structural validation
+func (c *Chain) validateBlockStructure(block *Block) error {
+	if block == nil {
+		return errors.New("block is nil")
 	}
 	
-	log.Printf("[Chain] All fork-compatible application attempts failed")
-	return false
+	if len(block.Transactions) == 0 {
+		return errors.New("block has no transactions")
+	}
+	
+	// Verify first transaction is coinbase
+	if block.Transactions[0].Type != TxCoinbase {
+		return errors.New("first transaction must be coinbase")
+	}
+	
+	// Verify merkle root if present
+	if len(block.Header.MerkleRoot) > 0 {
+		leaves := make([][]byte, 0, len(block.Transactions))
+		for _, tx := range block.Transactions {
+			th, err := txSigningHashForConsensus(tx, c.consensus, block.GetHeight())
+			if err != nil {
+				return fmt.Errorf("compute tx hash: %w", err)
+			}
+			leaves = append(leaves, th)
+		}
+		
+		computedRoot, err := MerkleRoot(leaves)
+		if err != nil {
+			return fmt.Errorf("compute merkle root: %w", err)
+		}
+		
+		if !bytes.Equal(block.Header.MerkleRoot, computedRoot) {
+			return fmt.Errorf("merkle root mismatch: header=%x calculated=%x",
+				block.Header.MerkleRoot, computedRoot)
+		}
+	}
+	
+	return nil
+}
+
+// validateBlockPoW validates proof-of-work with strict difficulty check
+func (c *Chain) validateBlockPoW(block *Block) error {
+	// Create NogoPow engine for validation
+	engine := nogopow.New(nil)
+	defer engine.Close()
+	
+	// Convert to nogopow header format
+	header := convertToNogopowHeader(&block.Header, block)
+	
+	// Verify seal
+	if err := engine.VerifySealOnly(header); err != nil {
+		return fmt.Errorf("PoW verification failed: %w", err)
+	}
+	
+	return nil
+}
+
+// applyBlockToStateWithStrictTolerance applies block state with minimal, strictly bounded tolerance
+// Security: maintains tight bounds on reward variations and nonce gaps
+func applyBlockToStateWithStrictTolerance(p ConsensusParams, mp MonetaryPolicy, state map[string]Account, b *Block, genesisAddress string, genesisTimestamp int64, existingState map[string]Account) error {
+	if p.MaxBlockSize > 0 {
+		size, err := blockSizeForConsensus(b)
+		if err != nil {
+			return err
+		}
+		if uint64(size) > p.MaxBlockSize {
+			return fmt.Errorf("block too large: %d bytes (max %d)", size, p.MaxBlockSize)
+		}
+	}
+	
+	if len(b.Transactions) == 0 {
+		return errors.New("block has no transactions")
+	}
+	
+	// Strict coinbase validation with minimal tolerance (±2% vs previous ±10%)
+	// This prevents inflation attacks while allowing minor protocol variations
+	if b.GetHeight() > 0 && b.Transactions[0].Type == TxCoinbase {
+		cb := b.Transactions[0]
+		minerReward := mp.BlockReward(b.GetHeight())*uint64(mp.MinerRewardShare)/100
+		
+		// Reduced tolerance: ±2% instead of ±10%
+		rewardLowerBound := minerReward * 98 / 100
+		rewardUpperBound := minerReward * 102 / 100
+		
+		if cb.Amount < rewardLowerBound || cb.Amount > rewardUpperBound {
+			return fmt.Errorf("coinbase reward outside strict tolerance bounds: %d not in [%d, %d] (±2%%)", 
+				cb.Amount, rewardLowerBound, rewardUpperBound)
+		}
+		
+		// Verify reward doesn't cause overflow
+		acct := state[cb.ToAddress]
+		if acct.Balance > math.MaxUint64-cb.Amount {
+			return errors.New("coinbase balance overflow")
+		}
+		acct.Balance += cb.Amount
+		state[cb.ToAddress] = acct
+	}
+	
+	// Process transactions with strict nonce validation
+	for i, tx := range b.Transactions {
+		switch tx.Type {
+		case TxCoinbase:
+			if i != 0 {
+				return errors.New("coinbase must be first")
+			}
+			// Already handled above
+		case TxTransfer:
+			if err := tx.VerifyForConsensus(p, b.GetHeight()); err != nil {
+				return err
+			}
+			
+			fromAddr, err := tx.FromAddress()
+			if err != nil {
+				return err
+			}
+			
+			from := state[fromAddr]
+			
+			// Strict nonce validation: only allow minimal gap (2 vs previous 10)
+			// This prevents transaction replay attacks
+			nonceGap := int64(tx.Nonce) - int64(from.Nonce)
+			if nonceGap < 0 {
+				// Reject transactions with nonce lower than current
+				return fmt.Errorf("invalid nonce for %s: expected >= %d got %d", 
+					fromAddr, from.Nonce, tx.Nonce)
+			}
+			if nonceGap > 2 {
+				// Reject excessive nonce gaps
+				return fmt.Errorf("excessive nonce gap for %s: expected <= %d got %d (max gap=2)", 
+					fromAddr, from.Nonce+2, tx.Nonce)
+			}
+			
+			// Update nonce
+			from.Nonce = max(from.Nonce, tx.Nonce)
+			
+			// Verify sufficient balance
+			totalDebit := tx.Amount + tx.Fee
+			if from.Balance < totalDebit {
+				return fmt.Errorf("insufficient funds for %s: balance=%d required=%d", 
+					fromAddr, from.Balance, totalDebit)
+			}
+			from.Balance -= totalDebit
+			state[fromAddr] = from
+			
+			// Apply credit
+			to := state[tx.ToAddress]
+			if to.Balance > math.MaxUint64-tx.Amount {
+				return errors.New("transfer balance overflow")
+			}
+			to.Balance += tx.Amount
+			state[tx.ToAddress] = to
+		}
+	}
+	
+	return nil
+}
+
+// validateStateIntegrity validates the integrity of the state before merging
+func (c *Chain) validateStateIntegrity(state map[string]Account) error {
+	// Check for negative balances (should never happen)
+	for addr, acct := range state {
+		if acct.Balance > math.MaxInt64 {
+			return fmt.Errorf("suspicious balance for %s: %d (potential overflow)", addr, acct.Balance)
+		}
+	}
+	
+	// Verify total supply hasn't increased beyond expected
+	// This is a critical security check to prevent inflation attacks
+	totalSupply := uint64(0)
+	for _, acct := range state {
+		if totalSupply > math.MaxUint64-acct.Balance {
+			return errors.New("total supply overflow detected")
+		}
+		totalSupply += acct.Balance
+	}
+	
+	// Compare with existing state supply
+	existingSupply := uint64(0)
+	for _, acct := range c.state {
+		existingSupply += acct.Balance
+	}
+	
+	// Allow only minimal supply increase (from block rewards)
+	maxAllowedIncrease := c.monetaryPolicy.BlockReward(c.currentHeight()) * 2
+	if totalSupply > existingSupply+maxAllowedIncrease {
+		return fmt.Errorf("excessive supply increase: old=%d new=%d max_allowed_increase=%d",
+			existingSupply, totalSupply, maxAllowedIncrease)
+	}
+	
+	return nil
+}
+
+// mergeStatesWithStrictValidation merges temporary fork state with strict validation
+func (c *Chain) mergeStatesWithStrictValidation(tempState map[string]Account) {
+	for addr, tempAcct := range tempState {
+		existingAcct, exists := c.state[addr]
+		if !exists {
+			// New account from fork, add it after validation
+			c.state[addr] = tempAcct
+		} else {
+			// Strict merge: verify balance consistency
+			// Prevent balance inflation from fork attacks
+			if tempAcct.Balance > existingAcct.Balance {
+				// Only allow balance increase if it's reasonable
+				maxIncrease := existingAcct.Balance / 10 // Max 10% increase
+				if tempAcct.Balance-existingAcct.Balance > maxIncrease {
+					log.Printf("[Chain] WARNING: Rejecting suspicious balance increase for %s: %d -> %d",
+						addr, existingAcct.Balance, tempAcct.Balance)
+					continue // Skip this account to prevent inflation
+				}
+			}
+			
+			// Update nonce only if higher (forward progress)
+			mergedAcct := Account{
+				Nonce:   max(existingAcct.Nonce, tempAcct.Nonce),
+				Balance: tempAcct.Balance, // Use tempAcct balance after validation
+			}
+			c.state[addr] = mergedAcct
+		}
+	}
+}
+
+// currentHeight returns the current chain height (helper for validation)
+func (c *Chain) currentHeight() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	
+	if len(c.blocks) == 0 {
+		return 0
+	}
+	return c.blocks[len(c.blocks)-1].GetHeight()
+}
+
+// convertToNogopowHeader converts BlockHeader to nogopow.Header format
+func convertToNogopowHeader(h *BlockHeader, block *Block) *nogopow.Header {
+	if h == nil {
+		return nil
+	}
+	
+	// Convert miner address from string to Address type
+	var coinbaseAddr nogopow.Address
+	if block != nil && len(block.MinerAddress) > 0 {
+		// Convert hex string address to Address bytes
+		if addrBytes, err := hex.DecodeString(block.MinerAddress); err == nil && len(addrBytes) == 20 {
+			copy(coinbaseAddr[:], addrBytes)
+		}
+	}
+	
+	// Convert byte slices to Hash/Address types
+	var parentHash nogopow.Hash
+	copy(parentHash[:], h.PrevHash)
+	
+	var txHash nogopow.Hash
+	if len(h.MerkleRoot) > 0 {
+		copy(txHash[:], h.MerkleRoot)
+	}
+	
+	return &nogopow.Header{
+		ParentHash: parentHash,
+		Coinbase:   coinbaseAddr,
+		Root:       nogopow.Hash{}, // State root not stored in BlockHeader
+		TxHash:     txHash,
+		Number:     big.NewInt(int64(block.GetHeight())),
+		GasLimit:   0,
+		Time:       uint64(h.TimestampUnix),
+		Extra:      nil,
+		Nonce:      nogopow.BlockNonce{},
+		Difficulty: big.NewInt(int64(h.Difficulty)),
+	}
 }
 
 // applyBlockToStateWithTolerance applies block state with relaxed validation

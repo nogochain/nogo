@@ -98,7 +98,10 @@ func TestFastSyncEngine_Basic(t *testing.T) {
 		latestBlock: &core.Block{Height: 0},
 		chainID:     1,
 	}
-	fs := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	fs, err := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	if err != nil {
+		t.Fatalf("NewFastSyncEngine failed: %v", err)
+	}
 	if fs == nil {
 		t.Fatal("NewFastSyncEngine returned nil")
 	}
@@ -130,9 +133,12 @@ func TestFastSyncEngine_StartStop(t *testing.T) {
 		latestBlock: &core.Block{Height: 0},
 		chainID:     1,
 	}
-	fs := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	fs, err := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	if err != nil {
+		t.Fatalf("NewFastSyncEngine failed: %v", err)
+	}
 	ctx := context.Background()
-	err := fs.Start(ctx, 10000)
+	err = fs.Start(ctx, 10000)
 	if err != nil {
 		t.Logf("Start returned: %v (expected for mock)", err)
 	}
@@ -154,7 +160,10 @@ func TestFastSyncEngine_GetCheckpoint(t *testing.T) {
 		latestBlock: &core.Block{Height: 0},
 		chainID:     1,
 	}
-	fs := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	fs, err := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	if err != nil {
+		t.Fatalf("NewFastSyncEngine failed: %v", err)
+	}
 	cp, height := fs.GetLatestCheckpoint()
 	if cp == nil {
 		t.Error("GetLatestCheckpoint returned nil")
@@ -178,7 +187,10 @@ func TestFastSyncEngine_ProgressTracking(t *testing.T) {
 		latestBlock: &core.Block{Height: 0},
 		chainID:     1,
 	}
-	fs := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	fs, err := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	if err != nil {
+		t.Fatalf("NewFastSyncEngine failed: %v", err)
+	}
 	fs.updateStatus("test_phase", 0.5)
 	status := fs.GetStatus()
 	if status.Phase != "test_phase" {
@@ -200,7 +212,10 @@ func TestFastSyncEngine_EstimateSyncTime(t *testing.T) {
 		latestBlock: &core.Block{Height: 0},
 		chainID:     1,
 	}
-	fs := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	fs, err := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	if err != nil {
+		t.Fatalf("NewFastSyncEngine failed: %v", err)
+	}
 	estimated := fs.EstimateSyncTime(10000, 100)
 	if estimated <= 0 {
 		t.Error("EstimateSyncTime returned invalid value")
@@ -219,7 +234,10 @@ func TestFastSyncEngine_CalculateSyncSpeed(t *testing.T) {
 		latestBlock: &core.Block{Height: 0},
 		chainID:     1,
 	}
-	fs := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	fs, err := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	if err != nil {
+		t.Fatalf("NewFastSyncEngine failed: %v", err)
+	}
 	speed := fs.CalculateSyncSpeed(1000, 10*time.Second)
 	if speed != 100 {
 		t.Errorf("expected speed 100 blocks/sec, got %f", speed)
@@ -348,7 +366,10 @@ func TestFastSyncEngine_FastSyncWithSnapshot(t *testing.T) {
 		latestBlock: &core.Block{Height: 0},
 		chainID:     1,
 	}
-	fs := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	fs, err := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	if err != nil {
+		t.Fatalf("NewFastSyncEngine failed: %v", err)
+	}
 	checkpoint := &Checkpoint{
 		Version:   CheckpointVersion,
 		Height:    10000,
@@ -390,7 +411,10 @@ func TestFastSyncEngine_ConcurrentAccess(t *testing.T) {
 		latestBlock: &core.Block{Height: 0},
 		chainID:     1,
 	}
-	fs := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	fs, err := NewFastSyncEngine(checkpointMgr, store, blockchain)
+	if err != nil {
+		t.Fatalf("NewFastSyncEngine failed: %v", err)
+	}
 	done := make(chan bool, 10)
 	for i := 0; i < 10; i++ {
 		go func() {

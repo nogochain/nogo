@@ -58,6 +58,9 @@ func NewSimpleServer(bc Blockchain, mp *MempoolImpl, miner *MinerImpl, peers *Pe
 func (s *SimpleServer) Start(addr string) error {
 	mux := http.NewServeMux()
 
+	// Health check endpoint - MUST be first for wallet connection
+	mux.HandleFunc("/health", s.handleHealth)
+
 	// Mining API endpoints (for pool miners) - MUST be registered before /block/
 	mux.HandleFunc("/block/template", s.handleGetBlockTemplate)
 	mux.HandleFunc("/mining/submit", s.handleSubmitWork)
@@ -72,6 +75,12 @@ func (s *SimpleServer) Start(addr string) error {
 
 	// Chain info endpoint
 	mux.HandleFunc("/chain/info", s.handleChainInfo)
+
+	// Version endpoint
+	mux.HandleFunc("/version", s.handleVersion)
+
+	// Balance endpoint (wallet compatibility)
+	mux.HandleFunc("/balance/", s.handleBalance)
 
 	// Latest block endpoint
 	mux.HandleFunc("/block/latest", s.handleLatestBlock)
@@ -88,9 +97,12 @@ func (s *SimpleServer) Start(addr string) error {
 	mux.HandleFunc("/tx/submit", s.handleSubmitTx)
 	mux.HandleFunc("/block/hash/", s.handleBlockByHash)
 
+	// Wrap with CORS middleware (always enabled for wallet compatibility)
+	handler := EnableCORS(mux, nil)
+
 	s.server = &http.Server{
 		Addr:         addr,
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  30 * time.Second,
@@ -102,9 +114,44 @@ func (s *SimpleServer) Start(addr string) error {
 // handleHealth handles health check requests
 func (s *SimpleServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "ok",
 	})
+}
+
+// handleBalance handles balance requests
+func (s *SimpleServer) handleBalance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	addr := strings.TrimPrefix(r.URL.Path, "/balance/")
+	if addr == "" {
+		http.Error(w, "missing address", http.StatusBadRequest)
+		return
+	}
+
+	// Validate address format
+	if err := validateAddress(addr); err != nil {
+		http.Error(w, "invalid address: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Get balance from blockchain
+	acct, ok := s.bc.Balance(addr)
+	if !ok {
+		acct = core.Account{}
+	}
+
+	out := map[string]interface{}{
+		"address": addr,
+		"balance": acct.Balance,
+		"nonce":   acct.Nonce,
+	}
+
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleChainInfo handles chain info requests

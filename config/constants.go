@@ -21,6 +21,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -837,16 +838,17 @@ func ValidateAllParams() error {
 }
 
 // init performs initialization validation
+// Uses log.Fatal instead of panic to provide clean exit with error message
 func init() {
 	// Validate all default parameters on package load
 	if err := ValidateAllParams(); err != nil {
-		panic(fmt.Sprintf("Default configuration validation failed: %v", err))
+		log.Fatalf("Default configuration validation failed: %v", err)
 	}
 
 	// Verify BlocksPerYear calculation is reasonable
 	blocksPerYear := GetBlocksPerYear()
 	if blocksPerYear < 100000 || blocksPerYear > 10000000 {
-		panic(fmt.Sprintf("BlocksPerYear calculation invalid: %d", blocksPerYear))
+		log.Fatalf("BlocksPerYear calculation invalid: %d", blocksPerYear)
 	}
 }
 
