@@ -233,6 +233,26 @@ func (pm *P2PPeerManager) AddPeer(addr string) {
 	log.Printf("P2P peer manager: added peer %s (total=%d/%d)", addr, len(pm.peers), pm.maxPeers)
 }
 
+// RefreshPeerConnection refreshes the connection to a peer, handling dynamic IP changes
+func (pm *P2PPeerManager) RefreshPeerConnection(peer string) error {
+	// Remove existing connection if it exists
+	pm.mu.Lock()
+	delete(pm.peerTimestamps, peer)
+	delete(pm.peerFailCounts, peer)
+	// Remove from peers list
+	for i, p := range pm.peers {
+		if p == peer {
+			pm.peers = append(pm.peers[:i], pm.peers[i+1:]...)
+			break
+		}
+	}
+	pm.mu.Unlock()
+
+	// Re-add the peer to refresh the connection
+	pm.AddPeer(peer)
+	return nil
+}
+
 // validatePeerAddressFormat validates the format of a peer address (host:port)
 // Unlike validatePublicIPFromAddr, this allows private IPs for local network peers
 func validatePeerAddressFormat(addr string) error {
@@ -422,13 +442,10 @@ func (pm *P2PPeerManager) FetchChainInfo(ctx context.Context, peer string) (*Cha
 
 // DiscoverPeersFromPeer connects to a peer and requests their peer list via getaddr
 func (pm *P2PPeerManager) DiscoverPeersFromPeer(ctx context.Context, peer string) {
-	log.Printf("P2P peer discovery: requesting peer list from %s", peer)
-
 	var addrResp struct {
 		Addresses []peerAddr `json:"addresses"`
 	}
 	if err := pm.client.do(ctx, peer, "getaddr", nil, &addrResp, "addr"); err != nil {
-		log.Printf("P2P peer discovery: failed to get addresses from %s: %v", peer, err)
 		return
 	}
 
@@ -440,7 +457,6 @@ func (pm *P2PPeerManager) DiscoverPeersFromPeer(ctx context.Context, peer string
 			addedCount++
 		}
 	}
-	log.Printf("P2P peer discovery: added %d peers from %s", addedCount, peer)
 }
 
 // FetchHeadersFrom fetches block headers from a peer starting at a specific height
@@ -560,7 +576,6 @@ func (pm *P2PPeerManager) BroadcastBlock(ctx context.Context, block *core.Block)
 	pm.mu.RUnlock()
 
 	if len(peers) == 0 {
-		log.Printf("P2P peer manager: no peers to broadcast block height=%d hash=%s", block.GetHeight(), hex.EncodeToString(block.Hash))
 		return
 	}
 
@@ -585,12 +600,11 @@ func (pm *P2PPeerManager) BroadcastBlock(ctx context.Context, block *core.Block)
 			defer wg.Done()
 			_, err := pm.client.BroadcastBlock(ctx, p, block)
 			if err != nil {
-				log.Printf("p2p broadcast block to %s failed: %v", p, err)
+				// 静默处理广播失败，只保留带颜色的区块广播日志
 			}
 		}(peer)
 	}
 	wg.Wait()
-	log.Printf("P2P peer manager: block broadcast completed height=%d hash=%s", block.GetHeight(), hex.EncodeToString(block.Hash))
 }
 
 // formatAddress formats an address for display

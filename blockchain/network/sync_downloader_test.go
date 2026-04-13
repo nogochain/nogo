@@ -122,6 +122,10 @@ func (m *mockBlockchain) MineTransfers(txs []core.Transaction) (*core.Block, err
 	return nil, nil
 }
 
+func (m *mockBlockchain) CalcNextDifficulty(latest *core.Block, currentTime int64) uint32 {
+	return 1
+}
+
 func (m *mockBlockchain) AuditChain() error {
 	return nil
 }
@@ -148,6 +152,10 @@ func (m *mockBlockchain) GetContractManager() *core.ContractManager {
 
 func (m *mockBlockchain) SyncLoop() SyncLoopInterface {
 	return nil
+}
+
+func (m *mockBlockchain) IsReorgInProgress() bool {
+	return false
 }
 
 type mockMiner struct{}
@@ -292,13 +300,14 @@ func TestBlockDownloader_BatchDownloadBlocks(t *testing.T) {
 	ctx := context.Background()
 	progressChan := make(chan DownloadProgress, 10)
 
-	blocks, err := downloader.BatchDownloadBlocks(ctx, "peer1", 101, 100, progressChan)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
+	// Create a mock store function
+	storeFunc := func(ctx context.Context, block *core.Block) error {
+		return nil
 	}
 
-	if len(blocks) != 100 {
-		t.Errorf("expected 100 blocks, got %d", len(blocks))
+	err := downloader.BatchDownloadBlocks(ctx, "peer1", 101, 100, progressChan, storeFunc)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
 
 	// Drain the progress channel and verify total downloaded

@@ -353,6 +353,11 @@ func (s *Server) submitSingleTransaction(tx core.Transaction, ctx context.Contex
 		})
 	}
 
+	// Broadcast transaction to network if txGossip is enabled
+	if s.txGossip && s.peers != nil {
+		go s.peers.BroadcastTransaction(ctx, tx, 0)
+	}
+
 	return txSubmissionResult{txID: txid, err: nil}
 }
 

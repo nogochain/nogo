@@ -34,6 +34,7 @@ type P2PServer struct {
 	listenAddr string
 	nodeID     string
 	publicIP   string
+	lastIPUpdate time.Time
 
 	maxConns      int
 	maxMsgSize    int
@@ -62,6 +63,9 @@ type P2PServer struct {
 
 	// Resolution engine for automatic fork resolution
 	resolutionEngine *ForkResolutionEngine
+
+	// Gossip integration
+	gossipIntegration *GossipIntegration
 }
 
 // NewP2PServer creates a new P2P server instance
@@ -134,6 +138,7 @@ func NewP2PServer(bc BlockchainInterface, pm *P2PPeerManager, mp Mempool, listen
 		listenAddr:    listenAddr,
 		nodeID:        nodeID,
 		publicIP:      publicIP,
+		lastIPUpdate:  time.Now(),
 		maxConns:      envInt("P2P_MAX_CONNECTIONS", DefaultP2PMaxConnections),
 		maxMsgSize:    envInt("P2P_MAX_MESSAGE_BYTES", 4<<20),
 		maxPeers:      maxPeers,
@@ -169,6 +174,11 @@ func (s *P2PServer) SetMiner(miner Miner) {
 	s.miner = miner
 }
 
+// SetGossipIntegration sets the gossip integration instance
+func (s *P2PServer) SetGossipIntegration(integration *GossipIntegration) {
+	s.gossipIntegration = integration
+}
+
 func (s *P2PServer) ListenAddr() string { return s.listenAddr }
 
 func (s *P2PServer) Serve(ctx context.Context) error {
@@ -194,6 +204,9 @@ func (s *P2PServer) Serve(ctx context.Context) error {
 	if s.pm.peers != nil {
 		go s.runPeerDiscoveryLoop(ctx)
 	}
+
+	// Start public IP update loop
+	go s.runIPUpdateLoop(ctx)
 
 	for {
 		c, err := ln.Accept()
@@ -412,6 +425,13 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 			handleErr = s.handlePing(c, env.Payload)
 		case "pong":
 			handleErr = s.handlePong(c, env.Payload)
+		case "gossip_message":
+			// Handle gossip message if integration is available
+			if s.gossipIntegration != nil {
+				handleErr = s.gossipIntegration.HandleGossipMessage(c, env)
+			} else {
+				handleErr = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "gossip_integration_not_available"})})
+			}
 		default:
 			handleErr = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "unknown_type"})})
 		}
@@ -1018,26 +1038,39 @@ func (s *P2PServer) handleGetAddr(c net.Conn) error {
 	}
 	var peerAddrs []peerAddr
 	now := time.Now().Unix()
-	if s.advertiseSelf && s.publicIP != "" && validatePublicIP(s.publicIP) == nil {
-		host, portStr, err := net.SplitHostPort(s.listenAddr)
+	
+	// Advertise self with appropriate IP (public or private)
+	if s.advertiseSelf {
+		_, portStr, err := net.SplitHostPort(s.listenAddr)
 		if err != nil {
-			host = "0.0.0.0"
 			portStr = "9090"
-		}
-		if host == "" || host == "0.0.0.0" {
-			host = s.publicIP
 		}
 		var port int
 		fmt.Sscanf(portStr, "%d", &port)
 		if port <= 0 {
 			port = 9090
 		}
-		peerAddrs = append(peerAddrs, peerAddr{
-			IP:        s.publicIP,
-			Port:      port,
-			Timestamp: now,
-		})
+		
+		// Use public IP if available
+		if s.publicIP != "" && validatePublicIP(s.publicIP) == nil {
+			peerAddrs = append(peerAddrs, peerAddr{
+				IP:        s.publicIP,
+				Port:      port,
+				Timestamp: now,
+			})
+		} else {
+			// Fallback to private IP for local network
+			localIP := s.getLocalIP()
+			if localIP != "" {
+				peerAddrs = append(peerAddrs, peerAddr{
+					IP:        localIP,
+					Port:      port,
+					Timestamp: now,
+				})
+			}
+		}
 	}
+	
 	// Use GetActivePeers to return only recently active peers (< 24h)
 	for _, addr := range s.pm.GetActivePeers() {
 		if len(peerAddrs) >= s.maxAddrReturn {
@@ -1047,9 +1080,7 @@ func (s *P2PServer) handleGetAddr(c net.Conn) error {
 		if err != nil {
 			continue
 		}
-		if err := validatePublicIP(host); err != nil {
-			continue
-		}
+		// Accept both public and private IPs to support local networks
 		var port int
 		fmt.Sscanf(portStr, "%d", &port)
 		if port <= 0 {
@@ -1062,6 +1093,44 @@ func (s *P2PServer) handleGetAddr(c net.Conn) error {
 		})
 	}
 	return p2pWriteJSON(c, p2pEnvelope{Type: "addr", Payload: mustJSON(map[string]any{"addresses": peerAddrs})})
+}
+
+// getLocalIP returns the first non-loopback IPv4 address
+func (s *P2PServer) getLocalIP() string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue // interface down
+		}
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue // loopback interface
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			ip = ip.To4()
+			if ip == nil {
+				continue // not IPv4
+			}
+			return ip.String()
+		}
+	}
+	return ""
 }
 
 func (s *P2PServer) handlePing(c net.Conn, payload json.RawMessage) error {
@@ -1127,18 +1196,14 @@ func (s *P2PServer) runPeerDiscoveryLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Duration(PeerDiscoveryIntervalSec) * time.Second)
 	defer ticker.Stop()
 
-	log.Printf("P2P peer discovery: starting loop (interval=%ds)", PeerDiscoveryIntervalSec)
-
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("P2P peer discovery: stopping loop")
 			return
 		case <-ticker.C:
 			// Get initial peers from environment configuration
 			initialPeers := s.pm.Peers()
 			if len(initialPeers) == 0 {
-				log.Printf("P2P peer discovery: no initial peers configured")
 				continue
 			}
 
@@ -1155,9 +1220,39 @@ func (s *P2PServer) runPeerDiscoveryLoop(ctx context.Context) {
 				cancel()
 				discoverCount++
 			}
-
-			log.Printf("P2P peer discovery: completed %d discovery iterations, total peers: %d", discoverCount, len(s.pm.Peers()))
 		}
+	}
+}
+
+// runIPUpdateLoop periodically updates the public IP address
+func (s *P2PServer) runIPUpdateLoop(ctx context.Context) {
+	// Check IP every 5 minutes
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.updatePublicIP()
+		}
+	}
+}
+
+// updatePublicIP updates the public IP address if it has changed
+func (s *P2PServer) updatePublicIP() {
+	newIP, err := GetPublicIPWithFallback()
+	if err != nil {
+		// Graceful degradation - continue with existing IP
+		return
+	}
+
+	// Check if IP has changed
+	if newIP != s.publicIP {
+		s.publicIP = newIP
+		s.lastIPUpdate = time.Now()
+		log.Printf("P2P server: public IP updated to %s", newIP)
 	}
 }
 

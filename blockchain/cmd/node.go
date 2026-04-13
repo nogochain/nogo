@@ -67,6 +67,7 @@ type Node struct {
 	httpServer *http.Server
 	orphanPool *utils.OrphanPool
 	validator  *consensus.BlockValidator
+	gossipIntegration *network.GossipIntegration
 
 	networkChainWrapper *networkChainWrapper
 
@@ -122,8 +123,6 @@ func (n *Node) Start() error {
 }
 
 func (n *Node) initializeComponents() error {
-	log := GetGlobalFormatter()
-
 	store, err := storage.NewBoltStore(n.config.DataDir)
 	if err != nil {
 		return fmt.Errorf("open chain store: %w", err)
@@ -142,10 +141,6 @@ func (n *Node) initializeComponents() error {
 		return fmt.Errorf("load blockchain: %w", err)
 	}
 	n.chain = chain
-
-	log.Info("Current Height: %d", chain.GetHeight())
-	tipHash := chain.GetTipHash()
-	log.Info("Current Hash:   %x", tipHash)
 
 	n.orphanPool = utils.NewOrphanPool(100, 1*time.Hour)
 	n.validator = consensus.NewBlockValidator(chain.GetConsensus(), n.config.ChainID, nil)
@@ -183,6 +178,15 @@ func (n *Node) initializeComponents() error {
 	metricsP2PWrapper := newMetricsPeerManager(n.p2pManager)
 
 	n.p2pServer = network.NewP2PServer(n.networkChainWrapper, n.p2pManager, mempoolWrapper, n.config.P2PListenAddr, nodeID)
+
+	// Initialize gossip protocol and integration
+	gossipConfig := network.DefaultGossipConfig()
+	gossipProtocol := network.NewGossipProtocol(n.p2pManager, gossipConfig)
+	gossipIntegrationConfig := network.DefaultIntegrationConfig()
+	n.gossipIntegration = network.NewGossipIntegration(gossipProtocol, n.p2pServer, n.networkChainWrapper, mempoolWrapper, gossipIntegrationConfig)
+	
+	// Set gossip integration to P2P server
+	n.p2pServer.SetGossipIntegration(n.gossipIntegration)
 
 	n.syncLoop = network.NewSyncLoop(
 		n.p2pManager,
@@ -231,7 +235,6 @@ func (n *Node) initializeComponents() error {
 	// ensures the block is broadcast to all P2P peers for network propagation
 	if n.p2pManager != nil {
 		n.chain.SetOnBlockAdded(func(block *core.Block) {
-			log.Printf("[Node] Broadcasting block %d from API (mining pool)", block.GetHeight())
 			n.p2pManager.BroadcastBlock(context.Background(), block)
 		})
 	}
@@ -302,6 +305,15 @@ func (n *Node) startComponents() error {
 	if n.p2pManager != nil {
 		if err := n.p2pManager.Start(n.ctx); err != nil {
 			log.Error("P2P manager start error: %v", err)
+		}
+	}
+
+	// Start gossip integration
+	if n.gossipIntegration != nil {
+		if err := n.gossipIntegration.Start(); err != nil {
+			log.Error("Gossip integration start error: %v", err)
+		} else {
+			log.Info("Gossip integration started successfully")
 		}
 	}
 
@@ -396,6 +408,11 @@ func (n *Node) Shutdown() {
 
 	if n.syncLoop != nil {
 		n.syncLoop.Stop()
+	}
+
+	// Stop gossip integration
+	if n.gossipIntegration != nil {
+		n.gossipIntegration.Stop()
 	}
 
 	if n.p2pManager != nil {

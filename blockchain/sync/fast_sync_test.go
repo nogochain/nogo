@@ -394,7 +394,7 @@ func TestFastSyncEngine_FastSyncWithSnapshot(t *testing.T) {
 		TotalAccounts: 1,
 	}
 	ctx := context.Background()
-	err := fs.FastSyncWithSnapshot(ctx, snapshot)
+	err = fs.FastSyncWithSnapshot(ctx, snapshot)
 	if err == nil {
 		t.Log("FastSyncWithSnapshot succeeded (mock implementation)")
 	}

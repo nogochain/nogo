@@ -4,6 +4,7 @@
 package network
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -31,8 +32,8 @@ type MiningState struct {
 	MiningEfficiency float64
 	ActiveDifficulty uint64
 	HashRateEstimate float64
-	LastBlockMined   uint64    // Height of last successfully mined block
-	TotalBlocksMined uint64    // Total number of blocks mined by this node
+	LastBlockMined   uint64 // Height of last successfully mined block
+	TotalBlocksMined uint64 // Total number of blocks mined by this node
 }
 
 // SyncState represents comprehensive synchronization state
@@ -48,10 +49,10 @@ type SyncState struct {
 	DataConsistency     DataConsistencyLevel
 	NetworkHealth       float64
 	SyncQuality         SyncQualityLevel
-	SyncStartHeight     uint64        // Height at which synchronization started
-	SyncTargetHeight    uint64        // Target height for current sync operation
-	SyncStartTime       time.Time     // When the current sync operation started
-	PeerConnections     int           // Number of active peer connections
+	SyncStartHeight     uint64    // Height at which synchronization started
+	SyncTargetHeight    uint64    // Target height for current sync operation
+	SyncStartTime       time.Time // When the current sync operation started
+	PeerConnections     int       // Number of active peer connections
 }
 
 // ExecutionMode defines bootstrap node operation modes
@@ -72,11 +73,11 @@ type AdaptiveParameters struct {
 	RetryBackoffFactor   float64
 	StabilityThreshold   float64
 	EmergencyModeEnabled bool
-	MiningBatchSize      int             // Size of mining batches
-	RetryDelayBase       time.Duration   // Base retry delay
-	RetryDelayMax        time.Duration   // Maximum retry delay
-	HealthCheckInterval  time.Duration   // Health check interval
-	ConnectionTimeout    time.Duration   // Connection timeout
+	MiningBatchSize      int           // Size of mining batches
+	RetryDelayBase       time.Duration // Base retry delay
+	RetryDelayMax        time.Duration // Maximum retry delay
+	HealthCheckInterval  time.Duration // Health check interval
+	ConnectionTimeout    time.Duration // Connection timeout
 }
 
 // SyncEventType categorizes synchronization events
@@ -108,31 +109,31 @@ type NotifySyncEvent func(eventType SyncEventType, blockHeight, targetHeight uin
 
 // PropagationMetrics tracks block propagation performance
 type PropagationMetrics struct {
-	TotalBlocksPropagated   uint64
-	TotalBlocksQueued       uint64
-	BlocksLost              uint32
-	MinPropagationTime      time.Duration
-	MaxPropagationTime      time.Duration
-	AveragePropagationTime  time.Duration
-	LastPropagationTime     time.Duration
-	ChannelUtilization      map[PriorityLevel]float64
-	LastMetricsUpdate       time.Time
-	HighPriorityPropagated  uint64
+	TotalBlocksPropagated    uint64
+	TotalBlocksQueued        uint64
+	BlocksLost               uint32
+	MinPropagationTime       time.Duration
+	MaxPropagationTime       time.Duration
+	AveragePropagationTime   time.Duration
+	LastPropagationTime      time.Duration
+	ChannelUtilization       map[PriorityLevel]float64
+	LastMetricsUpdate        time.Time
+	HighPriorityPropagated   uint64
 	NormalPriorityPropagated uint64
-	LowPriorityPropagated   uint64
-	AverageSuccessRate      float64
-	AverageReachRatio       float64
-	
+	LowPriorityPropagated    uint64
+	AverageSuccessRate       float64
+	AverageReachRatio        float64
+
 	// Additional fields for success tracking
 	HighPrioritySuccesses   uint64
 	NormalPrioritySuccesses uint64
 	LowPrioritySuccesses    uint64
-	
+
 	// System metrics for comprehensive monitoring
-	SystemStartTime         time.Time
-	ActiveConnectionCount   int32
-	TotalRetries            uint64
-	PeersAvailable          int32
+	SystemStartTime       time.Time
+	ActiveConnectionCount int32
+	TotalRetries          uint64
+	PeersAvailable        int32
 }
 
 // PropagationStatus provides comprehensive propagation monitoring
@@ -389,7 +390,7 @@ func (d *defaultSyncManager) GetSyncStatistics() *SyncStatistics {
 // HealthAssessmentReport provides comprehensive system health evaluation
 type HealthAssessmentReport struct {
 	Timestamp       time.Time
-	OverallScore    float64  // 0.0-1.0 overall health score
+	OverallScore    float64 // 0.0-1.0 overall health score
 	ComponentScores map[string]float64
 	CriticalIssues  []string
 	Warnings        []string
@@ -416,13 +417,13 @@ type ResourceMetrics struct {
 
 // OptimalThresholds defines system operation thresholds
 type OptimalThresholds struct {
-	MaxBlockPropagationTime     time.Duration
-	MinPeerConnections          int
-	MaxNetworkLatency           time.Duration
-	MinSyncSuccessRate          float64
-	MaxResourceUtilization      float64
-	MinBlockValidationRate      float64
-	MaxMempoolSize              int
+	MaxBlockPropagationTime        time.Duration
+	MinPeerConnections             int
+	MaxNetworkLatency              time.Duration
+	MinSyncSuccessRate             float64
+	MaxResourceUtilization         float64
+	MinBlockValidationRate         float64
+	MaxMempoolSize                 int
 	MinTransactionConfirmationRate float64
 }
 
@@ -431,8 +432,8 @@ type TelemetrySnapshot struct {
 	Timestamp         time.Time
 	ActiveConnections int
 	BlockHeight       uint64
-	MemoryUsage      float64
-	CPUUtilization   float64
+	MemoryUsage       float64
+	CPUUtilization    float64
 	NetworkThroughput float64
 	SyncProgress      float64
 }
@@ -441,9 +442,9 @@ type TelemetrySnapshot struct {
 
 // PropagationRateLimiter controls block propagation rate
 type PropagationRateLimiter struct {
-	maxRate    float64
-	allowances map[string]time.Time
-	mu         sync.RWMutex
+	maxRate       float64
+	allowances    map[string]time.Time
+	mu            sync.RWMutex
 	lastBlockTime time.Time
 }
 
@@ -459,14 +460,14 @@ func NewPropagationRateLimiter(maxRate float64) *PropagationRateLimiter {
 func (r *PropagationRateLimiter) Allow(blockID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	
+
 	now := time.Now()
 	if allowance, exists := r.allowances[blockID]; exists {
 		if now.Before(allowance) {
 			return false
 		}
 	}
-	
+
 	r.allowances[blockID] = now.Add(time.Second / time.Duration(r.maxRate))
 	return true
 }
@@ -519,14 +520,14 @@ func NewBlockDeduplicationTracker(window time.Duration) *BlockDeduplicationTrack
 func (b *BlockDeduplicationTracker) IsDuplicate(block *core.Block) bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	
+
 	hash := b.getBlockHash(block)
 	timestamp, exists := b.blockHashes[hash]
-	
+
 	if !exists {
 		return false
 	}
-	
+
 	return time.Since(timestamp) < b.dedupWindow
 }
 
@@ -534,7 +535,7 @@ func (b *BlockDeduplicationTracker) IsDuplicate(block *core.Block) bool {
 func (b *BlockDeduplicationTracker) RegisterBlock(block *core.Block) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	
+
 	hash := b.getBlockHash(block)
 	b.blockHashes[hash] = time.Now()
 }
@@ -544,14 +545,14 @@ func (b *BlockDeduplicationTracker) getBlockHash(block *core.Block) string {
 	if block == nil {
 		return ""
 	}
-	return string(block.GetHeight()) // Simplified hash - real implementation would use actual block hash
+	return fmt.Sprintf("block_%d", block.GetHeight()) // Simplified hash - real implementation would use actual block hash
 }
 
 // CleanupExpired removes expired entries from tracking
 func (b *BlockDeduplicationTracker) CleanupExpired() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	
+
 	now := time.Now()
 	for hash, timestamp := range b.blockHashes {
 		if now.Sub(timestamp) >= b.dedupWindow {

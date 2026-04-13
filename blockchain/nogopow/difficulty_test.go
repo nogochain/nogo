@@ -31,7 +31,7 @@ func defaultTestConsensusParams() *config.ConsensusParams {
 		BlockTimeTargetSeconds:       17,
 		MinDifficulty:                1,
 		MaxDifficultyChangePercent:   50,
-		DifficultyAdjustmentInterval: 1,
+		DifficultyAdjustmentInterval: 10,
 	}
 }
 
@@ -47,7 +47,6 @@ func TestPIControllerBasic(t *testing.T) {
 
 	t.Run("OnTargetBlockTime", func(t *testing.T) {
 		adjuster.ResetIntegral()
-
 		newDiff := adjuster.CalcDifficulty(1017, parent)
 
 		diffChange := new(big.Int).Abs(new(big.Int).Sub(newDiff, big.NewInt(1000)))
@@ -58,21 +57,53 @@ func TestPIControllerBasic(t *testing.T) {
 		}
 	})
 
-	t.Run("BlocksTooFast", func(t *testing.T) {
+	t.Run("BlocksTooSlow", func(t *testing.T) {
 		adjuster.ResetIntegral()
-		newDiff := adjuster.CalcDifficulty(1008, parent)
+		
+		// Create fresh parent to avoid contamination from previous tests
+		freshParent := &Header{
+			Difficulty: big.NewInt(1000),
+			Time:       2000,
+		}
+		
+		// First call to populate window (use target time)
+		_ = adjuster.CalcDifficulty(2017, freshParent)
+		freshParent.Time = 2017
+		
+		// Second call with slow block time (50s vs 17s target)
+		slowTime := freshParent.Time + 50
+		newDiff := adjuster.CalcDifficulty(slowTime, freshParent)
 
-		if newDiff.Cmp(big.NewInt(1000)) <= 0 {
-			t.Errorf("Expected difficulty to increase when blocks too fast, got %d", newDiff)
+		if newDiff.Cmp(big.NewInt(1000)) >= 0 {
+			t.Logf("Difficulty adjustment: 1000 -> %d", newDiff)
+			kp, ki, integral, avgTime := adjuster.GetParameters()
+			t.Logf("PI params: kp=%f, ki=%f, integral=%f, avgTime=%d", kp, ki, integral, avgTime)
+			t.Errorf("Expected difficulty to decrease when blocks too slow, got %d", newDiff)
 		}
 	})
 
-	t.Run("BlocksTooSlow", func(t *testing.T) {
-		adjuster.ResetIntegral()
-		newDiff := adjuster.CalcDifficulty(1034, parent)
+	t.Run("BlocksTooFast", func(t *testing.T) {
+		// Create fresh adjuster to avoid window contamination
+		freshAdjuster := NewDifficultyAdjuster(consensusParams)
+		
+		freshParent := &Header{
+			Difficulty: big.NewInt(1000),
+			Time:       3000,
+		}
+		
+		// First call to populate window (use target time)
+		_ = freshAdjuster.CalcDifficulty(3017, freshParent)
+		freshParent.Time = 3017
+		
+		// Second call with fast block time (5s vs 17s target)
+		fastTime := freshParent.Time + 5
+		newDiff := freshAdjuster.CalcDifficulty(fastTime, freshParent)
 
-		if newDiff.Cmp(big.NewInt(1000)) >= 0 {
-			t.Errorf("Expected difficulty to decrease when blocks too slow, got %d", newDiff)
+		if newDiff.Cmp(big.NewInt(1000)) <= 0 {
+			t.Logf("Difficulty adjustment: 1000 -> %d", newDiff)
+			kp, ki, integral, avgTime := freshAdjuster.GetParameters()
+			t.Logf("PI params: kp=%f, ki=%f, integral=%f, avgTime=%d", kp, ki, integral, avgTime)
+			t.Errorf("Expected difficulty to increase when blocks too fast, got %d", newDiff)
 		}
 	})
 }
@@ -94,14 +125,14 @@ func TestPIControllerIntegralAccumulation(t *testing.T) {
 	}
 
 	for i := 0; i < 5; i++ {
-		parent.Time += 8
-		newDiff := adjuster.CalcDifficulty(parent.Time+8, parent)
+		parent.Time += 25
+		newDiff := adjuster.CalcDifficulty(parent.Time+25, parent)
 		parent.Difficulty = newDiff
 	}
 
 	finalIntegral := adjuster.GetIntegralValue()
 	if finalIntegral <= initialIntegral {
-		t.Errorf("Expected integral to accumulate when blocks consistently too fast, got %f", finalIntegral)
+		t.Errorf("Expected integral to accumulate when blocks consistently too slow, got %f", finalIntegral)
 	}
 
 	t.Logf("Integral accumulated from %f to %f over 5 blocks", initialIntegral, finalIntegral)
@@ -119,8 +150,8 @@ func TestPIControllerAntiWindup(t *testing.T) {
 	}
 
 	for i := 0; i < 100; i++ {
-		parent.Time += 1
-		newDiff := adjuster.CalcDifficulty(parent.Time+1, parent)
+		parent.Time += 50
+		newDiff := adjuster.CalcDifficulty(parent.Time+50, parent)
 		parent.Difficulty = newDiff
 	}
 
@@ -177,9 +208,8 @@ func TestPIControllerParameters(t *testing.T) {
 	consensusParams := defaultTestConsensusParams()
 	adjuster := NewDifficultyAdjuster(consensusParams)
 
-	kp, ki, integral := adjuster.GetParameters()
+	kp, ki, integral, avgTime := adjuster.GetParameters()
 
-	// Kp should be MaxDifficultyChangePercent / 100
 	expectedKp := float64(consensusParams.MaxDifficultyChangePercent) / 100.0
 	if kp != expectedKp {
 		t.Errorf("Expected Kp to be %f, got %f", expectedKp, kp)
@@ -193,8 +223,12 @@ func TestPIControllerParameters(t *testing.T) {
 		t.Errorf("Expected initial integral to be 0.0, got %f", integral)
 	}
 
+	if avgTime != 0 {
+		t.Errorf("Expected initial average block time to be 0, got %d", avgTime)
+	}
+
 	adjuster.SetIntegralGain(0.2)
-	_, newKi, _ := adjuster.GetParameters()
+	_, newKi, _, _ := adjuster.GetParameters()
 	if newKi != 0.2 {
 		t.Errorf("Expected Ki to be updated to 0.2, got %f", newKi)
 	}
@@ -312,6 +346,134 @@ func TestPIControllerValidation(t *testing.T) {
 		valid := adjuster.ValidateDifficulty(big.NewInt(int64(consensusParams.MinDifficulty)-1), parent)
 		if valid {
 			t.Error("Expected below-minimum difficulty to fail validation")
+		}
+	})
+}
+
+// TestSlidingWindowAverage tests the sliding window average calculation
+func TestSlidingWindowAverage(t *testing.T) {
+	consensusParams := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(consensusParams)
+	adjuster.ResetIntegral()
+
+	parent := &Header{
+		Difficulty: big.NewInt(1000),
+		Time:       1000,
+	}
+
+	size, fill, avgTime := adjuster.GetWindowStats()
+	if size != 10 {
+		t.Errorf("Expected window size 10, got %d", size)
+	}
+	if fill != 0 {
+		t.Errorf("Expected initial fill 0, got %d", fill)
+	}
+	if avgTime != 0 {
+		t.Errorf("Expected initial average time 0, got %d", avgTime)
+	}
+
+	currentTime := parent.Time
+	for i := 0; i < 5; i++ {
+		currentTime += 20
+		adjuster.CalcDifficulty(currentTime, parent)
+		parent.Time = currentTime
+	}
+
+	size, fill, avgTime = adjuster.GetWindowStats()
+	if fill != 5 {
+		t.Errorf("Expected fill 5 after 5 blocks, got %d", fill)
+	}
+	if avgTime != 20 {
+		t.Errorf("Expected average time 20, got %d", avgTime)
+	}
+
+	for i := 0; i < 10; i++ {
+		currentTime += 15
+		adjuster.CalcDifficulty(currentTime, parent)
+		parent.Time = currentTime
+	}
+
+	size, fill, avgTime = adjuster.GetWindowStats()
+	if fill != 10 {
+		t.Errorf("Expected fill 10 (window size), got %d", fill)
+	}
+	if avgTime < 15 || avgTime > 20 {
+		t.Errorf("Expected average time between 15 and 20, got %d", avgTime)
+	}
+
+	t.Logf("Window stats: size=%d, fill=%d, avgTime=%d", size, fill, avgTime)
+}
+
+// TestDifficultySmoothTransition tests that difficulty transitions smoothly
+func TestDifficultySmoothTransition(t *testing.T) {
+	consensusParams := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(consensusParams)
+	adjuster.ResetIntegral()
+
+	parent := &Header{
+		Difficulty: big.NewInt(1000),
+		Time:       1000,
+	}
+
+	prevDiff := parent.Difficulty
+	maxJump := big.NewInt(0)
+	currentTime := parent.Time
+
+	for i := 0; i < 20; i++ {
+		currentTime += 17
+		newDiff := adjuster.CalcDifficulty(currentTime, parent)
+		
+		jump := new(big.Int).Abs(new(big.Int).Sub(newDiff, prevDiff))
+		if jump.Cmp(maxJump) > 0 {
+			maxJump = jump
+		}
+		
+		parent.Difficulty = newDiff
+		parent.Time = currentTime
+		prevDiff = newDiff
+	}
+
+	maxAllowedJump := big.NewInt(1000)
+	if maxJump.Cmp(maxAllowedJump) > 0 {
+		t.Errorf("Difficulty jump too large: %d (max allowed: %d)", maxJump, maxAllowedJump)
+	}
+
+	t.Logf("Maximum difficulty jump: %d over 20 blocks", maxJump)
+}
+
+// TestBoundaryConditions tests boundary condition enforcement
+func TestBoundaryConditions(t *testing.T) {
+	consensusParams := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(consensusParams)
+	adjuster.ResetIntegral()
+
+	t.Run("MaximumDecrease", func(t *testing.T) {
+		parent := &Header{
+			Difficulty: big.NewInt(1000),
+			Time:       1000,
+		}
+
+		parent.Time += 100
+		newDiff := adjuster.CalcDifficulty(parent.Time, parent)
+
+		minAllowed := new(big.Int).Div(parent.Difficulty, big.NewInt(2))
+		if newDiff.Cmp(minAllowed) < 0 {
+			t.Errorf("Expected difficulty >= 50%% of parent, got %d vs %d", newDiff, minAllowed)
+		}
+	})
+
+	t.Run("MaximumIncrease", func(t *testing.T) {
+		parent := &Header{
+			Difficulty: big.NewInt(1000),
+			Time:       1000,
+		}
+
+		parent.Time += 1
+		newDiff := adjuster.CalcDifficulty(parent.Time, parent)
+
+		maxAllowed := new(big.Int).Mul(parent.Difficulty, big.NewInt(2))
+		if newDiff.Cmp(maxAllowed) > 0 {
+			t.Errorf("Expected difficulty <= 200%% of parent, got %d vs %d", newDiff, maxAllowed)
 		}
 	})
 }

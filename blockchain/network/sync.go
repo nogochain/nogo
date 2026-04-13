@@ -177,14 +177,11 @@ func (s *SyncLoop) Start(ctx context.Context) error {
 		chain := cp.GetUnderlyingChain()
 		chainSelector := core.NewChainSelector(chain, s.bc)
 		s.forkResolver = NewForkResolutionEngine(chainSelector, s.forkDetector)
-		log.Printf("[Sync] Fork resolution engine initialized (chain_height=%d)", chain.LatestBlock().GetHeight())
 	} else {
-		log.Printf("[Sync] Warning: bc does not provide underlying chain")
 	}
 
 	go s.runSyncLoop()
 
-	log.Printf("[Sync] Sync loop started (fork resolution: dual-path)")
 	return nil
 }
 
@@ -198,8 +195,6 @@ func (s *SyncLoop) Stop() {
 	}
 	s.isSyncing = false
 	s.syncProgress = 0
-
-	log.Printf("[Sync] Sync loop stopped")
 }
 
 // IsSyncing returns whether sync is in progress
@@ -253,7 +248,6 @@ func (s *SyncLoop) IsSynced() bool {
 
 					// If no recent activity (5 minutes), node may be stuck
 					if sinceLastUpdate > StuckNodeThreshold {
-						log.Printf("[Sync] Node appears stuck: no peers, no recent sync activity")
 						return false
 					}
 
@@ -263,8 +257,6 @@ func (s *SyncLoop) IsSynced() bool {
 
 				// We've been isolated for longer than StaleCheckInterval
 				// This is likely a legitimate isolated node
-				log.Printf("[Sync] Warning: node may be isolated (height=%d, no peers for %v)",
-					localHeight, sinceStart)
 				return true
 			}
 		}
@@ -602,7 +594,6 @@ func (s *SyncLoop) performSyncStep() {
 
 	peers := s.pm.GetActivePeers()
 	if len(peers) == 0 {
-		log.Printf("[Sync] No active peers, skipping sync")
 		return
 	}
 
@@ -615,7 +606,6 @@ func (s *SyncLoop) performSyncStep() {
 	for _, peer := range peers {
 		info, err := s.pm.FetchChainInfo(s.ctx, peer)
 		if err != nil {
-			rateLimitedLog("sync_info_"+peer, "[Sync] Failed to get chain info from %s: %v", peer, err)
 			continue
 		}
 		if info.Height > maxPeerHeight {
@@ -625,7 +615,6 @@ func (s *SyncLoop) performSyncStep() {
 	}
 
 	if maxPeerHeight == 0 {
-		rateLimitedLog("sync_no_peer", "[Sync] No peer reported valid height, cannot determine sync status")
 		return
 	}
 
@@ -636,7 +625,6 @@ func (s *SyncLoop) performSyncStep() {
 		s.isSyncing = false
 		s.lastUpdateTime = time.Now()
 		s.mu.Unlock()
-		log.Printf("[Sync] Already synced: local=%d, peer=%d", currentHeight, maxPeerHeight)
 		return
 	}
 
@@ -645,14 +633,9 @@ func (s *SyncLoop) performSyncStep() {
 	s.isSyncing = true
 	s.mu.Unlock()
 
-	// Log and trigger actual sync with best peer
-	log.Printf("[Sync] Need sync: local=%d, peer=%d (%.2f%%) - initiating sync with peer %s",
-		currentHeight, maxPeerHeight, float64(currentHeight)*100/float64(maxPeerHeight), bestPeer)
-
 	// Perform actual sync with the peer
 	if bestPeer != "" {
 		if err := s.SyncWithPeer(s.ctx, bestPeer); err != nil {
-			log.Printf("[Sync] SyncWithPeer failed: %v", err)
 		}
 	}
 }

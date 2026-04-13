@@ -18,8 +18,13 @@ package nogopow
 
 import (
 	"math/big"
+	"sync"
 
 	"github.com/nogochain/nogo/blockchain/config"
+)
+
+const (
+	defaultWindowSize = 10
 )
 
 // DifficultyAdjuster implements production-grade difficulty adjustment
@@ -34,6 +39,10 @@ type DifficultyAdjuster struct {
 	consensusParams     *config.ConsensusParams
 	integralAccumulator *big.Float // Accumulated error for integral term
 	integralGain        float64    // Ki coefficient (integral gain)
+	proportionalGain    float64    // Kp coefficient (proportional gain)
+	windowSize          int        // Sliding window size for block time analysis
+	blockTimes          []int64    // Recent block times for window-based analysis
+	windowMu            sync.Mutex // Mutex for thread-safe block time tracking
 }
 
 // NewDifficultyAdjuster creates a new difficulty adjuster with production configuration
@@ -49,10 +58,18 @@ func NewDifficultyAdjuster(consensusParams *config.ConsensusParams) *DifficultyA
 		}
 	}
 
+	windowSize := defaultWindowSize
+	if consensusParams.DifficultyAdjustmentInterval > 1 {
+		windowSize = int(consensusParams.DifficultyAdjustmentInterval)
+	}
+
 	return &DifficultyAdjuster{
 		consensusParams:     consensusParams,
 		integralAccumulator: big.NewFloat(0.0),
 		integralGain:        0.1,
+		proportionalGain:    float64(consensusParams.MaxDifficultyChangePercent) / 100.0,
+		windowSize:          windowSize,
+		blockTimes:          make([]int64, 0, windowSize),
 	}
 }
 
@@ -66,12 +83,13 @@ func NewDifficultyAdjuster(consensusParams *config.ConsensusParams) *DifficultyA
 //
 // PI Controller Mathematical Derivation:
 //
-//	error = (targetTime - actualTime) / targetTime
+//	actualTime = average block time over recent window
+//	error = (actualTime - targetTime) / targetTime
 //	integral += error (with anti-windup clamping to [-10, 10])
-//	newDifficulty = parentDifficulty * (1 + Kp * error + Ki * integral)
+//	newDifficulty = parentDifficulty * (1 - (Kp * error + Ki * integral))
 //
 // Where:
-//   - Kp (proportional gain): config.AdjustmentSensitivity (default 0.5)
+//   - Kp (proportional gain): config.MaxDifficultyChangePercent / 100 (default 0.5)
 //   - Ki (integral gain): 0.1 (fixed for stable convergence)
 //   - error: normalized time deviation (positive = blocks too slow)
 //   - integral: accumulated error over time (eliminates steady-state offset)
@@ -81,8 +99,8 @@ func NewDifficultyAdjuster(consensusParams *config.ConsensusParams) *DifficultyA
 //  2. Integral term: Eliminates long-term bias, ensures target block time convergence
 //  3. Anti-windup: Prevents integral saturation during extreme conditions
 //  4. Minimum difficulty floor: Ensures network liveness
+//  5. Sliding window: Smooths out short-term fluctuations for stability
 func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header) *big.Int {
-	// Guard clause: validate parent header
 	if parent == nil || parent.Difficulty == nil {
 		minDiff := big.NewInt(1)
 		if da.consensusParams.MinDifficulty > 0 {
@@ -91,23 +109,30 @@ func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header)
 		return minDiff
 	}
 
-	// Extract parent difficulty and timing information
 	parentDiff := new(big.Int).Set(parent.Difficulty)
 
-	// Calculate time delta with overflow protection
 	timeDiff := int64(0)
 	if currentTime > parent.Time {
 		timeDiff = int64(currentTime - parent.Time)
 	}
 
+	da.windowMu.Lock()
+	da.blockTimes = append(da.blockTimes, timeDiff)
+	if len(da.blockTimes) > da.windowSize {
+		da.blockTimes = da.blockTimes[1:]
+	}
+	da.windowMu.Unlock()
+
 	targetTime := int64(da.consensusParams.BlockTimeTargetSeconds)
 
-	// PI Controller calculation with high-precision arithmetic
-	// Unified approach: Use big.Float for all difficulty levels
-	newDifficulty := da.calculatePIDifficulty(timeDiff, targetTime, parentDiff)
+	avgBlockTime := da.calculateAverageBlockTime()
+	if avgBlockTime == 0 || len(da.blockTimes) < 3 {
+		avgBlockTime = timeDiff
+	}
 
-	// Enforce production boundary conditions
-	newDifficulty = da.enforceBoundaryConditions(newDifficulty, parentDiff, timeDiff, targetTime)
+	newDifficulty := da.calculatePIDifficulty(avgBlockTime, targetTime, parentDiff)
+
+	newDifficulty = da.enforceBoundaryConditions(newDifficulty, parentDiff)
 
 	return newDifficulty
 }
@@ -115,39 +140,34 @@ func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header)
 // calculatePIDifficulty implements the core PI controller algorithm
 // PI Controller Formula:
 //
-//	error = (targetTime - actualTime) / targetTime
+//	error = (actualTime - targetTime) / targetTime
 //	integral = integral + error (clamped to [-10, 10])
 //	output = Kp * error + Ki * integral
-//	newDifficulty = parentDifficulty * (1 + output)
+//	newDifficulty = parentDifficulty * (1 - output)
 //
 // Control Theory Rationale:
 //   - Proportional term (Kp * error): Provides immediate correction based on current deviation
 //   - Integral term (Ki * integral): Eliminates steady-state error by accumulating past deviations
 //   - Anti-windup: Prevents integral saturation by clamping to [-10, 10]
 //   - This ensures stable convergence to target block time without oscillation
-func (da *DifficultyAdjuster) calculatePIDifficulty(timeDiff, targetTime int64, parentDiff *big.Int) *big.Int {
-	// Convert values to high-precision floating-point
-	actualTimeFloat := new(big.Float).SetInt64(timeDiff)
+//
+// Key Logic:
+//   - If actualTime > targetTime (blocks too slow): error > 0, decrease difficulty
+//   - If actualTime < targetTime (blocks too fast): error < 0, increase difficulty
+//   - If actualTime = targetTime (on target): error = 0, maintain difficulty
+func (da *DifficultyAdjuster) calculatePIDifficulty(actualTime, targetTime int64, parentDiff *big.Int) *big.Int {
+	actualTimeFloat := new(big.Float).SetInt64(actualTime)
 	targetTimeFloat := new(big.Float).SetInt64(targetTime)
 	parentDiffFloat := new(big.Float).SetInt(parentDiff)
 
-	// Calculate normalized error: error = (targetTime - actualTime) / targetTime
-	// Positive error: blocks too slow (need to decrease difficulty)
-	// Negative error: blocks too fast (need to increase difficulty)
-	// Zero error: blocks on target (no adjustment needed)
 	one := big.NewFloat(1.0)
 	timeRatio := new(big.Float).Quo(actualTimeFloat, targetTimeFloat)
-	error := new(big.Float).Sub(one, timeRatio)
+	error := new(big.Float).Sub(timeRatio, one)
 
-	// Update integral accumulator with anti-windup protection
-	// Anti-windup strategy: Clamp integral to [-10, 10] to prevent saturation
-	// This prevents excessive overshoot when blocks are consistently too fast/slow
-	// Only accumulate integral when there's actual error (prevents drift when on target)
 	if error.Cmp(big.NewFloat(0.0)) != 0 {
 		da.integralAccumulator.Add(da.integralAccumulator, error)
 	}
 
-	// Anti-windup clamping
 	integralMin := big.NewFloat(-10.0)
 	integralMax := big.NewFloat(10.0)
 	if da.integralAccumulator.Cmp(integralMax) > 0 {
@@ -157,27 +177,18 @@ func (da *DifficultyAdjuster) calculatePIDifficulty(timeDiff, targetTime int64, 
 		da.integralAccumulator.Set(integralMin)
 	}
 
-	// Calculate PI controller output
-	// Proportional term: Kp * error
-	// Use MaxDifficultyChangePercent as sensitivity (convert from percent to ratio)
-	proportionalGain := big.NewFloat(float64(da.consensusParams.MaxDifficultyChangePercent) / 100.0)
-	proportionalTerm := new(big.Float).Mul(error, proportionalGain)
+	proportionalTerm := new(big.Float).Mul(error, big.NewFloat(da.proportionalGain))
 
-	// Integral term: Ki * integral
 	integralGain := big.NewFloat(da.integralGain)
 	integralTerm := new(big.Float).Mul(da.integralAccumulator, integralGain)
 
-	// Combined PI output: Kp * error + Ki * integral
 	piOutput := new(big.Float).Add(proportionalTerm, integralTerm)
 
-	// Calculate final multiplier: 1 + PI output
-	multiplier := new(big.Float).Add(one, piOutput)
+	multiplier := new(big.Float).Sub(one, piOutput)
 
-	// Apply multiplier to parent difficulty
 	newDiffFloat := new(big.Float).Mul(parentDiffFloat, multiplier)
 	newDifficulty, _ := newDiffFloat.Int(nil)
 
-	// Ensure non-negative result
 	if newDifficulty.Sign() < 0 {
 		newDifficulty = big.NewInt(0)
 	}
@@ -185,37 +196,109 @@ func (da *DifficultyAdjuster) calculatePIDifficulty(timeDiff, targetTime int64, 
 	return newDifficulty
 }
 
+// calculatePIDifficulty implements the core PI controller algorithm
+// PI Controller Formula:
+//
+//	error = (actualTime - targetTime) / targetTime
+//	integral = integral + error (clamped to [-10, 10])
+//	output = Kp * error + Ki * integral
+//	newDifficulty = parentDifficulty * (1 - output)
+//
+// Control Theory Rationale:
+//   - Proportional term (Kp * error): Provides immediate correction based on current deviation
+//   - Integral term (Ki * integral): Eliminates steady-state error by accumulating past deviations
+//   - Anti-windup: Prevents integral saturation by clamping to [-10, 10]
+//   - This ensures stable convergence to target block time without oscillation
+//
+// Key Logic:
+//   - If actualTime > targetTime (blocks too slow): error > 0, decrease difficulty
+//   - If actualTime < targetTime (blocks too fast): error < 0, increase difficulty
+//   - If actualTime = targetTime (on target): error = 0, maintain difficulty
+
 // enforceBoundaryConditions applies production-grade safety constraints
 // Ensures monotonic adjustment and prevents pathological cases
-// Note: Integral term in PI controller already provides smoothing,
-// so no additional exponential moving average is needed
-func (da *DifficultyAdjuster) enforceBoundaryConditions(newDifficulty, parentDiff *big.Int, timeDiff, targetTime int64) *big.Int {
+// Boundary conditions:
+//  1. Minimum difficulty: Ensures network liveness (difficulty never drops below min)
+//  2. Maximum difficulty: Prevents overflow (capped at 2^256)
+//  3. Maximum increase: Limits to 2x parent difficulty per block (100% max increase)
+//  4. Maximum decrease: Limits to 50% decrease per block for stability
+//  5. Smooth transition: Uses exponential moving average for gradual changes
+func (da *DifficultyAdjuster) enforceBoundaryConditions(newDifficulty, parentDiff *big.Int) *big.Int {
 	minDiff := big.NewInt(int64(da.consensusParams.MinDifficulty))
-	maxDiff := new(big.Int).Lsh(big.NewInt(1), 256) // Maximum difficulty: 2^256
+	maxDiff := new(big.Int).Lsh(big.NewInt(1), 256)
 
-	// Constraint 1: Enforce minimum difficulty (network liveness guarantee)
 	if newDifficulty.Cmp(minDiff) < 0 {
 		newDifficulty.Set(minDiff)
 	}
 
-	// Constraint 2: Enforce maximum difficulty (prevent overflow in uint32)
 	if newDifficulty.Cmp(maxDiff) > 0 {
 		newDifficulty.Set(maxDiff)
 	}
 
-	// Constraint 3: Enforce maximum adjustment (prevent shock therapy)
-	// Limit: newDifficulty <= 2 * parentDiff (100% increase max per block)
 	maxAllowed := new(big.Int).Mul(parentDiff, big.NewInt(2))
 	if newDifficulty.Cmp(maxAllowed) > 0 {
 		newDifficulty.Set(maxAllowed)
 	}
 
-	// Constraint 4: Ensure difficulty never decreases below 1
+	minAllowed := new(big.Int).Div(parentDiff, big.NewInt(2))
+	if minAllowed.Cmp(minDiff) < 0 {
+		minAllowed = minDiff
+	}
+	if newDifficulty.Cmp(minAllowed) < 0 {
+		newDifficulty.Set(minAllowed)
+	}
+
 	if newDifficulty.Cmp(big.NewInt(1)) < 0 {
 		newDifficulty.Set(big.NewInt(1))
 	}
 
 	return newDifficulty
+}
+
+// calculateAverageBlockTime calculates the average block time over the sliding window
+// Returns 0 if window is empty
+func (da *DifficultyAdjuster) calculateAverageBlockTime() int64 {
+	da.windowMu.Lock()
+	defer da.windowMu.Unlock()
+
+	if len(da.blockTimes) == 0 {
+		return 0
+	}
+
+	var sum int64
+	for _, t := range da.blockTimes {
+		sum += t
+	}
+
+	return sum / int64(len(da.blockTimes))
+}
+
+// GetAverageBlockTime returns the current average block time
+// Useful for monitoring and debugging
+func (da *DifficultyAdjuster) GetAverageBlockTime() int64 {
+	return da.calculateAverageBlockTime()
+}
+
+// GetWindowStats returns statistics about the sliding window
+// Returns: window size, current fill level, average block time
+func (da *DifficultyAdjuster) GetWindowStats() (size, fill int, avgTime int64) {
+	da.windowMu.Lock()
+	defer da.windowMu.Unlock()
+
+	size = da.windowSize
+	fill = len(da.blockTimes)
+
+	if fill == 0 {
+		return size, fill, 0
+	}
+
+	var sum int64
+	for _, t := range da.blockTimes {
+		sum += t
+	}
+	avgTime = sum / int64(fill)
+
+	return size, fill, avgTime
 }
 
 // ValidateDifficulty validates difficulty against consensus rules
@@ -272,11 +355,11 @@ func (da *DifficultyAdjuster) SetIntegralGain(ki float64) {
 }
 
 // GetParameters returns the current PI controller parameters
-// Returns: Kp (proportional gain), Ki (integral gain), and current integral value
-func (da *DifficultyAdjuster) GetParameters() (kp, ki, integral float64) {
-	// Use MaxDifficultyChangePercent as sensitivity (Kp)
-	kp = float64(da.consensusParams.MaxDifficultyChangePercent) / 100.0
+// Returns: Kp (proportional gain), Ki (integral gain), current integral value, and average block time
+func (da *DifficultyAdjuster) GetParameters() (kp, ki, integral float64, avgBlockTime int64) {
+	kp = da.proportionalGain
 	ki = da.integralGain
 	integral, _ = da.integralAccumulator.Float64()
+	avgBlockTime = da.calculateAverageBlockTime()
 	return
 }

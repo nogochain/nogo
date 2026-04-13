@@ -5,8 +5,10 @@
 package network
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -544,6 +546,69 @@ func (gp *GossipProtocol) selectPeersForPropagation(msg *GossipMessage) []string
 	return selectedPeers
 }
 
+// BroadcastTransactionToAllPeers broadcasts a transaction to all active peers
+// This ensures maximum propagation even in dynamic IP environments
+func (gp *GossipProtocol) BroadcastTransactionToAllPeers(tx *core.Transaction, origin string) error {
+	if tx == nil {
+		return errors.New("transaction is nil")
+	}
+
+	// Serialize transaction
+	txData, err := serializeTransaction(tx)
+	if err != nil {
+		return fmt.Errorf("failed to serialize transaction: %w", err)
+	}
+
+	// Create gossip message
+	txHash, err := tx.SigningHash()
+	if err != nil {
+		return fmt.Errorf("failed to compute transaction hash: %w", err)
+	}
+	msg := &GossipMessage{
+		ID:        generateMessageID(txHash),
+		Type:      GossipMessageTransaction,
+		Payload:   txData,
+		Priority:  1, // Medium priority for transactions
+		Timestamp: time.Now().UnixNano(),
+		TTL:       8, // Max 8 hops
+		Origin:    origin,
+		Hops:      0,
+	}
+
+	// Add to cache and queue
+	if !gp.messageCache.Add(msg.ID, msg) {
+		return nil // Already seen
+	}
+
+	// Push to priority queue
+	if err := gp.priorityQueue.Push(msg); err != nil {
+		gp.metrics.RecordDropped()
+		return fmt.Errorf("failed to queue message: %w", err)
+	}
+
+	gp.metrics.RecordBroadcast(msg.Type)
+
+	// Also broadcast directly to all active peers to ensure maximum reach
+	activePeers := gp.peerManager.GetActivePeers()
+	if len(activePeers) > 0 {
+		var wg sync.WaitGroup
+		for _, peerID := range activePeers {
+			if peerID != origin {
+				wg.Add(1)
+				go func(pid string) {
+					defer wg.Done()
+					if err := gp.sendToPeer(msg, pid); err != nil {
+						// Ignore errors - gossip queue will handle retries
+					}
+				}(peerID)
+			}
+		}
+		wg.Wait()
+	}
+
+	return nil
+}
+
 // calculateFanout calculates the optimal fanout for current network conditions
 func (gp *GossipProtocol) calculateFanout(availablePeers int, msg *GossipMessage) int {
 	if !gp.config.AdaptiveFanout {
@@ -603,13 +668,33 @@ func (gp *GossipProtocol) selectFanoutPeers(peers []string, fanout int) []string
 
 // sendToPeer sends a message to a specific peer
 func (gp *GossipProtocol) sendToPeer(msg *GossipMessage, peerID string) error {
-	// This would integrate with actual P2P send mechanism
-	// For production, this calls p2pClient.SendMessage()
-
 	// Update metrics
 	gp.metrics.RecordPeerMessage(peerID, msg.Type)
 
-	// Simulated send (replace with actual implementation)
+	// Use P2P client to send gossip message
+	if gp.peerManager != nil && gp.peerManager.client != nil {
+		// Serialize gossip message to JSON
+		msgJSON, err := json.Marshal(msg)
+		if err != nil {
+			log.Printf("GossipProtocol: Failed to serialize message: %v", err)
+			return err
+		}
+
+		// Create envelope for gossip message
+		envelope := p2pEnvelope{
+			Type:    "gossip_message",
+			Payload: msgJSON,
+		}
+
+		// Send message using P2P client
+		var resp struct{}
+		err = gp.peerManager.client.do(context.Background(), peerID, "gossip_message", envelope, &resp, "gossip_message_ack")
+		if err != nil {
+			log.Printf("GossipProtocol: Failed to send message to peer %s: %v", peerID, err)
+			return err
+		}
+	}
+
 	return nil
 }
 

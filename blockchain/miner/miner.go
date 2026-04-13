@@ -19,7 +19,6 @@ package miner
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -281,15 +280,12 @@ func (m *Miner) StartVerification() {
 	defer m.mu.Unlock()
 
 	if m.verifyCancel != nil {
-		logf(colorBrightYellow, "⚠️ ", "Already verifying, skipping new verification start")
 		return
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.verificationCtx = ctx
 	m.verifyCancel = cancel
-
-	logf(colorBlue, "🔄 ", "Verification started, mining paused")
 }
 
 // EndVerification signals that block verification has completed
@@ -308,8 +304,6 @@ func (m *Miner) EndVerification() {
 	case m.verifyDoneCh <- struct{}{}:
 	default:
 	}
-
-	logf(colorBrightGreen, "✅ ", "Verification completed, mining resumed")
 }
 
 // IsVerifying returns true if verification is in progress
@@ -326,7 +320,6 @@ func (m *Miner) InterruptMining() {
 	defer m.miningMu.Unlock()
 
 	if m.isMining && m.miningCancel != nil {
-		logf(colorBrightMagenta, "⛏️ ", "Interrupting ongoing mining operation")
 		m.miningCancel()
 		m.isMining = false
 	}
@@ -339,7 +332,6 @@ func (m *Miner) ResumeMining() {
 
 	m.miningCtx, m.miningCancel = context.WithCancel(context.Background())
 	m.isMining = true
-	logf(colorBrightMagenta, "⛏️ ", "Mining resumed")
 }
 
 // isMiningActive checks if mining context is active
@@ -398,7 +390,6 @@ func (m *Miner) Run(ctx context.Context, interval time.Duration) {
 			// CRITICAL: Pause mining during sync to prevent forks
 			// Check if sync loop is available and currently syncing
 			if m.syncLoop != nil && m.syncLoop.IsSyncing() {
-				logf(colorBlue, "🔄 ", "Pausing mining, node is syncing (prevents fork)")
 				time.Sleep(1 * time.Second) // Sleep before retry
 				continue
 			}
@@ -406,7 +397,6 @@ func (m *Miner) Run(ctx context.Context, interval time.Duration) {
 			// CRITICAL: Wait for chain stability after sync completes
 			// This prevents mining on unstable chain
 			if m.syncLoop != nil && !m.syncLoop.IsSynced() {
-				logf(colorBlue, "🔄 ", "Waiting for chain stability after sync")
 				time.Sleep(1 * time.Second) // Sleep before retry
 				continue
 			}
@@ -449,24 +439,20 @@ func (m *Miner) Stop() error {
 // handleMiningTick handles a single mining tick
 func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 	if m.syncLoop != nil && m.syncLoop.IsSyncing() {
-		logf(colorBlue, "🔄 ", "Pausing mining, node is syncing (prevents fork)")
 		time.Sleep(time.Second)
 		return
 	}
 
 	if m.syncLoop != nil && !m.syncLoop.IsSynced() {
-		logf(colorBlue, "🔄 ", "Waiting for chain stability after sync")
 		time.Sleep(time.Second)
 		return
 	}
 
 	if m.isVerificationActive() {
-		logf(colorBlue, "🔄 ", "Skipping mining tick, verification in progress")
 		return
 	}
 
 	if !m.isMiningActive() {
-		logf(colorYellow, "⚠️ ", "Mining interrupted, skipping tick")
 		return
 	}
 
@@ -503,14 +489,9 @@ func (m *Miner) broadcastBlockAsync(ctx context.Context, block *core.Block) {
 			}
 		}()
 
-		logf(colorCyan, "📡 ", fmt.Sprintf("Broadcasting block %d (%s)", block.GetHeight(), hex.EncodeToString(block.Hash)))
-
 		// Broadcast block to peers via P2P manager
 		if m.pm != nil {
-			peerCount := len(m.pm.Peers())
-			logf(colorCyan, "📡 ", fmt.Sprintf("Starting broadcast to %d peers", peerCount))
 			m.pm.BroadcastBlock(ctx, block)
-			logf(colorBrightGreen, "✅ ", fmt.Sprintf("Broadcast completed height=%d", block.GetHeight()))
 		}
 	}()
 }
@@ -567,25 +548,19 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		peerHeight := getPeerHeight(pm)
 
 		if peerHeight > localHeight {
-			logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Network advanced (local=%d, peer=%d) - aborting to sync", localHeight, peerHeight))
 			return nil, nil
 		}
 
 		if peerHeight == localHeight || peerHeight == 0 {
-			logf(colorBrightMagenta, "⛏️ ", fmt.Sprintf("Competing at height %d (peer=%d), mining immediately", localHeight, peerHeight))
-
 			if config.DefaultBlockPropagationDelayMs > 0 {
 				time.Sleep(time.Duration(config.DefaultBlockPropagationDelayMs) * time.Millisecond)
 
 				newPeerHeight := getPeerHeight(pm)
 				if newPeerHeight > localHeight {
-					logf(colorBrightYellow, "⚠️ ", "Network advanced during propagation delay - aborting")
 					return nil, nil
 				}
 			}
 		}
-	} else {
-		logf(colorCyan, "ℹ️ ", "No P2P configured, mining without network sync")
 	}
 
 	selected, selectedIDs, err := m.bc.SelectMempoolTxs(m.mp, m.maxTxPerBlock)
@@ -599,23 +574,17 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		return nil, nil
 	}
 
-	logf(colorBrightMagenta, "⛏️ ", fmt.Sprintf("Attempting to mine block with %d transactions", len(selected)))
-
 	parentAtMineTime := m.bc.LatestBlock()
 	if parentAtMineTime == nil {
 		logf(colorRed, "❌ ", "No parent block at mining time")
 		return nil, errors.New("no parent block")
 	}
 
-	fmt.Printf("[DEBUG] miner.go: Calling MineTransfers with %d transactions\n", len(selected))
 	b, err := m.bc.MineTransfers(selected)
 	if err != nil {
-		fmt.Printf("[ERROR] miner.go: MineTransfers failed: %v\n", err)
 		logf(colorRed, "❌ ", fmt.Sprintf("Mine failed: %v", err))
 		return nil, err
 	}
-	fmt.Printf("[DEBUG] miner.go: MineTransfers returned block %d, hash=%x\n", b.GetHeight(), b.Hash)
-	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block mined - height=%d, hash=%x", b.GetHeight(), b.Hash))
 
 	// Redundant POW validation removed for the following reasons:
 	// 1. POW already validated by NogoPow engine during Seal
@@ -623,21 +592,12 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 	// 3. This validation is redundant and incomplete
 	latest := m.bc.LatestBlock()
 	if latest == nil || latest.Hash == nil || string(latest.Hash) != string(b.Hash) {
-		logf(colorYellow, "⚠️ ", "Mined block was not added to chain")
 		return nil, nil
 	}
-
-	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block validated and added to chain (height=%d, hash=%x)", b.GetHeight(), b.Hash))
 
 	propagationDelay := calculateAdaptivePropagationDelay(pm)
 	time.Sleep(time.Duration(propagationDelay) * time.Millisecond)
 
-	peerCount := 0
-	if isPeerAPIValid(pm) {
-		peerCount = len(pm.Peers())
-	}
-
-	logf(colorCyan, "📡 ", fmt.Sprintf("Broadcasting block #%d to %d peers", b.GetHeight(), peerCount))
 	go m.broadcastBlock(ctx, b)
 
 	if len(selectedIDs) > 0 {
@@ -668,18 +628,12 @@ func (m *Miner) publishRemoveEvent(txids []string) {
 // broadcastBlock broadcasts the mined block to all peers
 func (m *Miner) broadcastBlock(ctx context.Context, block *core.Block) {
 	if !isPeerAPIValid(m.pm) {
-		logf(colorBrightYellow, "⚠️ ", "No peer manager, skipping broadcast")
 		return
 	}
 
-	logf(colorCyan, "📡 ", fmt.Sprintf("Broadcasting block %d (%s)", block.GetHeight(), hex.EncodeToString(block.Hash)))
-
 	// Broadcast block to peers via P2P manager
 	if m.pm != nil {
-		peerCount := len(m.pm.Peers())
-		logf(colorCyan, "📡 ", fmt.Sprintf("Starting broadcast to %d peers", peerCount))
 		m.pm.BroadcastBlock(ctx, block)
-		logf(colorBrightGreen, "✅ ", fmt.Sprintf("Broadcast completed height=%d", block.GetHeight()))
 	}
 }
 

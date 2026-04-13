@@ -24,16 +24,14 @@ var (
 
 // rateLimitedLog logs a message only once per rate limit window per key
 func rateLimitedLog(key, format string, args ...interface{}) {
+	// 静默处理，不输出日志
 	logRateLimitMu.Lock()
 	last, exists := logRateLimitLast[key]
 	now := time.Now()
 	if !exists || now.Sub(last) >= logRateLimitWindow {
 		logRateLimitLast[key] = now
-		logRateLimitMu.Unlock()
-		log.Printf(format, args...)
-	} else {
-		logRateLimitMu.Unlock()
 	}
+	logRateLimitMu.Unlock()
 }
 
 // p2pConnection represents a persistent P2P connection with metadata
@@ -127,12 +125,16 @@ func (c *P2PClient) getConnection(ctx context.Context, peer string) (*p2pConnect
 	netConn, err := d.DialContext(ctx, "tcp", peer)
 	if err != nil {
 		rateLimitedLog("dial_"+peer, "P2P client: failed to dial %s: %v", peer, err)
+		// Remove stale connection if it exists
+		c.removeConnection(peer)
 		return nil, err
 	}
 
 	// Perform handshake
 	if err := c.performHandshake(netConn); err != nil {
 		netConn.Close()
+		// Remove connection on handshake failure
+		c.removeConnection(peer)
 		return nil, fmt.Errorf("handshake failed: %w", err)
 	}
 
@@ -153,6 +155,7 @@ func (c *P2PClient) getConnection(ctx context.Context, peer string) (*p2pConnect
 	// This ensures lastPing is set and prevents immediate cleanup
 	if err := c.initializeConnection(pc); err != nil {
 		netConn.Close()
+		c.removeConnection(peer)
 		return nil, fmt.Errorf("connection initialization failed: %w", err)
 	}
 
@@ -239,7 +242,6 @@ func (c *P2PClient) initializeConnection(conn *p2pConnection) error {
 	// Just set the lastPing timestamp without sending actual ping
 	// This prevents the connection from being marked as stale immediately
 	conn.lastPing = time.Now()
-	log.Printf("P2P client: connection marked as initialized to %s", conn.peer)
 	return nil
 }
 
@@ -417,9 +419,6 @@ func (c *P2PClient) removeConnection(peer string) {
 	if conn, exists := c.connections[peer]; exists {
 		conn.conn.Close()
 		delete(c.connections, peer)
-		// Add context to help debug why connection was removed
-		log.Printf("P2P client: removed connection to %s (age=%v, lastPing=%v)",
-			peer, time.Since(conn.lastUsed), time.Since(conn.lastPing))
 	}
 	c.connMutex.Unlock()
 }
@@ -435,7 +434,6 @@ func (c *P2PClient) Close() error {
 	for peer, conn := range c.connections {
 		conn.conn.Close()
 		delete(c.connections, peer)
-		log.Printf("P2P client: closed connection to %s", peer)
 	}
 
 	return nil
@@ -606,7 +604,6 @@ func (c *P2PClient) RequestPeers(ctx context.Context, peer string) ([]string, er
 		peers = append(peers, peerAddr)
 	}
 
-	log.Printf("P2P client: received %d peers from %s", len(peers), peer)
 	return peers, nil
 }
 
@@ -695,7 +692,6 @@ func (c *P2PClient) maintainConnections() {
 	for {
 		select {
 		case <-c.ctx.Done():
-			log.Printf("P2P client: connection maintenance shutting down")
 			return
 		case <-ticker.C:
 			c.cleanupStaleConnections()
@@ -726,14 +722,8 @@ func (c *P2PClient) cleanupStaleConnections() {
 	}
 
 	for _, peer := range stalePeers {
-		log.Printf("P2P client: cleaning up stale connection to %s (unused=%v, lastPing=%v)",
-			peer, now.Sub(c.connections[peer].lastUsed), now.Sub(c.connections[peer].lastPing))
 		c.connections[peer].conn.Close()
 		delete(c.connections, peer)
-	}
-
-	if len(stalePeers) > 0 {
-		log.Printf("P2P client: cleaned up %d stale connections", len(stalePeers))
 	}
 }
 
@@ -754,12 +744,8 @@ func (c *P2PClient) sendKeepAlivePings() {
 
 		// Only ping if we haven't pinged in the last 2 minutes
 		if time.Since(conn.lastPing) > 2*time.Minute {
-			log.Printf("P2P client: sending keep-alive ping to %s (last ping %v ago)",
-				conn.peer, time.Since(conn.lastPing))
 			if err := c.sendPing(conn); err != nil {
-				log.Printf("P2P client: ping failed for %s: %v (will retry later)", conn.peer, err)
 				// Don't remove on first failure - let cleanupStaleConnections handle old connections
-				// c.removeConnection(conn.peer)
 			}
 		}
 	}

@@ -299,6 +299,14 @@ func (m *MockBlockchainInterface) AuditChain() error {
 	return nil
 }
 
+func (m *MockBlockchainInterface) CalcNextDifficulty(latest *core.Block, currentTime int64) uint32 {
+	return 1
+}
+
+func (m *MockBlockchainInterface) IsReorgInProgress() bool {
+	return false
+}
+
 func (m *MockBlockchainInterface) TxByID(txid string) (*core.Transaction, *core.TxLocation, bool) {
 	return nil, nil, false
 }

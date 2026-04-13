@@ -152,7 +152,7 @@ func (b *BootstrapBlockPropagator) highPriorityWorker() {
 		}
 
 		// Rate limiting for network stability
-		if !b.rateLimiter.Allow(string(block.GetHeight())) {
+		if !b.rateLimiter.Allow(fmt.Sprintf("block_%d", block.GetHeight())) {
 			log.Printf("[BootstrapPropagator] Rate limit exceeded for high priority block %d", block.GetHeight())
 			b.handleRateLimitedBlock(block, PriorityHigh)
 			continue
@@ -1780,7 +1780,7 @@ func (b *BootstrapBlockPropagator) escalateToEnterpriseIncidentManager(assessmen
 // logCriticalIncidentDetails logs comprehensive incident information
 func (b *BootstrapBlockPropagator) logCriticalIncidentDetails(assessment *HealthAssessmentReport) {
 	log.Printf("CRITICAL INCIDENT DETAILS:")
-	log.Printf("  - Node ID: %s", b.nodeID)
+	log.Printf("  - Node ID: %v", b.nodeID())
 	log.Printf("  - Timestamp: %v", time.Now())
 	log.Printf("  - Overall Score: %.3f", assessment.OverallScore)
 
