@@ -29,6 +29,17 @@ func p2pWriteJSON(w io.Writer, v any) error {
 	return err
 }
 
+// p2pWriteRaw writes pre-serialized JSON bytes with length prefix
+func p2pWriteRaw(w io.Writer, b []byte) error {
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(b)))
+	if _, err := w.Write(lenBuf[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(b)
+	return err
+}
+
 func p2pReadJSON(r io.Reader, maxBytes int) ([]byte, error) {
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {

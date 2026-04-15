@@ -102,12 +102,17 @@ type Mempool interface {
 
 	// Transaction operations
 	Add(tx core.Transaction) (string, error)
+	AddWithoutSignatureValidation(tx core.Transaction) (string, error)
 	Remove(txID string)
 	RemoveMany(txids []string)
 
 	// Mempool state
 	Size() int
 	EntriesSortedByFeeDesc() []MempoolEntry
+
+	// Update methods for P2P received transactions
+	UpdateHeight(height uint64)
+	UpdateConsensus(consensus config.ConsensusParams)
 }
 
 // MempoolEntry represents a mempool transaction entry

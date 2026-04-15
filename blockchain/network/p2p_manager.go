@@ -1,12 +1,15 @@
 package network
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -38,6 +41,15 @@ type P2PPeerManager struct {
 	peerFailCounts map[string]int // Track consecutive connection failures
 	maxPeers       int
 	client         *P2PClient
+	p2pServer      P2PServerBroadcaster // Reference to P2P server for inbound broadcasting
+	httpClient     *http.Client         // HTTP client for fallback broadcast
+	txHandler      TransactionHandler   // Handler for incoming transactions from P2P
+}
+
+// P2PServerBroadcaster is an interface for broadcasting to inbound connections
+type P2PServerBroadcaster interface {
+	BroadcastTransactionToInbound(tx core.Transaction) int
+	GetInboundConnectionCount() int
 }
 
 // Start starts the P2P manager
@@ -117,6 +129,10 @@ func NewP2PPeerManager(chainID uint64, rulesHash string, nodeID string, peers []
 		peerFailCounts: make(map[string]int, len(peers)),
 		maxPeers:       maxPeers,
 		client:         NewP2PClient(chainID, rulesHash, nodeID),
+		p2pServer:      nil, // Will be set later via SetP2PServer
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
 	}
 
 	// Initialize with configured peers (validate format only, allow private IPs)
@@ -133,6 +149,26 @@ func NewP2PPeerManager(chainID uint64, rulesHash string, nodeID string, peers []
 
 	log.Printf("P2P peer manager initialized with maxPeers=%d, initialPeers=%d", maxPeers, len(pm.peers))
 	return pm
+}
+
+// SetP2PServer sets the P2P server reference for inbound broadcasting
+func (pm *P2PPeerManager) SetP2PServer(server P2PServerBroadcaster) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.p2pServer = server
+	log.Printf("P2P peer manager: P2P server reference set for inbound broadcasting")
+}
+
+// SetTransactionHandler sets the handler for incoming transactions from P2P
+func (pm *P2PPeerManager) SetTransactionHandler(handler TransactionHandler) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.txHandler = handler
+	// Also set on the P2P client
+	if pm.client != nil {
+		pm.client.SetTransactionHandler(handler)
+	}
+	log.Printf("P2P peer manager: transaction handler set")
 }
 
 // validatePublicIPFromAddr validates the IP portion of an address (host:port)
@@ -532,11 +568,29 @@ func (pm *P2PPeerManager) FetchAnyBlockByHash(ctx context.Context, hashHex strin
 }
 
 // BroadcastTransaction broadcasts a transaction to all peers concurrently
+// It first tries to broadcast to inbound connections (for peers without listening ports),
+// then broadcasts to active peers via outbound connections
+// Falls back to HTTP broadcast if P2P broadcast fails
 func (pm *P2PPeerManager) BroadcastTransaction(ctx context.Context, tx core.Transaction, _ int) {
 	peers := pm.GetActivePeers()
-	if len(peers) == 0 {
-		log.Printf("P2P peer manager: no active peers to broadcast transaction")
-		return
+	inboundCount := 0
+	if pm.p2pServer != nil {
+		inboundCount = pm.p2pServer.GetInboundConnectionCount()
+	}
+
+	log.Printf("[P2P] ========================================")
+	log.Printf("[P2P] BroadcastTransaction START")
+	log.Printf("[P2P] total_peers=%d, active_peers=%d, inbound_conns=%d", pm.GetPeerCount(), len(peers), inboundCount)
+	log.Printf("[P2P] ========================================")
+
+	// First, broadcast to inbound connections (for peers that don't have P2P listening ports)
+	inboundSuccess := 0
+	if pm.p2pServer != nil && inboundCount > 0 {
+		log.Printf("[P2P] Step 1: Broadcasting to %d inbound connections", inboundCount)
+		inboundSuccess = pm.p2pServer.BroadcastTransactionToInbound(tx)
+		log.Printf("[P2P] Step 1 result: %d/%d inbound broadcasts succeeded", inboundSuccess, inboundCount)
+	} else {
+		log.Printf("[P2P] Step 1: SKIPPED (no inbound connections)")
 	}
 
 	// Print transaction broadcast header with box and color
@@ -553,21 +607,118 @@ func (pm *P2PPeerManager) BroadcastTransaction(ctx context.Context, tx core.Tran
 	fmt.Printf(ColorCyan+"║"+ColorReset+ColorYellow+"  To:   %-54s"+ColorReset+ColorCyan+"║\n"+ColorReset, tx.ToAddress)
 	fmt.Printf(ColorCyan+"║"+ColorReset+ColorYellow+"  Amount: %-52d NOGO"+ColorReset+ColorCyan+"║\n"+ColorReset, tx.Amount)
 	fmt.Printf(ColorCyan+"║"+ColorReset+ColorGreen+"  Peers: %-53d"+ColorReset+ColorCyan+"║\n"+ColorReset, len(peers))
+	fmt.Printf(ColorCyan+"║"+ColorReset+ColorGreen+"  Inbound: %-51d"+ColorReset+ColorCyan+"║\n"+ColorReset, inboundCount)
 	fmt.Printf(ColorCyan + "╚═══════════════════════════════════════════════════════════╝\n" + ColorReset)
 	fmt.Printf("\n")
 
+	log.Printf("[P2P] Broadcasting transaction to %d peers: to=%s, amount=%d, fee=%d, nonce=%d",
+		len(peers), tx.ToAddress, tx.Amount, tx.Fee, tx.Nonce)
+
 	var wg sync.WaitGroup
+	p2pSuccessCount := 0
+	httpSuccessCount := 0
+	var mu sync.Mutex
+
+	// Try P2P broadcast first, then fall back to HTTP if needed
 	for _, peer := range peers {
 		wg.Add(1)
 		go func(p string) {
 			defer wg.Done()
+			
+			// Try P2P broadcast
 			_, err := pm.client.BroadcastTransaction(ctx, p, tx)
 			if err != nil {
-				log.Printf("p2p broadcast tx to %s failed: %v", p, err)
+				log.Printf("[P2P] P2P broadcast to %s failed: %v, trying HTTP fallback", p, err)
+				
+				// Fall back to HTTP broadcast
+				if httpErr := pm.broadcastTransactionViaHTTP(ctx, p, tx); httpErr != nil {
+					log.Printf("[P2P] HTTP fallback to %s also failed: %v", p, httpErr)
+				} else {
+					mu.Lock()
+					httpSuccessCount++
+					mu.Unlock()
+					log.Printf("[P2P] HTTP broadcast to %s succeeded", p)
+				}
+			} else {
+				mu.Lock()
+				p2pSuccessCount++
+				mu.Unlock()
+				log.Printf("[P2P] P2P broadcast to %s succeeded", p)
 			}
 		}(peer)
 	}
 	wg.Wait()
+
+	totalSuccess := p2pSuccessCount + httpSuccessCount + inboundSuccess
+	log.Printf("[P2P] Transaction broadcast complete: P2P=%d, HTTP=%d, Inbound=%d, Total=%d/%d",
+		p2pSuccessCount, httpSuccessCount, inboundSuccess, totalSuccess, len(peers)+inboundCount)
+}
+
+// broadcastTransactionViaHTTP broadcasts a transaction via HTTP API as fallback
+// This is used when P2P broadcast fails (e.g., peer doesn't have P2P listening port)
+func (pm *P2PPeerManager) broadcastTransactionViaHTTP(ctx context.Context, p2pAddr string, tx core.Transaction) error {
+	// Convert P2P address to HTTP address
+	// P2P port is typically 9090, HTTP port is typically 8080
+	host, port, err := net.SplitHostPort(p2pAddr)
+	if err != nil {
+		return fmt.Errorf("invalid peer address: %w", err)
+	}
+	
+	// Try common HTTP ports in order
+	// 1. Use HTTP_PORT environment variable if set
+	// 2. Try P2P port - 1010 (9090 -> 8080)
+	// 3. Try default HTTP port 8080
+	httpPorts := []int{8080} // Default
+	
+	if httpPortEnv := os.Getenv("HTTP_PORT"); httpPortEnv != "" {
+		if p, err := strconv.Atoi(httpPortEnv); err == nil {
+			httpPorts = []int{p}
+		}
+	} else {
+		p2pPort, _ := strconv.Atoi(port)
+		httpPorts = []int{p2pPort - 1010, 8080, p2pPort - 1000} // 9090-1010=8080, fallback to 8080, then 8090
+	}
+	
+	// Marshal transaction
+	txJSON, err := json.Marshal(tx)
+	if err != nil {
+		return fmt.Errorf("marshal transaction: %w", err)
+	}
+	
+	var lastErr error
+	for _, httpPort := range httpPorts {
+		if httpPort <= 0 || httpPort > 65535 {
+			continue
+		}
+		
+		httpAddr := fmt.Sprintf("%s:%d", host, httpPort)
+		
+		// Create HTTP request
+		url := fmt.Sprintf("http://%s/tx", httpAddr)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(txJSON))
+		if err != nil {
+			lastErr = fmt.Errorf("create request: %w", err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		
+		// Send request with short timeout
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("send request to %s: %w", httpAddr, err)
+			continue
+		}
+		defer resp.Body.Close()
+		
+		if resp.StatusCode == http.StatusOK {
+			log.Printf("[P2P] HTTP broadcast to %s succeeded (port=%d)", httpAddr, httpPort)
+			return nil
+		}
+		lastErr = fmt.Errorf("HTTP error from %s: %d", httpAddr, resp.StatusCode)
+	}
+	
+	return lastErr
 }
 
 // BroadcastBlock broadcasts a block to all peers concurrently

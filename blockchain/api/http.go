@@ -1496,9 +1496,14 @@ func (s *Server) handleSubmitTx(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	log.Printf("[HTTP] Transaction added to mempool: txid=%s", txid)
+
+	// Wake up miner to include this transaction in the next block
 	if s.miner != nil {
 		s.miner.Wake()
+		log.Printf("[HTTP] Miner woken up for new transaction")
 	}
+
 	if s.wsHub != nil {
 		if len(evicted) > 0 {
 			s.wsHub.Publish(WSEvent{Type: "mempool_removed", Data: map[string]any{"txIds": evicted, "reason": "rbf"}})
@@ -1516,19 +1521,35 @@ func (s *Server) handleSubmitTx(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	}
-	if s.txGossip && s.peers != nil {
-		hops := 0
-		if raw := strings.TrimSpace(r.Header.Get(relayHopsHeader)); raw != "" {
-			if n, err := strconv.Atoi(raw); err == nil {
-				hops = n
+
+	// Broadcast transaction to all P2P peers
+	// This ensures the transaction propagates through the network for miners to include
+	// Use dynamic peer check instead of static txGossip flag - allows broadcast to dynamically discovered peers
+	if s.peers != nil {
+		activePeers := s.peers.GetActivePeers()
+		log.Printf("[HTTP] Transaction submit: active_peers=%d", len(activePeers))
+		if len(activePeers) > 0 {
+			hops := 0
+			if raw := strings.TrimSpace(r.Header.Get(relayHopsHeader)); raw != "" {
+				if n, err := strconv.Atoi(raw); err == nil {
+					hops = n
+				}
+				hops = hops - 1
+			} else {
+				hops = envInt("TX_GOSSIP_HOPS", 2)
 			}
-			hops = hops - 1
+			log.Printf("[HTTP] Transaction broadcast hops=%d (TX_GOSSIP_HOPS=%d)", hops, envInt("TX_GOSSIP_HOPS", 2))
+			if hops > 0 {
+				log.Printf("[HTTP] Broadcasting transaction to P2P peers: txid=%s, hops=%d, peers=%d", txid, hops, len(activePeers))
+				s.peers.BroadcastTransaction(context.Background(), tx, hops)
+			} else {
+				log.Printf("[HTTP] Skipping broadcast: hops=%d (TX_GOSSIP_HOPS env var or relay header)", hops)
+			}
 		} else {
-			hops = envInt("TX_GOSSIP_HOPS", 2)
+			log.Printf("[HTTP] No active P2P peers, transaction not broadcast (peers may be discovered dynamically)")
 		}
-		if hops > 0 {
-			s.peers.BroadcastTransaction(context.Background(), tx, hops)
-		}
+	} else {
+		log.Printf("[HTTP] No P2P peer manager configured, transaction not broadcast")
 	}
 	_ = writeJSON(w, http.StatusOK, submitTxResponse{
 		Accepted: true,

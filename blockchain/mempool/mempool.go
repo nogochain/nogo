@@ -540,6 +540,86 @@ func (m *Mempool) validateTransaction(tx core.Transaction, p config.ConsensusPar
 	return nil
 }
 
+// validateTransactionBasic performs basic validation without signature verification
+// This is used for P2P received transactions where signature was verified separately
+func (m *Mempool) validateTransactionBasic(tx core.Transaction) error {
+	// Validate transaction fee using FeeChecker (consistent with mining validation)
+	feeChecker := core.NewFeeChecker(core.MinFee, core.MinFeePerByte)
+	if err := feeChecker.ValidateFee(&tx); err != nil {
+		return err
+	}
+
+	if tx.Nonce == 0 {
+		return errors.New("nonce must be > 0")
+	}
+
+	if tx.ChainID != m.chainID && m.chainID != 0 {
+		return fmt.Errorf("wrong chain ID: %d != %d", tx.ChainID, m.chainID)
+	}
+
+	return nil
+}
+
+// AddWithoutSignatureValidation adds a transaction that has been signature-verified elsewhere
+// This is used for P2P received transactions where the signature was verified with legacy method
+func (m *Mempool) AddWithoutSignatureValidation(tx core.Transaction) (string, error) {
+	txid, err := core.TxIDHex(tx)
+	if err != nil {
+		return "", fmt.Errorf("calculate txid: %w", err)
+	}
+
+	fromAddr, err := tx.FromAddress()
+	if err != nil {
+		return "", fmt.Errorf("get from address: %w", err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.entries[txid]; ok {
+		return txid, errors.New("duplicate transaction")
+	}
+
+	if existingID, ok := m.bySenderNonce[fromAddr][tx.Nonce]; ok {
+		return existingID, errors.New("nonce already in mempool")
+	}
+
+	if err := m.validateTransactionBasic(tx); err != nil {
+		return "", fmt.Errorf("validation failed: %w", err)
+	}
+
+	if m.isFull() {
+		lowest := m.lowestFeeEntry()
+		if lowest == "" {
+			return "", errors.New("mempool full")
+		}
+		m.evictWithDependents(lowest)
+	}
+
+	txSize := estimateTxSize(tx)
+	if m.totalSize+txSize > m.maxTotalSize {
+		return "", errors.New("mempool size limit exceeded")
+	}
+
+	feeRate := float64(tx.Fee) / float64(txSize)
+	entry := &mempoolEntry{
+		tx:        tx,
+		txID:      txid,
+		received:  time.Now(),
+		size:      txSize,
+		feeRate:   feeRate,
+		dependsOn: make(map[string]struct{}),
+		children:  make(map[string]struct{}),
+	}
+
+	m.entries[txid] = entry
+	m.indexEntry(fromAddr, tx.Nonce, txid)
+	m.byFee.push(entry)
+	m.totalSize += txSize
+
+	return txid, nil
+}
+
 // isFull checks if the mempool is at capacity
 func (m *Mempool) isFull() bool {
 	return len(m.entries) >= m.maxSize || m.totalSize >= m.maxTotalSize

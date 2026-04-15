@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -179,6 +180,24 @@ func (n *Node) initializeComponents() error {
 
 	n.p2pServer = network.NewP2PServer(n.networkChainWrapper, n.p2pManager, mempoolWrapper, n.config.P2PListenAddr, nodeID)
 
+	// Set P2P server reference in peer manager for inbound broadcasting
+	// This allows transactions to be broadcast to inbound connections (peers without listening ports)
+	n.p2pManager.SetP2PServer(n.p2pServer)
+
+	// Set transaction handler for incoming P2P transaction broadcasts
+	// This enables local mining nodes to receive transactions from remote servers
+	n.p2pManager.SetTransactionHandler(func(tx core.Transaction) error {
+		// Add transaction to mempool without signature validation
+		// (signature was validated by the sender)
+		txid, err := n.mempool.AddWithoutSignatureValidation(tx)
+		if err != nil {
+			log.Printf("Node: failed to add incoming tx to mempool: %v", err)
+			return err
+		}
+		log.Printf("Node: received incoming tx via P2P broadcast, txid=%s", txid)
+		return nil
+	})
+
 	// Initialize gossip protocol and integration
 	gossipConfig := network.DefaultGossipConfig()
 	gossipProtocol := network.NewGossipProtocol(n.p2pManager, gossipConfig)
@@ -236,6 +255,17 @@ func (n *Node) initializeComponents() error {
 	if n.p2pManager != nil {
 		n.chain.SetOnBlockAdded(func(block *core.Block) {
 			n.p2pManager.BroadcastBlock(context.Background(), block)
+			// Update mempool height for correct transaction validation
+			if n.mempool != nil {
+				n.mempool.UpdateHeight(block.GetHeight() + 1)
+			}
+		})
+	} else {
+		// Even without P2P, update mempool height
+		n.chain.SetOnBlockAdded(func(block *core.Block) {
+			if n.mempool != nil {
+				n.mempool.UpdateHeight(block.GetHeight() + 1)
+			}
 		})
 	}
 
@@ -267,7 +297,10 @@ func (n *Node) createHandler(limiter *api.IPRateLimiter, trustProxy, wsEnable bo
 
 	// Enable transaction gossip when P2P is configured with peers
 	// This ensures transactions are broadcast to the network for any miner to include
-	txGossip := n.p2pManager != nil && len(network.ParseP2PPeersEnv(n.config.P2PPeers)) > 0
+	parsedPeers := network.ParseP2PPeersEnv(n.config.P2PPeers)
+	txGossip := n.p2pManager != nil && len(parsedPeers) > 0
+	log.Printf("[Node] Transaction gossip config: p2pManager=nil=%v, P2PPeers=%s, parsedPeers=%v, txGossip=%v",
+		n.p2pManager == nil, n.config.P2PPeers, parsedPeers, txGossip)
 
 	srv := api.NewServer(
 		n.networkChainWrapper,

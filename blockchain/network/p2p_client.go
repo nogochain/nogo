@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +45,11 @@ type p2pConnection struct {
 	chainID     uint64
 	nodeID      string
 	protocolVer uint32
+
+	// For handling async messages from server
+	responseCh   chan *p2pEnvelope // Channel for request responses
+	incomingMsgCh chan *p2pEnvelope // Channel for server-pushed messages
+	readErrCh    chan error         // Channel for read errors
 }
 
 // isStale returns true if connection is too old or hasn't been used recently
@@ -53,6 +59,10 @@ func (pc *p2pConnection) isStale() bool {
 	return now.Sub(pc.lastUsed) > 5*time.Minute || now.Sub(pc.lastPing) > 3*time.Minute
 }
 
+// TransactionHandler is a callback for handling received transactions
+type TransactionHandler func(tx core.Transaction) error
+
+// P2PClient handles P2P client connections
 type P2PClient struct {
 	chainID       uint64
 	rulesHash     string
@@ -69,12 +79,21 @@ type P2PClient struct {
 	connections  map[string]*p2pConnection
 	connPoolSize int
 
+	// Transaction handler for incoming transactions
+	txHandler TransactionHandler
+
 	// Background goroutine management
 	wg     sync.WaitGroup
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
+// SetTransactionHandler sets the callback for handling incoming transactions
+func (c *P2PClient) SetTransactionHandler(handler TransactionHandler) {
+	c.txHandler = handler
+}
+
+// NewP2PClient creates a new P2P client
 func NewP2PClient(chainID uint64, rulesHash string, nodeID string) *P2PClient {
 	if strings.TrimSpace(nodeID) == "" {
 		nodeID = "unknown"
@@ -146,14 +165,17 @@ func (c *P2PClient) getConnection(ctx context.Context, peer string) (*p2pConnect
 	// Create persistent connection object
 	now := time.Now()
 	pc := &p2pConnection{
-		conn:        netConn,
-		peer:        peer,
-		lastUsed:    now,
-		lastPing:    now, // Initialize to current time to prevent immediate expiration
-		handshakeOK: true,
-		chainID:     c.chainID,
-		nodeID:      c.nodeID,
-		protocolVer: 1,
+		conn:          netConn,
+		peer:          peer,
+		lastUsed:      now,
+		lastPing:      now, // Initialize to current time to prevent immediate expiration
+		handshakeOK:   true,
+		chainID:       c.chainID,
+		nodeID:        c.nodeID,
+		protocolVer:   1,
+		responseCh:    make(chan *p2pEnvelope, 1),
+		incomingMsgCh: make(chan *p2pEnvelope, 10),
+		readErrCh:     make(chan error, 1),
 	}
 
 	// Send initial ping-pong to confirm connection is alive
@@ -163,6 +185,14 @@ func (c *P2PClient) getConnection(ctx context.Context, peer string) (*p2pConnect
 		c.removeConnection(peer)
 		return nil, fmt.Errorf("connection initialization failed: %w", err)
 	}
+
+	// Start background reader goroutine to handle incoming messages
+	c.wg.Add(1)
+	go c.connectionReader(pc)
+
+	// Start message handler goroutine
+	c.wg.Add(1)
+	go c.handleIncomingMessages(pc)
 
 	// Store in connection pool
 	c.connMutex.Lock()
@@ -273,9 +303,6 @@ func (c *P2PClient) do(ctx context.Context, peer string, reqType string, reqPayl
 		return err
 	}
 
-	// Set deadline for this operation
-	_ = conn.conn.SetDeadline(time.Now().Add(c.ioTimeout))
-
 	// Send request (only log at debug level)
 	var payload json.RawMessage
 	if reqPayload != nil {
@@ -284,6 +311,9 @@ func (c *P2PClient) do(ctx context.Context, peer string, reqType string, reqPayl
 	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
 		log.Printf("[P2PClient.do] Sending request type=%s payload=%s to %s", reqType, string(payload), peer)
 	}
+
+	// Set write deadline
+	_ = conn.conn.SetWriteDeadline(time.Now().Add(c.ioTimeout))
 	if err := p2pWriteJSON(conn.conn, p2pEnvelope{Type: reqType, Payload: payload}); err != nil {
 		log.Printf("[P2PClient.do] Write failed to %s: %v - removing stale connection and retrying", peer, err)
 		// Connection is dead - remove it and retry with new connection
@@ -296,72 +326,60 @@ func (c *P2PClient) do(ctx context.Context, peer string, reqType string, reqPayl
 			return fmt.Errorf("write to %s failed: %w, reconnect failed: %w", peer, err, err2)
 		}
 
-		_ = conn2.conn.SetDeadline(time.Now().Add(c.ioTimeout))
+		_ = conn2.conn.SetWriteDeadline(time.Now().Add(c.ioTimeout))
 		if err2 := p2pWriteJSON(conn2.conn, p2pEnvelope{Type: reqType, Payload: payload}); err2 != nil {
 			log.Printf("[P2PClient.do] Retry write also failed: %v", err2)
 			c.removeConnection(peer)
 			return fmt.Errorf("write to %s failed after retry: %w", peer, err2)
 		}
 		conn = conn2 // Use new connection for reading
-		goto readResponse
 	}
 
-readResponse:
-	// Read response (only log at debug level to reduce noise)
+	// Wait for response from channel
 	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
 		log.Printf("[P2PClient.do] Waiting for response from %s", peer)
 	}
-	raw, err := p2pReadJSON(conn.conn, c.maxMsgBytes)
-	if err != nil {
-		log.Printf("[P2PClient.do] Read failed from %s: %v - removing stale connection and retrying", peer, err)
-		// Connection is dead - remove it and retry with new connection
+
+	timeout := time.NewTimer(c.ioTimeout)
+	defer timeout.Stop()
+
+	select {
+	case <-timeout.C:
+		log.Printf("[P2PClient.do] Timeout waiting for response from %s", peer)
 		c.removeConnection(peer)
-
-		// Retry with new connection - need to resend request
-		log.Printf("[P2PClient.do] Retrying request with new connection to %s", peer)
-		conn2, err2 := c.getConnection(ctx, peer)
-		if err2 != nil {
-			return fmt.Errorf("read from %s failed: %w, reconnect failed: %w", peer, err, err2)
-		}
-
-		_ = conn2.conn.SetDeadline(time.Now().Add(c.ioTimeout))
-		// Resend the request
-		if err2 := p2pWriteJSON(conn2.conn, p2pEnvelope{Type: reqType, Payload: payload}); err2 != nil {
-			log.Printf("[P2PClient.do] Retry write failed: %v", err2)
+		return fmt.Errorf("timeout waiting for response from %s", peer)
+	case readErr := <-conn.readErrCh:
+		log.Printf("[P2PClient.do] Read error from %s: %v", peer, readErr)
+		c.removeConnection(peer)
+		return fmt.Errorf("read error from %s: %w", peer, readErr)
+	case env, ok := <-conn.responseCh:
+		if !ok {
+			log.Printf("[P2PClient.do] Response channel closed for %s", peer)
 			c.removeConnection(peer)
-			return fmt.Errorf("write to %s failed on retry: %w", peer, err2)
+			return fmt.Errorf("response channel closed for %s", peer)
 		}
 
-		raw, err = p2pReadJSON(conn2.conn, c.maxMsgBytes)
-		if err != nil {
-			log.Printf("[P2PClient.do] Retry read also failed: %v", err)
-			c.removeConnection(peer)
-			return fmt.Errorf("read from %s failed after retry: %w", peer, err)
+		// Only log response at debug level to reduce noise
+		if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
+			log.Printf("[P2PClient.do] Received response type=%s from %s, payload=%s", env.Type, peer, string(mustJSON(env.Payload)))
 		}
-	}
 
-	var env p2pEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("unmarshal response from %s failed: %w", peer, err)
-	}
-
-	// Only log response at debug level to reduce noise
-	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
-		log.Printf("[P2PClient.do] Received response type=%s from %s, payload=%s", env.Type, peer, string(mustJSON(env.Payload)))
-	}
-
-	if expectedRespType != "" && env.Type != expectedRespType {
-		if env.Type == "not_found" {
-			return errors.New("not found")
+		if expectedRespType != "" && env.Type != expectedRespType {
+			if env.Type == "not_found" {
+				return errors.New("not found")
+			}
+			return fmt.Errorf("unexpected response type from %s: %s (expected %s)", peer, env.Type, expectedRespType)
 		}
-		return fmt.Errorf("unexpected response type from %s: %s (expected %s)", peer, env.Type, expectedRespType)
-	}
 
-	if resp != nil {
-		return json.Unmarshal(env.Payload, resp)
+		if resp != nil {
+			return json.Unmarshal(env.Payload, resp)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.ctx.Done():
+		return errors.New("client shutting down")
 	}
-
-	return nil
 }
 
 // doWithNewConnection performs a request-response exchange with a dedicated connection.
@@ -478,13 +496,18 @@ func (c *P2PClient) RequestTransaction(ctx context.Context, peer string, tx core
 func (c *P2PClient) BroadcastTransaction(ctx context.Context, peer string, tx core.Transaction) (string, error) {
 	txJSON, err := json.Marshal(tx)
 	if err != nil {
+		log.Printf("[P2PClient] Failed to marshal transaction: %v", err)
 		return "", err
 	}
+	log.Printf("[P2PClient] Broadcasting tx to %s: type=%s, to=%s, amount=%d, nonce=%d",
+		peer, tx.Type, tx.ToAddress, tx.Amount, tx.Nonce)
 	var resp p2pTxResponse
 	err = c.do(ctx, peer, "tx_broadcast", p2pTransactionBroadcast{TxHex: string(txJSON)}, &resp, "tx_broadcast_ack")
 	if err != nil {
+		log.Printf("[P2PClient] Broadcast tx to %s failed: %v", peer, err)
 		return "", err
 	}
+	log.Printf("[P2PClient] Broadcast tx to %s succeeded: txid=%s", peer, resp.TxID)
 	return resp.TxID, nil
 }
 
@@ -800,5 +823,173 @@ func (c *P2PClient) sendKeepAlivePings() {
 				// Don't remove on first failure - let cleanupStaleConnections handle old connections
 			}
 		}
+	}
+}
+
+// connectionReader continuously reads messages from a connection
+func (c *P2PClient) connectionReader(pc *p2pConnection) {
+	defer c.wg.Done()
+	defer close(pc.readErrCh)
+	defer close(pc.incomingMsgCh)
+	defer close(pc.responseCh)
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+		}
+
+		// Set a reasonable read deadline
+		_ = pc.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+		raw, err := p2pReadJSON(pc.conn, c.maxMsgBytes)
+		if err != nil {
+			// Check if it's a timeout - then continue waiting
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			// Real error - signal and exit
+			select {
+			case pc.readErrCh <- err:
+			case <-c.ctx.Done():
+			}
+			return
+		}
+
+		var env p2pEnvelope
+		if err := json.Unmarshal(raw, &env); err != nil {
+			log.Printf("P2P Client: failed to unmarshal message from %s: %v", pc.peer, err)
+			continue
+		}
+
+		// Route message based on type
+		switch env.Type {
+		case "tx_broadcast":
+			// Server-pushed transaction - handle directly
+			log.Printf("P2P Client: received tx_broadcast from %s", pc.peer)
+			select {
+			case pc.incomingMsgCh <- &env:
+			case <-c.ctx.Done():
+				return
+			default:
+				log.Printf("P2P Client: incoming message channel full, dropping message from %s", pc.peer)
+			}
+		case "block_broadcast":
+			// Server-pushed block
+			log.Printf("P2P Client: received block_broadcast from %s", pc.peer)
+			select {
+			case pc.incomingMsgCh <- &env:
+			case <-c.ctx.Done():
+				return
+			default:
+				log.Printf("P2P Client: incoming message channel full, dropping message from %s", pc.peer)
+			}
+		default:
+			// Response to a request - send to response channel
+			select {
+			case pc.responseCh <- &env:
+			case <-c.ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				// No one waiting for response, discard
+				if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
+					log.Printf("P2P Client: no waiter for response type=%s from %s", env.Type, pc.peer)
+				}
+			}
+		}
+	}
+}
+
+// handleIncomingMessages processes server-pushed messages
+func (c *P2PClient) handleIncomingMessages(pc *p2pConnection) {
+	defer c.wg.Done()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case env, ok := <-pc.incomingMsgCh:
+			if !ok {
+				return
+			}
+			c.processIncomingMessage(pc, env)
+		}
+	}
+}
+
+// processIncomingMessage handles a single incoming message
+func (c *P2PClient) processIncomingMessage(pc *p2pConnection, env *p2pEnvelope) {
+	switch env.Type {
+	case "tx_broadcast":
+		c.handleIncomingTransaction(pc, env)
+	case "block_broadcast":
+		c.handleIncomingBlock(pc, env)
+	default:
+		log.Printf("P2P Client: unknown incoming message type=%s from %s", env.Type, pc.peer)
+	}
+}
+
+// handleIncomingTransaction processes an incoming transaction broadcast
+func (c *P2PClient) handleIncomingTransaction(pc *p2pConnection, env *p2pEnvelope) {
+	var txBroadcast p2pTransactionBroadcast
+	if err := json.Unmarshal(env.Payload, &txBroadcast); err != nil {
+		log.Printf("P2P Client: failed to unmarshal tx_broadcast: %v", err)
+		return
+	}
+
+	var tx core.Transaction
+	if err := json.Unmarshal([]byte(txBroadcast.TxHex), &tx); err != nil {
+		log.Printf("P2P Client: failed to unmarshal transaction: %v", err)
+		return
+	}
+
+	log.Printf("P2P Client: received transaction broadcast: type=%s, to=%s, amount=%d, nonce=%d",
+		tx.Type, tx.ToAddress, tx.Amount, tx.Nonce)
+
+	// Call the transaction handler if set
+	if c.txHandler != nil {
+		if err := c.txHandler(tx); err != nil {
+			log.Printf("P2P Client: transaction handler error: %v", err)
+		}
+	} else {
+		log.Printf("P2P Client: no transaction handler set, transaction ignored")
+	}
+
+	// Send ack back to server
+	ack := p2pEnvelope{
+		Type:    "tx_broadcast_ack",
+		Payload: mustJSON(p2pTxResponse{TxID: tx.GetID()}),
+	}
+	_ = pc.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if err := p2pWriteJSON(pc.conn, ack); err != nil {
+		log.Printf("P2P Client: failed to send tx_broadcast_ack: %v", err)
+	}
+}
+
+// handleIncomingBlock processes an incoming block broadcast
+func (c *P2PClient) handleIncomingBlock(pc *p2pConnection, env *p2pEnvelope) {
+	var blockBroadcast p2pBlockBroadcast
+	if err := json.Unmarshal(env.Payload, &blockBroadcast); err != nil {
+		log.Printf("P2P Client: failed to unmarshal block_broadcast: %v", err)
+		return
+	}
+
+	var block core.Block
+	if err := json.Unmarshal([]byte(blockBroadcast.BlockHex), &block); err != nil {
+		log.Printf("P2P Client: failed to unmarshal block: %v", err)
+		return
+	}
+
+	log.Printf("P2P Client: received block broadcast: height=%d, hash=%x", block.Height, block.Hash)
+
+	// Send ack back to server
+	ack := p2pEnvelope{
+		Type:    "block_broadcast_ack",
+		Payload: mustJSON(p2pBlockResponse{Hash: hex.EncodeToString(block.Hash)}),
+	}
+	_ = pc.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if err := p2pWriteJSON(pc.conn, ack); err != nil {
+		log.Printf("P2P Client: failed to send block_broadcast_ack: %v", err)
 	}
 }

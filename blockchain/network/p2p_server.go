@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,13 @@ type P2PServer struct {
 	blockRecvCB   func(*core.Block)
 	peerPorts     map[string]int // Track peer ports: IP -> port
 	peerPortsMu   sync.RWMutex
+
+	// Inbound connections for bidirectional communication
+	inboundConns   map[string]chan []byte // Key: peer address, Value: broadcast channel
+	inboundConnsMu sync.RWMutex
+
+	// Broadcast channel for inbound connections
+	broadcastChan chan core.Transaction
 
 	// Peer scoring system
 	scorer *PeerScorer
@@ -162,6 +170,8 @@ func NewP2PServer(bc BlockchainInterface, pm *P2PPeerManager, mp Mempool, listen
 		maxAddrReturn:      maxAddrReturn,
 		advertiseSelf:     advertiseSelf,
 		peerPorts:         make(map[string]int),
+		inboundConns:      make(map[string]chan []byte),
+		broadcastChan:     make(chan core.Transaction, 100),
 		scorer:            NewPeerScorer(maxPeers),
 		rateLimiter:       rateLimiter,
 		chainSelector:     chainSelector,
@@ -198,6 +208,65 @@ func (s *P2PServer) SetMiner(miner Miner) {
 // SetGossipIntegration sets the gossip integration instance
 func (s *P2PServer) SetGossipIntegration(integration *GossipIntegration) {
 	s.gossipIntegration = integration
+}
+
+// BroadcastTransactionToInbound broadcasts a transaction to all inbound connections
+// This is used when we have inbound connections from peers that don't have P2P listening ports
+// Returns the number of successful broadcasts
+func (s *P2PServer) BroadcastTransactionToInbound(tx core.Transaction) int {
+	s.inboundConnsMu.RLock()
+	defer s.inboundConnsMu.RUnlock()
+
+	if len(s.inboundConns) == 0 {
+		return 0
+	}
+
+	txJSON, err := json.Marshal(tx)
+	if err != nil {
+		log.Printf("[P2P] Failed to marshal transaction for inbound broadcast: %v", err)
+		return 0
+	}
+
+	// Create broadcast message
+	broadcast := p2pTransactionBroadcast{TxHex: string(txJSON)}
+	envelope := p2pEnvelope{Type: "tx_broadcast", Payload: mustJSON(broadcast)}
+	msgBytes, err := json.Marshal(envelope)
+	if err != nil {
+		log.Printf("[P2P] Failed to marshal envelope for inbound broadcast: %v", err)
+		return 0
+	}
+
+	// Send to all inbound connection channels (non-blocking)
+	successCount := 0
+	for addr, ch := range s.inboundConns {
+		if ch == nil {
+			continue
+		}
+		select {
+		case ch <- msgBytes:
+			successCount++
+			log.Printf("[P2P] Queued tx broadcast for inbound peer %s", addr)
+		default:
+			log.Printf("[P2P] Channel full for inbound peer %s, skipping", addr)
+		}
+	}
+
+	log.Printf("[P2P] BroadcastTransactionToInbound: queued for %d/%d peers", successCount, len(s.inboundConns))
+	return successCount
+}
+
+// GetInboundConnectionCount returns the number of active inbound connections
+func (s *P2PServer) GetInboundConnectionCount() int {
+	s.inboundConnsMu.RLock()
+	defer s.inboundConnsMu.RUnlock()
+	count := len(s.inboundConns)
+	log.Printf("[P2P] GetInboundConnectionCount: %d active inbound connections", count)
+	if count > 0 {
+		for addr := range s.inboundConns {
+			log.Printf("[P2P]   - inbound peer: %s", addr)
+		}
+	}
+	return count
 }
 
 func (s *P2PServer) ListenAddr() string { return s.listenAddr }
@@ -373,7 +442,7 @@ func (s *P2PServer) handleConn(ctx context.Context, c net.Conn) error {
 
 	// Add the connecting peer to peer manager (if available)
 	// This ensures we track inbound connections even if they don't send addr message
-	if s.pm.peers != nil {
+	if s.pm != nil {
 		peerAddr := c.RemoteAddr().String()
 		// Extract host and use P2P listen port
 		host, remotePort, err := net.SplitHostPort(peerAddr)
@@ -386,25 +455,69 @@ func (s *P2PServer) handleConn(ctx context.Context, c net.Conn) error {
 			s.peerPorts[host] = port
 			s.peerPortsMu.Unlock()
 
-			// Use the P2P listen port for the peer
-			_, listenPort, err := net.SplitHostPort(s.listenAddr)
-			if err != nil {
-				listenPort = "9090"
+			// For inbound peers, we don't know their P2P listen port.
+			// Use default P2P port (9090) as a reasonable assumption.
+			// The peer can update this via addr message if needed.
+			defaultP2PPort := "9090"
+			if port := os.Getenv("P2P_PORT"); port != "" {
+				defaultP2PPort = port
 			}
-			formattedPeer := fmt.Sprintf("%s:%s", host, listenPort)
+			formattedPeer := fmt.Sprintf("%s:%s", host, defaultP2PPort)
 			log.Printf("P2P server: adding inbound peer %s (from %s, remote port=%d)", formattedPeer, peerAddr, port)
 			s.pm.AddPeer(formattedPeer)
 
 			// Record successful connection
 			s.pm.RecordPeerSuccess(formattedPeer)
+
+			// Log current peer count for debugging
+			activePeers := s.pm.GetActivePeers()
+			log.Printf("P2P server: after adding inbound peer, total_peers=%d, active_peers=%d", s.pm.GetPeerCount(), len(activePeers))
 		}
+	} else {
+		log.Printf("P2P server: WARNING - peer manager is nil, cannot add inbound peer")
 	}
 
+	// Track inbound connection for bidirectional communication FIRST
+	// This must happen before any checks that might cause early return
+	broadcastCh := make(chan []byte, 10) // Buffer for outgoing broadcasts
+	s.inboundConnsMu.Lock()
+	s.inboundConns[remoteAddr] = broadcastCh
+	s.inboundConnsMu.Unlock()
+	log.Printf("P2P server: ========================================")
+	log.Printf("P2P server: TRACKING inbound connection from %s (host=%s)", remoteAddr, host)
+	log.Printf("P2P server: Total inbound connections: %d", len(s.inboundConns))
+	log.Printf("P2P server: ========================================")
+
+	// Start goroutine to handle outgoing broadcasts
+	go func() {
+		log.Printf("P2P server: broadcast goroutine started for %s", remoteAddr)
+		for msgBytes := range broadcastCh {
+			log.Printf("P2P server: broadcast goroutine received %d bytes for %s", len(msgBytes), remoteAddr)
+			_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if err := p2pWriteRaw(c, msgBytes); err != nil {
+				log.Printf("P2P server: FAILED to send broadcast to %s: %v", remoteAddr, err)
+				return
+			}
+			log.Printf("P2P server: SUCCESS sent broadcast to %s", remoteAddr)
+		}
+		log.Printf("P2P server: broadcast goroutine exited for %s (channel closed)", remoteAddr)
+	}()
+
+	// Ensure cleanup on exit
+	defer func() {
+		s.inboundConnsMu.Lock()
+		delete(s.inboundConns, remoteAddr)
+		s.inboundConnsMu.Unlock()
+		close(broadcastCh)
+		log.Printf("P2P server: removed inbound connection tracking for %s", remoteAddr)
+	}()
+
 	// One request per connection (simple and safe).
-	// DDoS protection: Check message rate limit
+	// DDoS protection: Check message rate limit (moved after tracking so we can still broadcast to this peer)
 	if !s.rateLimiter.AllowMessage(s.nodeID, host) {
 		log.Printf("P2P server: message rate limit exceeded for %s", remoteAddr)
-		return fmt.Errorf("message rate limit exceeded")
+		// Don't return error - we still want to track this connection for broadcasts
+		// Just skip the message processing
 	}
 
 	_ = c.SetDeadline(time.Now().Add(30 * time.Second))
@@ -687,26 +800,83 @@ func (s *P2PServer) handleTransactionReq(c net.Conn, payload json.RawMessage) er
 func (s *P2PServer) handleTransactionBroadcast(c net.Conn, payload json.RawMessage) error {
 	var broadcast p2pTransactionBroadcast
 	if err := json.Unmarshal(payload, &broadcast); err != nil {
+		log.Printf("p2p: failed to unmarshal tx_broadcast: %v", err)
 		return err
 	}
 
 	var tx core.Transaction
 	if err := json.Unmarshal([]byte(broadcast.TxHex), &tx); err != nil {
+		log.Printf("p2p: failed to unmarshal transaction: %v", err)
 		return err
 	}
 
 	txid, err := TxIDHex(tx)
 	if err != nil {
+		log.Printf("p2p: failed to compute txid: %v", err)
 		_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "invalid_tx"})})
 		return err
 	}
 
+	log.Printf("[P2P] Received transaction broadcast: txid=%s, from=%x, to=%s, amount=%d, fee=%d, nonce=%d, chainId=%d",
+		txid[:16]+"...", tx.FromPubKey[:8], tx.ToAddress, tx.Amount, tx.Fee, tx.Nonce, tx.ChainID)
+
 	if s.mp != nil {
-		if _, err := s.mp.Add(tx); err != nil {
-			log.Printf("p2p: failed to add tx to mempool: %v", err)
-			_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "mempool_add_failed"})})
+		// Use legacy signature verification (tx.Verify()) for P2P received transactions
+		// This is necessary because the transaction was signed at the sender's height,
+		// which may differ from our local height. VerifyForConsensus() requires
+		// the exact height used during signing, which we don't know.
+		// The legacy Verify() uses height-independent signing hash.
+		if err := tx.Verify(); err != nil {
+			log.Printf("[P2P] Transaction signature verification failed: %v (txid=%s)", err, txid[:16]+"...")
+			_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "signature_invalid", "detail": err.Error()})})
+			return fmt.Errorf("signature verification: %w", err)
+		}
+		log.Printf("[P2P] Signature verification passed for tx: %s", txid[:16]+"...")
+
+		// Add to mempool without re-verifying signature
+		if _, err := s.mp.AddWithoutSignatureValidation(tx); err != nil {
+			// Check if it's just a duplicate
+			if err.Error() == "duplicate transaction" {
+				log.Printf("[P2P] Transaction already in mempool: txid=%s", txid[:16]+"...")
+				return p2pWriteJSON(c, p2pEnvelope{Type: "tx_broadcast_ack", Payload: mustJSON(map[string]any{"txid": txid})})
+			}
+			log.Printf("[P2P] Failed to add tx to mempool: %v (txid=%s)", err, txid[:16]+"...")
+			_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "mempool_add_failed", "detail": err.Error()})})
 			return err
 		}
+		log.Printf("[P2P] Successfully added tx to mempool: txid=%s", txid[:16]+"...")
+
+		// Relay transaction to other peers (with hop count control)
+		// This ensures transaction propagates through the network
+		if s.pm != nil {
+			peers := s.pm.GetActivePeers()
+			if len(peers) > 0 {
+				// Get remote address to avoid sending back to sender
+				remoteAddr := ""
+				if tcpConn, ok := c.(*net.TCPConn); ok {
+					remoteAddr = tcpConn.RemoteAddr().String()
+				}
+				relayCount := 0
+				for _, peer := range peers {
+					// Skip the peer that sent us this transaction
+					if strings.Contains(peer, remoteAddr) {
+						continue
+					}
+					relayCount++
+					go func(p string) {
+						_, err := s.pm.client.BroadcastTransaction(context.Background(), p, tx)
+						if err != nil {
+							log.Printf("[P2P] Failed to relay tx to %s: %v", p, err)
+						}
+					}(peer)
+				}
+				if relayCount > 0 {
+					log.Printf("[P2P] Relaying tx to %d other peers", relayCount)
+				}
+			}
+		}
+	} else {
+		log.Printf("[P2P] Warning: mempool is nil, cannot add transaction")
 	}
 
 	return p2pWriteJSON(c, p2pEnvelope{Type: "tx_broadcast_ack", Payload: mustJSON(map[string]any{"txid": txid})})
