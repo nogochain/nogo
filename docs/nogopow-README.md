@@ -1,8 +1,8 @@
 # NogoPow Consensus Engine
 
 **File Path**: `blockchain/nogopow/nogopow.go`  
-**Last Updated**: 2026-04-06  
-**Version**: 1.0.0
+**Last Updated**: 2026-04-15  
+**Version**: 1.1.0
 
 ---
 
@@ -337,9 +337,9 @@ newDifficulty = parentDifficulty × (1 + adjustment)
 ```
 
 **Parameters**:
-- **Kp (Proportional Gain)**: MaxDifficultyChangePercent / 100 (default 0.2)
+- **Kp (Proportional Gain)**: MaxDifficultyChangePercent / 100 (default 1.0 when MaxDifficultyChangePercent=100)
 - **Ki (Integral Gain)**: 0.1 (fixed for stable convergence)
-- **TargetBlockTime**: 15 seconds
+- **TargetBlockTime**: 17 seconds
 - **Integral Anti-windup**: [-10.0, 10.0] (prevents saturation)
 
 **Economic Properties**:
@@ -626,23 +626,21 @@ func DefaultConfig() *Config {
         PowMode:      ModeNormal,
         ReuseObjects: true,
         Difficulty: DifficultyConfig{
-            MinimumDifficulty:  big.NewInt(1000000),
-            TargetBlockTime:    10 * time.Second,
-            AdjustmentSensitivity: 0.1,
-            Kp: 0.1,
-            Ki: 0.01,
-            Kd: 0.05,
+            MinimumDifficulty:  big.NewInt(100),
+            TargetBlockTime:    17 * time.Second,
+            AdjustmentSensitivity: 1.0,
+            Kp: 1.0,
+            Ki: 0.1,
         },
         CacheSize: 1000,
         Logger:    &defaultLogger{},
     }
 }
-```
 
 **Recommended Settings**:
 - **CacheSize**: 1000 entries (adjust based on memory)
 - **ReuseObjects**: true (for production)
-- **TargetBlockTime**: 10 seconds
+- **TargetBlockTime**: 17 seconds
 
 ---
 
@@ -805,4 +803,4 @@ hitRate := cache.HitRate()
 ---
 
 *This document is based on actual code implementation*  
-*Last updated: 2026-04-06*
+*Last updated: 2026-04-15*
