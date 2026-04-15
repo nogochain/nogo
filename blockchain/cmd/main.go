@@ -105,6 +105,20 @@ func handleServerCommand() {
 		cfg = mainnetConfigHardcoded
 	}
 
+	// Override with environment variables if set
+	if p2pPort := os.Getenv("NOGO_P2P_PORT"); p2pPort != "" {
+		cfg.P2PListenAddr = "0.0.0.0:" + p2pPort
+	}
+	if p2pPeers := os.Getenv("NOGO_P2P_PEERS"); p2pPeers != "" {
+		cfg.P2PPeers = p2pPeers
+	}
+	if apiPort := os.Getenv("NOGO_API_PORT"); apiPort != "" {
+		cfg.HTTPAddr = "0.0.0.0:" + apiPort
+	}
+	if dataDir := os.Getenv("NOGO_DATA_DIR"); dataDir != "" {
+		cfg.DataDir = dataDir
+	}
+
 	node := NewNode(cfg, miner, adminToken, autoMine, isTestnet)
 
 	if err := node.Start(); err != nil {

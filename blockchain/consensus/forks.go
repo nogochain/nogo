@@ -733,12 +733,8 @@ func validateDifficultyNogoPow(consensus ConsensusParams, path []*Block, idx int
 	}
 
 	if consensus.DifficultyEnable {
-		consensusParams := &config.ConsensusParams{
-			BlockTimeTargetSeconds:       15,
-			MaxDifficultyChangePercent:   20,
-			MinDifficulty:                1,
-		}
-		adjuster := nogopow.NewDifficultyAdjuster(consensusParams)
+		// Use PI controller difficulty calculation (same as mining)
+		adjuster := nogopow.NewDifficultyAdjuster(&consensus)
 
 		var parentHash nogopow.Hash
 		if len(parentBlock.Hash) > 0 {
@@ -754,6 +750,7 @@ func validateDifficultyNogoPow(consensus ConsensusParams, path []*Block, idx int
 			ParentHash: parentHash,
 		}
 
+		// Use PI controller difficulty calculation (same as mining)
 		expectedDifficulty := adjuster.CalcDifficulty(uint64(currentBlock.Header.TimestampUnix), parentHeader)
 		actualDifficulty := big.NewInt(int64(currentBlock.Header.DifficultyBits))
 

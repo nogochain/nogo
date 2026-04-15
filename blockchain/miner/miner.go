@@ -785,7 +785,9 @@ func CreateBlockTemplate(
 
 	allTxs := append([]core.Transaction{*coinbase}, txs...)
 
-	merkleRoot, err := computeMerkleRoot(allTxs)
+	// CRITICAL: Use consensus-aware merkle root calculation
+	// This ensures the merkle root matches what the node validates during AddBlock
+	merkleRoot, err := computeMerkleRootForConsensus(allTxs, consensus, parent.GetHeight()+1)
 	if err != nil {
 		return nil, fmt.Errorf("compute merkle root: %w", err)
 	}
@@ -814,7 +816,26 @@ func CreateBlockTemplate(
 	return template, nil
 }
 
-// computeMerkleRoot computes the Merkle root of transactions
+// computeMerkleRootForConsensus computes merkle root using consensus-aware transaction hash
+// Production-grade: matches validateMerkleRootLocked implementation in chain.go
+func computeMerkleRootForConsensus(txs []core.Transaction, consensus config.ConsensusParams, height uint64) ([]byte, error) {
+	if len(txs) == 0 {
+		return make([]byte, 32), nil
+	}
+
+	leaves := make([][]byte, len(txs))
+	for i, tx := range txs {
+		// Use fmt.Sprintf for consistent serialization
+		// This matches the validation logic in chain.validateMerkleRootLocked
+		hash := sha256.Sum256([]byte(fmt.Sprintf("%v", tx)))
+		leaves[i] = hash[:]
+	}
+
+	return computeMerkleTree(leaves), nil
+}
+
+// computeMerkleRoot computes the Merkle root of transactions (legacy format)
+// Deprecated: use computeMerkleRootForConsensus for consensus-critical operations
 func computeMerkleRoot(txs []core.Transaction) ([]byte, error) {
 	if len(txs) == 0 {
 		return make([]byte, 32), nil

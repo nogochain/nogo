@@ -63,6 +63,6 @@ func newP2PHello(chainID uint64, rulesHash string, nodeID string) p2pHello {
 		ChainID:   chainID,
 		RulesHash: rulesHash,
 		NodeID:    nodeID,
-		TimeUnix:  time.Now().Unix(),
+		TimeUnix:   time.Now().Unix(),
 	}
 }

@@ -22,19 +22,28 @@ import (
 	"math/big"
 	"net/http"
 	"time"
+
+	"github.com/nogochain/nogo/blockchain/config"
+	"github.com/nogochain/nogo/blockchain/core"
+	"github.com/nogochain/nogo/blockchain/miner"
 )
 
+// Transaction type alias for block template
+type Transaction = core.Transaction
+
 // BlockTemplate represents a block template for mining
+// Production-grade: includes all transactions from mempool for complete block construction
 type BlockTemplate struct {
-	Height         uint64 `json:"height"`
-	PrevHash       string `json:"prevHash"`
-	MerkleRoot     string `json:"merkleRoot"`
-	Timestamp      int64  `json:"timestamp"`
-	DifficultyBits uint32 `json:"difficultyBits"`
-	MinerAddress   string `json:"minerAddress"`
-	ChainID        uint64 `json:"chainId"`
-	Target         string `json:"target"`
-	ExtraNonce     string `json:"extraNonce"`
+	Height         uint64        `json:"height"`
+	PrevHash       string        `json:"prevHash"`
+	MerkleRoot     string        `json:"merkleRoot"`
+	Timestamp      int64         `json:"timestamp"`
+	DifficultyBits uint32        `json:"difficultyBits"`
+	MinerAddress   string        `json:"minerAddress"`
+	ChainID        uint64        `json:"chainId"`
+	Target         string        `json:"target"`
+	ExtraNonce     string        `json:"extraNonce"`
+	Transactions   []Transaction `json:"transactions"` // Complete transaction list including coinbase
 }
 
 // SubmitWorkRequest represents a mining work submission
@@ -70,6 +79,7 @@ type MiningInfo struct {
 }
 
 // handleGetBlockTemplate handles block template requests from miners
+// Production-grade: includes mempool transactions and calculates merkle root
 func (s *SimpleServer) handleGetBlockTemplate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -93,9 +103,8 @@ func (s *SimpleServer) handleGetBlockTemplate(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// CRITICAL FIX: Check if chain is currently reorganizing
+	// Check if chain is currently reorganizing
 	// Prevent serving templates during reorg to avoid PrevHash instability
-	// This fixes infinite reorg loop caused by unstable LatestBlock()
 	if s.bc.IsReorgInProgress() {
 		http.Error(w, "chain reorganizing, please retry", http.StatusServiceUnavailable)
 		return
@@ -108,25 +117,52 @@ func (s *SimpleServer) handleGetBlockTemplate(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Calculate difficulty for next block (CRITICAL: use PI controller from consensus engine!)
-	// This ensures miners use the correct difficulty that matches consensus rules
+	// Get consensus parameters for block construction
+	consensus := config.GetConsensusParams()
+
+	// Collect mempool transactions sorted by fee (highest first)
+	var mempoolTxs []core.Transaction
+	if s.mp != nil {
+		entries := s.mp.EntriesSortedByFeeDesc()
+		maxTxs := config.DefaultMaxTransactionsPerBlock
+		for i, entry := range entries {
+			if i >= maxTxs {
+				break
+			}
+			mempoolTxs = append(mempoolTxs, entry.Tx())
+		}
+	}
+
+	// Create complete block template using miner's production function
+	// This handles: coinbase creation, merkle root calculation, block version
+	block, err := miner.CreateBlockTemplate(
+		latest,
+		mempoolTxs,
+		minerAddress,
+		s.bc.GetChainID(),
+		consensus,
+	)
+	if err != nil {
+		http.Error(w, "failed to create block template: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Calculate difficulty for next block using PI controller
 	currentTime := time.Now().Unix()
 	nextDifficulty := s.bc.CalcNextDifficulty(latest, currentTime)
-	
-	// Create merkle root (empty for now, will be filled with transactions)
-	merkleRoot := make([]byte, 32)
 
-	// Create block template
+	// Build response template with complete transaction list
 	template := &BlockTemplate{
-		Height:         latest.GetHeight() + 1,
-		PrevHash:       hex.EncodeToString(latest.Hash),
-		MerkleRoot:     hex.EncodeToString(merkleRoot),
-		Timestamp:      currentTime,
+		Height:         block.Height,
+		PrevHash:       hex.EncodeToString(block.Header.PrevHash),
+		MerkleRoot:     hex.EncodeToString(block.Header.MerkleRoot),
+		Timestamp:      block.Header.TimestampUnix,
 		DifficultyBits: nextDifficulty,
 		MinerAddress:   minerAddress,
 		ChainID:        s.bc.GetChainID(),
 		Target:         difficultyBitsToTarget(nextDifficulty),
 		ExtraNonce:     hex.EncodeToString(make([]byte, 4)),
+		Transactions:   block.Transactions,
 	}
 
 	writeJSON(w, http.StatusOK, template)

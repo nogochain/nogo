@@ -191,9 +191,8 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
 	}
 
 	if v.consensus.DifficultyEnable {
-		// Use the same consensus parameters as mining to ensure consistency
-		// This matches the parameters used in core/mining.go MineTransfers()
-		adjuster := nogopow.NewDifficultyAdjuster(&v.consensus)
+		// Calculate expected difficulty using PI controller (same as mining)
+		// Use nogopow.NewDifficultyAdjuster for PI controller algorithm
 
 		var parentHash nogopow.Hash
 		if len(parent.Hash) > 0 {
@@ -209,13 +208,21 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
 			ParentHash: parentHash,
 		}
 
+		// Use PI controller difficulty calculation (same as mining)
+		adjuster := nogopow.NewDifficultyAdjuster(&v.consensus)
 		expectedDifficulty := adjuster.CalcDifficulty(uint64(block.Header.TimestampUnix), parentHeader)
 		actualDifficulty := big.NewInt(int64(block.Header.DifficultyBits))
 
-		minAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100-DifficultyTolerancePercent))
+		// Use wider tolerance (50%) for initial blocks to allow difficulty to stabilize
+		tolerance := DifficultyTolerancePercent
+		if block.GetHeight() < 100 {
+			tolerance = 50
+		}
+
+		minAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(int64(100-tolerance)))
 		minAllowed.Div(minAllowed, big.NewInt(100))
 
-		maxAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100+DifficultyTolerancePercent))
+		maxAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(int64(100+tolerance)))
 		maxAllowed.Div(maxAllowed, big.NewInt(100))
 
 		if actualDifficulty.Cmp(minAllowed) < 0 {
@@ -390,8 +397,6 @@ func (v *BlockValidator) ValidateBlockFast(block *Block) error {
 	return nil
 }
 
-
-
 func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Block) error {
 	if block == nil || len(block.Hash) == 0 {
 		return errors.New("invalid block for POW verification")
@@ -405,7 +410,10 @@ func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Bl
 		return errors.New("parent block is nil for POW verification")
 	}
 
-	engine := nogopow.New(nogopow.DefaultConfig())
+	// Create nogopow config with actual consensus params (same as mining)
+	powConfig := nogopow.DefaultConfig()
+	powConfig.ConsensusParams = &consensus
+	engine := nogopow.New(powConfig)
 	defer engine.Close()
 
 	var parentHash nogopow.Hash

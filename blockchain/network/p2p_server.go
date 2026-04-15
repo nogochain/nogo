@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nogochain/nogo/blockchain/config"
 	"github.com/nogochain/nogo/blockchain/consensus"
 	"github.com/nogochain/nogo/blockchain/core"
 )
@@ -23,6 +22,14 @@ import (
 // Get global log formatter for P2P
 func getP2PLogger() LogFormatter {
 	return GetGlobalFormatter()
+}
+
+// pendingBlockRequest represents an outstanding block request (Bitcoin-style)
+type pendingBlockRequest struct {
+	hashHex string
+	respCh  chan *core.Block
+	errCh   chan error
+	sentAt  time.Time
 }
 
 type P2PServer struct {
@@ -66,6 +73,16 @@ type P2PServer struct {
 
 	// Gossip integration
 	gossipIntegration *GossipIntegration
+
+	// Pending block requests (Bitcoin-style async request tracking) - DEPRECATED, use InventoryManager
+	pendingBlockReqs     map[string][]pendingBlockRequest // Key: peer address, Value: list of pending requests
+	pendingBlockReqsMu   sync.RWMutex
+
+	// Inventory manager for INV/GETDATA mechanism (Bitcoin-style)
+	inventoryMgr *InventoryManager
+
+	// Block sync manager for async block synchronization (Bitcoin-style)
+	blockSyncMgr *BlockSyncManager
 }
 
 // NewP2PServer creates a new P2P server instance
@@ -111,16 +128,15 @@ func NewP2PServer(bc BlockchainInterface, pm *P2PPeerManager, mp Mempool, listen
 	// This follows Bitcoin's model: each node independently evaluates forks
 	// based on accumulated work (Chain Work), eventually reaching consensus
 	forkDetector := core.NewForkDetector()
-	
+
 	// Create chain selector if chain supports it
-	var chainSelector *core.ChainSelector
-	var resolutionEngine *ForkResolutionEngine
-	
-	// Try to get underlying chain for ChainSelector
 	type chainProvider interface {
 		GetUnderlyingChain() *core.Chain
 	}
-	
+
+	var chainSelector *core.ChainSelector
+	var resolutionEngine *ForkResolutionEngine
+
 	if cp, ok := bc.(chainProvider); ok {
 		chain := cp.GetUnderlyingChain()
 		chainSelector = core.NewChainSelector(chain, bc)
@@ -130,28 +146,33 @@ func NewP2PServer(bc BlockchainInterface, pm *P2PPeerManager, mp Mempool, listen
 		log.Printf("[P2PServer] Warning: bc does not provide underlying chain, fork resolution disabled")
 	}
 
+
 	s := &P2PServer{
-		bc:            bc,
-		pm:            pm, // Interface passed by value - safe as interfaces are reference types
-		mp:            mp,
-		miner:         nil, // Will be set later via SetMiner method
-		listenAddr:    listenAddr,
-		nodeID:        nodeID,
-		publicIP:      publicIP,
-		lastIPUpdate:  time.Now(),
-		maxConns:      envInt("P2P_MAX_CONNECTIONS", DefaultP2PMaxConnections),
-		maxMsgSize:    envInt("P2P_MAX_MESSAGE_BYTES", 4<<20),
-		maxPeers:      maxPeers,
-		maxAddrReturn: maxAddrReturn,
-		advertiseSelf: advertiseSelf,
-		peerPorts:     make(map[string]int),
-		scorer:        NewPeerScorer(maxPeers),
-		rateLimiter:   rateLimiter,
-		// Fork resolution components initialized above
-		forkDetector:     forkDetector,
-		chainSelector:    chainSelector,
-		resolutionEngine: resolutionEngine,
-		blockPropagator:  nil, // Will be initialized in Serve()
+		bc:                bc,
+		pm:                pm, // Interface passed by value - safe as interfaces are reference types
+		mp:                mp,
+		miner:             nil, // Will be set later via SetMiner method
+		listenAddr:        listenAddr,
+		nodeID:            nodeID,
+		publicIP:          publicIP,
+		lastIPUpdate:      time.Now(),
+		maxConns:          envInt("P2P_MAX_CONNECTIONS", DefaultP2PMaxConnections),
+		maxMsgSize:        envInt("P2P_MAX_MESSAGE_BYTES", 4<<20),
+		maxPeers:          maxPeers,
+		maxAddrReturn:      maxAddrReturn,
+		advertiseSelf:     advertiseSelf,
+		peerPorts:         make(map[string]int),
+		scorer:            NewPeerScorer(maxPeers),
+		rateLimiter:       rateLimiter,
+		chainSelector:     chainSelector,
+		forkDetector:      forkDetector,
+		resolutionEngine:  resolutionEngine,
+		// Pending block requests for async handling (Bitcoin-style)
+		pendingBlockReqs:   make(map[string][]pendingBlockRequest),
+		// Inventory manager for INV/GETDATA mechanism (will be initialized in Serve)
+		inventoryMgr:      nil,
+		// Block sync manager for async block synchronization (will be initialized in Serve)
+		blockSyncMgr:      nil,
 	}
 	if s.maxConns <= 0 {
 		s.maxConns = DefaultP2PMaxConnections
@@ -182,7 +203,9 @@ func (s *P2PServer) SetGossipIntegration(integration *GossipIntegration) {
 func (s *P2PServer) ListenAddr() string { return s.listenAddr }
 
 func (s *P2PServer) Serve(ctx context.Context) error {
-	lc := net.ListenConfig{}
+	lc := net.ListenConfig{
+		KeepAlive: 30 * time.Second, // Enable TCP keepalive for better connection health
+	}
 	ln, err := lc.Listen(ctx, "tcp", s.listenAddr)
 	if err != nil {
 		return err
@@ -208,6 +231,16 @@ func (s *P2PServer) Serve(ctx context.Context) error {
 	// Start public IP update loop
 	go s.runIPUpdateLoop(ctx)
 
+	// Initialize inventory manager for Bitcoin-style INV/GETDATA
+	s.inventoryMgr = NewInventoryManager(s)
+	go s.inventoryMgr.StartCleanup(ctx) // CRITICAL: must run in goroutine to avoid blocking Accept loop
+	log.Printf("[P2PServer] Inventory manager initialized (Bitcoin-style INV/GETDATA)")
+
+	// Initialize block sync manager for async GETDATA response handling
+	s.blockSyncMgr = NewBlockSyncManager(s)
+	log.Printf("[P2PServer] Block sync manager initialized (Bitcoin-style async)")
+
+
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -226,6 +259,10 @@ func (s *P2PServer) Serve(ctx context.Context) error {
 			log.Printf("p2p server: failed to parse remote address %s: %v", remoteAddr, err)
 			host = remoteAddr
 		}
+
+		// Log every accepted connection for diagnostics
+		log.Printf("p2p server: accepted connection from %s (host=%s)", remoteAddr, host)
+
 		if !s.rateLimiter.AllowConnection(host) {
 			log.Printf("p2p server: connection rate limit exceeded for %s", remoteAddr)
 			_ = c.Close()
@@ -234,22 +271,28 @@ func (s *P2PServer) Serve(ctx context.Context) error {
 
 		select {
 		case s.sem <- struct{}{}:
+			log.Printf("p2p server: starting handleConn for %s", remoteAddr)
 			go func() {
 				defer func() { <-s.sem }()
-				if err := s.handleConn(c); err != nil {
+				if err := s.handleConn(ctx, c); err != nil {
 					log.Printf("p2p server: handleConn error: %v", err)
 				}
 			}()
 		default:
-			if closeErr := c.Close(); closeErr != nil {
-				log.Printf("p2p server: failed to close connection: %v", closeErr)
-			}
+			// Connection limit reached - log and close connection
+			log.Printf("p2p server: connection limit reached (%d), rejecting connection from %s", s.maxConns, remoteAddr)
+			_ = c.Close()
 		}
 	}
 }
 
-func (s *P2PServer) handleConn(c net.Conn) error {
+func (s *P2PServer) handleConn(ctx context.Context, c net.Conn) error {
 	defer c.Close()
+
+	// Enable TCP_NODELAY to ensure hello response is sent immediately without buffering
+	if tcpConn, ok := c.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+	}
 
 	remoteAddr := c.RemoteAddr().String()
 	host, _, err := net.SplitHostPort(remoteAddr)
@@ -269,29 +312,34 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 	log.Printf("P2P server: new connection from %s", remoteAddr)
 	getP2PLogger().Connection("New connection from %s", remoteAddr)
 
-	_ = c.SetDeadline(time.Now().Add(15 * time.Second))
+	_ = c.SetDeadline(time.Now().Add(30 * time.Second)) // Increased from 15s to 30s for slow networks
 
 	// Expect hello first.
 	log.Printf("handleConn: waiting for hello from %s", remoteAddr)
 	raw, err := p2pReadJSON(c, 1<<20)
 	if err != nil {
-		log.Printf("P2P server: failed to read from %s: %v", c.RemoteAddr().String(), err)
+		log.Printf("P2P server: failed to read hello from %s: %v", c.RemoteAddr().String(), err)
+		// Send error response before closing
+		_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "read_failed", "details": err.Error()})})
 		return err
 	}
 	log.Printf("handleConn: received %d bytes from %s", len(raw), remoteAddr)
 	var env p2pEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		log.Printf("P2P server: failed to unmarshal from %s: %v", c.RemoteAddr().String(), err)
+		_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "invalid_message_format"})})
 		return err
 	}
 	log.Printf("P2P server: received message type=%s from %s", env.Type, c.RemoteAddr().String())
 	if env.Type != "hello" {
 		log.Printf("P2P server: expected hello but got %s from %s", env.Type, c.RemoteAddr().String())
+		_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "expected_hello"})})
 		return errors.New("expected hello")
 	}
 	var hello p2pHello
 	if err := json.Unmarshal(env.Payload, &hello); err != nil {
 		log.Printf("P2P server: failed to unmarshal hello payload from %s: %v", c.RemoteAddr().String(), err)
+		_ = p2pWriteJSON(c, p2pEnvelope{Type: "error", Payload: mustJSON(map[string]any{"error": "invalid_hello_payload"})})
 		return err
 	}
 
@@ -315,8 +363,13 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 
 	log.Printf("P2P server: handshake successful with %s", c.RemoteAddr().String())
 
-	// Reply hello.
-	_ = p2pWriteJSON(c, p2pEnvelope{Type: "hello", Payload: mustJSON(newP2PHello(s.bc.GetChainID(), s.bc.RulesHashHex(), s.nodeID))})
+	// Reply hello - CRITICAL: must send response before entering message loop
+	helloResp := newP2PHello(s.bc.GetChainID(), s.bc.RulesHashHex(), s.nodeID)
+	if err := p2pWriteJSON(c, p2pEnvelope{Type: "hello", Payload: mustJSON(helloResp)}); err != nil {
+		log.Printf("P2P server: failed to send hello response to %s: %v", c.RemoteAddr().String(), err)
+		return err
+	}
+	log.Printf("P2P server: hello response sent to %s", c.RemoteAddr().String())
 
 	// Add the connecting peer to peer manager (if available)
 	// This ensures we track inbound connections even if they don't send addr message
@@ -361,6 +414,7 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 		raw, err = p2pReadJSON(c, s.maxMsgSize)
 		if err != nil {
 			log.Printf("P2P server: connection closed by %s: %v", remoteAddr, err)
+			s.cleanupPendingRequests(remoteAddr)
 			break // Connection closed, exit loop gracefully
 		}
 
@@ -415,6 +469,57 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 			handleErr = s.handleTransactionBroadcast(c, env.Payload)
 		case "block_broadcast":
 			handleErr = s.handleBlockBroadcast(c, env.Payload)
+		case "inv":
+			// Handle INV message (Bitcoin-style)
+			if s.inventoryMgr != nil {
+				var inv p2pInvMsg
+				if err := json.Unmarshal(env.Payload, &inv); err != nil {
+					log.Printf("P2P server: failed to unmarshal INV from %s: %v", remoteAddr, err)
+				} else {
+					go s.inventoryMgr.HandleInv(ctx, c, remoteAddr, inv.Entries)
+				}
+			}
+		case "getdata":
+			// Handle GETDATA message (Bitcoin-style)
+			if s.inventoryMgr != nil {
+				var gd p2pGetDataMsg
+				if err := json.Unmarshal(env.Payload, &gd); err != nil {
+					log.Printf("P2P server: failed to unmarshal GETDATA from %s: %v", remoteAddr, err)
+				} else {
+					handleErr = s.inventoryMgr.HandleGetData(ctx, c, remoteAddr, gd.Entries)
+				}
+			}
+		case "block":
+			// Handle BLOCK message (Bitcoin-style - full block data)
+			if s.inventoryMgr != nil {
+				var bm p2pBlockMsg
+				if err := json.Unmarshal(env.Payload, &bm); err != nil {
+					log.Printf("P2P server: failed to unmarshal BLOCK from %s: %v", remoteAddr, err)
+				} else {
+					handleErr = s.inventoryMgr.HandleBlock(c, remoteAddr, &bm.Block)
+				}
+			}
+		case "tx":
+			// Handle TX message (Bitcoin-style - full tx data)
+			if s.inventoryMgr != nil {
+				var tm p2pTxMsg
+				if err := json.Unmarshal(env.Payload, &tm); err != nil {
+					log.Printf("P2P server: failed to unmarshal TX from %s: %v", remoteAddr, err)
+				} else {
+					txHash, _ := TxIDHex(tm.Tx)
+					handleErr = s.inventoryMgr.HandleTx(c, remoteAddr, &tm.Tx, []byte(txHash))
+				}
+			}
+		case "notfound":
+			// Handle NOTFOUND message (Bitcoin-style)
+			if s.inventoryMgr != nil {
+				var nf p2pNotFoundMsg
+				if err := json.Unmarshal(env.Payload, &nf); err != nil {
+					log.Printf("P2P server: failed to unmarshal NOTFOUND from %s: %v", remoteAddr, err)
+				} else {
+					s.inventoryMgr.HandleNotFound(remoteAddr, nf.Entries)
+				}
+			}
 		case "block_req":
 			handleErr = s.handleBlockReq(c, env.Payload)
 		case "getaddr":
@@ -446,6 +551,8 @@ func (s *P2PServer) handleConn(c net.Conn) error {
 		}
 	}
 
+	// Cleanup pending requests when connection closes
+	s.cleanupPendingRequests(remoteAddr)
 	log.Printf("P2P server: connection with %s closed", remoteAddr)
 	return nil
 }
@@ -833,7 +940,8 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 		}
 
 		// If parent is unknown, try to fetch missing ancestor blocks
-		if err == consensus.ErrUnknownParent {
+		// Note: AddBlock returns core.ErrOrphanBlock when parent is not found
+		if errors.Is(err, core.ErrOrphanBlock) || err == consensus.ErrUnknownParent {
 			log.Printf("p2p: unknown parent, attempting to fetch missing blocks")
 			// Create a context with timeout
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -924,74 +1032,234 @@ func (s *P2PServer) handleBlockBroadcast(c net.Conn, payload json.RawMessage) er
 	return p2pWriteJSON(c, p2pEnvelope{Type: "block_broadcast_ack", Payload: mustJSON(ackPayload)})
 }
 
-// syncMissingBlocks fetches missing ancestor blocks from the peer
-func (s *P2PServer) syncMissingBlocks(ctx context.Context, c net.Conn, targetBlock *core.Block) error {
-	log.Printf("p2p: starting sync of missing blocks, target height=%d", targetBlock.GetHeight())
+// requestBlockAsync sends a block request over existing connection without blocking
+// Returns channels for receiving the response asynchronously (Bitcoin-style)
+func (s *P2PServer) requestBlockAsync(c net.Conn, hashHex string) (<-chan *core.Block, <-chan error) {
+	peerAddr := c.RemoteAddr().String()
+	respCh := make(chan *core.Block, 1)
+	errCh := make(chan error, 1)
 
-	// Walk backwards from the target block until we find a known ancestor
+	// Create pending request
+	req := pendingBlockRequest{
+		hashHex: hashHex,
+		respCh:  respCh,
+		errCh:   errCh,
+		sentAt:  time.Now(),
+	}
+
+	// Add to pending requests map
+	s.pendingBlockReqsMu.Lock()
+	s.pendingBlockReqs[peerAddr] = append(s.pendingBlockReqs[peerAddr], req)
+	s.pendingBlockReqsMu.Unlock()
+
+	// Send the request (non-blocking)
+	blockReq := p2pBlockReq{HashHex: hashHex}
+	if err := p2pWriteJSON(c, p2pEnvelope{Type: "block_req", Payload: mustJSON(blockReq)}); err != nil {
+		// Remove from pending if send failed
+		s.pendingBlockReqsMu.Lock()
+		if reqs, ok := s.pendingBlockReqs[peerAddr]; ok && len(reqs) > 0 {
+			// Remove the last added request
+			s.pendingBlockReqs[peerAddr] = reqs[:len(reqs)-1]
+		}
+		s.pendingBlockReqsMu.Unlock()
+		errCh <- fmt.Errorf("failed to send block request: %w", err)
+		return respCh, errCh
+	}
+
+	log.Printf("p2p: queued async block request hash=%s to %s", hashHex, peerAddr)
+	return respCh, errCh
+}
+
+// handleBlockResponse handles block responses for pending async requests (Bitcoin-style)
+func (s *P2PServer) handleBlockResponse(c net.Conn, peerAddr string, block *core.Block) error {
+	blockHash := hex.EncodeToString(block.Hash)
+	log.Printf("p2p: received block response hash=%s from %s", blockHash, peerAddr)
+
+	s.pendingBlockReqsMu.Lock()
+	defer s.pendingBlockReqsMu.Unlock()
+
+	// Find and matching pending request
+	reqs, exists := s.pendingBlockReqs[peerAddr]
+	if !exists || len(reqs) == 0 {
+		log.Printf("p2p: no pending requests for %s, ignoring block response", peerAddr)
+		return nil
+	}
+
+	// Find request by hash (FIFO - Bitcoin-style)
+	var matchedIdx = -1
+	for i, req := range reqs {
+		if req.hashHex == blockHash {
+			matchedIdx = i
+			break
+		}
+	}
+
+	if matchedIdx == -1 {
+		log.Printf("p2p: no matching pending request for block hash=%s", blockHash)
+		return nil
+	}
+
+	// Send response to channel (non-blocking)
+	req := reqs[matchedIdx]
+	select {
+	case req.respCh <- block:
+		log.Printf("p2p: delivered block response hash=%s to requester", blockHash)
+	default:
+		log.Printf("p2p: failed to deliver block response hash=%s (channel full or closed)", blockHash)
+	}
+
+	// Remove the matched request
+	if matchedIdx == 0 {
+		// Remove all requests (matched + any earlier)
+		s.pendingBlockReqs[peerAddr] = nil
+		delete(s.pendingBlockReqs, peerAddr)
+	} else {
+		// Remove only matched request and earlier ones
+		s.pendingBlockReqs[peerAddr] = reqs[matchedIdx+1:]
+	}
+
+	return nil
+}
+
+// SendToPeer sends a message to a specific peer
+// Uses P2PManager's connection pool
+func (s *P2PServer) SendToPeer(ctx context.Context, peerAddr string, msg p2pEnvelope) error {
+	if s.pm == nil {
+		return fmt.Errorf("peer manager not initialized")
+	}
+
+	log.Printf("p2p: sending message type=%s to peer %s", msg.Type, peerAddr)
+	return s.pm.SendMessage(ctx, peerAddr, msg)
+}
+
+// handleReceivedBlock processes a block received via BLOCK message
+// Called by InventoryManager when matching GETDATA request is found
+func (s *P2PServer) handleReceivedBlock(conn net.Conn, block *core.Block) error {
+	log.Printf("p2p: processing received block height=%d hash=%s",
+		block.GetHeight(), hex.EncodeToString(block.Hash)[:16])
+
+	// Validate PoW
+	if err := s.validateBlockPoW(block); err != nil {
+		log.Printf("p2p: block PoW validation failed: %v", err)
+		return err
+	}
+
+	// Add to blockchain
+	accepted, err := s.bc.AddBlock(block)
+	if err != nil {
+		log.Printf("p2p: failed to add block to chain: %v", err)
+		return err
+	}
+
+	if accepted {
+		log.Printf("p2p: block accepted height=%d", block.GetHeight())
+		getP2PLogger().Success("Block #%d accepted | Hash: %s",
+			block.GetHeight(), hex.EncodeToString(block.Hash))
+
+		// Announce to other peers via INV (Bitcoin-style)
+		if s.inventoryMgr != nil {
+			peerAddrs := s.pm.Peers()
+			s.inventoryMgr.AnnounceBlock(context.Background(), peerAddrs, block)
+		}
+
+		// Interrupt mining
+		if s.miner != nil {
+			s.miner.InterruptMining()
+		}
+
+		// Resume mining after propagation delay
+		if s.miner != nil {
+			go func() {
+				time.Sleep(time.Duration(BlockPropagationDelayMs) * time.Millisecond)
+				s.miner.ResumeMining()
+			}()
+		}
+	}
+
+	return nil
+}
+
+// handleReceivedTx processes a transaction received via TX message
+// Called by InventoryManager when matching GETDATA request is found
+func (s *P2PServer) handleReceivedTx(conn net.Conn, tx *core.Transaction) error {
+	log.Printf("p2p: processing received tx")
+
+	// Add to mempool
+	if s.mp != nil {
+		_, err := s.mp.Add(*tx)
+		if err != nil {
+			log.Printf("p2p: failed to add tx to mempool: %v", err)
+			return err
+		}
+
+		log.Printf("p2p: transaction added to mempool")
+
+		// Announce to other peers via INV (Bitcoin-style)
+		if s.inventoryMgr != nil {
+			txHash, err := TxIDHex(*tx)
+			if err == nil {
+				peerAddrs := s.pm.Peers()
+				s.inventoryMgr.AnnounceTx(context.Background(), peerAddrs, tx, []byte(txHash))
+			}
+		}
+	}
+
+	return nil
+}
+
+// syncMissingBlocks fetches missing ancestor blocks from peer using GETDATA (Bitcoin-style)
+// Uses BlockSyncManager for channel-based async synchronization
+func (s *P2PServer) syncMissingBlocks(ctx context.Context, c net.Conn, targetBlock *core.Block) error {
+	log.Printf("p2p: starting GETDATA sync of missing blocks, target height=%d from %s",
+		targetBlock.GetHeight(), c.RemoteAddr().String())
+
+	peerAddr := c.RemoteAddr().String()
+
+	// Walk backwards from target block until we find a known ancestor
 	currentHash := targetBlock.Header.PrevHash
+	currentHashHex := hex.EncodeToString(currentHash)
 
 	maxDepth := 100 // Safety limit
 	for i := 0; i < maxDepth; i++ {
 		// Check if this block is known
-		block, exists := s.bc.BlockByHash(hex.EncodeToString(currentHash))
+		block, exists := s.bc.BlockByHash(currentHashHex)
 		if exists {
-			log.Printf("p2p: found known ancestor at height=%d hash=%s", block.GetHeight(), hex.EncodeToString(currentHash))
+			log.Printf("p2p: found known ancestor at height=%d hash=%s", block.GetHeight(), currentHashHex[:16])
 			break
 		}
 
-		// Request the missing block from the peer using P2P client
-		// Use the peer's actual connection port (not a hardcoded port)
-		log.Printf("p2p: requesting missing block hash=%s", hex.EncodeToString(currentHash))
-		peerHost, _, err := net.SplitHostPort(c.RemoteAddr().String())
+		// Request the missing block via GETDATA (Bitcoin-style)
+		// Use BlockSyncManager for async channel-based synchronization
+		log.Printf("p2p: requesting missing block hash=%s via GETDATA", currentHashHex[:16])
+
+		respCh, err := s.blockSyncMgr.RequestBlockAsync(ctx, c, peerAddr, currentHashHex, 30*time.Second)
 		if err != nil {
-			return fmt.Errorf("failed to parse peer address: %w", err)
+			return fmt.Errorf("failed to request block %s: %w", currentHashHex[:16], err)
 		}
 
-		// Use the port that the peer actually used for connection
-		s.peerPortsMu.RLock()
-		peerPort := s.peerPorts[peerHost]
-		s.peerPortsMu.RUnlock()
+		// Wait for block to arrive via BLOCK message (Bitcoin-style async channel)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("sync cancelled")
+		case block := <-respCh:
+			if block == nil {
+				return fmt.Errorf("received nil block for hash %s", currentHashHex[:16])
+			}
 
-		var fetchedBlock *core.Block
-		if peerPort <= 0 {
-			// Fallback to common P2P ports if we don't know the peer's port
-			log.Printf("p2p: unknown port for peer %s, trying common ports", peerHost)
-			portsToTry := []int{9090, 9091, 9092, 8080, 8081}
-			var fetchErr error
-			for _, port := range portsToTry {
-				peerAddr := fmt.Sprintf("%s:%d", peerHost, port)
-				fetchedBlock, fetchErr = RequestBlockFromPeer(ctx, peerAddr, hex.EncodeToString(currentHash))
-				if fetchErr == nil {
-					log.Printf("p2p: successfully fetched block from %s", peerAddr)
-					break
-				}
-			}
-			if fetchErr != nil {
-				return fmt.Errorf("failed to fetch block %s from all tried ports: %w", hex.EncodeToString(currentHash), fetchErr)
-			}
-		} else {
-			// Use the actual port
-			peerAddr := fmt.Sprintf("%s:%d", peerHost, peerPort)
-			var err error
-			fetchedBlock, err = RequestBlockFromPeer(ctx, peerAddr, hex.EncodeToString(currentHash))
+			// Add the fetched block to chain
+			accepted, err := s.bc.AddBlock(block)
 			if err != nil {
-				return fmt.Errorf("failed to fetch block %s from %s: %w", hex.EncodeToString(currentHash), peerAddr, err)
+				log.Printf("p2p: failed to add fetched block: %v", err)
+				// Continue to next block
+			} else if accepted {
+				log.Printf("p2p: synced missing block height=%d hash=%s",
+					block.GetHeight(), hex.EncodeToString(block.Hash))
 			}
-		}
 
-		// Add the block to the chain
-		accepted, err := s.bc.AddBlock(fetchedBlock)
-		if err != nil {
-			log.Printf("p2p: failed to add fetched block: %v", err)
-			// Continue trying to fetch more blocks
-		} else if accepted {
-			log.Printf("p2p: synced missing block height=%d hash=%s", fetchedBlock.GetHeight(), hex.EncodeToString(fetchedBlock.Hash))
-			// Mempool cleanup is now handled centrally in Chain.addCanonicalBlockLocked
+			// Move to next ancestor
+			currentHash = block.Header.PrevHash
+			currentHashHex = hex.EncodeToString(currentHash)
 		}
-
-		// Move to the next ancestor
-		currentHash = fetchedBlock.Header.PrevHash
 	}
 
 	// Now try to add the original target block again
@@ -1001,11 +1269,36 @@ func (s *P2PServer) syncMissingBlocks(ctx context.Context, c net.Conn, targetBlo
 		return fmt.Errorf("still failed to add target block after sync: %w", err)
 	}
 	if accepted {
-		log.Printf("p2p: successfully synced and accepted target block height=%d hash=%s", targetBlock.GetHeight(), hex.EncodeToString(targetBlock.Hash))
-		// Mempool cleanup is now handled centrally in Chain.addCanonicalBlockLocked
+		log.Printf("p2p: successfully synced and accepted target block height=%d hash=%s",
+			targetBlock.GetHeight(), hex.EncodeToString(targetBlock.Hash))
 	}
 
 	return nil
+}
+
+// cleanupPendingRequests removes all pending requests for a peer (Bitcoin-style cleanup)
+func (s *P2PServer) cleanupPendingRequests(peerAddr string) {
+	// Cleanup old-style pending requests
+	s.pendingBlockReqsMu.Lock()
+	defer s.pendingBlockReqsMu.Unlock()
+
+	if reqs, exists := s.pendingBlockReqs[peerAddr]; exists && len(reqs) > 0 {
+		log.Printf("p2p: cleaning up %d pending requests for %s", len(reqs), peerAddr)
+		// Send error to all pending requests
+		for _, req := range reqs {
+			select {
+			case req.errCh <- errors.New("connection closed"):
+			default:
+				// Channel already closed or full
+			}
+		}
+		delete(s.pendingBlockReqs, peerAddr)
+	}
+
+	// Cleanup new-style InventoryManager requests (Bitcoin-style)
+	if s.inventoryMgr != nil {
+		s.inventoryMgr.GetRequestManager().RemoveQueue(peerAddr)
+	}
 }
 
 func (s *P2PServer) handleBlockReq(c net.Conn, payload json.RawMessage) error {
@@ -1350,8 +1643,10 @@ func (s *P2PServer) validateBlockPoW(block *core.Block) error {
 
 	// Use consensus validator for full validation
 	// Note: ValidateBlock includes PoW, difficulty, and timestamp validation
-	cfg := config.DefaultConfig()
-	validator := consensus.NewBlockValidator(cfg.Consensus, 1, nil)
+	// Use blockchain's actual consensus params instead of default config
+	// This ensures difficulty calculation matches the mining node
+	consensusParams := s.bc.GetConsensus()
+	validator := consensus.NewBlockValidator(consensusParams, 1, nil)
 	
 	// Validate with empty state (we're only validating structure and PoW)
 	if err := validator.ValidateBlock(block, parent, nil); err != nil {

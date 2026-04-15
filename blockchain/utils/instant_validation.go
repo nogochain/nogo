@@ -70,10 +70,17 @@ func (v *InstantValidator) validatePoW(b *core.Block) error {
 		return errors.New("missing block hash")
 	}
 
-	target := new(big.Int).SetUint64(uint64(b.Header.DifficultyBits))
+	// Convert difficulty to target: target = 2^256 / difficulty
+	// Higher difficulty = smaller target = harder to find valid hash
+	// Lower difficulty = larger target = easier to find valid hash
+	difficulty := new(big.Int).SetUint64(uint64(b.Header.DifficultyBits))
+	maxTarget := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	target := new(big.Int).Div(maxTarget, difficulty)
+
 	hashInt := new(big.Int).SetBytes(b.Hash)
 
-	if hashInt.Cmp(target) >= 0 {
+	// Valid PoW: hash <= target
+	if hashInt.Cmp(target) > 0 {
 		return errors.New("block hash not below target")
 	}
 

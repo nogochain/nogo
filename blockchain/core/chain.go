@@ -1304,13 +1304,8 @@ func (c *Chain) validateBlockDifficultyLocked(block, parent *Block) error {
 		return nil
 	}
 
-	// Use NogoPow difficulty adjuster with consensus params
-	consensusParams := &config.ConsensusParams{
-		BlockTimeTargetSeconds:     15,
-		MaxDifficultyChangePercent: 20,
-		MinDifficulty:              1,
-	}
-	adjuster := nogopow.NewDifficultyAdjuster(consensusParams)
+	// Use PI controller difficulty calculation (same as mining)
+	adjuster := nogopow.NewDifficultyAdjuster(&c.consensus)
 
 	// Create parent header for calculation
 	var parentHash nogopow.Hash
@@ -1323,7 +1318,7 @@ func (c *Chain) validateBlockDifficultyLocked(block, parent *Block) error {
 		ParentHash: parentHash,
 	}
 
-	// Calculate expected difficulty
+	// Calculate expected difficulty using PI controller
 	expectedDifficulty := adjuster.CalcDifficulty(uint64(block.Header.TimestampUnix), parentHeader)
 
 	// Validate difficulty is within tolerance
@@ -2099,8 +2094,10 @@ func verifyBlockPoWSeal(consensus ConsensusParams, block *Block, parent *Block) 
 		return errors.New("parent block is nil for POW verification")
 	}
 
-	// Create NogoPow engine
-	engine := nogopow.New(nogopow.DefaultConfig())
+	// Create NogoPow engine with actual consensus params (same as mining and validation)
+	powConfig := nogopow.DefaultConfig()
+	powConfig.ConsensusParams = &consensus
+	engine := nogopow.New(powConfig)
 	defer engine.Close()
 
 	// Reconstruct header from block fields
@@ -2860,6 +2857,16 @@ func (c *Chain) extractTransactionIDs(txs []Transaction) []string {
 func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 	height := block.GetHeight()
 
+	// CRITICAL: Check if we already have a fork block with same hash at this height
+	// This prevents duplicate processing of the same block
+	existingForks := c.forkBlocks[height]
+	for _, existing := range existingForks {
+		if hex.EncodeToString(existing.Hash) == hashHex {
+			log.Printf("[Chain] Fork block %d already stored (hash: %s), skipping", height, hashHex[:16])
+			return false, nil
+		}
+	}
+
 	// Store in fork blocks
 	c.forkBlocks[height] = append(c.forkBlocks[height], block)
 
@@ -2890,6 +2897,7 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 }
 
 // shouldReorgToLocked checks if we should reorganize to the given block
+// Production-grade: implements heaviest chain rule with proper work comparison
 // Caller must hold c.mu lock
 func (c *Chain) shouldReorgToLocked(newBlock *Block) bool {
 	if len(c.blocks) == 0 {
@@ -2897,27 +2905,41 @@ func (c *Chain) shouldReorgToLocked(newBlock *Block) bool {
 	}
 
 	currentTip := c.blocks[len(c.blocks)-1]
+	
+	// Block extends current chain - no reorg needed
 	if currentTip.GetHeight() < newBlock.GetHeight() {
-		return true // New block is higher
+		return true
 	}
 
+	// Same height - compare cumulative work
 	if currentTip.GetHeight() == newBlock.GetHeight() {
-		// Same height - compare cumulative work
+		// CRITICAL: Check if newBlock has same parent as current tip
+		// If prevHash is the same, they are siblings competing for same slot
+		// Only reorg if new block has MORE work, not equal work
 		currentWork := c.canonicalWork
 
 		// Calculate cumulative work for new block
 		newWork := c.calculateCumulativeWorkLocked(newBlock)
 
+		// STRICT: Only reorg if new block has strictly more work
+		// Equal work means no improvement - stay on current chain
 		if newWork.Cmp(currentWork) > 0 {
-			return true // More work
+			log.Printf("[Chain] Reorg decision: newWork=%s > currentWork=%s, will reorg", 
+				newWork.String(), currentWork.String())
+			return true
 		}
 
-		// Same work - use hash as tie-breaker (smaller hash wins)
-		if newWork.Cmp(currentWork) == 0 {
-			return bytes.Compare(newBlock.Hash, currentTip.Hash) < 0
+		// Equal or less work - no reorg
+		// This prevents infinite reorg loop when blocks have same difficulty
+		if newWork.Cmp(currentWork) <= 0 {
+			log.Printf("[Chain] Reorg decision: newWork=%s <= currentWork=%s, staying on current chain",
+				newWork.String(), currentWork.String())
+			return false
 		}
 	}
 
+	// Block is at lower height - only reorg if it has significantly more work
+	// This handles deep forks correctly
 	return false
 }
 

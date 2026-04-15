@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nogochain/nogo/blockchain/config"
 	"github.com/nogochain/nogo/blockchain/core"
 )
 
@@ -46,6 +47,7 @@ type BlockchainInterface interface {
 	GetChainID() uint64
 	GetMinerAddress() string
 	TotalSupply() uint64
+	GetConsensus() config.ConsensusParams
 
 	// Block operations
 	AddBlock(block *core.Block) (bool, error)

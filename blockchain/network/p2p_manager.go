@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/consensus"
@@ -594,17 +595,33 @@ func (pm *P2PPeerManager) BroadcastBlock(ctx context.Context, block *core.Block)
 	fmt.Printf("\n")
 
 	var wg sync.WaitGroup
+	broadcastSuccess := int64(0)
+	broadcastFailed := int64(0)
+	broadcastAttempts := int64(0)
 	for _, peer := range peers {
 		wg.Add(1)
 		go func(p string) {
 			defer wg.Done()
+			atomic.AddInt64(&broadcastAttempts, 1)
+			log.Printf("[P2P] Broadcasting block #%d to peer %s", block.GetHeight(), p)
 			_, err := pm.client.BroadcastBlock(ctx, p, block)
 			if err != nil {
-				// 静默处理广播失败，只保留带颜色的区块广播日志
+				atomic.AddInt64(&broadcastFailed, 1)
+				log.Printf("[P2P] Failed to broadcast block #%d to peer %s: %v", block.GetHeight(), p, err)
+			} else {
+				atomic.AddInt64(&broadcastSuccess, 1)
+				log.Printf("[P2P] Successfully broadcasted block #%d to peer %s (ack received)", block.GetHeight(), p)
 			}
 		}(peer)
 	}
 	wg.Wait()
+	log.Printf("[P2P] Block #%d broadcast complete: attempts=%d success=%d failed=%d", block.GetHeight(), broadcastAttempts, broadcastSuccess, broadcastFailed)
+}
+
+// SendMessage sends a custom message to a specific peer (Bitcoin-style)
+// Used by InventoryManager for INV/GETDATA mechanism
+func (pm *P2PPeerManager) SendMessage(ctx context.Context, peerAddr string, msg p2pEnvelope) error {
+	return pm.client.SendCustomMessage(ctx, peerAddr, msg)
 }
 
 // formatAddress formats an address for display

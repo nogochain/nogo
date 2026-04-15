@@ -880,10 +880,10 @@ var MainnetGenesisConfig = GenesisConfiguration{
 		DifficultyEnable:               true,
 		TargetBlockTime:                17 * time.Second,
 		DifficultyWindow:               10,
-		DifficultyMaxStep:              2,
+		DifficultyMaxStep:              4, // Allow faster adjustment
 		MinDifficultyBits:              1,
-		MaxDifficultyBits:              40,
-		GenesisDifficultyBits:          1,
+		MaxDifficultyBits:              255,
+		GenesisDifficultyBits:          100, // CPU-minable genesis, PI controller auto-adjusts
 		MedianTimePastWindow:           11,
 		MaxTimeDrift:                   7200,
 		MaxBlockSize:                   4000000, // 4MB
@@ -917,10 +917,10 @@ var TestnetGenesisConfig = GenesisConfiguration{
 		DifficultyEnable:               true,
 		TargetBlockTime:                15 * time.Second, // 15 seconds for testnet
 		DifficultyWindow:               20,
-		DifficultyMaxStep:              1,
+		DifficultyMaxStep:              4, // Allow faster adjustment
 		MinDifficultyBits:              1,
 		MaxDifficultyBits:              255,
-		GenesisDifficultyBits:          8,
+		GenesisDifficultyBits:          100, // CPU-minable genesis, PI controller auto-adjusts
 		MedianTimePastWindow:           11,
 		MaxTimeDrift:                   7200,
 		MaxBlockSize:                   1000000, // 1MB for testnet

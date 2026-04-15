@@ -166,12 +166,16 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	txs = append(txs, transfers...)
 
 	// Calculate next difficulty using NogoPow engine
+	// Use Chain's consensus params for correct difficulty calculation
 	var engine *nogopow.NogopowEngine
 	powMode := os.Getenv("POW_MODE")
 	if powMode == "fake" {
 		engine = nogopow.NewFaker()
 	} else {
-		engine = nogopow.New(nogopow.DefaultConfig())
+		// Create config with Chain's actual consensus params
+		powConfig := nogopow.DefaultConfig()
+		powConfig.ConsensusParams = &c.consensus
+		engine = nogopow.New(powConfig)
 	}
 
 	// Get parent header for difficulty calculation

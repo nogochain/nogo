@@ -1364,10 +1364,11 @@ func (s *Server) handleSubmitTx(w http.ResponseWriter, r *http.Request) {
 	latest := s.bc.LatestBlock()
 	nextHeight := latest.GetHeight() + 1
 
-	// Get consensus params from default config
-	consensusParams := config.DefaultConfig().Consensus
-	log.Printf("Verifying transaction at height %d, BinaryEncodingActive: %v", nextHeight, consensusParams.BinaryEncodingActive(nextHeight))
-	if err := tx.VerifyForConsensus(consensusParams, nextHeight); err != nil {
+	// For new transaction submissions, use Verify() which uses legacy signing hash
+	// without height. This allows wallets to sign transactions without knowing
+	// the future block height. VerifyForConsensus() is used when validating
+	// transactions already included in blocks.
+	if err := tx.Verify(); err != nil {
 		log.Printf("Transaction verification failed: %v", err)
 		log.Printf("Tx details: type=%s, fromPubKeyLen=%d, sigLen=%d, nonce=%d, amount=%d, fee=%d",
 			tx.Type, len(tx.FromPubKey), len(tx.Signature), tx.Nonce, tx.Amount, tx.Fee)

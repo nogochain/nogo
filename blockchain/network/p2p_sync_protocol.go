@@ -27,7 +27,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nogochain/nogo/blockchain/config"
 	"github.com/nogochain/nogo/blockchain/core"
 	nogoconfig "github.com/nogochain/nogo/config"
 )
@@ -352,8 +351,8 @@ func (p *P2PSyncProtocol) BatchDownloadBlocks(ctx context.Context, peerAddrs []s
 			if len(batchHeights) > 0 && batchHeights[0] > 0 {
 				parentBlock, ok := p.bc.BlockByHeight(batchHeights[0] - 1)
 				if ok && parentBlock != nil {
-					cfg := config.DefaultConfig()
-					hash, _ := core.BlockHashHex(parentBlock, cfg.Consensus)
+					consensusParams := p.bc.GetConsensus()
+					hash, _ := core.BlockHashHex(parentBlock, consensusParams)
 					parentHash = hash
 				}
 			}

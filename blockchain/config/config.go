@@ -123,20 +123,22 @@ func DefaultConfig() *Config {
 		Consensus: ConsensusParams{
 			ChainID:                        1,
 			DifficultyEnable:               true,
-			BlockTimeTargetSeconds:         15,
+			BlockTimeTargetSeconds:         17,
 			DifficultyAdjustmentInterval:   100,
 			MaxBlockTimeDriftSeconds:       7200,
 			MinDifficulty:                  1,
 			MaxDifficulty:                  4294967295,
 			MinDifficultyBits:              1,
 			MaxDifficultyBits:              255,
-			MaxDifficultyChangePercent:     50,
+			MaxDifficultyChangePercent:     100, // Increased for faster difficulty adjustment
 			MedianTimePastWindow:           11,
 			MerkleEnable:                   true,
 			MerkleActivationHeight:         0,
 			BinaryEncodingEnable:           false,
 			BinaryEncodingActivationHeight: 0,
-			GenesisDifficultyBits:          18,
+			// GenesisDifficultyBits: 100 allows CPU mining of genesis block
+			// PI controller will auto-adjust based on network hashrate
+			GenesisDifficultyBits: 100,
 			MonetaryPolicy: MonetaryPolicy{
 				InitialBlockReward:     800000000,
 				AnnualReductionPercent: 10,
@@ -171,7 +173,7 @@ func DefaultConfig() *Config {
 			RateLimitReqs:  100,
 			RateLimitBurst: 50,
 			TrustProxy:     false,
-			TLSEnabled:     true,  // TLS must be enabled for mainnet deployment
+			TLSEnabled:     true, // TLS must be enabled for mainnet deployment
 		},
 		NTP: NTPConfig{
 			Enabled:      true,
@@ -360,24 +362,27 @@ func GetTargetBlockTime() int64 {
 
 // GetConsensusParams returns the default consensus parameters
 // Production-grade: provides access to consensus configuration
+// IMPORTANT: Must match nogopow.DefaultConfig() for consistency
 func GetConsensusParams() ConsensusParams {
 	return ConsensusParams{
-		ChainID:                        1,
-		DifficultyEnable:               true,
-		BlockTimeTargetSeconds:         DefaultTargetBlockTime,
-		DifficultyAdjustmentInterval:   100,
-		MaxBlockTimeDriftSeconds:       7200,
-		MinDifficultyBits:              0x1d00ffff,
-		MaxDifficultyBits:              0x1f7fffff,
-		MaxDifficultyChangePercent:     50,
-		MedianTimePastWindow:           11,
-		MerkleEnable:                   true,
-		MerkleActivationHeight:         0,
-		BinaryEncodingEnable:           false,
+		ChainID:                      1,
+		DifficultyEnable:             true,
+		BlockTimeTargetSeconds:       17,
+		DifficultyAdjustmentInterval: 1,
+		MaxBlockTimeDriftSeconds:     900,
+		MinDifficultyBits:            1,
+		MaxDifficultyBits:            255,
+		MaxDifficultyChangePercent:   100,
+		MedianTimePastWindow:         11,
+		MinDifficulty:                1,
+		MaxDifficulty:                4294967295,
+		GenesisDifficultyBits:        100,
+		MerkleEnable:                 true,
+		MerkleActivationHeight:       0,
+		BinaryEncodingEnable:         false,
 		BinaryEncodingActivationHeight: 0,
-		GenesisDifficultyBits:          0x1d00ffff,
-		MaxBlockSize:                   1024 * 1024,
-		MaxTransactionsPerBlock:        1000,
+		MaxBlockSize:                 1024 * 1024,
+		MaxTransactionsPerBlock:      1000,
 		MonetaryPolicy: MonetaryPolicy{
 			InitialBlockReward:     800000000,
 			AnnualReductionPercent: 10,

@@ -355,21 +355,9 @@ func (t *NogopowEngine) calcSeed(chain ChainHeaderReader, header *Header) Hash {
 		return Hash{}
 	}
 
-	// If chain is not available, use parent hash directly from header
-	// This is used for standalone validation
-	if chain == nil {
-		return header.ParentHash
-	}
-
-	// Get parent block
-	parent := chain.GetHeaderByHash(header.ParentHash)
-	if parent == nil {
-		// Fallback: use parent hash directly
-		return header.ParentHash
-	}
-
-	// Seed is parent's hash
-	return parent.Hash()
+	// The seed is the parent block's hash, which is stored in header.ParentHash
+	// We don't need to look up the parent block or recalculate anything
+	return header.ParentHash
 }
 
 // computePoW computes the proof-of-work hash using NogoPow algorithm
@@ -411,6 +399,8 @@ func (t *NogopowEngine) SealHash(header *Header) Hash {
 }
 
 // CalcDifficulty returns the difficulty for a new block
+// Uses PI controller algorithm for adaptive difficulty adjustment
+// This ensures mining and validation produce identical results
 func (t *NogopowEngine) CalcDifficulty(chain ChainHeaderReader, time uint64, parent *Header) *big.Int {
 	minDifficulty := uint64(1)
 	if t.config.ConsensusParams != nil {
@@ -421,10 +411,12 @@ func (t *NogopowEngine) CalcDifficulty(chain ChainHeaderReader, time uint64, par
 		return big.NewInt(int64(minDifficulty))
 	}
 
-	// Use difficulty adjuster for smooth adjustment
-	newDifficulty := t.diffAdjuster.CalcDifficulty(time, parent)
+	// Use PI controller difficulty calculation (same as validation)
+	// Each call creates a fresh adjuster to ensure deterministic results
+	adjuster := NewDifficultyAdjuster(t.config.ConsensusParams)
+	newDifficulty := adjuster.CalcDifficulty(time, parent)
 
-	t.config.Log.Info("NogoPow CalcDifficulty",
+	t.config.Log.Info("NogoPow CalcDifficulty (PI Controller)",
 		"parentNumber", parent.Number.Uint64(),
 		"parentDifficulty", parent.Difficulty.Uint64(),
 		"newDifficulty", newDifficulty.Uint64(),

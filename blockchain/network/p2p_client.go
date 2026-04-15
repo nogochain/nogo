@@ -94,11 +94,11 @@ func NewP2PClient(chainID uint64, rulesHash string, nodeID string) *P2PClient {
 		nodeID:        nodeID,
 		publicIP:      publicIP,
 		advertiseSelf: advertiseSelf,
-		dialTimeout:   5 * time.Second,
-		ioTimeout:     30 * time.Second,
+		dialTimeout:   10 * time.Second, // Increased for slow networks
+		ioTimeout:     60 * time.Second, // Increased for slow networks
 		maxMsgBytes:   4 << 20,
 		connections:   make(map[string]*p2pConnection),
-		connPoolSize:  50,
+		connPoolSize: 50,
 		ctx:           ctx,
 		cancel:        cancel,
 	}
@@ -128,6 +128,11 @@ func (c *P2PClient) getConnection(ctx context.Context, peer string) (*p2pConnect
 		// Remove stale connection if it exists
 		c.removeConnection(peer)
 		return nil, err
+	}
+
+	// Enable TCP_NODELAY to ensure data is sent immediately without buffering
+	if tcpConn, ok := netConn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
 	}
 
 	// Perform handshake
@@ -175,25 +180,22 @@ func (c *P2PClient) getConnection(ctx context.Context, peer string) (*p2pConnect
 func (c *P2PClient) performHandshake(conn net.Conn) error {
 	_ = conn.SetDeadline(time.Now().Add(c.ioTimeout))
 
-	// Only log handshake at debug level to reduce noise
-	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
-		log.Printf("P2P Client Handshake: My ChainID=%d, RulesHash=%s, NodeID=%s", c.chainID, c.rulesHash, c.nodeID)
-	}
+	// Always log handshake for diagnostics
+	log.Printf("P2P Client: starting handshake with %s (timeout=%v)", conn.RemoteAddr(), c.ioTimeout)
 
 	// Send hello
 	helloMsg := newP2PHello(c.chainID, c.rulesHash, c.nodeID)
-	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
-		log.Printf("P2P Client: sending hello with RulesHash=%s", helloMsg.RulesHash)
-	}
+	log.Printf("P2P Client: sending hello - ChainID=%d, RulesHash=%s, NodeID=%s", c.chainID, helloMsg.RulesHash, c.nodeID)
 	if err := p2pWriteJSON(conn, p2pEnvelope{Type: "hello", Payload: mustJSON(helloMsg)}); err != nil {
 		log.Printf("P2P Client: failed to send hello: %v", err)
 		return err
 	}
+	log.Printf("P2P Client: hello sent, waiting for response...")
 
 	// Read hello response
 	raw, err := p2pReadJSON(conn, 1<<20)
 	if err != nil {
-		log.Printf("P2P Client: failed to read hello response: %v", err)
+		log.Printf("P2P Client: failed to read hello response: %v (remote=%s)", err, conn.RemoteAddr())
 		return err
 	}
 
@@ -202,6 +204,20 @@ func (c *P2PClient) performHandshake(conn net.Conn) error {
 		log.Printf("P2P Client: failed to unmarshal hello response: %v", err)
 		return err
 	}
+
+	// Handle error response from server
+	if env.Type == "error" {
+		var errMsg struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(env.Payload, &errMsg); err == nil {
+			log.Printf("P2P Client: server rejected connection: %s", errMsg.Error)
+			return fmt.Errorf("server rejected: %s", errMsg.Error)
+		}
+		log.Printf("P2P Client: server returned error: %s", string(env.Payload))
+		return errors.New("server returned error")
+	}
+
 	if env.Type != "hello" {
 		log.Printf("P2P Client: expected hello but got type=%s", env.Type)
 		return errors.New("bad hello response")
@@ -213,10 +229,7 @@ func (c *P2PClient) performHandshake(conn net.Conn) error {
 		return err
 	}
 
-	// Only log at debug level
-	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
-		log.Printf("P2P Client: received hello - ChainID=%d, RulesHash=%s, Protocol=%d", hello.ChainID, hello.RulesHash, hello.Protocol)
-	}
+	log.Printf("P2P Client: received hello response - ChainID=%d, RulesHash=%s, Protocol=%d", hello.ChainID, hello.RulesHash, hello.Protocol)
 
 	if hello.Protocol != 1 || hello.ChainID != c.chainID {
 		log.Printf("P2P Client: chain/protocol mismatch - expected ChainID=%d, got ChainID=%d, Protocol=%d", c.chainID, hello.ChainID, hello.Protocol)
@@ -224,14 +237,11 @@ func (c *P2PClient) performHandshake(conn net.Conn) error {
 	}
 	if c.rulesHash != "" && hello.RulesHash != c.rulesHash {
 		log.Printf("P2P Client: RULES HASH MISMATCH! My RulesHash=%s, Remote RulesHash=%s", c.rulesHash, hello.RulesHash)
-		log.Printf("P2P Client: This means your code version is different from the mainnet node!")
+		log.Printf("P2P Client: This means your code version is different from the remote node!")
 		return errors.New("rules hash mismatch")
 	}
 
-	// Only log at debug level
-	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
-		log.Printf("P2P Client: handshake successful with peer")
-	}
+	log.Printf("P2P Client: handshake successful with %s", conn.RemoteAddr())
 	return nil
 }
 
@@ -371,6 +381,11 @@ func (c *P2PClient) doWithNewConnection(ctx context.Context, peer string, reqTyp
 	}
 	defer netConn.Close()
 
+	// Enable TCP_NODELAY to ensure data is sent immediately
+	if tcpConn, ok := netConn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+	}
+
 	// Perform handshake
 	if err := c.performHandshake(netConn); err != nil {
 		return fmt.Errorf("handshake with %s failed: %w", peer, err)
@@ -495,6 +510,38 @@ func (c *P2PClient) RequestBlock(ctx context.Context, peer string, hashHex strin
 	return &block, nil
 }
 
+// SendCustomMessage sends a custom message to a peer (Bitcoin-style)
+// Does not wait for specific response - message is sent asynchronously
+func (c *P2PClient) SendCustomMessage(ctx context.Context, peer string, msg p2pEnvelope) error {
+	peer = strings.TrimSpace(peer)
+	if peer == "" {
+		return errors.New("empty peer")
+	}
+
+	// Get or create persistent connection
+	conn, err := c.getConnection(ctx, peer)
+	if err != nil {
+		return err
+	}
+
+	// Set deadline for this operation
+	_ = conn.conn.SetDeadline(time.Now().Add(c.ioTimeout))
+
+	// Send message (no response expected)
+	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
+		log.Printf("[P2PClient.SendCustomMessage] Sending type=%s to %s", msg.Type, peer)
+	}
+
+	if err := p2pWriteJSON(conn.conn, msg); err != nil {
+		log.Printf("[P2PClient.SendCustomMessage] Write failed to %s: %v", peer, err)
+		c.removeConnection(peer)
+		return err
+	}
+
+	log.Printf("[P2PClient] Sent message type=%s to %s", msg.Type, peer)
+	return nil
+}
+
 // FetchBlocksByHeightRange fetches multiple blocks by height range in a single connection.
 // This is more efficient than calling FetchBlockByHeight multiple times because it reuses
 // the same TCP connection for all requests, avoiding the overhead of repeated handshakes.
@@ -514,6 +561,11 @@ func (c *P2PClient) FetchBlocksByHeightRange(ctx context.Context, peer string, s
 		return nil, fmt.Errorf("dial %s failed: %w", peer, err)
 	}
 	defer netConn.Close()
+
+	// Enable TCP_NODELAY to ensure data is sent immediately
+	if tcpConn, ok := netConn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+	}
 
 	// Perform handshake once
 	if err := c.performHandshake(netConn); err != nil {

@@ -589,13 +589,17 @@ func (s *SyncLoop) runSyncLoop() {
 // performSyncStep executes one sync iteration
 func (s *SyncLoop) performSyncStep() {
 	if s.pm == nil {
+		log.Printf("[Sync] performSyncStep: peer manager is nil")
 		return
 	}
 
 	peers := s.pm.GetActivePeers()
 	if len(peers) == 0 {
+		log.Printf("[Sync] performSyncStep: no active peers")
 		return
 	}
+
+	log.Printf("[Sync] performSyncStep: %d active peers", len(peers))
 
 	// Get current chain state
 	currentHeight := s.bc.LatestBlock().GetHeight()
@@ -606,8 +610,10 @@ func (s *SyncLoop) performSyncStep() {
 	for _, peer := range peers {
 		info, err := s.pm.FetchChainInfo(s.ctx, peer)
 		if err != nil {
+			log.Printf("[Sync] failed to fetch chain info from peer %s: %v", peer, err)
 			continue
 		}
+		log.Printf("[Sync] peer %s: height=%d work=%s", peer, info.Height, info.Work)
 		if info.Height > maxPeerHeight {
 			maxPeerHeight = info.Height
 			bestPeer = peer
@@ -615,8 +621,12 @@ func (s *SyncLoop) performSyncStep() {
 	}
 
 	if maxPeerHeight == 0 {
+		log.Printf("[Sync] performSyncStep: no valid peer info")
 		return
 	}
+
+	log.Printf("[Sync] performSyncStep: current=%d, maxPeer=%d, bestPeer=%s", currentHeight, maxPeerHeight, bestPeer)
+
 
 	if maxPeerHeight <= currentHeight {
 		// Chain is synced
@@ -646,7 +656,7 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 	log.Printf("[Sync] Received block %d hash=%s",
 		block.GetHeight(), hex.EncodeToString(block.Hash))
 
-	// Validate block
+	// Fast validation first (basic structure check)
 	err := s.validator.ValidateBlockFast(block)
 	if err != nil {
 		// Check if this is corrupted block data (critical error)
@@ -665,6 +675,27 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 		// Try adding as orphan for non-corrupted blocks
 		s.orphanPool.AddOrphan(block)
 		return fmt.Errorf("block validation failed: %v", err)
+	}
+
+	// Full validation with parent block (PoW, difficulty, timestamp)
+	// This ensures consistency with P2P broadcast validation path
+	if block.GetHeight() > 0 {
+		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+		parent, exists := s.bc.BlockByHash(parentHashHex)
+		if exists && parent != nil {
+			// Perform full validation including PoW and difficulty
+			if err := s.validator.ValidateBlock(block, parent, nil); err != nil {
+				log.Printf("[Sync] Full validation failed for block %d: %v", block.GetHeight(), err)
+				s.orphanPool.AddOrphan(block)
+				return fmt.Errorf("full block validation failed: %w", err)
+			}
+			log.Printf("[Sync] Block %d passed full validation (PoW, difficulty, timestamp)", block.GetHeight())
+		} else {
+			// Parent not found, add as orphan - will be validated when parent arrives
+			log.Printf("[Sync] Parent not found for block %d, adding as orphan", block.GetHeight())
+			s.orphanPool.AddOrphan(block)
+			return fmt.Errorf("parent block not found: orphan block")
+		}
 	}
 
 	log.Printf("[Sync] Block %d validated", block.GetHeight())

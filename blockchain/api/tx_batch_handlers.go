@@ -232,8 +232,10 @@ func (s *Server) submitSingleTransaction(tx core.Transaction, ctx context.Contex
 	}
 	nextHeight := latest.GetHeight() + 1
 
-	consensusParams := config.DefaultConfig().Consensus
-	if err := tx.VerifyForConsensus(consensusParams, nextHeight); err != nil {
+	// For new transaction submissions, use Verify() which uses legacy signing hash
+	// without height. This allows wallets to sign transactions without knowing
+	// the future block height.
+	if err := tx.Verify(); err != nil {
 		return txSubmissionResult{err: fmt.Errorf("verification failed: %w", err)}
 	}
 
