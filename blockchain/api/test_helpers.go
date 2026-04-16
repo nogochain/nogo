@@ -17,6 +17,7 @@
 package api
 
 import (
+	"context"
 	"encoding/hex"
 	"math/big"
 
@@ -137,7 +138,7 @@ func (m *mockBlockchain) SelectMempoolTxs(mp network.Mempool, maxTxPerBlock int)
 	return nil, nil, nil
 }
 
-func (m *mockBlockchain) MineTransfers(txs []core.Transaction) (*core.Block, error) {
+func (m *mockBlockchain) MineTransfers(ctx context.Context, txs []core.Transaction) (*core.Block, error) {
 	return nil, nil
 }
 

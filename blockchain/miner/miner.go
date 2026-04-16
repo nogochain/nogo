@@ -138,7 +138,7 @@ type Miner struct {
 type Blockchain interface {
 	LatestBlock() *core.Block
 	SelectMempoolTxs(mp Mempool, maxTxPerBlock int) ([]core.Transaction, []string, error)
-	MineTransfers(txs []core.Transaction) (*core.Block, error)
+	MineTransfers(ctx context.Context, txs []core.Transaction) (*core.Block, error)
 	CanonicalWork() *big.Int
 	RollbackToHeight(height uint64) error
 	GetConsensus() config.ConsensusParams
@@ -580,7 +580,7 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		return nil, errors.New("no parent block")
 	}
 
-	b, err := m.bc.MineTransfers(selected)
+	b, err := m.bc.MineTransfers(ctx, selected)
 	if err != nil {
 		logf(colorRed, "❌ ", fmt.Sprintf("Mine failed: %v", err))
 		return nil, err
@@ -825,13 +825,14 @@ func computeMerkleRootForConsensus(txs []core.Transaction, consensus config.Cons
 
 	leaves := make([][]byte, len(txs))
 	for i, tx := range txs {
-		// Use fmt.Sprintf for consistent serialization
-		// This matches the validation logic in chain.validateMerkleRootLocked
-		hash := sha256.Sum256([]byte(fmt.Sprintf("%v", tx)))
-		leaves[i] = hash[:]
+		th, err := core.TxSigningHashForConsensus(tx, consensus, height)
+		if err != nil {
+			return nil, fmt.Errorf("compute tx hash: %w", err)
+		}
+		leaves[i] = th
 	}
 
-	return computeMerkleTree(leaves), nil
+	return core.ComputeMerkleRoot(leaves)
 }
 
 // computeMerkleRoot computes the Merkle root of transactions (legacy format)

@@ -1201,7 +1201,6 @@ func (s *Server) handleAddBlock(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
-		// Log detailed error for debugging
 		log.Printf("[API] Block submission failed: %v", err)
 		errMsg := err.Error()
 		if errMsg == "" {
@@ -1210,6 +1209,17 @@ func (s *Server) handleAddBlock(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"accepted": false, "message": errMsg})
 		return
+	}
+
+	// CRITICAL FIX: Broadcast block to peers after successful submission
+	// This ensures blocks submitted by mining pools are propagated to the network
+	if s.peers != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			s.peers.BroadcastBlock(ctx, &b)
+			log.Printf("[API] Block broadcast completed: height=%d, hash=%x", b.GetHeight(), b.Hash[:8])
+		}()
 	}
 
 	// Mempool cleanup is now handled centrally in Chain.addCanonicalBlockLocked

@@ -1805,11 +1805,15 @@ func (s *P2PServer) validateBlockPoW(block *core.Block) error {
 
 	// Get parent block
 	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+	log.Printf("[P2P] validateBlockPoW: block height=%d, looking for parent hash=%s", block.GetHeight(), parentHashHex[:16])
+	
 	parent, exists := s.bc.BlockByHash(parentHashHex)
 	if !exists {
-		// Parent unknown, will be handled by ErrUnknownParent logic
+		log.Printf("[P2P] validateBlockPoW: parent NOT found for block height=%d, returning ErrUnknownParent", block.GetHeight())
 		return consensus.ErrUnknownParent
 	}
+	
+	log.Printf("[P2P] validateBlockPoW: parent found at height=%d, hash=%s", parent.GetHeight(), hex.EncodeToString(parent.Hash)[:16])
 
 	// Use consensus validator for full validation
 	// Note: ValidateBlock includes PoW, difficulty, and timestamp validation
@@ -1818,10 +1822,14 @@ func (s *P2PServer) validateBlockPoW(block *core.Block) error {
 	consensusParams := s.bc.GetConsensus()
 	validator := consensus.NewBlockValidator(consensusParams, 1, nil)
 	
+	log.Printf("[P2P] validateBlockPoW: starting full validation for block height=%d", block.GetHeight())
+	
 	// Validate with empty state (we're only validating structure and PoW)
 	if err := validator.ValidateBlock(block, parent, nil); err != nil {
+		log.Printf("[P2P] validateBlockPoW: validation FAILED for block height=%d: %v", block.GetHeight(), err)
 		return fmt.Errorf("block validation failed: %w", err)
 	}
 
+	log.Printf("[P2P] validateBlockPoW: validation PASSED for block height=%d", block.GetHeight())
 	return nil
 }

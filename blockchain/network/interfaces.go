@@ -62,7 +62,7 @@ type BlockchainInterface interface {
 	SelectMempoolTxs(mp Mempool, maxTxPerBlock int) ([]core.Transaction, []string, error)
 
 	// Mining operations
-	MineTransfers(txs []core.Transaction) (*core.Block, error)
+	MineTransfers(ctx context.Context, txs []core.Transaction) (*core.Block, error)
 	CalcNextDifficulty(latest *core.Block, currentTime int64) uint32
 
 	// Chain audit

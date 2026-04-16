@@ -351,6 +351,7 @@ func (c *Chain) GetOnBlockAdded() func(*Block) {
 // Parameters:
 //   - latest: the parent block (latest block in the chain)
 //   - currentTime: Unix timestamp for the new block
+//
 // Returns:
 //   - uint32: difficulty bits for the next block
 func (c *Chain) CalcNextDifficulty(latest *Block, currentTime int64) uint32 {
@@ -567,19 +568,19 @@ func (c *Chain) validateRulesHashLocked() error {
 // Caller must hold c.mu lock
 func (c *Chain) tryForkCompatibleStateApplication(block *Block, hashHex string) bool {
 	log.Printf("[Chain] Attempting fork-compatible state application for block %d", block.GetHeight())
-	
+
 	// Strict validation: verify block structure and cryptographic integrity
 	if err := c.validateBlockStructure(block); err != nil {
 		log.Printf("[Chain] Fork-tolerant application failed: invalid block structure: %v", err)
 		return false
 	}
-	
+
 	// Verify proof-of-work is valid
 	if err := c.validateBlockPoW(block); err != nil {
 		log.Printf("[Chain] Fork-tolerant application failed: invalid PoW: %v", err)
 		return false
 	}
-	
+
 	// Attempt to apply state with strict fork tolerance
 	tempState := make(map[string]Account)
 	err := applyBlockToStateWithStrictTolerance(c.consensus, c.monetaryPolicy, tempState, block, c.genesisAddress, c.genesisTimestamp, c.state)
@@ -589,13 +590,13 @@ func (c *Chain) tryForkCompatibleStateApplication(block *Block, hashHex string) 
 			log.Printf("[Chain] Fork-tolerant state validation failed: %v", err)
 			return false
 		}
-		
+
 		// Merge temp state with canonical state
 		c.mergeStatesWithStrictValidation(tempState)
 		log.Printf("[Chain] Fork-tolerant application successful for block %d", block.GetHeight())
 		return true
 	}
-	
+
 	log.Printf("[Chain] Fork-tolerant application failed: %v", err)
 	return false
 }
@@ -605,16 +606,16 @@ func (c *Chain) validateBlockStructure(block *Block) error {
 	if block == nil {
 		return errors.New("block is nil")
 	}
-	
+
 	if len(block.Transactions) == 0 {
 		return errors.New("block has no transactions")
 	}
-	
+
 	// Verify first transaction is coinbase
 	if block.Transactions[0].Type != TxCoinbase {
 		return errors.New("first transaction must be coinbase")
 	}
-	
+
 	// Verify merkle root if present
 	if len(block.Header.MerkleRoot) > 0 {
 		leaves := make([][]byte, 0, len(block.Transactions))
@@ -625,18 +626,18 @@ func (c *Chain) validateBlockStructure(block *Block) error {
 			}
 			leaves = append(leaves, th)
 		}
-		
+
 		computedRoot, err := MerkleRoot(leaves)
 		if err != nil {
 			return fmt.Errorf("compute merkle root: %w", err)
 		}
-		
+
 		if !bytes.Equal(block.Header.MerkleRoot, computedRoot) {
 			return fmt.Errorf("merkle root mismatch: header=%x calculated=%x",
 				block.Header.MerkleRoot, computedRoot)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -645,15 +646,15 @@ func (c *Chain) validateBlockPoW(block *Block) error {
 	// Create NogoPow engine for validation
 	engine := nogopow.New(nil)
 	defer engine.Close()
-	
+
 	// Convert to nogopow header format
 	header := convertToNogopowHeader(&block.Header, block)
-	
+
 	// Verify seal
 	if err := engine.VerifySealOnly(header); err != nil {
 		return fmt.Errorf("PoW verification failed: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -669,26 +670,26 @@ func applyBlockToStateWithStrictTolerance(p ConsensusParams, mp MonetaryPolicy, 
 			return fmt.Errorf("block too large: %d bytes (max %d)", size, p.MaxBlockSize)
 		}
 	}
-	
+
 	if len(b.Transactions) == 0 {
 		return errors.New("block has no transactions")
 	}
-	
+
 	// Strict coinbase validation with minimal tolerance (±2% vs previous ±10%)
 	// This prevents inflation attacks while allowing minor protocol variations
 	if b.GetHeight() > 0 && b.Transactions[0].Type == TxCoinbase {
 		cb := b.Transactions[0]
-		minerReward := mp.BlockReward(b.GetHeight())*uint64(mp.MinerRewardShare)/100
-		
+		minerReward := mp.BlockReward(b.GetHeight()) * uint64(mp.MinerRewardShare) / 100
+
 		// Reduced tolerance: ±2% instead of ±10%
 		rewardLowerBound := minerReward * 98 / 100
 		rewardUpperBound := minerReward * 102 / 100
-		
+
 		if cb.Amount < rewardLowerBound || cb.Amount > rewardUpperBound {
-			return fmt.Errorf("coinbase reward outside strict tolerance bounds: %d not in [%d, %d] (±2%%)", 
+			return fmt.Errorf("coinbase reward outside strict tolerance bounds: %d not in [%d, %d] (±2%%)",
 				cb.Amount, rewardLowerBound, rewardUpperBound)
 		}
-		
+
 		// Verify reward doesn't cause overflow
 		acct := state[cb.ToAddress]
 		if acct.Balance > math.MaxUint64-cb.Amount {
@@ -697,7 +698,7 @@ func applyBlockToStateWithStrictTolerance(p ConsensusParams, mp MonetaryPolicy, 
 		acct.Balance += cb.Amount
 		state[cb.ToAddress] = acct
 	}
-	
+
 	// Process transactions with strict nonce validation
 	for i, tx := range b.Transactions {
 		switch tx.Type {
@@ -710,40 +711,40 @@ func applyBlockToStateWithStrictTolerance(p ConsensusParams, mp MonetaryPolicy, 
 			if err := tx.VerifyForConsensus(p, b.GetHeight()); err != nil {
 				return err
 			}
-			
+
 			fromAddr, err := tx.FromAddress()
 			if err != nil {
 				return err
 			}
-			
+
 			from := state[fromAddr]
-			
+
 			// Strict nonce validation: only allow minimal gap (2 vs previous 10)
 			// This prevents transaction replay attacks
 			nonceGap := int64(tx.Nonce) - int64(from.Nonce)
 			if nonceGap < 0 {
 				// Reject transactions with nonce lower than current
-				return fmt.Errorf("invalid nonce for %s: expected >= %d got %d", 
+				return fmt.Errorf("invalid nonce for %s: expected >= %d got %d",
 					fromAddr, from.Nonce, tx.Nonce)
 			}
 			if nonceGap > 2 {
 				// Reject excessive nonce gaps
-				return fmt.Errorf("excessive nonce gap for %s: expected <= %d got %d (max gap=2)", 
+				return fmt.Errorf("excessive nonce gap for %s: expected <= %d got %d (max gap=2)",
 					fromAddr, from.Nonce+2, tx.Nonce)
 			}
-			
+
 			// Update nonce
 			from.Nonce = max(from.Nonce, tx.Nonce)
-			
+
 			// Verify sufficient balance
 			totalDebit := tx.Amount + tx.Fee
 			if from.Balance < totalDebit {
-				return fmt.Errorf("insufficient funds for %s: balance=%d required=%d", 
+				return fmt.Errorf("insufficient funds for %s: balance=%d required=%d",
 					fromAddr, from.Balance, totalDebit)
 			}
 			from.Balance -= totalDebit
 			state[fromAddr] = from
-			
+
 			// Apply credit
 			to := state[tx.ToAddress]
 			if to.Balance > math.MaxUint64-tx.Amount {
@@ -753,7 +754,7 @@ func applyBlockToStateWithStrictTolerance(p ConsensusParams, mp MonetaryPolicy, 
 			state[tx.ToAddress] = to
 		}
 	}
-	
+
 	return nil
 }
 
@@ -765,7 +766,7 @@ func (c *Chain) validateStateIntegrity(state map[string]Account) error {
 			return fmt.Errorf("suspicious balance for %s: %d (potential overflow)", addr, acct.Balance)
 		}
 	}
-	
+
 	// Verify total supply hasn't increased beyond expected
 	// This is a critical security check to prevent inflation attacks
 	totalSupply := uint64(0)
@@ -775,20 +776,20 @@ func (c *Chain) validateStateIntegrity(state map[string]Account) error {
 		}
 		totalSupply += acct.Balance
 	}
-	
+
 	// Compare with existing state supply
 	existingSupply := uint64(0)
 	for _, acct := range c.state {
 		existingSupply += acct.Balance
 	}
-	
+
 	// Allow only minimal supply increase (from block rewards)
 	maxAllowedIncrease := c.monetaryPolicy.BlockReward(c.currentHeight()) * 2
 	if totalSupply > existingSupply+maxAllowedIncrease {
 		return fmt.Errorf("excessive supply increase: old=%d new=%d max_allowed_increase=%d",
 			existingSupply, totalSupply, maxAllowedIncrease)
 	}
-	
+
 	return nil
 }
 
@@ -811,7 +812,7 @@ func (c *Chain) mergeStatesWithStrictValidation(tempState map[string]Account) {
 					continue // Skip this account to prevent inflation
 				}
 			}
-			
+
 			// Update nonce only if higher (forward progress)
 			mergedAcct := Account{
 				Nonce:   max(existingAcct.Nonce, tempAcct.Nonce),
@@ -826,7 +827,7 @@ func (c *Chain) mergeStatesWithStrictValidation(tempState map[string]Account) {
 func (c *Chain) currentHeight() uint64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	
+
 	if len(c.blocks) == 0 {
 		return 0
 	}
@@ -838,7 +839,7 @@ func convertToNogopowHeader(h *BlockHeader, block *Block) *nogopow.Header {
 	if h == nil {
 		return nil
 	}
-	
+
 	// Convert miner address from string to Address type
 	var coinbaseAddr nogopow.Address
 	if block != nil && len(block.MinerAddress) > 0 {
@@ -847,16 +848,16 @@ func convertToNogopowHeader(h *BlockHeader, block *Block) *nogopow.Header {
 			copy(coinbaseAddr[:], addrBytes)
 		}
 	}
-	
+
 	// Convert byte slices to Hash/Address types
 	var parentHash nogopow.Hash
 	copy(parentHash[:], h.PrevHash)
-	
+
 	var txHash nogopow.Hash
 	if len(h.MerkleRoot) > 0 {
 		copy(txHash[:], h.MerkleRoot)
 	}
-	
+
 	return &nogopow.Header{
 		ParentHash: parentHash,
 		Coinbase:   coinbaseAddr,
@@ -883,25 +884,25 @@ func applyBlockToStateWithTolerance(p ConsensusParams, mp MonetaryPolicy, state 
 			return fmt.Errorf("block too large: %d bytes (max %d)", size, p.MaxBlockSize)
 		}
 	}
-	
+
 	if len(b.Transactions) == 0 {
 		return errors.New("block has no transactions")
 	}
-	
+
 	// Relaxed validation: allow mining rewards within reasonable bounds
 	if b.GetHeight() > 0 && b.Transactions[0].Type == TxCoinbase {
 		cb := b.Transactions[0]
-		minerReward := mp.BlockReward(b.GetHeight())*uint64(mp.MinerRewardShare)/100
-		
+		minerReward := mp.BlockReward(b.GetHeight()) * uint64(mp.MinerRewardShare) / 100
+
 		// Tolerance: allow ±10% mining reward variation for fork compatibility
 		rewardLowerBound := minerReward * 90 / 100
 		rewardUpperBound := minerReward * 110 / 100
-		
+
 		if cb.Amount < rewardLowerBound || cb.Amount > rewardUpperBound {
-			return fmt.Errorf("coinbase reward out of tolerance bounds: %d not in [%d, %d]", 
+			return fmt.Errorf("coinbase reward out of tolerance bounds: %d not in [%d, %d]",
 				cb.Amount, rewardLowerBound, rewardUpperBound)
 		}
-		
+
 		// Apply rewards with tolerance (skip exact distribution validation)
 		acct := state[cb.ToAddress]
 		if acct.Balance > math.MaxUint64-cb.Amount {
@@ -910,7 +911,7 @@ func applyBlockToStateWithTolerance(p ConsensusParams, mp MonetaryPolicy, state 
 		acct.Balance += cb.Amount
 		state[cb.ToAddress] = acct
 	}
-	
+
 	// Process transactions with nonce tolerance
 	for i, tx := range b.Transactions {
 		switch tx.Type {
@@ -923,30 +924,30 @@ func applyBlockToStateWithTolerance(p ConsensusParams, mp MonetaryPolicy, state 
 			if err := tx.VerifyForConsensus(p, b.GetHeight()); err != nil {
 				return err
 			}
-			
+
 			fromAddr, err := tx.FromAddress()
 			if err != nil {
 				return err
 			}
-			
+
 			from := state[fromAddr]
-			
+
 			// Nonce tolerance: allow up to 10 nonce gap for fork synchronization
 			if tx.Nonce > from.Nonce+10 {
-				return fmt.Errorf("excessive nonce gap for %s: expected <= %d got %d", 
+				return fmt.Errorf("excessive nonce gap for %s: expected <= %d got %d",
 					fromAddr, from.Nonce+10, tx.Nonce)
 			}
-			
+
 			// Update nonce to highest valid value
 			from.Nonce = max(from.Nonce, tx.Nonce)
-			
+
 			totalDebit := tx.Amount + tx.Fee
 			if from.Balance < totalDebit {
 				return fmt.Errorf("insufficient funds for %s", fromAddr)
 			}
 			from.Balance -= totalDebit
 			state[fromAddr] = from
-			
+
 			to := state[tx.ToAddress]
 			if to.Balance > math.MaxUint64-tx.Amount {
 				return errors.New("transfer balance overflow")
@@ -955,7 +956,7 @@ func applyBlockToStateWithTolerance(p ConsensusParams, mp MonetaryPolicy, state 
 			state[tx.ToAddress] = to
 		}
 	}
-	
+
 	return nil
 }
 
@@ -963,15 +964,15 @@ func applyBlockToStateWithTolerance(p ConsensusParams, mp MonetaryPolicy, state 
 // Used when network synchronization is failing due to minor protocol differences
 func (c *Chain) emergencySyncStateApplication(block *Block, hashHex string) bool {
 	log.Printf("[Chain] Emergency sync mode activated for block %d", block.GetHeight())
-	
+
 	// Emergency validation: accept any blocks with valid structure and PoW
 	// Minimal economic validation to ensure blockchain continuity
-	
+
 	if len(block.Transactions) < 1 || block.Transactions[0].Type != TxCoinbase {
 		log.Printf("[Chain] Emergency sync: invalid coinbase structure")
 		return false
 	}
-	
+
 	// Accept block without state change in emergency mode
 	// State will be rebuilt from checkpoint on successful sync
 	log.Printf("[Chain] Emergency sync mode accepted block %d, state rebuild deferred", block.GetHeight())
@@ -1457,14 +1458,14 @@ func (c *Chain) handleReorganizationLocked(newBlock *Block) error {
 	c.reorgMu.Lock()
 	c.reorgInProgress = true
 	c.reorgMu.Unlock()
-	
+
 	// Ensure flag is cleared on exit
 	defer func() {
 		c.reorgMu.Lock()
 		c.reorgInProgress = false
 		c.reorgMu.Unlock()
 	}()
-	
+
 	// Find common ancestor
 	ancestor, forkBlocks, err := c.findCommonAncestorLocked(newBlock)
 	if err != nil {
@@ -2117,13 +2118,21 @@ func verifyBlockPoWSeal(consensus ConsensusParams, block *Block, parent *Block) 
 		powCoinbase[i] = byteVal
 	}
 
-	// Reconstruct header with all fields
+	// CRITICAL FIX: Include MerkleRoot in header for correct SealHash calculation
+	// Without MerkleRoot, the SealHash would be computed incorrectly and PoW verification would fail
+	var merkleRoot nogopow.Hash
+	if len(block.Header.MerkleRoot) > 0 {
+		copy(merkleRoot[:], block.Header.MerkleRoot)
+	}
+
+	// Reconstruct header with all fields including MerkleRoot
 	header := &nogopow.Header{
 		Number:     big.NewInt(int64(block.GetHeight())),
 		Time:       uint64(block.Header.TimestampUnix),
 		ParentHash: parentHash,
 		Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
 		Coinbase:   powCoinbase,
+		Root:       merkleRoot, // CRITICAL: Include MerkleRoot for correct hash
 	}
 
 	// Set nonce (32 bytes, little-endian)
@@ -2246,6 +2255,15 @@ func (c *Chain) BlockByHash(hashHex string) (*Block, bool) {
 			return block, true
 		}
 	}
+
+	for _, forkBlocks := range c.forkBlocks {
+		for _, forkBlock := range forkBlocks {
+			if hex.EncodeToString(forkBlock.Hash) == hashHex {
+				return forkBlock, true
+			}
+		}
+	}
+
 	return nil, false
 }
 
@@ -2492,17 +2510,23 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 		// Fork case: block at lower height - store as alternative
 		return c.addForkBlockLocked(block, hashHex)
 	} else if block.GetHeight() == expectedHeight+1 {
-		// Next height block - check if parent exists
-		parent, parentExists := c.blocksByHash[hex.EncodeToString(block.Header.PrevHash)]
-		if !parentExists {
-			// Parent not found - store as orphan
+		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+		_, parentExists := c.blocksByHash[parentHashHex]
+		parentInFork := c.isParentInForkBlocksLocked(parentHashHex)
+
+		if !parentExists && !parentInFork {
 			log.Printf("[Chain] Orphan block %d: parent %s not found, storing for later",
-				block.GetHeight(), hex.EncodeToString(block.Header.PrevHash)[:16])
+				block.GetHeight(), parentHashHex[:16])
 			return c.addOrphanBlockLocked(block, hashHex)
 		}
-		// Parent exists - this should have been expectedHeight, logic error
-		log.Printf("[Chain] WARNING: block height %d but expected %d with parent at %d",
-			block.GetHeight(), expectedHeight, parent.GetHeight())
+
+		if parentInFork {
+			log.Printf("[Chain] Block %d extends fork chain, adding to fork blocks", block.GetHeight())
+			return c.addForkBlockLocked(block, hashHex)
+		}
+
+		log.Printf("[Chain] WARNING: block height %d but expected %d with parent in blocksByHash",
+			block.GetHeight(), expectedHeight)
 		return c.addCanonicalBlockLocked(block, hashHex)
 	} else {
 		// Orphan case: block height too high (gap > 1)
@@ -2569,6 +2593,7 @@ func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error)
 }
 
 // tryProcessOrphansLocked attempts to process orphan blocks whose parents have arrived
+// Production-grade: handles both canonical chain and fork chain orphans
 // Caller must hold c.mu lock
 func (c *Chain) tryProcessOrphansLocked() (bool, error) {
 	if c.orphanPool == nil || len(c.orphanPool) == 0 {
@@ -2583,7 +2608,6 @@ func (c *Chain) tryProcessOrphansLocked() (bool, error) {
 		iterations++
 		foundOrphan := false
 
-		// Get current canonical chain tip
 		canonicalTip := c.canonicalTipLocked()
 		if canonicalTip == nil {
 			break
@@ -2591,38 +2615,53 @@ func (c *Chain) tryProcessOrphansLocked() (bool, error) {
 		canonicalTipHash := hex.EncodeToString(canonicalTip.Hash)
 		expectedHeight := canonicalTip.GetHeight() + 1
 
-		// Find orphans whose parent is the current canonical tip
 		for orphanHash, orphan := range c.orphanPool {
-			// Check if this orphan's parent is the canonical tip
 			orphanParentHash := hex.EncodeToString(orphan.Header.PrevHash)
-			if orphanParentHash != canonicalTipHash {
-				continue
+
+			if orphanParentHash == canonicalTipHash {
+				if orphan.GetHeight() != expectedHeight {
+					log.Printf("[Chain] WARNING: Orphan height mismatch: expected %d, got %d", expectedHeight, orphan.GetHeight())
+					continue
+				}
+
+				foundOrphan = true
+				log.Printf("[Chain] Processing canonical orphan %d with parent %d", orphan.GetHeight(), canonicalTip.GetHeight())
+
+				delete(c.orphanPool, orphanHash)
+				c.removeOrphanIndexLocked(orphanHash, orphanParentHash)
+
+				accepted, err := c.addCanonicalBlockLocked(orphan, orphanHash)
+				if err != nil {
+					log.Printf("[Chain] Failed to add processed orphan: %v", err)
+					continue
+				}
+				if accepted {
+					processed = true
+					log.Printf("[Chain] Orphan %d added to canonical chain", orphan.GetHeight())
+				}
+				break
 			}
 
-			// Verify height consistency
-			if orphan.GetHeight() != expectedHeight {
-				log.Printf("[Chain] WARNING: Orphan height mismatch: expected %d, got %d", expectedHeight, orphan.GetHeight())
-				continue
-			}
+			if c.isParentInForkBlocksLocked(orphanParentHash) {
+				foundOrphan = true
+				log.Printf("[Chain] Processing fork chain orphan %d with parent in fork blocks", orphan.GetHeight())
 
-			foundOrphan = true
-			log.Printf("[Chain] Processing orphan %d with parent %d", orphan.GetHeight(), canonicalTip.GetHeight())
+				delete(c.orphanPool, orphanHash)
+				c.removeOrphanIndexLocked(orphanHash, orphanParentHash)
 
-			// Remove from orphan pool before processing
-			delete(c.orphanPool, orphanHash)
-			c.removeOrphanIndexLocked(orphanHash, orphanParentHash)
-
-			// Add to canonical chain
-			accepted, err := c.addCanonicalBlockLocked(orphan, orphanHash)
-			if err != nil {
-				log.Printf("[Chain] Failed to add processed orphan: %v", err)
-				continue
+				accepted, err := c.addForkBlockLocked(orphan, orphanHash)
+				if err != nil {
+					log.Printf("[Chain] Failed to add fork orphan: %v", err)
+					continue
+				}
+				if accepted {
+					processed = true
+					log.Printf("[Chain] Fork orphan %d triggered reorganization", orphan.GetHeight())
+				} else {
+					log.Printf("[Chain] Fork orphan %d stored in fork blocks", orphan.GetHeight())
+				}
+				break
 			}
-			if accepted {
-				processed = true
-				log.Printf("[Chain] Orphan %d added to canonical chain", orphan.GetHeight())
-			}
-			break // Restart iteration since chain changed
 		}
 
 		if !foundOrphan {
@@ -2634,6 +2673,19 @@ func (c *Chain) tryProcessOrphansLocked() (bool, error) {
 		log.Printf("[Chain] Processed orphan blocks, chain height now %d", len(c.blocks)-1)
 	}
 	return processed, nil
+}
+
+// isParentInForkBlocksLocked checks if a parent hash exists in fork blocks
+// Caller must hold c.mu lock
+func (c *Chain) isParentInForkBlocksLocked(parentHashHex string) bool {
+	for _, forkBlocks := range c.forkBlocks {
+		for _, forkBlock := range forkBlocks {
+			if hex.EncodeToString(forkBlock.Hash) == parentHashHex {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // canonicalTipLocked returns the current tip of the canonical chain
@@ -2829,12 +2881,12 @@ func (c *Chain) addCanonicalBlockLocked(block *Block, hashHex string) (bool, err
 	}
 
 	log.Printf("[Chain] Block %d added to canonical chain (height: %d, hash: %s)", block.GetHeight(), height, hashHex[:16])
-	
+
 	// Call onBlockAdded callback if set (e.g., for broadcasting blocks from mining pool)
 	if callback := c.GetOnBlockAdded(); callback != nil {
 		go callback(block)
 	}
-	
+
 	return true, nil
 }
 
@@ -2898,6 +2950,7 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 
 // shouldReorgToLocked checks if we should reorganize to the given block
 // Production-grade: implements heaviest chain rule with proper work comparison
+// Handles both same-height forks and lower-height forks with more work
 // Caller must hold c.mu lock
 func (c *Chain) shouldReorgToLocked(newBlock *Block) bool {
 	if len(c.blocks) == 0 {
@@ -2905,64 +2958,64 @@ func (c *Chain) shouldReorgToLocked(newBlock *Block) bool {
 	}
 
 	currentTip := c.blocks[len(c.blocks)-1]
-	
-	// Block extends current chain - no reorg needed
+
 	if currentTip.GetHeight() < newBlock.GetHeight() {
 		return true
 	}
 
-	// Same height - compare cumulative work
+	currentWork := c.canonicalWork
+	newWork := c.calculateCumulativeWorkLocked(newBlock)
+
 	if currentTip.GetHeight() == newBlock.GetHeight() {
-		// CRITICAL: Check if newBlock has same parent as current tip
-		// If prevHash is the same, they are siblings competing for same slot
-		// Only reorg if new block has MORE work, not equal work
-		currentWork := c.canonicalWork
-
-		// Calculate cumulative work for new block
-		newWork := c.calculateCumulativeWorkLocked(newBlock)
-
-		// STRICT: Only reorg if new block has strictly more work
-		// Equal work means no improvement - stay on current chain
 		if newWork.Cmp(currentWork) > 0 {
-			log.Printf("[Chain] Reorg decision: newWork=%s > currentWork=%s, will reorg", 
+			log.Printf("[Chain] Reorg decision: same height, newWork=%s > currentWork=%s, will reorg",
 				newWork.String(), currentWork.String())
 			return true
 		}
-
-		// Equal or less work - no reorg
-		// This prevents infinite reorg loop when blocks have same difficulty
-		if newWork.Cmp(currentWork) <= 0 {
-			log.Printf("[Chain] Reorg decision: newWork=%s <= currentWork=%s, staying on current chain",
-				newWork.String(), currentWork.String())
-			return false
-		}
+		log.Printf("[Chain] Reorg decision: same height, newWork=%s <= currentWork=%s, staying on current chain",
+			newWork.String(), currentWork.String())
+		return false
 	}
 
-	// Block is at lower height - only reorg if it has significantly more work
-	// This handles deep forks correctly
+	if newWork.Cmp(currentWork) > 0 {
+		log.Printf("[Chain] Reorg decision: lower height but more work, newWork=%s > currentWork=%s, will reorg",
+			newWork.String(), currentWork.String())
+		return true
+	}
+
+	log.Printf("[Chain] Reorg decision: lower height and less/equal work, newWork=%s <= currentWork=%s, staying",
+		newWork.String(), currentWork.String())
 	return false
 }
 
 // calculateCumulativeWorkLocked calculates the cumulative work from genesis to the given block
-// Follows the parent chain recursively to sum all work
+// Production-grade: follows the parent chain recursively, including fork blocks
 // Caller must hold c.mu lock
 func (c *Chain) calculateCumulativeWorkLocked(block *Block) *big.Int {
-	// If block already has TotalWork set, use it
 	if block.TotalWork != "" {
 		if work, ok := StringToWork(block.TotalWork); ok {
 			return work
 		}
 	}
 
-	// Calculate work for this block
 	work := WorkForDifficultyBits(block.Header.DifficultyBits)
 
-	// Add parent's cumulative work if parent exists
 	if len(block.Header.PrevHash) > 0 {
 		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+
 		if parent, exists := c.blocksByHash[parentHashHex]; exists {
 			parentWork := c.calculateCumulativeWorkLocked(parent)
 			work.Add(work, parentWork)
+		} else {
+			for _, forkBlocks := range c.forkBlocks {
+				for _, forkBlock := range forkBlocks {
+					if hex.EncodeToString(forkBlock.Hash) == parentHashHex {
+						parentWork := c.calculateCumulativeWorkLocked(forkBlock)
+						work.Add(work, parentWork)
+						return work
+					}
+				}
+			}
 		}
 	}
 

@@ -23,6 +23,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math"
+	"math/big"
 	"strings"
 	"sync"
 	"time"
@@ -32,7 +34,6 @@ import (
 	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/nogochain/nogo/blockchain/metrics"
 	"github.com/nogochain/nogo/blockchain/utils"
-	"math"
 )
 
 // =============================================================================
@@ -601,12 +602,14 @@ func (s *SyncLoop) performSyncStep() {
 
 	log.Printf("[Sync] performSyncStep: %d active peers", len(peers))
 
-	// Get current chain state
 	currentHeight := s.bc.LatestBlock().GetHeight()
+	localWork := s.bc.CanonicalWork()
 
-	// Check peer heights
 	var maxPeerHeight uint64
 	var bestPeer string
+	var bestPeerWork *big.Int
+	peerInfos := make(map[string]*ChainInfo)
+
 	for _, peer := range peers {
 		info, err := s.pm.FetchChainInfo(s.ctx, peer)
 		if err != nil {
@@ -614,38 +617,58 @@ func (s *SyncLoop) performSyncStep() {
 			continue
 		}
 		log.Printf("[Sync] peer %s: height=%d work=%s", peer, info.Height, info.Work)
-		if info.Height > maxPeerHeight {
+		peerInfos[peer] = info
+
+		peerWork := info.Work
+		if peerWork == nil {
+			peerWork = big.NewInt(0)
+		}
+
+		if bestPeerWork == nil || peerWork.Cmp(bestPeerWork) > 0 {
+			bestPeerWork = peerWork
 			maxPeerHeight = info.Height
 			bestPeer = peer
 		}
 	}
 
-	if maxPeerHeight == 0 {
+	if maxPeerHeight == 0 || bestPeerWork == nil {
 		log.Printf("[Sync] performSyncStep: no valid peer info")
 		return
 	}
 
-	log.Printf("[Sync] performSyncStep: current=%d, maxPeer=%d, bestPeer=%s", currentHeight, maxPeerHeight, bestPeer)
+	log.Printf("[Sync] performSyncStep: currentHeight=%d, localWork=%s, maxPeerHeight=%d, bestPeerWork=%s, bestPeer=%s",
+		currentHeight, localWork.String(), maxPeerHeight, bestPeerWork.String(), bestPeer)
 
+	shouldSync := false
+	syncReason := ""
 
-	if maxPeerHeight <= currentHeight {
-		// Chain is synced
+	if maxPeerHeight > currentHeight {
+		shouldSync = true
+		syncReason = fmt.Sprintf("peer has higher height (%d > %d)", maxPeerHeight, currentHeight)
+	} else if bestPeerWork.Cmp(localWork) > 0 {
+		shouldSync = true
+		syncReason = fmt.Sprintf("peer has more work (%s > %s)", bestPeerWork.String(), localWork.String())
+	}
+
+	if !shouldSync {
 		s.mu.Lock()
 		s.syncProgress = 1.0
 		s.isSyncing = false
 		s.lastUpdateTime = time.Now()
 		s.mu.Unlock()
+		log.Printf("[Sync] Chain is synced (height=%d, work=%s)", currentHeight, localWork.String())
 		return
 	}
 
-	// Update progress
+	log.Printf("[Sync] Sync needed: %s", syncReason)
+
 	s.mu.Lock()
 	s.isSyncing = true
 	s.mu.Unlock()
 
-	// Perform actual sync with the peer
 	if bestPeer != "" {
 		if err := s.SyncWithPeer(s.ctx, bestPeer); err != nil {
+			log.Printf("[Sync] SyncWithPeer failed: %v", err)
 		}
 	}
 }
@@ -867,7 +890,6 @@ func (s *SyncLoop) processOrphans(ctx context.Context) {
 
 // SyncWithPeer performs initial sync with a peer using scoring and retry
 func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
-	// Use retry executor for robust sync
 	result := s.retryExec.ExecuteWithRetry(ctx, func(ctx context.Context, p string) error {
 		info, err := s.pm.FetchChainInfo(ctx, p)
 		if err != nil {
@@ -875,16 +897,34 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		}
 
 		currentHeight := s.bc.LatestBlock().GetHeight()
-		if info.Height <= currentHeight {
+		localWork := s.bc.CanonicalWork()
+		peerWork := info.Work
+		if peerWork == nil {
+			peerWork = big.NewInt(0)
+		}
+
+		shouldSync := false
+		syncReason := ""
+		if info.Height > currentHeight {
+			shouldSync = true
+			syncReason = fmt.Sprintf("peer has higher height (%d > %d)", info.Height, currentHeight)
+		} else if peerWork.Cmp(localWork) > 0 {
+			shouldSync = true
+			syncReason = fmt.Sprintf("peer has more work (%s > %s)", peerWork.String(), localWork.String())
+		}
+
+		if !shouldSync {
 			s.mu.Lock()
 			s.syncProgress = 1.0
 			s.isSyncing = false
 			s.lastUpdateTime = time.Now()
 			s.mu.Unlock()
-			return nil // Already synced
+			log.Printf("[Sync] Already synced with peer %s (localHeight=%d, localWork=%s, peerHeight=%d, peerWork=%s)",
+				p, currentHeight, localWork.String(), info.Height, peerWork.String())
+			return nil
 		}
 
-		log.Printf("[Sync] Starting sync with peer %s (height %d, current %d)", p, info.Height, currentHeight)
+		log.Printf("[Sync] Starting sync with peer %s: %s", p, syncReason)
 
 		// Sync headers first with retry
 		headersToFetch := info.Height - currentHeight

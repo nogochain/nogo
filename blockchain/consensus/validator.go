@@ -426,12 +426,20 @@ func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Bl
 		return fmt.Errorf("invalid miner address: %w", err)
 	}
 
+	// CRITICAL FIX: Include MerkleRoot in header for correct SealHash calculation
+	// Without MerkleRoot, the SealHash would be computed incorrectly and PoW verification would fail
+	var merkleRoot nogopow.Hash
+	if len(block.Header.MerkleRoot) > 0 {
+		copy(merkleRoot[:], block.Header.MerkleRoot)
+	}
+
 	header := &nogopow.Header{
 		Number:     big.NewInt(int64(block.GetHeight())),
 		Time:       uint64(block.Header.TimestampUnix),
 		ParentHash: parentHash,
 		Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
 		Coinbase:   powCoinbase,
+		Root:       merkleRoot, // CRITICAL: Include MerkleRoot for correct hash
 	}
 
 	binary.LittleEndian.PutUint64(header.Nonce[:8], block.Header.Nonce)

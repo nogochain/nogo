@@ -160,8 +160,8 @@ func (w *chainWrapper) SelectMempoolTxsNetwork(mp network.Mempool, maxTxPerBlock
 }
 
 // MineTransfers mines transfers into a block
-func (w *chainWrapper) MineTransfers(txs []core.Transaction) (*core.Block, error) {
-	return w.chain.MineTransfers(txs)
+func (w *chainWrapper) MineTransfers(ctx context.Context, txs []core.Transaction) (*core.Block, error) {
+	return w.chain.MineTransfers(ctx, txs)
 }
 
 // CanonicalWork returns the total work on canonical chain
@@ -377,8 +377,8 @@ func (w *networkChainWrapper) SelectMempoolTxs(mp network.Mempool, maxTxPerBlock
 }
 
 // MineTransfers mines transfers into a block
-func (w *networkChainWrapper) MineTransfers(txs []core.Transaction) (*core.Block, error) {
-	return w.chain.MineTransfers(txs)
+func (w *networkChainWrapper) MineTransfers(ctx context.Context, txs []core.Transaction) (*core.Block, error) {
+	return w.chain.MineTransfers(ctx, txs)
 }
 
 // AuditChain audits the chain integrity
