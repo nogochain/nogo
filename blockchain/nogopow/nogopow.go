@@ -326,16 +326,37 @@ func (t *NogopowEngine) checkSolution(chain ChainHeaderReader, header *Header, s
 
 // verifySeal verifies that the block has a valid PoW seal (full version with logging)
 func (t *NogopowEngine) verifySeal(chain ChainHeaderReader, header *Header) error {
-	// Calculate seed from parent block
 	seed := t.calcSeed(chain, header)
-
-	// Calculate block hash with nonce
 	blockHash := t.SealHash(header)
-
-	// Apply NogoPow PoW algorithm: H(blockHash, seed)
 	powHash := t.computePoW(blockHash, seed)
 
-	// Check if hash meets difficulty target
+	if !t.checkPow(powHash, header.Difficulty) {
+		t.config.Log.Info("NogoPow checkPow failed",
+			"number", header.Number.Uint64(),
+			"powHash", powHash.Hex(),
+			"difficulty", header.Difficulty,
+		)
+		return ErrInvalidSeal
+	}
+
+	return nil
+}
+
+// VerifySealWithBlockHash verifies PoW seal using the provided block hash
+// This is used when the block hash is already known (e.g., from remote nodes)
+// Production-grade: ensures compatibility with blocks mined by different code versions
+func (t *NogopowEngine) VerifySealWithBlockHash(header *Header, blockHash Hash) error {
+	if t.config.PowMode == ModeFake {
+		return nil
+	}
+
+	if header.Number.Uint64() == 0 {
+		return nil
+	}
+
+	seed := t.calcSeed(nil, header)
+	powHash := t.computePoW(blockHash, seed)
+
 	if !t.checkPow(powHash, header.Difficulty) {
 		t.config.Log.Info("NogoPow checkPow failed",
 			"number", header.Number.Uint64(),

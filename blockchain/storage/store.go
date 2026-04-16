@@ -14,11 +14,12 @@ import (
 )
 
 const (
+	baseDataDir     = "nogodata"
 	dataDirName     = "data"
-	blocksGobRel    = "data/blocks.gob"
-	chainBoltRel    = "data/chain.db"
-	rulesHashRel    = "data/rules.hash"
-	genesisHashRel  = "data/genesis.hash"
+	blocksGobRel    = "nogodata/data/blocks.gob"
+	chainBoltRel    = "nogodata/data/chain.db"
+	rulesHashRel    = "nogodata/data/rules.hash"
+	genesisHashRel  = "nogodata/data/genesis.hash"
 	blocksBucket    = "blocks"
 	canonBucket     = "canonical"
 	metaBucket      = "meta"

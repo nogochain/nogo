@@ -260,8 +260,9 @@ type Chain struct {
 	forkBlocks map[uint64][]*Block
 
 	// Orphan pool - store blocks whose parent is not yet known
-	orphanPool     map[string]*Block   // hash -> block
-	orphanByParent map[string][]string // parent hash -> list of orphan hashes
+	orphanPool       map[string]*Block    // hash -> block
+	orphanByParent   map[string][]string  // parent hash -> list of orphan hashes
+	orphanTimestamps map[string]time.Time // hash -> insertion time for TTL cleanup
 
 	// Indexes
 	txIndex          map[string]TxLocation       // txid -> location (canonical only)
@@ -283,6 +284,11 @@ type Chain struct {
 	// Used for broadcasting blocks added via API (e.g., from mining pool)
 	onBlockAdded func(*Block)
 	onBlockMu    sync.RWMutex
+
+	// Missing block callback - called when orphan block is received
+	// Used to request missing parent blocks from peers
+	onMissingBlock func(parentHash []byte, height uint64)
+	onMissingMu    sync.RWMutex
 
 	// Integrity reward system
 	integrityManager     *NodeIntegrityManager
@@ -344,6 +350,21 @@ func (c *Chain) GetOnBlockAdded() func(*Block) {
 	c.onBlockMu.RLock()
 	defer c.onBlockMu.RUnlock()
 	return c.onBlockAdded
+}
+
+// SetOnMissingBlock sets the callback function to be called when an orphan block is received
+// Production-grade: enables automatic request of missing parent blocks from peers
+func (c *Chain) SetOnMissingBlock(callback func(parentHash []byte, height uint64)) {
+	c.onMissingMu.Lock()
+	defer c.onMissingMu.Unlock()
+	c.onMissingBlock = callback
+}
+
+// GetOnMissingBlock returns the current callback function
+func (c *Chain) GetOnMissingBlock() func(parentHash []byte, height uint64) {
+	c.onMissingMu.RLock()
+	defer c.onMissingMu.RUnlock()
+	return c.onMissingBlock
 }
 
 // CalcNextDifficulty calculates the difficulty for the next block
@@ -2543,7 +2564,11 @@ func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error)
 	if c.orphanPool == nil {
 		c.orphanPool = make(map[string]*Block)
 		c.orphanByParent = make(map[string][]string)
+		c.orphanTimestamps = make(map[string]time.Time)
 	}
+
+	// Cleanup expired orphans before adding new one
+	c.cleanupExpiredOrphansLocked()
 
 	// Check if orphan pool is full and evict oldest if needed
 	if len(c.orphanPool) >= MaxOrphanPoolSize {
@@ -2558,28 +2583,14 @@ func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error)
 			}
 		}
 		if lowestHash != "" {
-			// Remove from orphan pool
-			delete(c.orphanPool, lowestHash)
-			// Remove from parent index
-			if blk, exists := c.orphanPool[lowestHash]; exists {
-				parentHashHex := hex.EncodeToString(blk.Header.PrevHash)
-				orphans := c.orphanByParent[parentHashHex]
-				for i, h := range orphans {
-					if h == lowestHash {
-						c.orphanByParent[parentHashHex] = append(orphans[:i], orphans[i+1:]...)
-						break
-					}
-				}
-				if len(c.orphanByParent[parentHashHex]) == 0 {
-					delete(c.orphanByParent, parentHashHex)
-				}
-			}
+			c.removeOrphanLocked(lowestHash)
 			log.Printf("[Chain] Orphan pool full, evicted block at height %d", lowestHeight)
 		}
 	}
 
 	// Store orphan block
 	c.orphanPool[hashHex] = block
+	c.orphanTimestamps[hashHex] = time.Now()
 
 	// Index by parent hash for efficient lookup
 	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
@@ -2588,8 +2599,30 @@ func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error)
 	log.Printf("[Chain] Orphan block stored: height=%d hash=%s parent=%s (pool size: %d/%d)",
 		block.GetHeight(), hashHex[:16], parentHashHex[:16], len(c.orphanPool), MaxOrphanPoolSize)
 
+	// Request missing parent block asynchronously
+	c.requestMissingParentAsync(block)
+
 	// Try to process orphan children
 	return c.tryProcessOrphansLocked()
+}
+
+// requestMissingParentAsync requests the missing parent block from peers
+// This is called when an orphan block is received to proactively fetch missing ancestors
+func (c *Chain) requestMissingParentAsync(block *Block) {
+	c.onMissingMu.RLock()
+	callback := c.onMissingBlock
+	c.onMissingMu.RUnlock()
+
+	if callback == nil {
+		return
+	}
+
+	// Request parent block asynchronously to avoid blocking
+	go func() {
+		parentHash := make([]byte, len(block.Header.PrevHash))
+		copy(parentHash, block.Header.PrevHash)
+		callback(parentHash, block.GetHeight())
+	}()
 }
 
 // tryProcessOrphansLocked attempts to process orphan blocks whose parents have arrived
@@ -2627,8 +2660,7 @@ func (c *Chain) tryProcessOrphansLocked() (bool, error) {
 				foundOrphan = true
 				log.Printf("[Chain] Processing canonical orphan %d with parent %d", orphan.GetHeight(), canonicalTip.GetHeight())
 
-				delete(c.orphanPool, orphanHash)
-				c.removeOrphanIndexLocked(orphanHash, orphanParentHash)
+				c.removeOrphanLocked(orphanHash)
 
 				accepted, err := c.addCanonicalBlockLocked(orphan, orphanHash)
 				if err != nil {
@@ -2646,8 +2678,7 @@ func (c *Chain) tryProcessOrphansLocked() (bool, error) {
 				foundOrphan = true
 				log.Printf("[Chain] Processing fork chain orphan %d with parent in fork blocks", orphan.GetHeight())
 
-				delete(c.orphanPool, orphanHash)
-				c.removeOrphanIndexLocked(orphanHash, orphanParentHash)
+				c.removeOrphanLocked(orphanHash)
 
 				accepted, err := c.addForkBlockLocked(orphan, orphanHash)
 				if err != nil {
@@ -2711,6 +2742,8 @@ func (c *Chain) processLoadedOrphansLocked() {
 	// Build orphan pool from blocks not on canonical chain
 	c.orphanPool = make(map[string]*Block)
 	c.orphanByParent = make(map[string][]string)
+	c.orphanTimestamps = make(map[string]time.Time)
+	now := time.Now()
 
 	canonicalCount := len(c.blocks)
 	for hashHex, block := range c.blocksByHash {
@@ -2724,6 +2757,7 @@ func (c *Chain) processLoadedOrphansLocked() {
 
 		// Add to orphan pool
 		c.orphanPool[hashHex] = block
+		c.orphanTimestamps[hashHex] = now
 		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 		c.orphanByParent[parentHashHex] = append(c.orphanByParent[parentHashHex], hashHex)
 	}
@@ -2757,7 +2791,7 @@ func (c *Chain) processLoadedOrphansLocked() {
 
 			if orphan.GetHeight() != expectedHeight {
 				log.Printf("[Chain] Orphan height mismatch: expected %d, got %d", expectedHeight, orphan.GetHeight())
-				delete(c.orphanPool, orphanHash)
+				c.removeOrphanLocked(orphanHash)
 				continue
 			}
 
@@ -2765,15 +2799,14 @@ func (c *Chain) processLoadedOrphansLocked() {
 			accepted, err := c.addCanonicalBlockLocked(orphan, orphanHash)
 			if err != nil {
 				log.Printf("[Chain] Failed to add orphan %d: %v", orphan.GetHeight(), err)
-				delete(c.orphanPool, orphanHash)
+				c.removeOrphanLocked(orphanHash)
 				continue
 			}
 
 			if accepted {
 				processed++
 				found = true
-				delete(c.orphanPool, orphanHash)
-				c.removeOrphanIndexLocked(orphanHash, orphanParentHash)
+				c.removeOrphanLocked(orphanHash)
 				log.Printf("[Chain] Connected orphan block %d to canonical chain", orphan.GetHeight())
 				break
 			}
@@ -2814,6 +2847,48 @@ func (c *Chain) removeOrphanIndexLocked(orphanHash, parentHash string) {
 			break
 		}
 	}
+}
+
+// removeOrphanLocked removes an orphan block from all indexes
+// Caller must hold c.mu lock
+func (c *Chain) removeOrphanLocked(hashHex string) {
+	block, exists := c.orphanPool[hashHex]
+	if !exists {
+		return
+	}
+
+	delete(c.orphanPool, hashHex)
+	delete(c.orphanTimestamps, hashHex)
+
+	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+	c.removeOrphanIndexLocked(hashHex, parentHashHex)
+}
+
+// cleanupExpiredOrphansLocked removes orphan blocks that have exceeded MaxOrphanPoolAge
+// Caller must hold c.mu lock
+func (c *Chain) cleanupExpiredOrphansLocked() int {
+	if c.orphanPool == nil || c.orphanTimestamps == nil {
+		return 0
+	}
+
+	now := time.Now()
+	expiredHashes := make([]string, 0)
+
+	for hashHex, insertTime := range c.orphanTimestamps {
+		if now.Sub(insertTime) > MaxOrphanPoolAge {
+			expiredHashes = append(expiredHashes, hashHex)
+		}
+	}
+
+	for _, hashHex := range expiredHashes {
+		c.removeOrphanLocked(hashHex)
+	}
+
+	if len(expiredHashes) > 0 {
+		log.Printf("[Chain] Cleaned up %d expired orphan blocks (TTL: %v)", len(expiredHashes), MaxOrphanPoolAge)
+	}
+
+	return len(expiredHashes)
 }
 
 // addCanonicalBlockLocked adds a block to the canonical chain
@@ -3473,7 +3548,7 @@ func (c *Chain) RollbackToHeight(height uint64) error {
 // Concurrency safety: must be called with mutex held
 func (c *Chain) initAddressIndexLocked() error {
 	if c.indexPath == "" {
-		c.indexPath = "blockchain_data"
+		c.indexPath = "nogodata/blockchain_data"
 	}
 
 	indexDir := filepath.Join(c.indexPath, "address_index")

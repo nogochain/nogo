@@ -260,6 +260,22 @@ func (n *Node) initializeComponents() error {
 				n.mempool.UpdateHeight(block.GetHeight() + 1)
 			}
 		})
+
+		// CRITICAL: Set missing block callback for requesting missing parent blocks
+		// Production-grade: enables automatic request of missing ancestors when orphan block is received
+		// This ensures chain continuity when receiving blocks out of order
+		n.chain.SetOnMissingBlock(func(parentHash []byte, height uint64) {
+			parentHashHex := hex.EncodeToString(parentHash)
+			log.Printf("[Node] Requesting missing parent block: hash=%s height=%d", parentHashHex[:16], height-1)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			// Use EnsureAncestors to recursively fetch missing blocks
+			if err := n.p2pManager.EnsureAncestors(ctx, n.networkChainWrapper, parentHashHex); err != nil {
+				log.Printf("[Node] Failed to fetch missing parent block %s: %v", parentHashHex[:16], err)
+			}
+		})
 	} else {
 		// Even without P2P, update mempool height
 		n.chain.SetOnBlockAdded(func(block *core.Block) {

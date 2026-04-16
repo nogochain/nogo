@@ -37,10 +37,8 @@ func (c *Chain) GetHeaderByHash(hash nogopow.Hash) *nogopow.Header {
 	hashHex := hex.EncodeToString(hash.Bytes())
 	for _, block := range c.blocks {
 		if hex.EncodeToString(block.Hash) == hashHex {
-			// Convert miner address using reusable function for consistency
-			coinbaseAddr, err := StringToAddress(c.minerAddress)
+			coinbaseAddr, err := StringToAddress(block.MinerAddress)
 			if err != nil {
-				// Return zero address if conversion fails (should not happen in production)
 				coinbaseAddr = nogopow.Address{}
 			}
 			return &nogopow.Header{
@@ -243,14 +241,6 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 		Root:       powMerkleRoot,
 	}
 
-	// Prepare header with dynamic difficulty
-	if err := engine.Prepare(c, header); err != nil {
-		c.mu.RUnlock()
-		return nil, fmt.Errorf("failed to prepare header: %w", err)
-	}
-
-	// CRITICAL FIX: Update DifficultyBits after Prepare() modifies header.Difficulty
-	// Prepare() recalculates difficulty, so we must sync it back to the block header
 	newBlock.Header.DifficultyBits = uint32(header.Difficulty.Uint64())
 
 	// Create block for mining

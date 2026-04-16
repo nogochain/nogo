@@ -398,7 +398,7 @@ func (v *BlockValidator) ValidateBlockFast(block *Block) error {
 }
 
 func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Block) error {
-	if block == nil || len(block.Hash) == 0 {
+	if block == nil {
 		return errors.New("invalid block for POW verification")
 	}
 
@@ -410,24 +410,19 @@ func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Bl
 		return errors.New("parent block is nil for POW verification")
 	}
 
-	// Create nogopow config with actual consensus params (same as mining)
 	powConfig := nogopow.DefaultConfig()
 	powConfig.ConsensusParams = &consensus
 	engine := nogopow.New(powConfig)
 	defer engine.Close()
 
 	var parentHash nogopow.Hash
-	copy(parentHash[:], parent.Hash)
+	copy(parentHash[:], block.GetPrevHash())
 
-	// Convert miner address string to nogopow.Address using reusable function
-	// This ensures consistent address conversion across the codebase
 	powCoinbase, err := core.StringToAddress(block.MinerAddress)
 	if err != nil {
 		return fmt.Errorf("invalid miner address: %w", err)
 	}
 
-	// CRITICAL FIX: Include MerkleRoot in header for correct SealHash calculation
-	// Without MerkleRoot, the SealHash would be computed incorrectly and PoW verification would fail
 	var merkleRoot nogopow.Hash
 	if len(block.Header.MerkleRoot) > 0 {
 		copy(merkleRoot[:], block.Header.MerkleRoot)
@@ -439,12 +434,19 @@ func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Bl
 		ParentHash: parentHash,
 		Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
 		Coinbase:   powCoinbase,
-		Root:       merkleRoot, // CRITICAL: Include MerkleRoot for correct hash
+		Root:       merkleRoot,
 	}
 
 	binary.LittleEndian.PutUint64(header.Nonce[:8], block.Header.Nonce)
 
-	if err := engine.VerifySealOnly(header); err != nil {
+	var blockHash nogopow.Hash
+	if len(block.Hash) == 32 {
+		copy(blockHash[:], block.Hash)
+	} else {
+		return fmt.Errorf("invalid block hash length: %d", len(block.Hash))
+	}
+
+	if err := engine.VerifySealWithBlockHash(header, blockHash); err != nil {
 		return fmt.Errorf("NogoPow seal verification failed for block %d: %w", block.GetHeight(), err)
 	}
 

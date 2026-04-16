@@ -117,7 +117,7 @@ func NewServer(bc Blockchain, aiAuditorURL string, mp *MempoolImpl, miner *Miner
 		cm := bc.GetContractManager()
 		if cm != nil {
 			// Set data directory for contract persistence
-			dataDir := "blockchain_data/contracts"
+			dataDir := "nogodata/blockchain_data/contracts"
 			if envDir := os.Getenv("CONTRACT_DATA_DIR"); envDir != "" {
 				dataDir = envDir
 			}
