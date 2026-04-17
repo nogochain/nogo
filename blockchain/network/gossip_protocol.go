@@ -686,9 +686,9 @@ func (gp *GossipProtocol) sendToPeer(msg *GossipMessage, peerID string) error {
 			Payload: msgJSON,
 		}
 
-		// Send message using P2P client
+		// Send message using P2P client with dedicated connection
 		var resp struct{}
-		err = gp.peerManager.client.do(context.Background(), peerID, "gossip_message", envelope, &resp, "gossip_message_ack")
+		err = gp.peerManager.client.doWithNewConnection(context.Background(), peerID, "gossip_message", envelope, &resp, "gossip_message_ack")
 		if err != nil {
 			log.Printf("GossipProtocol: Failed to send message to peer %s: %v", peerID, err)
 			return err
