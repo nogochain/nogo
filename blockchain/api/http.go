@@ -117,7 +117,7 @@ func NewServer(bc Blockchain, aiAuditorURL string, mp *MempoolImpl, miner *Miner
 		cm := bc.GetContractManager()
 		if cm != nil {
 			// Set data directory for contract persistence
-			dataDir := "blockchain_data/contracts"
+			dataDir := "nogodata/blockchain_data/contracts"
 			if envDir := os.Getenv("CONTRACT_DATA_DIR"); envDir != "" {
 				dataDir = envDir
 			}
@@ -1201,7 +1201,6 @@ func (s *Server) handleAddBlock(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
-		// Log detailed error for debugging
 		log.Printf("[API] Block submission failed: %v", err)
 		errMsg := err.Error()
 		if errMsg == "" {
@@ -1210,6 +1209,17 @@ func (s *Server) handleAddBlock(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"accepted": false, "message": errMsg})
 		return
+	}
+
+	// CRITICAL FIX: Broadcast block to peers after successful submission
+	// This ensures blocks submitted by mining pools are propagated to the network
+	if s.peers != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			s.peers.BroadcastBlock(ctx, &b)
+			log.Printf("[API] Block broadcast completed: height=%d, hash=%x", b.GetHeight(), b.Hash[:8])
+		}()
 	}
 
 	// Mempool cleanup is now handled centrally in Chain.addCanonicalBlockLocked
@@ -1364,10 +1374,11 @@ func (s *Server) handleSubmitTx(w http.ResponseWriter, r *http.Request) {
 	latest := s.bc.LatestBlock()
 	nextHeight := latest.GetHeight() + 1
 
-	// Get consensus params from default config
-	consensusParams := config.DefaultConfig().Consensus
-	log.Printf("Verifying transaction at height %d, BinaryEncodingActive: %v", nextHeight, consensusParams.BinaryEncodingActive(nextHeight))
-	if err := tx.VerifyForConsensus(consensusParams, nextHeight); err != nil {
+	// For new transaction submissions, use Verify() which uses legacy signing hash
+	// without height. This allows wallets to sign transactions without knowing
+	// the future block height. VerifyForConsensus() is used when validating
+	// transactions already included in blocks.
+	if err := tx.Verify(); err != nil {
 		log.Printf("Transaction verification failed: %v", err)
 		log.Printf("Tx details: type=%s, fromPubKeyLen=%d, sigLen=%d, nonce=%d, amount=%d, fee=%d",
 			tx.Type, len(tx.FromPubKey), len(tx.Signature), tx.Nonce, tx.Amount, tx.Fee)
@@ -1495,9 +1506,14 @@ func (s *Server) handleSubmitTx(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	log.Printf("[HTTP] Transaction added to mempool: txid=%s", txid)
+
+	// Wake up miner to include this transaction in the next block
 	if s.miner != nil {
 		s.miner.Wake()
+		log.Printf("[HTTP] Miner woken up for new transaction")
 	}
+
 	if s.wsHub != nil {
 		if len(evicted) > 0 {
 			s.wsHub.Publish(WSEvent{Type: "mempool_removed", Data: map[string]any{"txIds": evicted, "reason": "rbf"}})
@@ -1515,19 +1531,35 @@ func (s *Server) handleSubmitTx(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	}
-	if s.txGossip && s.peers != nil {
-		hops := 0
-		if raw := strings.TrimSpace(r.Header.Get(relayHopsHeader)); raw != "" {
-			if n, err := strconv.Atoi(raw); err == nil {
-				hops = n
+
+	// Broadcast transaction to all P2P peers
+	// This ensures the transaction propagates through the network for miners to include
+	// Use dynamic peer check instead of static txGossip flag - allows broadcast to dynamically discovered peers
+	if s.peers != nil {
+		activePeers := s.peers.GetActivePeers()
+		log.Printf("[HTTP] Transaction submit: active_peers=%d", len(activePeers))
+		if len(activePeers) > 0 {
+			hops := 0
+			if raw := strings.TrimSpace(r.Header.Get(relayHopsHeader)); raw != "" {
+				if n, err := strconv.Atoi(raw); err == nil {
+					hops = n
+				}
+				hops = hops - 1
+			} else {
+				hops = envInt("TX_GOSSIP_HOPS", 2)
 			}
-			hops = hops - 1
+			log.Printf("[HTTP] Transaction broadcast hops=%d (TX_GOSSIP_HOPS=%d)", hops, envInt("TX_GOSSIP_HOPS", 2))
+			if hops > 0 {
+				log.Printf("[HTTP] Broadcasting transaction to P2P peers: txid=%s, hops=%d, peers=%d", txid, hops, len(activePeers))
+				s.peers.BroadcastTransaction(context.Background(), tx, hops)
+			} else {
+				log.Printf("[HTTP] Skipping broadcast: hops=%d (TX_GOSSIP_HOPS env var or relay header)", hops)
+			}
 		} else {
-			hops = envInt("TX_GOSSIP_HOPS", 2)
+			log.Printf("[HTTP] No active P2P peers, transaction not broadcast (peers may be discovered dynamically)")
 		}
-		if hops > 0 {
-			s.peers.BroadcastTransaction(context.Background(), tx, hops)
-		}
+	} else {
+		log.Printf("[HTTP] No P2P peer manager configured, transaction not broadcast")
 	}
 	_ = writeJSON(w, http.StatusOK, submitTxResponse{
 		Accepted: true,

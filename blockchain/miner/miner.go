@@ -138,7 +138,7 @@ type Miner struct {
 type Blockchain interface {
 	LatestBlock() *core.Block
 	SelectMempoolTxs(mp Mempool, maxTxPerBlock int) ([]core.Transaction, []string, error)
-	MineTransfers(txs []core.Transaction) (*core.Block, error)
+	MineTransfers(ctx context.Context, txs []core.Transaction) (*core.Block, error)
 	CanonicalWork() *big.Int
 	RollbackToHeight(height uint64) error
 	GetConsensus() config.ConsensusParams
@@ -580,7 +580,7 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		return nil, errors.New("no parent block")
 	}
 
-	b, err := m.bc.MineTransfers(selected)
+	b, err := m.bc.MineTransfers(ctx, selected)
 	if err != nil {
 		logf(colorRed, "❌ ", fmt.Sprintf("Mine failed: %v", err))
 		return nil, err
@@ -785,7 +785,9 @@ func CreateBlockTemplate(
 
 	allTxs := append([]core.Transaction{*coinbase}, txs...)
 
-	merkleRoot, err := computeMerkleRoot(allTxs)
+	// CRITICAL: Use consensus-aware merkle root calculation
+	// This ensures the merkle root matches what the node validates during AddBlock
+	merkleRoot, err := computeMerkleRootForConsensus(allTxs, consensus, parent.GetHeight()+1)
 	if err != nil {
 		return nil, fmt.Errorf("compute merkle root: %w", err)
 	}
@@ -814,7 +816,27 @@ func CreateBlockTemplate(
 	return template, nil
 }
 
-// computeMerkleRoot computes the Merkle root of transactions
+// computeMerkleRootForConsensus computes merkle root using consensus-aware transaction hash
+// Production-grade: matches validateMerkleRootLocked implementation in chain.go
+func computeMerkleRootForConsensus(txs []core.Transaction, consensus config.ConsensusParams, height uint64) ([]byte, error) {
+	if len(txs) == 0 {
+		return make([]byte, 32), nil
+	}
+
+	leaves := make([][]byte, len(txs))
+	for i, tx := range txs {
+		th, err := core.TxSigningHashForConsensus(tx, consensus, height)
+		if err != nil {
+			return nil, fmt.Errorf("compute tx hash: %w", err)
+		}
+		leaves[i] = th
+	}
+
+	return core.ComputeMerkleRoot(leaves)
+}
+
+// computeMerkleRoot computes the Merkle root of transactions (legacy format)
+// Deprecated: use computeMerkleRootForConsensus for consensus-critical operations
 func computeMerkleRoot(txs []core.Transaction) ([]byte, error) {
 	if len(txs) == 0 {
 		return make([]byte, 32), nil

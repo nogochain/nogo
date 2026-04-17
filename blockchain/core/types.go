@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/config"
-	nogoconfig "github.com/nogochain/nogo/config"
 )
 
 // GenerateAddress creates a NogoChain address from a public key
@@ -108,7 +107,8 @@ const (
 	// defaultChainID is the default chain ID for NogoChain mainnet
 	defaultChainID = uint64(1)
 	// defaultDifficultyBits is the default difficulty bits for genesis block
-	defaultDifficultyBits = uint32(18)
+	// Set to 100 for CPU-minable genesis, PI controller will auto-adjust
+	defaultDifficultyBits = uint32(100)
 	// maxDifficultyBits is the maximum difficulty bits value (uint32 max)
 	// Mathematical safety: prevents overflow in difficulty calculations
 	maxDifficultyBits = uint32(4294967295)
@@ -160,8 +160,9 @@ const (
 
 	// MaxBlockTimeDriftSec is the maximum allowed block time drift in seconds (deprecated: use config.ConsensusParams)
 	MaxBlockTimeDriftSec = int64(900) // 15 minutes
-	// DifficultyTolerancePercent is the tolerance percentage for difficulty adjustment (deprecated: use config.ConsensusParams)
-	DifficultyTolerancePercent = uint8(20)
+	// DifficultyTolerancePercent is the tolerance percentage for difficulty adjustment
+	// IMPORTANT: Must match consensus/validator.go DifficultyTolerancePercent for consistency
+	DifficultyTolerancePercent = uint8(50)
 )
 
 // BlockHeader represents the header of a block
@@ -838,162 +839,8 @@ func (t Transaction) signingHashLegacyJSON() ([]byte, error) {
 }
 
 // MonetaryPolicy defines the monetary policy for block rewards
-// Production-grade: implements NogoChain economic model
-// Concurrency safety: immutable after creation, safe for concurrent reads
-type MonetaryPolicy struct {
-	InitialBlockReward     uint64 `json:"initialBlockReward"`
-	MinimumBlockReward     uint64 `json:"minimumBlockReward"`
-	AnnualReductionPercent uint8  `json:"annualReductionPercent"`
-	MinerFeeShare          uint8  `json:"minerFeeShare"`
-	UncleRewardEnabled     bool   `json:"uncleRewardEnabled"`
-	MaxUncleDepth          uint8  `json:"maxUncleDepth"`
-	// Reward distribution shares (must sum to 100)
-	MinerRewardShare   uint8 `json:"minerRewardShare"`
-	CommunityFundShare uint8 `json:"communityFundShare"`
-	GenesisShare       uint8 `json:"genesisShare"`
-	IntegrityPoolShare uint8 `json:"integrityPoolShare"`
-	// Legacy fields for compatibility
-	HalvingInterval uint64 `json:"halvingInterval"`
-	MaxSupply       uint64 `json:"maxSupply"`
-	TailEmission    uint64 `json:"tailEmission"`
-}
-
-// BlockReward calculates the block reward for a given height
-// Math & numeric safety: uses big.Int for precise calculations
-// Production-grade: implements geometric decay economic model
-func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
-	if p.InitialBlockReward == 0 {
-		return 0
-	}
-
-	minReward := p.MinimumBlockReward
-	if minReward == 0 {
-		minReward = 0
-	}
-
-	years := height / nogoconfig.GetBlocksPerYear()
-
-	reward := new(big.Int).SetUint64(p.InitialBlockReward)
-	minRewardBig := new(big.Int).SetUint64(minReward)
-
-	for i := uint64(0); i < years; i++ {
-		if reward.Cmp(minRewardBig) <= 0 {
-			return minReward
-		}
-		reward.Mul(reward, big.NewInt(int64(10-p.AnnualReductionPercent)))
-		reward.Div(reward, big.NewInt(10))
-		if reward.Cmp(minRewardBig) <= 0 {
-			return minReward
-		}
-	}
-
-	if reward.Cmp(minRewardBig) < 0 {
-		return minReward
-	}
-
-	if !reward.IsUint64() {
-		return minReward
-	}
-
-	return reward.Uint64()
-}
-
-// GetUncleReward calculates the uncle block reward
-// Math & numeric safety: validates inputs and uses integer arithmetic
-func (p MonetaryPolicy) GetUncleReward(nephewHeight, uncleHeight uint64, blockReward uint64) uint64 {
-	if nephewHeight <= uncleHeight {
-		return 0
-	}
-
-	distance := nephewHeight - uncleHeight
-	if distance == 0 {
-		return 0
-	}
-
-	maxDepth := p.MaxUncleDepth
-	if maxDepth == 0 {
-		maxDepth = 6
-	}
-	if distance > uint64(maxDepth) || distance >= 8 {
-		return 0
-	}
-
-	multiplier := 8 - distance
-	rewardBig := new(big.Int).SetUint64(uint64(multiplier))
-	rewardBig.Mul(rewardBig, big.NewInt(int64(blockReward)))
-	rewardBig.Div(rewardBig, big.NewInt(8))
-
-	if !rewardBig.IsUint64() {
-		return 0
-	}
-
-	return rewardBig.Uint64()
-}
-
-// GetNephewBonus calculates the bonus for including uncle blocks
-// Math & numeric safety: validates inputs and prevents overflow
-func (p MonetaryPolicy) GetNephewBonus(blockReward uint64, uncleCount int) uint64 {
-	if uncleCount <= 0 {
-		return 0
-	}
-
-	if uncleCount > 2 {
-		uncleCount = 2
-	}
-
-	bonusPerUncle := blockReward / 32
-	totalBonus := uint64(uncleCount) * bonusPerUncle
-
-	if totalBonus > blockReward {
-		return blockReward
-	}
-
-	return totalBonus
-}
-
-// GetTotalMinerReward calculates total reward including uncle bonuses
-// Math & numeric safety: checks for overflow before addition
-func (p MonetaryPolicy) GetTotalMinerReward(height uint64, uncleCount int) uint64 {
-	blockReward := p.BlockReward(height)
-	nephewBonus := p.GetNephewBonus(blockReward, uncleCount)
-
-	if blockReward > math.MaxUint64-nephewBonus {
-		return blockReward
-	}
-
-	return blockReward + nephewBonus
-}
-
-// MinerFeeAmount calculates the amount of fees allocated to the miner
-// When MinerFeeShare=0, all fees are burned (deflationary mechanism)
-// Math & numeric safety: uses integer arithmetic to prevent precision loss
-func (p MonetaryPolicy) MinerFeeAmount(totalFees uint64) uint64 {
-	if p.MinerFeeShare == 0 || totalFees == 0 {
-		return 0
-	}
-	return totalFees * uint64(p.MinerFeeShare) / 100
-}
-
-// Validate validates the monetary policy parameters
-// Logic completeness: checks all parameter constraints
-func (p MonetaryPolicy) Validate() error {
-	if p.InitialBlockReward == 0 {
-		return errors.New("initialBlockReward must be > 0")
-	}
-	if p.MinimumBlockReward >= p.InitialBlockReward {
-		return errors.New("minimumBlockReward must be < initialBlockReward")
-	}
-	if p.AnnualReductionPercent > 100 {
-		return errors.New("annualReductionPercent must be <= 100")
-	}
-	if p.UncleRewardEnabled && (p.MaxUncleDepth < 1 || p.MaxUncleDepth > 10) {
-		return errors.New("maxUncleDepth must be between 1 and 10")
-	}
-	if p.MinerFeeShare > 100 {
-		return errors.New("minerFeeShare must be <= 100")
-	}
-	return nil
-}
+// Type alias to config package to avoid circular dependency
+type MonetaryPolicy = config.MonetaryPolicy
 
 // EventSink defines the event sink interface for blockchain events
 type EventSink interface {

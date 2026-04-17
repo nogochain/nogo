@@ -17,6 +17,7 @@
 package nogopow
 
 import (
+	"log"
 	"math/big"
 	"sync"
 
@@ -53,8 +54,8 @@ type DifficultyAdjuster struct {
 func NewDifficultyAdjuster(consensusParams *config.ConsensusParams) *DifficultyAdjuster {
 	if consensusParams == nil {
 		consensusParams = &config.ConsensusParams{
-			BlockTimeTargetSeconds:     15,
-			MaxDifficultyChangePercent: 20,
+			BlockTimeTargetSeconds:     17,
+			MaxDifficultyChangePercent: 100,
 		}
 	}
 
@@ -106,20 +107,44 @@ func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header)
 		if da.consensusParams.MinDifficulty > 0 {
 			minDiff = big.NewInt(int64(da.consensusParams.MinDifficulty))
 		}
+		log.Printf("[Difficulty] Genesis block: using minimum difficulty %d", minDiff)
 		return minDiff
 	}
 
 	parentDiff := new(big.Int).Set(parent.Difficulty)
 
+	// Calculate actual block time difference
 	timeDiff := int64(0)
 	if currentTime > parent.Time {
 		timeDiff = int64(currentTime - parent.Time)
 	}
 
+	// Sanity check: if timeDiff is unreasonably large (e.g., > 1 hour),
+	// cap it to prevent extreme difficulty changes
+	maxReasonableTimeDiff := int64(3600) // 1 hour max
+	if timeDiff > maxReasonableTimeDiff {
+		log.Printf("[Difficulty] WARNING: timeDiff=%ds exceeds max, capping to %ds",
+			timeDiff, da.consensusParams.BlockTimeTargetSeconds)
+		timeDiff = int64(da.consensusParams.BlockTimeTargetSeconds)
+	}
+
+	// CRITICAL FIX: Only add to sliding window if this is a new block being calculated
+	// Check if we already have this timeDiff (same parent = repeated call)
 	da.windowMu.Lock()
-	da.blockTimes = append(da.blockTimes, timeDiff)
-	if len(da.blockTimes) > da.windowSize {
-		da.blockTimes = da.blockTimes[1:]
+	shouldAddToWindow := true
+	if len(da.blockTimes) > 0 {
+		// If the last entry has similar timeDiff (within 2 seconds), this is a repeated call
+		// Don't add duplicate entries
+		lastTime := da.blockTimes[len(da.blockTimes)-1]
+		if timeDiff > 0 && lastTime > 0 && abs(timeDiff-lastTime) < 2 {
+			shouldAddToWindow = false
+		}
+	}
+	if shouldAddToWindow {
+		da.blockTimes = append(da.blockTimes, timeDiff)
+		if len(da.blockTimes) > da.windowSize {
+			da.blockTimes = da.blockTimes[1:]
+		}
 	}
 	da.windowMu.Unlock()
 
@@ -132,9 +157,30 @@ func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header)
 
 	newDifficulty := da.calculatePIDifficulty(avgBlockTime, targetTime, parentDiff)
 
+	// Log PI calculation details
+	log.Printf("[Difficulty] PI: parentDiff=%d, timeDiff=%ds, avgTime=%ds, target=%ds, calculated=%d",
+		parentDiff.Uint64(), timeDiff, avgBlockTime, targetTime, newDifficulty.Uint64())
+
 	newDifficulty = da.enforceBoundaryConditions(newDifficulty, parentDiff)
 
+	// Calculate change percentage safely
+	var changePct float64
+	if parentDiff.Uint64() > 0 {
+		changePct = float64(newDifficulty.Int64()-parentDiff.Int64()) / float64(parentDiff.Uint64()) * 100
+	}
+
+	log.Printf("[Difficulty] Result: %d -> %d (%.1f%% change)",
+		parentDiff.Uint64(), newDifficulty.Uint64(), changePct)
+
 	return newDifficulty
+}
+
+// abs returns absolute value of int64
+func abs(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // calculatePIDifficulty implements the core PI controller algorithm
@@ -187,7 +233,19 @@ func (da *DifficultyAdjuster) calculatePIDifficulty(actualTime, targetTime int64
 	multiplier := new(big.Float).Sub(one, piOutput)
 
 	newDiffFloat := new(big.Float).Mul(parentDiffFloat, multiplier)
+	
+	// CRITICAL FIX: When difficulty should increase (multiplier > 1) and parentDiff is small,
+	// use ceiling to ensure at least a +1 increase instead of truncation
+	// This prevents difficulty from being stuck at 1 when blocks are mined too fast
 	newDifficulty, _ := newDiffFloat.Int(nil)
+	
+	// If multiplier > 1 (need to increase difficulty) but result equals parent (due to truncation),
+	// use ceiling function to ensure at least +1 increase
+	if multiplier.Cmp(one) > 0 && newDifficulty.Cmp(parentDiff) <= 0 {
+		// Use ceiling: newDiff = floor(newDiffFloat) + 1 if there's a fractional part
+		newDiffFloatCeil := new(big.Float).Add(newDiffFloat, big.NewFloat(0.999999))
+		newDifficulty, _ = newDiffFloatCeil.Int(nil)
+	}
 
 	if newDifficulty.Sign() < 0 {
 		newDifficulty = big.NewInt(0)

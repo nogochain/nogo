@@ -45,8 +45,8 @@ type DifficultyCalculator struct {
 func NewDifficultyCalculator(consensusParams *config.ConsensusParams) *DifficultyCalculator {
 	if consensusParams == nil {
 		consensusParams = &config.ConsensusParams{
-			BlockTimeTargetSeconds:     15,
-			MaxDifficultyChangePercent: 20,
+			BlockTimeTargetSeconds:     17,
+			MaxDifficultyChangePercent: 100,
 		}
 	}
 

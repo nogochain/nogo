@@ -17,9 +17,11 @@
 package api
 
 import (
+	"context"
 	"encoding/hex"
 	"math/big"
 
+	"github.com/nogochain/nogo/blockchain/config"
 	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/nogochain/nogo/blockchain/mempool"
 	"github.com/nogochain/nogo/blockchain/network"
@@ -136,7 +138,7 @@ func (m *mockBlockchain) SelectMempoolTxs(mp network.Mempool, maxTxPerBlock int)
 	return nil, nil, nil
 }
 
-func (m *mockBlockchain) MineTransfers(txs []core.Transaction) (*core.Block, error) {
+func (m *mockBlockchain) MineTransfers(ctx context.Context, txs []core.Transaction) (*core.Block, error) {
 	return nil, nil
 }
 
@@ -201,6 +203,11 @@ func (m *mockBlockchain) GetAllBlocks() ([]*core.Block, error) {
 // IsReorgInProgress returns false for mock (no reorg in tests)
 func (m *mockBlockchain) IsReorgInProgress() bool {
 	return false
+}
+
+// GetConsensus returns default consensus params for mock
+func (m *mockBlockchain) GetConsensus() config.ConsensusParams {
+	return config.DefaultConfig().Consensus
 }
 
 // createTestServer creates a test server with mock dependencies

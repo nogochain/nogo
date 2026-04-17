@@ -1,16 +1,20 @@
 package network
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/consensus"
@@ -37,6 +41,18 @@ type P2PPeerManager struct {
 	peerFailCounts map[string]int // Track consecutive connection failures
 	maxPeers       int
 	client         *P2PClient
+	p2pServer      P2PServerBroadcaster // Reference to P2P server for inbound broadcasting
+	httpClient     *http.Client         // HTTP client for fallback broadcast
+	txHandler      TransactionHandler   // Handler for incoming transactions from P2P
+
+	// Connection pool management
+	connSemaphore chan struct{} // Semaphore to limit concurrent connections
+}
+
+// P2PServerBroadcaster is an interface for broadcasting to inbound connections
+type P2PServerBroadcaster interface {
+	BroadcastTransactionToInbound(tx core.Transaction) int
+	GetInboundConnectionCount() int
 }
 
 // Start starts the P2P manager
@@ -48,6 +64,9 @@ func (pm *P2PPeerManager) Start(ctx context.Context) error {
 	pm.mu.Unlock()
 
 	log.Printf("P2P peer manager started with %d peers", len(initialPeers))
+
+	// Start connection maintenance loop
+	go pm.runConnectionMaintenanceLoop(ctx)
 
 	// Perform initial peer discovery from bootstrap peers
 	if len(initialPeers) > 0 {
@@ -65,6 +84,123 @@ func (pm *P2PPeerManager) Start(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// runConnectionMaintenanceLoop maintains persistent connections to seed nodes
+// Production-grade: ensures always-connected network topology
+func (pm *P2PPeerManager) runConnectionMaintenanceLoop(ctx context.Context) {
+	// Initial connection attempt to all configured peers
+	pm.connectToAllPeers(ctx)
+
+	// Periodic reconnection and health check
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pm.connectToAllPeers(ctx)
+			pm.healthCheckConnections(ctx)
+		}
+	}
+}
+
+// connectToAllPeers attempts to establish connections to all known peers
+func (pm *P2PPeerManager) connectToAllPeers(ctx context.Context) {
+	pm.mu.RLock()
+	peers := make([]string, len(pm.peers))
+	copy(peers, pm.peers)
+	pm.mu.RUnlock()
+
+	for _, peer := range peers {
+		// Check if already connected
+		if pm.client.IsConnected(peer) {
+			continue
+		}
+
+		// Attempt connection in background
+		go func(p string) {
+			connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+
+			// Just establish connection (handshake)
+			_, err := pm.client.GetConnection(connectCtx, p)
+			if err != nil {
+				pm.RecordPeerFailure(p)
+			} else {
+				pm.ResetPeerFailureCount(p)
+				log.Printf("[P2P] Established persistent connection to peer: %s", p)
+			}
+		}(peer)
+	}
+}
+
+// healthCheckConnections checks health of all active connections
+// CRITICAL FIX: Use dedicated connection to avoid response mixing
+func (pm *P2PPeerManager) healthCheckConnections(ctx context.Context) {
+	pm.mu.RLock()
+	peers := make([]string, len(pm.peers))
+	copy(peers, pm.peers)
+	pm.mu.RUnlock()
+
+	for _, peer := range peers {
+		// Use dedicated connection for health check to avoid response mixing
+		// This prevents conflicts with sync/broadcast operations
+		go func(p string) {
+			// Create dedicated connection for ping
+			d := net.Dialer{Timeout: 5 * time.Second}
+			pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+
+			netConn, err := d.DialContext(pingCtx, "tcp", p)
+			if err != nil {
+				log.Printf("[P2P] Health check failed for peer %s: %v", p, err)
+				pm.RecordPeerFailure(p)
+				return
+			}
+			defer netConn.Close()
+
+			// Perform handshake
+			if err := pm.client.PerformHandshake(netConn); err != nil {
+				log.Printf("[P2P] Health check handshake failed for peer %s: %v", p, err)
+				pm.RecordPeerFailure(p)
+				return
+			}
+
+			// Send ping and wait for pong
+			_ = netConn.SetDeadline(time.Now().Add(5 * time.Second))
+			if err := p2pWriteJSON(netConn, p2pEnvelope{Type: "ping", Payload: json.RawMessage(fmt.Sprintf("%d", time.Now().Unix()))}); err != nil {
+				log.Printf("[P2P] Health check ping failed for peer %s: %v", p, err)
+				pm.RecordPeerFailure(p)
+				return
+			}
+
+			raw, err := p2pReadJSON(netConn, DefaultP2PMaxMessageBytes)
+			if err != nil {
+				log.Printf("[P2P] Health check read failed for peer %s: %v", p, err)
+				pm.RecordPeerFailure(p)
+				return
+			}
+
+			var env p2pEnvelope
+			if err := json.Unmarshal(raw, &env); err != nil {
+				log.Printf("[P2P] Health check parse failed for peer %s: %v", p, err)
+				pm.RecordPeerFailure(p)
+				return
+			}
+
+			if env.Type != "pong" {
+				log.Printf("[P2P] Health check failed for peer %s: expected pong, got %s", p, env.Type)
+				pm.RecordPeerFailure(p)
+				return
+			}
+
+			// Health check passed - reset failure count
+			pm.ResetPeerFailureCount(p)
+		}(peer)
+	}
 }
 
 // Stop stops the P2P manager
@@ -100,6 +236,7 @@ func getMaxPeersFromEnv() int {
 	if err != nil || maxPeers <= 0 {
 		return DefaultMaxPeers
 	}
+
 	// Cap at reasonable maximum to prevent memory exhaustion
 	if maxPeers > 10000 {
 		return 10000
@@ -107,18 +244,61 @@ func getMaxPeersFromEnv() int {
 	return maxPeers
 }
 
+// getMaxConnectionsFromEnv returns the maximum concurrent connections from environment
+// This limits how many simultaneous P2P connections can be made
+func getMaxConnectionsFromEnv() int {
+	val := os.Getenv("P2P_MAX_CONNECTIONS")
+	if val == "" {
+		return DefaultP2PMaxConnections
+	}
+	maxConns, err := strconv.Atoi(val)
+	if err != nil || maxConns <= 0 {
+		return DefaultP2PMaxConnections
+	}
+
+	// Cap at reasonable maximum
+	if maxConns > 500 {
+		return 500
+	}
+	return maxConns
+}
+
+// DefaultBootstrapSeeds contains hardcoded bootstrap node addresses
+// These are well-known nodes that are always available for initial connection
+// Production-grade: similar to Bitcoin's DNS seeds and Ethereum's bootnodes
+var DefaultBootstrapSeeds = []string{
+	"main.nogochain.org:9090",
+	"wallet.nogochain.org:9090",
+	"node.nogochain.org:9090",
+}
+
+// DefaultDNSSeeds contains DNS seed domains for peer discovery
+// New nodes can query these domains to get a list of active peers
+var DefaultDNSSeeds = []string{
+	"main.nogochain.org",
+	"wallet.nogochain.org",
+	"node.nogochain.org",
+}
+
 // NewP2PPeerManager creates a new P2P peer manager with dynamic peer storage
+// Production-grade: automatically connects to bootstrap seeds if no peers configured
 func NewP2PPeerManager(chainID uint64, rulesHash string, nodeID string, peers []string) *P2PPeerManager {
 	maxPeers := getMaxPeersFromEnv()
+	maxConns := getMaxConnectionsFromEnv()
+
 	pm := &P2PPeerManager{
 		peers:          make([]string, 0, len(peers)),
 		peerTimestamps: make(map[string]int64, len(peers)),
 		peerFailCounts: make(map[string]int, len(peers)),
 		maxPeers:       maxPeers,
 		client:         NewP2PClient(chainID, rulesHash, nodeID),
+		p2pServer:      nil, // Will be set later via SetP2PServer
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+		connSemaphore: make(chan struct{}, maxConns),
 	}
 
-	// Initialize with configured peers (validate format only, allow private IPs)
 	now := time.Now().Unix()
 	for _, peer := range peers {
 		if err := validatePeerAddressFormat(peer); err == nil {
@@ -130,8 +310,117 @@ func NewP2PPeerManager(chainID uint64, rulesHash string, nodeID string, peers []
 		}
 	}
 
+	// CRITICAL: If no peers configured, use bootstrap seeds
+	// This ensures new nodes can always connect to the network
+	if len(pm.peers) == 0 {
+		bootstrapPeers := getBootstrapPeers()
+		for _, peer := range bootstrapPeers {
+			if err := validatePeerAddressFormat(peer); err == nil {
+				pm.peers = append(pm.peers, peer)
+				pm.peerTimestamps[peer] = now
+				pm.peerFailCounts[peer] = 0
+			}
+		}
+		log.Printf("P2P peer manager: no peers configured, using %d bootstrap seeds", len(pm.peers))
+	}
+
 	log.Printf("P2P peer manager initialized with maxPeers=%d, initialPeers=%d", maxPeers, len(pm.peers))
 	return pm
+}
+
+// getBootstrapPeers returns the list of bootstrap peers
+// Priority: env variable > hardcoded seeds > DNS seeds
+func getBootstrapPeers() []string {
+	// Check environment variable first
+	if envSeeds := os.Getenv("BOOTSTRAP_SEEDS"); envSeeds != "" {
+		var seeds []string
+		for _, raw := range strings.Split(envSeeds, ",") {
+			raw = strings.TrimSpace(raw)
+			if raw != "" {
+				seeds = append(seeds, raw)
+			}
+		}
+		if len(seeds) > 0 {
+			return seeds
+		}
+	}
+
+	// Use hardcoded bootstrap seeds
+	if len(DefaultBootstrapSeeds) > 0 {
+		return DefaultBootstrapSeeds
+	}
+
+	// Try DNS seed discovery as last resort
+	dnsPeers := discoverPeersFromDNS()
+	if len(dnsPeers) > 0 {
+		return dnsPeers
+	}
+
+	return nil
+}
+
+// discoverPeersFromDNS queries DNS seeds to discover peers
+// Production-grade: similar to Bitcoin's DNS seeding mechanism
+func discoverPeersFromDNS() []string {
+	var peers []string
+
+	for _, seed := range DefaultDNSSeeds {
+		// Query DNS A records for peer addresses
+		addrs, err := net.LookupHost(seed)
+		if err != nil {
+			log.Printf("P2P peer manager: DNS seed lookup failed for %s: %v", seed, err)
+			continue
+		}
+
+		// Default P2P port
+		defaultPort := getDefaultP2PPort()
+
+		for _, addr := range addrs {
+			// Skip invalid addresses
+			if addr == "" || addr == "0.0.0.0" {
+				continue
+			}
+			// Format as host:port
+			peerAddr := fmt.Sprintf("%s:%d", addr, defaultPort)
+			peers = append(peers, peerAddr)
+		}
+
+		if len(peers) > 0 {
+			log.Printf("P2P peer manager: discovered %d peers from DNS seed %s", len(peers), seed)
+		}
+	}
+
+	return peers
+}
+
+// getDefaultP2PPort returns the default P2P port from environment or default
+func getDefaultP2PPort() uint16 {
+	if port := os.Getenv("P2P_PORT"); port != "" {
+		if p, err := strconv.ParseUint(port, 10, 16); err == nil && p > 0 {
+			return uint16(p)
+		}
+	}
+	return 9090 // Default P2P port for NogoChain
+}
+
+// SetP2PServer sets the P2P server reference for inbound broadcasting
+func (pm *P2PPeerManager) SetP2PServer(server P2PServerBroadcaster) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.p2pServer = server
+	log.Printf("P2P peer manager: P2P server reference set for inbound broadcasting")
+}
+
+// SetTransactionHandler sets the handler for incoming transactions from P2P
+func (pm *P2PPeerManager) SetTransactionHandler(handler TransactionHandler) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.txHandler = handler
+	// Also set on the P2P client
+	if pm.client != nil {
+		pm.client.SetTransactionHandler(handler)
+	}
+	log.Printf("P2P peer manager: transaction handler set")
 }
 
 // validatePublicIPFromAddr validates the IP portion of an address (host:port)
@@ -531,11 +820,29 @@ func (pm *P2PPeerManager) FetchAnyBlockByHash(ctx context.Context, hashHex strin
 }
 
 // BroadcastTransaction broadcasts a transaction to all peers concurrently
+// It first tries to broadcast to inbound connections (for peers without listening ports),
+// then broadcasts to active peers via outbound connections
+// Falls back to HTTP broadcast if P2P broadcast fails
 func (pm *P2PPeerManager) BroadcastTransaction(ctx context.Context, tx core.Transaction, _ int) {
 	peers := pm.GetActivePeers()
-	if len(peers) == 0 {
-		log.Printf("P2P peer manager: no active peers to broadcast transaction")
-		return
+	inboundCount := 0
+	if pm.p2pServer != nil {
+		inboundCount = pm.p2pServer.GetInboundConnectionCount()
+	}
+
+	log.Printf("[P2P] ========================================")
+	log.Printf("[P2P] BroadcastTransaction START")
+	log.Printf("[P2P] total_peers=%d, active_peers=%d, inbound_conns=%d", pm.GetPeerCount(), len(peers), inboundCount)
+	log.Printf("[P2P] ========================================")
+
+	// First, broadcast to inbound connections (for peers that don't have P2P listening ports)
+	inboundSuccess := 0
+	if pm.p2pServer != nil && inboundCount > 0 {
+		log.Printf("[P2P] Step 1: Broadcasting to %d inbound connections", inboundCount)
+		inboundSuccess = pm.p2pServer.BroadcastTransactionToInbound(tx)
+		log.Printf("[P2P] Step 1 result: %d/%d inbound broadcasts succeeded", inboundSuccess, inboundCount)
+	} else {
+		log.Printf("[P2P] Step 1: SKIPPED (no inbound connections)")
 	}
 
 	// Print transaction broadcast header with box and color
@@ -552,21 +859,118 @@ func (pm *P2PPeerManager) BroadcastTransaction(ctx context.Context, tx core.Tran
 	fmt.Printf(ColorCyan+"║"+ColorReset+ColorYellow+"  To:   %-54s"+ColorReset+ColorCyan+"║\n"+ColorReset, tx.ToAddress)
 	fmt.Printf(ColorCyan+"║"+ColorReset+ColorYellow+"  Amount: %-52d NOGO"+ColorReset+ColorCyan+"║\n"+ColorReset, tx.Amount)
 	fmt.Printf(ColorCyan+"║"+ColorReset+ColorGreen+"  Peers: %-53d"+ColorReset+ColorCyan+"║\n"+ColorReset, len(peers))
+	fmt.Printf(ColorCyan+"║"+ColorReset+ColorGreen+"  Inbound: %-51d"+ColorReset+ColorCyan+"║\n"+ColorReset, inboundCount)
 	fmt.Printf(ColorCyan + "╚═══════════════════════════════════════════════════════════╝\n" + ColorReset)
 	fmt.Printf("\n")
 
+	log.Printf("[P2P] Broadcasting transaction to %d peers: to=%s, amount=%d, fee=%d, nonce=%d",
+		len(peers), tx.ToAddress, tx.Amount, tx.Fee, tx.Nonce)
+
 	var wg sync.WaitGroup
+	p2pSuccessCount := 0
+	httpSuccessCount := 0
+	var mu sync.Mutex
+
+	// Try P2P broadcast first, then fall back to HTTP if needed
 	for _, peer := range peers {
 		wg.Add(1)
 		go func(p string) {
 			defer wg.Done()
+
+			// Try P2P broadcast
 			_, err := pm.client.BroadcastTransaction(ctx, p, tx)
 			if err != nil {
-				log.Printf("p2p broadcast tx to %s failed: %v", p, err)
+				log.Printf("[P2P] P2P broadcast to %s failed: %v, trying HTTP fallback", p, err)
+
+				// Fall back to HTTP broadcast
+				if httpErr := pm.broadcastTransactionViaHTTP(ctx, p, tx); httpErr != nil {
+					log.Printf("[P2P] HTTP fallback to %s also failed: %v", p, httpErr)
+				} else {
+					mu.Lock()
+					httpSuccessCount++
+					mu.Unlock()
+					log.Printf("[P2P] HTTP broadcast to %s succeeded", p)
+				}
+			} else {
+				mu.Lock()
+				p2pSuccessCount++
+				mu.Unlock()
+				log.Printf("[P2P] P2P broadcast to %s succeeded", p)
 			}
 		}(peer)
 	}
 	wg.Wait()
+
+	totalSuccess := p2pSuccessCount + httpSuccessCount + inboundSuccess
+	log.Printf("[P2P] Transaction broadcast complete: P2P=%d, HTTP=%d, Inbound=%d, Total=%d/%d",
+		p2pSuccessCount, httpSuccessCount, inboundSuccess, totalSuccess, len(peers)+inboundCount)
+}
+
+// broadcastTransactionViaHTTP broadcasts a transaction via HTTP API as fallback
+// This is used when P2P broadcast fails (e.g., peer doesn't have P2P listening port)
+func (pm *P2PPeerManager) broadcastTransactionViaHTTP(ctx context.Context, p2pAddr string, tx core.Transaction) error {
+	// Convert P2P address to HTTP address
+	// P2P port is typically 9090, HTTP port is typically 8080
+	host, port, err := net.SplitHostPort(p2pAddr)
+	if err != nil {
+		return fmt.Errorf("invalid peer address: %w", err)
+	}
+
+	// Try common HTTP ports in order
+	// 1. Use HTTP_PORT environment variable if set
+	// 2. Try P2P port - 1010 (9090 -> 8080)
+	// 3. Try default HTTP port 8080
+	httpPorts := []int{8080} // Default
+
+	if httpPortEnv := os.Getenv("HTTP_PORT"); httpPortEnv != "" {
+		if p, err := strconv.Atoi(httpPortEnv); err == nil {
+			httpPorts = []int{p}
+		}
+	} else {
+		p2pPort, _ := strconv.Atoi(port)
+		httpPorts = []int{p2pPort - 1010, 8080, p2pPort - 1000} // 9090-1010=8080, fallback to 8080, then 8090
+	}
+
+	// Marshal transaction
+	txJSON, err := json.Marshal(tx)
+	if err != nil {
+		return fmt.Errorf("marshal transaction: %w", err)
+	}
+
+	var lastErr error
+	for _, httpPort := range httpPorts {
+		if httpPort <= 0 || httpPort > 65535 {
+			continue
+		}
+
+		httpAddr := fmt.Sprintf("%s:%d", host, httpPort)
+
+		// Create HTTP request
+		url := fmt.Sprintf("http://%s/tx", httpAddr)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(txJSON))
+		if err != nil {
+			lastErr = fmt.Errorf("create request: %w", err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		// Send request with short timeout
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("send request to %s: %w", httpAddr, err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			log.Printf("[P2P] HTTP broadcast to %s succeeded (port=%d)", httpAddr, httpPort)
+			return nil
+		}
+		lastErr = fmt.Errorf("HTTP error from %s: %d", httpAddr, resp.StatusCode)
+	}
+
+	return lastErr
 }
 
 // BroadcastBlock broadcasts a block to all peers concurrently
@@ -594,17 +998,46 @@ func (pm *P2PPeerManager) BroadcastBlock(ctx context.Context, block *core.Block)
 	fmt.Printf("\n")
 
 	var wg sync.WaitGroup
+	broadcastSuccess := int64(0)
+	broadcastFailed := int64(0)
+	broadcastAttempts := int64(0)
+
+	// Use semaphore to limit concurrent connections
 	for _, peer := range peers {
+		// Acquire semaphore slot
+		select {
+		case pm.connSemaphore <- struct{}{}:
+			// Got a slot, proceed
+		case <-ctx.Done():
+			// Context cancelled
+			break
+		}
+
 		wg.Add(1)
 		go func(p string) {
 			defer wg.Done()
+			defer func() { <-pm.connSemaphore }() // Release semaphore slot
+
+			atomic.AddInt64(&broadcastAttempts, 1)
+			log.Printf("[P2P] Broadcasting block #%d to peer %s", block.GetHeight(), p)
 			_, err := pm.client.BroadcastBlock(ctx, p, block)
 			if err != nil {
-				// 静默处理广播失败，只保留带颜色的区块广播日志
+				atomic.AddInt64(&broadcastFailed, 1)
+				log.Printf("[P2P] Failed to broadcast block #%d to peer %s: %v", block.GetHeight(), p, err)
+			} else {
+				atomic.AddInt64(&broadcastSuccess, 1)
+				log.Printf("[P2P] Successfully broadcasted block #%d to peer %s (ack received)", block.GetHeight(), p)
 			}
 		}(peer)
 	}
 	wg.Wait()
+	log.Printf("[P2P] Block #%d broadcast complete: attempts=%d success=%d failed=%d", block.GetHeight(), broadcastAttempts, broadcastSuccess, broadcastFailed)
+}
+
+// SendMessage sends a custom message to a specific peer (Bitcoin-style)
+// Used by InventoryManager for INV/GETDATA mechanism
+func (pm *P2PPeerManager) SendMessage(ctx context.Context, peerAddr string, msg p2pEnvelope) error {
+	return pm.client.SendCustomMessage(ctx, peerAddr, msg)
 }
 
 // formatAddress formats an address for display

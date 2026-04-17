@@ -221,6 +221,10 @@ func LoadGenesisConfig(path string) (*GenesisConfig, error) {
 		return nil, err
 	}
 
+	// Synchronize MonetaryPolicy to ConsensusParams.MonetaryPolicy
+	// This is critical for coinbase economics validation which uses consensus.MonetaryPolicy
+	consensus.MonetaryPolicy = policy
+
 	cfg := &GenesisConfig{
 		Network:             raw.Network,
 		ChainID:             raw.ChainID,
@@ -279,6 +283,8 @@ func loadHardcodedMainnetGenesis() (*GenesisConfig, error) {
 			CommunityFundShare:     genesisConfig.MonetaryPolicy.CommunityFundShare,
 			GenesisShare:           genesisConfig.MonetaryPolicy.GenesisShare,
 			IntegrityPoolShare:     genesisConfig.MonetaryPolicy.IntegrityPoolShare,
+			HalvingInterval:        0,
+			TailEmission:           0,
 		},
 		ConsensusParams: ConsensusParams{
 			ChainID:                        genesisConfig.ChainID,
@@ -297,6 +303,18 @@ func loadHardcodedMainnetGenesis() (*GenesisConfig, error) {
 			BinaryEncodingEnable:           genesisConfig.ConsensusParams.BinaryEncodingEnable,
 			BinaryEncodingActivationHeight: genesisConfig.ConsensusParams.BinaryEncodingActivationHeight,
 			GenesisDifficultyBits:          genesisConfig.ConsensusParams.GenesisDifficultyBits,
+			MonetaryPolicy: MonetaryPolicy{
+				InitialBlockReward:     genesisConfig.MonetaryPolicy.InitialBlockReward,
+				MinimumBlockReward:     genesisConfig.MonetaryPolicy.MinimumBlockReward,
+				AnnualReductionPercent: genesisConfig.MonetaryPolicy.AnnualReductionPercent,
+				MinerFeeShare:          genesisConfig.MonetaryPolicy.MinerFeeShare,
+				MinerRewardShare:       genesisConfig.MonetaryPolicy.MinerRewardShare,
+				CommunityFundShare:     genesisConfig.MonetaryPolicy.CommunityFundShare,
+				GenesisShare:           genesisConfig.MonetaryPolicy.GenesisShare,
+				IntegrityPoolShare:     genesisConfig.MonetaryPolicy.IntegrityPoolShare,
+				HalvingInterval:        0,
+				TailEmission:           0,
+			},
 		},
 		CommunityFundAddress: communityFundAddr,
 		IntegrityPoolAddress: integrityPoolAddr,
@@ -330,6 +348,8 @@ func loadHardcodedTestnetGenesis() (*GenesisConfig, error) {
 			CommunityFundShare:     genesisConfig.MonetaryPolicy.CommunityFundShare,
 			GenesisShare:           genesisConfig.MonetaryPolicy.GenesisShare,
 			IntegrityPoolShare:     genesisConfig.MonetaryPolicy.IntegrityPoolShare,
+			HalvingInterval:        0,
+			TailEmission:           0,
 		},
 		ConsensusParams: ConsensusParams{
 			ChainID:                        genesisConfig.ChainID,
@@ -348,6 +368,18 @@ func loadHardcodedTestnetGenesis() (*GenesisConfig, error) {
 			BinaryEncodingEnable:           genesisConfig.ConsensusParams.BinaryEncodingEnable,
 			BinaryEncodingActivationHeight: genesisConfig.ConsensusParams.BinaryEncodingActivationHeight,
 			GenesisDifficultyBits:          genesisConfig.ConsensusParams.GenesisDifficultyBits,
+			MonetaryPolicy: MonetaryPolicy{
+				InitialBlockReward:     genesisConfig.MonetaryPolicy.InitialBlockReward,
+				MinimumBlockReward:     genesisConfig.MonetaryPolicy.MinimumBlockReward,
+				AnnualReductionPercent: genesisConfig.MonetaryPolicy.AnnualReductionPercent,
+				MinerFeeShare:          genesisConfig.MonetaryPolicy.MinerFeeShare,
+				MinerRewardShare:       genesisConfig.MonetaryPolicy.MinerRewardShare,
+				CommunityFundShare:     genesisConfig.MonetaryPolicy.CommunityFundShare,
+				GenesisShare:           genesisConfig.MonetaryPolicy.GenesisShare,
+				IntegrityPoolShare:     genesisConfig.MonetaryPolicy.IntegrityPoolShare,
+				HalvingInterval:        0,
+				TailEmission:           0,
+			},
 		},
 		CommunityFundAddress: communityFundAddr,
 		IntegrityPoolAddress: integrityPoolAddr,
@@ -764,7 +796,10 @@ func CreateGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, 
 		},
 	}
 
-	engine := nogopow.New(nogopow.DefaultConfig())
+	// Create nogopow config with actual consensus params (same as mining and validation)
+	powConfig := nogopow.DefaultConfig()
+	powConfig.ConsensusParams = &consensus
+	engine := nogopow.New(powConfig)
 	defer engine.Close()
 
 	genesisHeader := &nogopow.Header{
@@ -898,7 +933,10 @@ func ValidateGenesisBlock(b *Block, cfg *GenesisConfig, consensus ConsensusParam
 // validateGenesisPoWNogoPow validates genesis block PoW using NogoPow algorithm
 // Security: verifies proof-of-work meets genesis difficulty
 func validateGenesisPoWNogoPow(consensus ConsensusParams, b *Block) error {
-	engine := nogopow.New(nogopow.DefaultConfig())
+	// Use actual consensus params (same as mining and validation)
+	powConfig := nogopow.DefaultConfig()
+	powConfig.ConsensusParams = &consensus
+	engine := nogopow.New(powConfig)
 	defer engine.Close()
 
 	header := &nogopow.Header{

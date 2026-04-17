@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nogochain/nogo/blockchain/config"
 	"github.com/nogochain/nogo/blockchain/core"
 )
 
@@ -46,6 +47,7 @@ type BlockchainInterface interface {
 	GetChainID() uint64
 	GetMinerAddress() string
 	TotalSupply() uint64
+	GetConsensus() config.ConsensusParams
 
 	// Block operations
 	AddBlock(block *core.Block) (bool, error)
@@ -60,7 +62,7 @@ type BlockchainInterface interface {
 	SelectMempoolTxs(mp Mempool, maxTxPerBlock int) ([]core.Transaction, []string, error)
 
 	// Mining operations
-	MineTransfers(txs []core.Transaction) (*core.Block, error)
+	MineTransfers(ctx context.Context, txs []core.Transaction) (*core.Block, error)
 	CalcNextDifficulty(latest *core.Block, currentTime int64) uint32
 
 	// Chain audit
@@ -100,12 +102,17 @@ type Mempool interface {
 
 	// Transaction operations
 	Add(tx core.Transaction) (string, error)
+	AddWithoutSignatureValidation(tx core.Transaction) (string, error)
 	Remove(txID string)
 	RemoveMany(txids []string)
 
 	// Mempool state
 	Size() int
 	EntriesSortedByFeeDesc() []MempoolEntry
+
+	// Update methods for P2P received transactions
+	UpdateHeight(height uint64)
+	UpdateConsensus(consensus config.ConsensusParams)
 }
 
 // MempoolEntry represents a mempool transaction entry

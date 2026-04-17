@@ -33,8 +33,9 @@ const (
 	// DefaultP2PMaxConnections is the default maximum concurrent P2P connections
 	DefaultP2PMaxConnections = 100
 
-	// DefaultP2PMaxMessageBytes is the default maximum P2P message size (4MB)
-	DefaultP2PMaxMessageBytes = 4 << 20
+	// DefaultP2PMaxMessageBytes is the default maximum P2P message size (16MB)
+	// Increased to handle batch block responses (up to 50 blocks with transactions)
+	DefaultP2PMaxMessageBytes = 16 << 20
 
 	// DefaultP2PMaxAddrReturn is the default maximum addresses to return in getaddr
 	DefaultP2PMaxAddrReturn = 100

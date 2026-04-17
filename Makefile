@@ -46,7 +46,7 @@ fmt:
 
 # Vulnerability scan
 vuln:
-	go sec ./...
+	gosec ./...
 
 # Docker build (production)
 docker-build:

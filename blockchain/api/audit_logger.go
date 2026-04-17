@@ -87,7 +87,7 @@ type AuditLoggerConfig struct {
 func DefaultAuditLoggerConfig() *AuditLoggerConfig {
 	return &AuditLoggerConfig{
 		Enabled:         true,
-		LogDir:          "logs/audit",
+		LogDir:          "nogodata/logs/audit",
 		MaxFileSize:     100 << 20, // 100MB
 		MaxRetention:    90,        // 90 days
 		Compress:        true,

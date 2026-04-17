@@ -1,8 +1,8 @@
 # NogoChain Core Data Structures
 
 **File Path**: `blockchain/core/types.go`  
-**Last Updated**: 2026-04-06  
-**Version**: 1.0.0
+**Last Updated**: 2026-04-15  
+**Version**: 1.1.0
 
 ---
 
@@ -132,7 +132,8 @@ const (
     defaultChainID = uint64(1)
     
     // defaultDifficultyBits is the default difficulty bits for genesis block
-    defaultDifficultyBits = uint32(18)
+    // Set to 100 for CPU-minable genesis, PI controller will auto-adjust
+    defaultDifficultyBits = uint32(100)
     
     // maxDifficultyBits is the maximum difficulty bits value
     maxDifficultyBits = uint32(4294967295)
@@ -143,11 +144,14 @@ const (
     // powVerifyProbabilityThreshold is the threshold for PoW verification
     powVerifyProbabilityThreshold = uint8(26)
     
-    // minFee is the minimum transaction fee in wei
-    minFee = uint64(1)
+    // MinFee is the minimum transaction fee in wei (increased from 1 to 10000)
+    MinFee = uint64(10000)
+    
+    // MinFeePerByte is the fee per byte in wei
+    MinFeePerByte = uint64(100)
     
     // MaxBlockTimeDriftSec is the maximum allowed block time drift in seconds
-    MaxBlockTimeDriftSec = 7200 // 2 hours
+    MaxBlockTimeDriftSec = 900 // 15 minutes
     
     // DifficultyTolerancePercent is the tolerance percentage for difficulty adjustment
     DifficultyTolerancePercent = 50
@@ -160,7 +164,7 @@ const (
 
 ### 3.1 Structure Definition
 
-**Code**: [`types.go:L169-L177`](file:///d:/NogoChain/nogo/blockchain/core/types.go#L169-L177)
+**Code**: [`types.go:L168-L179`](file:///d:/NogoChain/nogo/blockchain/core/types.go#L168-L179)
 
 ```go
 type BlockHeader struct {
@@ -173,6 +177,8 @@ type BlockHeader struct {
     MerkleRoot     []byte `json:"merkleRoot,omitempty"`
 }
 ```
+
+**Note**: BlockHeader does not store Height, Coinbase, or ChainID directly. These are stored in the Block struct for efficiency.
 
 ### 3.2 Field Descriptions
 
@@ -217,13 +223,12 @@ func (h *BlockHeader) HashHex(blockHash []byte) string {
 
 ### 4.1 Structure Definition
 
-**Code**: [`types.go:L197-L213`](file:///d:/NogoChain/nogo/blockchain/core/types.go#L197-L213)
+**Code**: [`types.go:L196-L210`](file:///d:/NogoChain/nogo/blockchain/core/types.go#L196-L210)
 
 ```go
 type Block struct {
     mu sync.RWMutex
-    
-    Version      uint32        `json:"version"`
+
     Hash         []byte        `json:"hash,omitempty"`
     Height       uint64        `json:"height"`
     Header       BlockHeader   `json:"header"`
@@ -231,14 +236,10 @@ type Block struct {
     CoinbaseTx   *Transaction  `json:"coinbaseTx,omitempty"`
     MinerAddress string        `json:"minerAddress"`
     TotalWork    string        `json:"totalWork"`
-    
-    // Redundant fields (for fast access)
-    TimestampUnix  int64  `json:"-"`
-    DifficultyBits uint32 `json:"-"`
-    Nonce          uint64 `json:"-"`
-    PrevHash       []byte `json:"-"`
 }
 ```
+
+**Note**: The Block struct uses Header as the single source of truth for block metadata. Redundant fields at the Block level have been removed for cleaner design.
 
 ### 4.2 Field Descriptions
 
@@ -723,4 +724,4 @@ All balance and nonce operations have overflow checks:
 ---
 
 *This document is based on actual code implementation*  
-*Last updated: 2026-04-06*
+*Last updated: 2026-04-15*

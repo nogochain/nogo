@@ -8,9 +8,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
+	"github.com/nogochain/nogo/blockchain/config"
+	"github.com/nogochain/nogo/blockchain/core"
+	"github.com/nogochain/nogo/blockchain/miner"
 )
 
 // handleGetBlockTemplate handles block template requests from miners
+// Production-grade: includes mempool transactions and calculates merkle root
 func (s *Server) handleGetBlockTemplate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -34,9 +39,8 @@ func (s *Server) handleGetBlockTemplate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// CRITICAL FIX: Check if chain is currently reorganizing
+	// Check if chain is currently reorganizing
 	// Prevent serving templates during reorg to avoid PrevHash instability
-	// This fixes infinite reorg loop caused by unstable LatestBlock()
 	if s.bc.IsReorgInProgress() {
 		http.Error(w, "chain reorganizing, please retry", http.StatusServiceUnavailable)
 		return
@@ -49,25 +53,52 @@ func (s *Server) handleGetBlockTemplate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Calculate difficulty for next block (CRITICAL: use PI controller from consensus engine!)
-	// This ensures miners use the correct difficulty that matches consensus rules
+	// Get consensus parameters for block construction
+	consensus := config.GetConsensusParams()
+
+	// Collect mempool transactions sorted by fee (highest first)
+	var mempoolTxs []core.Transaction
+	if s.mp != nil {
+		entries := s.mp.EntriesSortedByFeeDesc()
+		maxTxs := config.DefaultMaxTransactionsPerBlock
+		for i, entry := range entries {
+			if i >= maxTxs {
+				break
+			}
+			mempoolTxs = append(mempoolTxs, entry.Tx())
+		}
+	}
+
+	// Create complete block template using miner's production function
+	// This handles: coinbase creation, merkle root calculation, block version
+	block, err := miner.CreateBlockTemplate(
+		latest,
+		mempoolTxs,
+		minerAddress,
+		s.bc.GetChainID(),
+		consensus,
+	)
+	if err != nil {
+		http.Error(w, "failed to create block template: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Calculate difficulty for next block using PI controller
 	currentTime := time.Now().Unix()
 	nextDifficulty := s.bc.CalcNextDifficulty(latest, currentTime)
-	
-	// Create merkle root (empty for now, will be filled with transactions)
-	merkleRoot := make([]byte, 32)
 
-	// Create block template
+	// Build response template with complete transaction list
 	template := &BlockTemplate{
-		Height:         latest.GetHeight() + 1,
-		PrevHash:       hex.EncodeToString(latest.Hash),
-		MerkleRoot:     hex.EncodeToString(merkleRoot),
-		Timestamp:      currentTime,
+		Height:         block.Height,
+		PrevHash:       hex.EncodeToString(block.Header.PrevHash),
+		MerkleRoot:     hex.EncodeToString(block.Header.MerkleRoot),
+		Timestamp:      block.Header.TimestampUnix,
 		DifficultyBits: nextDifficulty,
 		MinerAddress:   minerAddress,
 		ChainID:        s.bc.GetChainID(),
 		Target:         difficultyBitsToTarget(nextDifficulty),
 		ExtraNonce:     hex.EncodeToString(make([]byte, 4)),
+		Transactions:   block.Transactions,
 	}
 
 	writeJSON(w, http.StatusOK, template)

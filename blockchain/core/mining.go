@@ -17,6 +17,7 @@
 package core
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -36,10 +37,8 @@ func (c *Chain) GetHeaderByHash(hash nogopow.Hash) *nogopow.Header {
 	hashHex := hex.EncodeToString(hash.Bytes())
 	for _, block := range c.blocks {
 		if hex.EncodeToString(block.Hash) == hashHex {
-			// Convert miner address using reusable function for consistency
-			coinbaseAddr, err := StringToAddress(c.minerAddress)
+			coinbaseAddr, err := StringToAddress(block.MinerAddress)
 			if err != nil {
-				// Return zero address if conversion fails (should not happen in production)
 				coinbaseAddr = nogopow.Address{}
 			}
 			return &nogopow.Header{
@@ -57,7 +56,8 @@ func (c *Chain) GetHeaderByHash(hash nogopow.Hash) *nogopow.Header {
 // MineTransfers mines a block with the given transactions
 // Production-grade: performs PoW mining to create new block
 // Fork-aware: checks for heavier chain before mining
-func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
+// Context-aware: responds to mining interruption for fast chain switching
+func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Block, error) {
 	c.mu.RLock()
 	latest := c.GetTip()
 	if latest == nil {
@@ -166,12 +166,16 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 	txs = append(txs, transfers...)
 
 	// Calculate next difficulty using NogoPow engine
+	// Use Chain's consensus params for correct difficulty calculation
 	var engine *nogopow.NogopowEngine
 	powMode := os.Getenv("POW_MODE")
 	if powMode == "fake" {
 		engine = nogopow.NewFaker()
 	} else {
-		engine = nogopow.New(nogopow.DefaultConfig())
+		// Create config with Chain's actual consensus params
+		powConfig := nogopow.DefaultConfig()
+		powConfig.ConsensusParams = &c.consensus
+		engine = nogopow.New(powConfig)
 	}
 
 	// Get parent header for difficulty calculation
@@ -217,16 +221,16 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 		return nil, fmt.Errorf("compute merkle root: %w", err)
 	}
 
-	// Set merkle root in block header
 	newBlock.Header.MerkleRoot = merkleRoot
 
-	// Prepare coinbase address for POW header using reusable function
-	// This ensures consistent address conversion with validation
 	powCoinbase, err := StringToAddress(c.minerAddress)
 	if err != nil {
 		c.mu.RUnlock()
 		return nil, fmt.Errorf("invalid miner address: %w", err)
 	}
+
+	var powMerkleRoot nogopow.Hash
+	copy(powMerkleRoot[:], merkleRoot)
 
 	header := &nogopow.Header{
 		Number:     big.NewInt(int64(newBlock.GetHeight())),
@@ -234,18 +238,14 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 		ParentHash: parentHash,
 		Difficulty: nextDifficulty,
 		Coinbase:   powCoinbase,
+		Root:       powMerkleRoot,
 	}
 
-	// Prepare header with dynamic difficulty
-	if err := engine.Prepare(c, header); err != nil {
-		c.mu.RUnlock()
-		return nil, fmt.Errorf("failed to prepare header: %w", err)
-	}
+	newBlock.Header.DifficultyBits = uint32(header.Difficulty.Uint64())
 
 	// Create block for mining
 	block := nogopow.NewBlock(header, nil, nil, nil)
 
-	// Mine using NogoPow algorithm (no timeout - wait until solution found for production)
 	stop := make(chan struct{})
 	resultCh := make(chan *nogopow.Block, 1)
 
@@ -256,15 +256,21 @@ func (c *Chain) MineTransfers(transfers []Transaction) (*Block, error) {
 		}
 	}()
 
-	// Wait for result (no timeout for production-grade implementation)
-	result, ok := <-resultCh
-	if !ok {
+	var result *nogopow.Block
+	select {
+	case <-ctx.Done():
 		close(stop)
 		c.mu.RUnlock()
-		return nil, fmt.Errorf("mining failed: channel closed")
+		log.Printf("[Mining] Mining interrupted by context cancellation")
+		return nil, ctx.Err()
+	case result = <-resultCh:
+		if result == nil {
+			close(stop)
+			c.mu.RUnlock()
+			return nil, fmt.Errorf("mining failed: nil result")
+		}
 	}
 
-	// Extract nonce and hash from sealed header
 	sealedHeader := result.Header()
 	newBlock.Header.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
 	newBlock.Header.Nonce = newBlock.Header.Nonce

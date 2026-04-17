@@ -160,8 +160,8 @@ func (w *chainWrapper) SelectMempoolTxsNetwork(mp network.Mempool, maxTxPerBlock
 }
 
 // MineTransfers mines transfers into a block
-func (w *chainWrapper) MineTransfers(txs []core.Transaction) (*core.Block, error) {
-	return w.chain.MineTransfers(txs)
+func (w *chainWrapper) MineTransfers(ctx context.Context, txs []core.Transaction) (*core.Block, error) {
+	return w.chain.MineTransfers(ctx, txs)
 }
 
 // CanonicalWork returns the total work on canonical chain
@@ -377,8 +377,8 @@ func (w *networkChainWrapper) SelectMempoolTxs(mp network.Mempool, maxTxPerBlock
 }
 
 // MineTransfers mines transfers into a block
-func (w *networkChainWrapper) MineTransfers(txs []core.Transaction) (*core.Block, error) {
-	return w.chain.MineTransfers(txs)
+func (w *networkChainWrapper) MineTransfers(ctx context.Context, txs []core.Transaction) (*core.Block, error) {
+	return w.chain.MineTransfers(ctx, txs)
 }
 
 // AuditChain audits the chain integrity
@@ -479,6 +479,21 @@ func (w *mempoolWrapper) Size() int {
 // EntriesSortedByFeeDesc returns entries sorted by fee for network.Mempool
 func (w *mempoolWrapper) EntriesSortedByFeeDesc() []network.MempoolEntry {
 	return w.EntriesSortedByFeeDescNetwork()
+}
+
+// UpdateHeight updates the current height for transaction validation
+func (w *mempoolWrapper) UpdateHeight(height uint64) {
+	w.mp.UpdateHeight(height)
+}
+
+// UpdateConsensus updates the consensus parameters for transaction validation
+func (w *mempoolWrapper) UpdateConsensus(consensus config.ConsensusParams) {
+	w.mp.UpdateConsensus(consensus)
+}
+
+// AddWithoutSignatureValidation adds a transaction without signature verification
+func (w *mempoolWrapper) AddWithoutSignatureValidation(tx core.Transaction) (string, error) {
+	return w.mp.AddWithoutSignatureValidation(tx)
 }
 
 // EntriesSortedByFeeDescMiner returns entries for miner.Mempool

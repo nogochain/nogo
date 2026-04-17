@@ -191,9 +191,8 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
 	}
 
 	if v.consensus.DifficultyEnable {
-		// Use the same consensus parameters as mining to ensure consistency
-		// This matches the parameters used in core/mining.go MineTransfers()
-		adjuster := nogopow.NewDifficultyAdjuster(&v.consensus)
+		// Calculate expected difficulty using PI controller (same as mining)
+		// Use nogopow.NewDifficultyAdjuster for PI controller algorithm
 
 		var parentHash nogopow.Hash
 		if len(parent.Hash) > 0 {
@@ -209,13 +208,21 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
 			ParentHash: parentHash,
 		}
 
+		// Use PI controller difficulty calculation (same as mining)
+		adjuster := nogopow.NewDifficultyAdjuster(&v.consensus)
 		expectedDifficulty := adjuster.CalcDifficulty(uint64(block.Header.TimestampUnix), parentHeader)
 		actualDifficulty := big.NewInt(int64(block.Header.DifficultyBits))
 
-		minAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100-DifficultyTolerancePercent))
+		// Use wider tolerance (50%) for initial blocks to allow difficulty to stabilize
+		tolerance := DifficultyTolerancePercent
+		if block.GetHeight() < 100 {
+			tolerance = 50
+		}
+
+		minAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(int64(100-tolerance)))
 		minAllowed.Div(minAllowed, big.NewInt(100))
 
-		maxAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(100+DifficultyTolerancePercent))
+		maxAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(int64(100+tolerance)))
 		maxAllowed.Div(maxAllowed, big.NewInt(100))
 
 		if actualDifficulty.Cmp(minAllowed) < 0 {
@@ -390,10 +397,8 @@ func (v *BlockValidator) ValidateBlockFast(block *Block) error {
 	return nil
 }
 
-
-
 func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Block) error {
-	if block == nil || len(block.Hash) == 0 {
+	if block == nil {
 		return errors.New("invalid block for POW verification")
 	}
 
@@ -405,17 +410,22 @@ func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Bl
 		return errors.New("parent block is nil for POW verification")
 	}
 
-	engine := nogopow.New(nogopow.DefaultConfig())
+	powConfig := nogopow.DefaultConfig()
+	powConfig.ConsensusParams = &consensus
+	engine := nogopow.New(powConfig)
 	defer engine.Close()
 
 	var parentHash nogopow.Hash
-	copy(parentHash[:], parent.Hash)
+	copy(parentHash[:], block.GetPrevHash())
 
-	// Convert miner address string to nogopow.Address using reusable function
-	// This ensures consistent address conversion across the codebase
 	powCoinbase, err := core.StringToAddress(block.MinerAddress)
 	if err != nil {
 		return fmt.Errorf("invalid miner address: %w", err)
+	}
+
+	var merkleRoot nogopow.Hash
+	if len(block.Header.MerkleRoot) > 0 {
+		copy(merkleRoot[:], block.Header.MerkleRoot)
 	}
 
 	header := &nogopow.Header{
@@ -424,11 +434,19 @@ func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Bl
 		ParentHash: parentHash,
 		Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
 		Coinbase:   powCoinbase,
+		Root:       merkleRoot,
 	}
 
 	binary.LittleEndian.PutUint64(header.Nonce[:8], block.Header.Nonce)
 
-	if err := engine.VerifySealOnly(header); err != nil {
+	var blockHash nogopow.Hash
+	if len(block.Hash) == 32 {
+		copy(blockHash[:], block.Hash)
+	} else {
+		return fmt.Errorf("invalid block hash length: %d", len(block.Hash))
+	}
+
+	if err := engine.VerifySealWithBlockHash(header, blockHash); err != nil {
 		return fmt.Errorf("NogoPow seal verification failed for block %d: %w", block.GetHeight(), err)
 	}
 

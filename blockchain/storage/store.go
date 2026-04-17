@@ -14,11 +14,13 @@ import (
 )
 
 const (
+	baseDataDir     = "nogodata"
 	dataDirName     = "data"
-	blocksGobRel    = "data/blocks.gob"
-	chainBoltRel    = "data/chain.db"
-	rulesHashRel    = "data/rules.hash"
-	genesisHashRel  = "data/genesis.hash"
+	legacyDataDir   = "data"
+	blocksGobRel    = "nogodata/data/blocks.gob"
+	chainBoltRel    = "nogodata/data/chain.db"
+	rulesHashRel    = "nogodata/data/rules.hash"
+	genesisHashRel  = "nogodata/data/genesis.hash"
 	blocksBucket    = "blocks"
 	canonBucket     = "canonical"
 	metaBucket      = "meta"
@@ -59,22 +61,70 @@ type ChainStore interface {
 }
 
 func OpenChainStoreFromEnv() (ChainStore, error) {
+	if err := migrateLegacyDataDir(); err != nil {
+		log.Printf("WARNING: failed to migrate legacy data directory: %v", err)
+	}
+
 	backend := os.Getenv("STORE_BACKEND")
 	switch backend {
 	case "", "bolt":
 		s, err := OpenBoltStore(chainBoltRel)
 		if err == nil {
-			// Best-effort migration from legacy gob if bolt is empty.
 			_ = maybeMigrateGobToBolt(s, blocksGobRel)
 			return s, nil
 		}
-		// Fall back to gob.
 		return OpenGobStore(blocksGobRel)
 	case "gob":
 		return OpenGobStore(blocksGobRel)
 	default:
 		return nil, fmt.Errorf("unknown STORE_BACKEND: %q", backend)
 	}
+}
+
+func migrateLegacyDataDir() error {
+	legacyFiles := []string{
+		filepath.Join(legacyDataDir, "chain.db"),
+		filepath.Join(legacyDataDir, "blocks.gob"),
+		filepath.Join(legacyDataDir, "rules.hash"),
+		filepath.Join(legacyDataDir, "genesis.hash"),
+		filepath.Join(legacyDataDir, "checkpoints.dat"),
+	}
+
+	newDataDir := filepath.Join(baseDataDir, dataDirName)
+	if err := os.MkdirAll(newDataDir, dirPerm); err != nil {
+		return fmt.Errorf("create new data directory: %w", err)
+	}
+
+	migrated := false
+	for _, legacyFile := range legacyFiles {
+		if _, err := os.Stat(legacyFile); err != nil {
+			continue
+		}
+
+		fileName := filepath.Base(legacyFile)
+		newPath := filepath.Join(newDataDir, fileName)
+
+		if _, err := os.Stat(newPath); err == nil {
+			continue
+		}
+
+		if err := os.Rename(legacyFile, newPath); err != nil {
+			log.Printf("WARNING: failed to migrate %s: %v", legacyFile, err)
+			continue
+		}
+		log.Printf("Migrated %s -> %s", legacyFile, newPath)
+		migrated = true
+	}
+
+	if migrated {
+		remaining, _ := os.ReadDir(legacyDataDir)
+		if len(remaining) == 0 {
+			os.Remove(legacyDataDir)
+			log.Printf("Removed empty legacy data directory: %s", legacyDataDir)
+		}
+	}
+
+	return nil
 }
 
 // --- Legacy gob store (canonical only) ---
