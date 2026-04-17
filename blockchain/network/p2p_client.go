@@ -113,9 +113,9 @@ func NewP2PClient(chainID uint64, rulesHash string, nodeID string) *P2PClient {
 		nodeID:        nodeID,
 		publicIP:      publicIP,
 		advertiseSelf: advertiseSelf,
-		dialTimeout:   10 * time.Second, // Increased for slow networks
-		ioTimeout:     60 * time.Second, // Increased for slow networks
-		maxMsgBytes:   4 << 20,
+		dialTimeout:   10 * time.Second,          // Increased for slow networks
+		ioTimeout:     60 * time.Second,          // Increased for slow networks
+		maxMsgBytes:   DefaultP2PMaxMessageBytes, // Use 16MB limit for large block batches
 		connections:   make(map[string]*p2pConnection),
 		connPoolSize:  50,
 		ctx:           ctx,
@@ -679,10 +679,11 @@ func (c *P2PClient) FetchBlocksByHeightRange(ctx context.Context, peer string, s
 }
 
 // RequestPeers requests a list of peers from a remote node
+// Uses dedicated connection to avoid response mixing
 func (c *P2PClient) RequestPeers(ctx context.Context, peer string) ([]string, error) {
-	// Send getaddr request
+	// Send getaddr request with dedicated connection
 	var resp map[string]any
-	err := c.do(ctx, peer, "getaddr", nil, &resp, "addr")
+	err := c.doWithNewConnection(ctx, peer, "getaddr", nil, &resp, "addr")
 	if err != nil {
 		return nil, err
 	}

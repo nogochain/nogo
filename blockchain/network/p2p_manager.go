@@ -721,20 +721,24 @@ func runPeerCleanupLoop(ctx context.Context, pm *P2PPeerManager) {
 }
 
 // FetchChainInfo fetches chain information from a peer
+// Uses dedicated connection to avoid response mixing with other requests
 func (pm *P2PPeerManager) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, error) {
 	var out ChainInfo
-	if err := pm.client.do(ctx, peer, "chain_info_req", p2pChainInfoReq{}, &out, "chain_info"); err != nil {
+	// Use doWithNewConnection for concurrent safety - prevents response mixing
+	if err := pm.client.doWithNewConnection(ctx, peer, "chain_info_req", p2pChainInfoReq{}, &out, "chain_info"); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
 // DiscoverPeersFromPeer connects to a peer and requests their peer list via getaddr
+// Uses dedicated connection to avoid response mixing with other requests
 func (pm *P2PPeerManager) DiscoverPeersFromPeer(ctx context.Context, peer string) {
 	var addrResp struct {
 		Addresses []peerAddr `json:"addresses"`
 	}
-	if err := pm.client.do(ctx, peer, "getaddr", nil, &addrResp, "addr"); err != nil {
+	// Use doWithNewConnection for concurrent safety - prevents response mixing
+	if err := pm.client.doWithNewConnection(ctx, peer, "getaddr", nil, &addrResp, "addr"); err != nil {
 		return
 	}
 
