@@ -165,7 +165,7 @@ func NewP2PServer(bc BlockchainInterface, pm *P2PPeerManager, mp Mempool, listen
 		publicIP:          publicIP,
 		lastIPUpdate:      time.Now(),
 		maxConns:          envInt("P2P_MAX_CONNECTIONS", DefaultP2PMaxConnections),
-		maxMsgSize:        envInt("P2P_MAX_MESSAGE_BYTES", 4<<20),
+		maxMsgSize:        envInt("P2P_MAX_MESSAGE_BYTES", DefaultP2PMaxMessageBytes),
 		maxPeers:          maxPeers,
 		maxAddrReturn:      maxAddrReturn,
 		advertiseSelf:     advertiseSelf,
@@ -1821,7 +1821,7 @@ func RequestBlockFromPeer(ctx context.Context, peerAddr string, hashHex string) 
 	}
 
 	// Read response
-	raw, err = p2pReadJSON(conn, 4<<20)
+	raw, err = p2pReadJSON(conn, DefaultP2PMaxMessageBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read block response: %w", err)
 	}
