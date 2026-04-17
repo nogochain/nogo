@@ -22,6 +22,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/nogochain/nogo/blockchain/core"
 )
 
 // AddressBalance represents an address balance
@@ -85,12 +87,20 @@ func (s *SimpleServer) handleAddressBalance(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Return placeholder balance (in production, would query state database)
+	// Get balance from blockchain state
+	acct, ok := s.bc.Balance(address)
+	if !ok {
+		acct = core.Account{}
+	}
+
+	// Get transaction count for address
+	txs, _, _ := s.bc.AddressTxs(address, 1000, 0)
+
 	balance := &AddressBalance{
 		Address:     address,
-		Balance:     0,
-		Nonce:       0,
-		TxCount:     0,
+		Balance:     acct.Balance,
+		Nonce:       acct.Nonce,
+		TxCount:     uint64(len(txs)),
 		LastUpdated: time.Now().Unix(),
 	}
 
@@ -111,10 +121,33 @@ func (s *SimpleServer) handleTxByHash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return not found (in production, would search mempool and blockchain)
-	writeJSON(w, http.StatusNotFound, map[string]string{
-		"error": "transaction not found",
-	})
+	// Search blockchain for transaction
+	tx, loc, found := s.bc.TxByID(txHash)
+	if !found {
+		// Transaction not found
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "transaction not found",
+		})
+		return
+	}
+
+	// Build transaction detail
+	fromAddr, _ := tx.FromAddress()
+	detail := &TxDetail{
+		Hash:      txHash,
+		From:      fromAddr,
+		To:        tx.ToAddress,
+		Amount:    tx.Amount,
+		Fee:       tx.Fee,
+		Nonce:     tx.Nonce,
+		Timestamp: 0, // Transaction doesn't have timestamp
+		Confirmed: loc != nil,
+	}
+	if loc != nil {
+		detail.Height = loc.Height
+	}
+
+	writeJSON(w, http.StatusOK, detail)
 }
 
 // handleSubmitTx handles transaction submissions
@@ -164,7 +197,7 @@ func (s *SimpleServer) handleSubmitTx(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Decode signature
-	_, err := hex.DecodeString(req.Signature)
+	sigBytes, err := hex.DecodeString(req.Signature)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "invalid signature format",
@@ -172,10 +205,36 @@ func (s *SimpleServer) handleSubmitTx(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return success placeholder (in production, would create and add to mempool)
+	// Get sender's nonce from blockchain state
+	acct, _ := s.bc.Balance(req.From)
+	nonce := acct.Nonce
+
+	// Create transaction
+	tx := core.Transaction{
+		Type:      core.TxTransfer,
+		ToAddress: req.To,
+		Amount:    req.Amount,
+		Fee:       req.Fee,
+		Nonce:     nonce,
+		Signature: sigBytes,
+	}
+
+	// Calculate transaction hash
+	txHash := tx.GetID()
+
+	// Add to mempool if available
+	if s.mp != nil {
+		if _, err := s.mp.Add(tx); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "failed to add transaction to mempool: " + err.Error(),
+			})
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusOK, SubmitTxResponse{
 		Success: true,
-		TxHash:  "placeholder_tx_hash",
+		TxHash:  txHash,
 	})
 }
 

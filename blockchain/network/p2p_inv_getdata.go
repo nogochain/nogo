@@ -158,7 +158,7 @@ func (im *InventoryManager) sendBlock(conn net.Conn, blockHashHex string) error 
 	// Send BLOCK message
 	return p2pWriteJSON(conn, p2pEnvelope{
 		Type:    "block",
-		Payload: mustJSON(p2pBlockMsg{Block: *block}),
+		Payload: mustJSON(p2pBlockMsg{Block: block}),
 	})
 }
 
@@ -169,13 +169,21 @@ func (im *InventoryManager) sendTx(conn net.Conn, txHashHex string) error {
 		return fmt.Errorf("mempool not available")
 	}
 
-	// Simplified: would need proper tx retrieval from mempool by hash
-	// For now, send NOTFOUND
+	tx, exists := im.server.mp.GetTx(txHashHex)
+	if !exists {
+		// Send NOTFOUND if transaction not in mempool
+		return p2pWriteJSON(conn, p2pEnvelope{
+			Type:    "notfound",
+			Payload: mustJSON(p2pNotFoundMsg{Entries: []InventoryEntry{
+				{Type: InvTypeTx, Hash: txHashHex},
+			}}),
+		})
+	}
+
+	// Send the transaction
 	return p2pWriteJSON(conn, p2pEnvelope{
-		Type:    "notfound",
-		Payload: mustJSON(p2pNotFoundMsg{Entries: []InventoryEntry{
-			{Type: InvTypeTx, Hash: txHashHex},
-		}}),
+		Type:    "tx",
+		Payload: mustJSON(p2pTxMsg{Tx: *tx}),
 	})
 }
 

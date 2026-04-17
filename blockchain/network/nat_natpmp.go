@@ -97,7 +97,7 @@ func (c *NATPMPClient) GetExternalAddress() (net.IP, uint16, error) {
 	data[1] = req.OpCode
 
 	// Send request
-	conn, err := net.Dial("udp", fmt.Sprintf("%s:%d", c.Gateway.String(), NATPMPClientPort))
+	conn, err := net.Dial("udp", net.JoinHostPort(c.Gateway.String(), fmt.Sprintf("%d", NATPMPClientPort)))
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to connect to NAT-PMP gateway: %w", err)
 	}
@@ -179,7 +179,7 @@ func (c *NATPMPClient) MapPort(protocol string, internalPort, externalPort int, 
 	binary.BigEndian.PutUint32(reqData[8:12], mapReq.TTL)
 
 	// Send request
-	conn, err := net.Dial("udp", fmt.Sprintf("%s:%d", c.Gateway.String(), NATPMPClientPort))
+	conn, err := net.Dial("udp", net.JoinHostPort(c.Gateway.String(), fmt.Sprintf("%d", NATPMPClientPort)))
 	if err != nil {
 		return 0, fmt.Errorf("failed to connect to NAT-PMP gateway: %w", err)
 	}

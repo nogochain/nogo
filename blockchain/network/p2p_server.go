@@ -609,7 +609,7 @@ func (s *P2PServer) handleConn(ctx context.Context, c net.Conn) error {
 				if err := json.Unmarshal(env.Payload, &bm); err != nil {
 					log.Printf("P2P server: failed to unmarshal BLOCK from %s: %v", remoteAddr, err)
 				} else {
-					handleErr = s.inventoryMgr.HandleBlock(c, remoteAddr, &bm.Block)
+					handleErr = s.inventoryMgr.HandleBlock(c, remoteAddr, bm.Block)
 				}
 			}
 		case "tx":

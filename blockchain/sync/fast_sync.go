@@ -556,8 +556,7 @@ func (fs *FastSyncEngine) downloadAndProcessBlockBatch(ctx context.Context,
 		return false, errors.New("no peers available for block download")
 	}
 
-	// Select best peer based on previous performance (simplified - use first available)
-	peer := peers[0]
+	peer := fs.selectBestPeer(peers)
 	batchSuccessful := true
 
 	for height := startHeight; height <= endHeight; height++ {
@@ -574,17 +573,14 @@ func (fs *FastSyncEngine) downloadAndProcessBlockBatch(ctx context.Context,
 			break
 		}
 
-		// Validate and add block to chain with orphan-aware logic
 		accepted, err := fs.blockchain.AddBlock(block)
 		if err != nil {
 			log.Printf("[FastSync] Block validation failed at height %d: %v", height, err)
-			// Mark peer as potentially bad
 			fs.recordBadBlock(peer, height)
 			batchSuccessful = false
 			break
 		}
 		if !accepted {
-			// Block stored as orphan - normal for fast sync with large gaps
 			log.Printf("[FastSync] Block %d stored as orphan (gap detection: expected=%d, actual=%d, gap=%d)", 
 				height, fs.currentHeight(), block.GetHeight(), block.GetHeight() - fs.currentHeight())
 			
@@ -656,6 +652,33 @@ func (fs *FastSyncEngine) fetchBlockDirect(ctx context.Context, peer string, hei
 
 	// No block fetcher available - return error
 	return nil, fmt.Errorf("block fetch not available: blockFetcher not configured for height %d", height)
+}
+
+// selectBestPeer selects the best peer for block download based on network height.
+func (fs *FastSyncEngine) selectBestPeer(peers []string) string {
+	if len(peers) == 0 {
+		return ""
+	}
+	if len(peers) == 1 {
+		return peers[0]
+	}
+
+	if fs.networkHeightFetcher != nil {
+		peerHeights, err := fs.networkHeightFetcher.GetPeerHeights()
+		if err == nil && len(peerHeights) > 0 {
+			bestPeer := peers[0]
+			bestHeight := uint64(0)
+			for _, peer := range peers {
+				if height, ok := peerHeights[peer]; ok && height > bestHeight {
+					bestHeight = height
+					bestPeer = peer
+				}
+			}
+			return bestPeer
+		}
+	}
+
+	return peers[0]
 }
 
 // recordBadBlock records a block fetch/validation failure for peer scoring.

@@ -252,7 +252,7 @@ func (c *PCPClient) RequestPortMapping(internalPort int, lifetime int) (uint16, 
 	}
 
 	// Send to gateway
-	conn, err := net.Dial("udp", fmt.Sprintf("%s:%d", c.Gateway.String(), PCPPort))
+	conn, err := net.Dial("udp", net.JoinHostPort(c.Gateway.String(), fmt.Sprintf("%d", PCPPort)))
 	if err != nil {
 		return 0, fmt.Errorf("failed to connect to PCP server: %w", err)
 	}

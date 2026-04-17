@@ -963,23 +963,29 @@ func calculateBlockPriority(block *core.Block) int {
 }
 
 func serializeBlock(block *core.Block) ([]byte, error) {
-	// In production, use efficient binary serialization
-	// For now, use JSON as placeholder
-	return []byte(fmt.Sprintf("%v", block)), nil
+	// Production-grade JSON serialization
+	return json.Marshal(block)
 }
 
 func deserializeBlock(data []byte) (*core.Block, error) {
-	// In production, use efficient binary deserialization
-	// Placeholder implementation
-	return &core.Block{}, nil
+	// Production-grade JSON deserialization
+	var block core.Block
+	if err := json.Unmarshal(data, &block); err != nil {
+		return nil, fmt.Errorf("deserialize block: %w", err)
+	}
+	return &block, nil
 }
 
 func serializeTransaction(tx *core.Transaction) ([]byte, error) {
-	// Placeholder implementation
-	return []byte(fmt.Sprintf("%v", tx)), nil
+	// Production-grade JSON serialization
+	return json.Marshal(tx)
 }
 
 func deserializeTransaction(data []byte) (*core.Transaction, error) {
-	// Placeholder implementation
-	return &core.Transaction{}, nil
+	// Production-grade JSON deserialization
+	var tx core.Transaction
+	if err := json.Unmarshal(data, &tx); err != nil {
+		return nil, fmt.Errorf("deserialize transaction: %w", err)
+	}
+	return &tx, nil
 }

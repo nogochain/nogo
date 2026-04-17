@@ -62,7 +62,7 @@ type p2pTxMsg struct {
 
 // Block messages (direct block data)
 type p2pBlockMsg struct {
-	Block core.Block `json:"block"`
+	Block *core.Block `json:"block"`
 }
 
 // Address messages

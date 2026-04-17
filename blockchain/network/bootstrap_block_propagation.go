@@ -5,6 +5,7 @@ package network
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -1652,8 +1653,13 @@ func (b *BootstrapBlockPropagator) maxConcurrentBroadcasts() int {
 
 // serializeBlockForTransmission prepares block for network transmission
 func serializeBlockForTransmission(block *core.Block) []byte {
-	// Implementation would serialize block
-	return []byte(fmt.Sprintf("block_%d", block.GetHeight()))
+	// Production-grade JSON serialization
+	data, err := json.Marshal(block)
+	if err != nil {
+		log.Printf("[Bootstrap] Failed to serialize block: %v", err)
+		return nil
+	}
+	return data
 }
 
 // isSystemUnderHeavyLoad determines if system is under heavy load
@@ -1673,8 +1679,10 @@ func (b *BootstrapBlockPropagator) isSystemUnderHeavyLoad() bool {
 
 // GetChainHeight gets the current blockchain height from coordinator
 func (c *BootstrapMiningCoordinator) GetChainHeight() uint64 {
-	// Implementation would get current chain height
-	return 10000 // Default implementation
+	if c.blockchain == nil {
+		return 0
+	}
+	return c.blockchain.GetHeight()
 }
 
 // === Missing Method Implementations ===

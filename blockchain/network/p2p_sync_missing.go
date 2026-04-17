@@ -40,25 +40,28 @@ func (bsm *BlockSyncManager) RequestBlockAsync(ctx context.Context, c net.Conn, 
 	blockCtx, cancel := context.WithTimeout(ctx, timeout)
 
 	bsm.syncMu.Lock()
-	
+
 	// Check if already waiting for this block (deduplication)
 	if existingCh, exists := bsm.waitingForBlock[blockHashHex]; exists {
 		// Already waiting for this block, return existing channel
 		bsm.syncMu.Unlock()
 		log.Printf("p2p: already waiting for block %s, reusing channel", blockHashHex[:16])
-		
+
+		// Cancel the new context since we're reusing existing one
+		cancel()
+
 		// Start a goroutine to wait on the existing channel
 		go func() {
 			select {
 			case block := <-existingCh:
 				select {
 				case respCh <- block:
-				case <-blockCtx.Done():
+				case <-ctx.Done():
 				}
-			case <-blockCtx.Done():
+			case <-ctx.Done():
 			}
 		}()
-		
+
 		return respCh, nil
 	}
 	

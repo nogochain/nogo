@@ -4,7 +4,7 @@
 package network
 
 import (
-	"fmt"
+	"encoding/hex"
 	"sync"
 	"time"
 
@@ -545,7 +545,7 @@ func (b *BlockDeduplicationTracker) getBlockHash(block *core.Block) string {
 	if block == nil {
 		return ""
 	}
-	return fmt.Sprintf("block_%d", block.GetHeight()) // Simplified hash - real implementation would use actual block hash
+	return hex.EncodeToString(block.Hash)
 }
 
 // CleanupExpired removes expired entries from tracking

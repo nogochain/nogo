@@ -237,14 +237,34 @@ func (obp *OptimizedBlockPropagator) handleUnknownParent(block *core.Block) erro
 
 // handleUnknownParentSync syncs missing blocks synchronously
 func (obp *OptimizedBlockPropagator) handleUnknownParentSync(block *core.Block, c net.Conn) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Request missing blocks from the sender
-	// Simplified implementation - in production would use proper sync protocol
-	_ = ctx
-	_ = c
+	parentHash := hex.EncodeToString(block.Header.PrevHash)
+	log.Printf("[OptimizedBlockPropagator] Requesting missing parent block: hash=%s", parentHash[:16])
 
+	if obp.server.pm == nil {
+		return fmt.Errorf("peer manager not available")
+	}
+
+	peerAddr := c.RemoteAddr().String()
+	parentBlock, err := obp.server.pm.FetchBlockByHash(ctx, peerAddr, parentHash)
+	if err != nil {
+		log.Printf("[OptimizedBlockPropagator] Failed to fetch parent block: %v", err)
+		return fmt.Errorf("failed to fetch parent block: %w", err)
+	}
+
+	if parentBlock == nil {
+		return fmt.Errorf("parent block not found")
+	}
+
+	_, err = obp.server.bc.AddBlock(parentBlock)
+	if err != nil {
+		log.Printf("[OptimizedBlockPropagator] Failed to add parent block: %v", err)
+		return fmt.Errorf("failed to add parent block: %w", err)
+	}
+
+	log.Printf("[OptimizedBlockPropagator] Successfully synced parent block: height=%d", parentBlock.GetHeight())
 	return nil
 }
 
