@@ -18,6 +18,7 @@ package utils
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"sync"
 	"testing"
 	"time"
@@ -118,7 +119,7 @@ func TestOrphanPoolOptimized_GetOrphansByParent(t *testing.T) {
 	pool.AddOrphan(block2)
 	pool.AddOrphan(block3)
 
-	orphans := pool.GetOrphansByParent(string(parentHash))
+	orphans := pool.GetOrphansByParent(hex.EncodeToString(parentHash))
 	if len(orphans) != 2 {
 		t.Errorf("expected 2 orphans with same parent, got %d", len(orphans))
 	}
@@ -131,7 +132,7 @@ func TestOrphanPoolOptimized_RemoveOrphan(t *testing.T) {
 	block := createTestBlock(100, generateRandomHash())
 	pool.AddOrphan(block)
 
-	hash := string(block.Hash)
+	hash := hex.EncodeToString(block.Hash)
 	removed := pool.RemoveOrphan(hash)
 
 	if removed == nil {
@@ -193,7 +194,7 @@ func TestOrphanPoolOptimized_Metrics(t *testing.T) {
 		block := createTestBlock(uint64(i), generateRandomHash())
 		pool.AddOrphan(block)
 		if i == 0 {
-			firstHash = string(block.Hash)
+			firstHash = hex.EncodeToString(block.Hash)
 		}
 	}
 
@@ -217,7 +218,7 @@ func TestOrphanPoolOptimized_Callbacks(t *testing.T) {
 	callbackCalled := false
 	var mu sync.Mutex
 
-	pool.RegisterParentCallback(string(parentHash), func(block *core.Block, err error) {
+	pool.RegisterParentCallback(hex.EncodeToString(parentHash), func(block *core.Block, err error) {
 		mu.Lock()
 		defer mu.Unlock()
 		callbackCalled = true
@@ -302,6 +303,7 @@ func TestOrphanPoolOptimized_GetStats(t *testing.T) {
 		"parent_requested",
 		"parent_found",
 		"parent_timeout",
+		"lru_evicted",
 		"parent_success_rate",
 	}
 
@@ -309,6 +311,118 @@ func TestOrphanPoolOptimized_GetStats(t *testing.T) {
 		if _, exists := stats[field]; !exists {
 			t.Errorf("expected field %s in stats", field)
 		}
+	}
+}
+
+func TestOrphanPoolOptimized_LRUEviction(t *testing.T) {
+	pool := NewOrphanPoolOptimized(3, 5*time.Minute)
+	defer pool.Stop()
+
+	block1 := createTestBlock(100, generateRandomHash())
+	block2 := createTestBlock(101, generateRandomHash())
+	block3 := createTestBlock(102, generateRandomHash())
+	block4 := createTestBlock(103, generateRandomHash())
+
+	pool.AddOrphan(block1)
+	pool.AddOrphan(block2)
+	pool.AddOrphan(block3)
+
+	if pool.Size() != 3 {
+		t.Fatalf("expected size 3 before eviction, got %d", pool.Size())
+	}
+
+	pool.AddOrphan(block4)
+
+	if pool.Size() != 3 {
+		t.Errorf("expected size 3 after LRU eviction, got %d", pool.Size())
+	}
+
+	if pool.HasOrphan(hex.EncodeToString(block1.Hash)) {
+		t.Error("expected oldest block (block1) to be evicted by LRU")
+	}
+
+	if !pool.HasOrphan(hex.EncodeToString(block4.Hash)) {
+		t.Error("expected newest block (block4) to exist in pool")
+	}
+
+	metrics := pool.GetMetrics()
+	if metrics.LRUEvicted == 0 {
+		t.Error("expected LRUEvicted metric > 0")
+	}
+}
+
+func TestOrphanPoolOptimized_OrphanBlockWrapper(t *testing.T) {
+	pool := NewOrphanPoolOptimized(100, 5*time.Minute)
+	defer pool.Stop()
+
+	block := createTestBlock(100, generateRandomHash())
+	beforeAdd := time.Now()
+
+	pool.AddOrphan(block)
+
+	hash := hex.EncodeToString(block.Hash)
+	retrieved := pool.GetOrphan(hash)
+
+	if retrieved == nil {
+		t.Fatal("expected to retrieve orphan block")
+	}
+	if retrieved.Height != block.Height {
+		t.Errorf("expected height %d, got %d", block.Height, retrieved.Height)
+	}
+
+	stats := pool.GetStats()
+	if _, exists := stats["lru_evicted"]; !exists {
+		t.Error("expected lru_evicted field in stats")
+	}
+
+	_ = beforeAdd
+}
+
+func TestOrphanPoolOptimized_ExponentialBackoff(t *testing.T) {
+	pool := NewOrphanPoolOptimized(100, 5*time.Minute)
+	defer pool.Stop()
+
+	tests := []struct {
+		retryCount int
+		minDelay   time.Duration
+		maxDelay   time.Duration
+	}{
+		{0, 30 * time.Second, 30 * time.Second},
+		{1, 60 * time.Second, 60 * time.Second},
+		{2, 120 * time.Second, 120 * time.Second},
+		{3, 120 * time.Second, 5 * time.Minute},
+		{10, 120 * time.Second, 5 * time.Minute},
+	}
+
+	for _, tt := range tests {
+		backoff := pool.calculateBackoff(tt.retryCount)
+		if backoff < tt.minDelay {
+			t.Errorf("retry %d: backoff %v < min %v", tt.retryCount, backoff, tt.minDelay)
+		}
+		if backoff > tt.maxDelay {
+			t.Errorf("retry %d: backoff %v > max %v", tt.retryCount, backoff, tt.maxDelay)
+		}
+	}
+}
+
+func TestOrphanPoolOptimized_DefaultConstants(t *testing.T) {
+	if OrphanPoolMaxSize != 256 {
+		t.Errorf("expected OrphanPoolMaxSize=256, got %d", OrphanPoolMaxSize)
+	}
+	if OrphanPoolDefaultTTL != 60*time.Minute {
+		t.Errorf("expected OrphanPoolDefaultTTL=60m, got %v", OrphanPoolDefaultTTL)
+	}
+	if OrphanPoolCleanupTicker != 3*time.Minute {
+		t.Errorf("expected OrphanPoolCleanupTicker=3m, got %v", OrphanPoolCleanupTicker)
+	}
+	if MaxParentRequestRetries != 3 {
+		t.Errorf("expected MaxParentRequestRetries=3, got %d", MaxParentRequestRetries)
+	}
+	if ParentRequestTimeout != 30*time.Second {
+		t.Errorf("expected ParentRequestTimeout=30s, got %v", ParentRequestTimeout)
+	}
+	if ParentRequestMaxBackoff != 5*time.Minute {
+		t.Errorf("expected ParentRequestMaxBackoff=5m, got %v", ParentRequestMaxBackoff)
 	}
 }
 
@@ -335,7 +449,7 @@ func BenchmarkOrphanPoolOptimized_GetOrphansByParent(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		pool.GetOrphansByParent(string(parentHash))
+		pool.GetOrphansByParent(hex.EncodeToString(parentHash))
 	}
 }
 
@@ -352,6 +466,6 @@ func BenchmarkOrphanPoolOptimized_RemoveOrphan(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		pool.RemoveOrphan(string(blocks[i].Hash))
+		pool.RemoveOrphan(hex.EncodeToString(blocks[i].Hash))
 	}
 }

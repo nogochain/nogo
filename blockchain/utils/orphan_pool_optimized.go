@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,13 +30,19 @@ import (
 )
 
 const (
-	OrphanPoolMaxDepth       = 1000
-	OrphanPoolDefaultTTL     = 10 * time.Minute
-	OrphanPoolCleanupTicker  = 1 * time.Hour
-	ParentRequestQueueSize   = 1024
-	MaxParentRequestsPerOrphan = 3
-	ParentRequestTimeout     = 30 * time.Second
+	OrphanPoolMaxSize          = 256
+	OrphanPoolDefaultTTL       = 60 * time.Minute
+	OrphanPoolCleanupTicker    = 3 * time.Minute
+	ParentRequestQueueSize     = 1024
+	MaxParentRequestRetries    = 3
+	ParentRequestTimeout       = 30 * time.Second
+	ParentRequestMaxBackoff    = 5 * time.Minute
 )
+
+type OrphanBlock struct {
+	Block   *core.Block
+	AddedAt time.Time
+}
 
 type OrphanMetrics struct {
 	TotalAdded      uint64
@@ -45,6 +52,7 @@ type OrphanMetrics struct {
 	ParentRequested uint64
 	ParentFound     uint64
 	ParentTimeout   uint64
+	LRUEvicted      uint64
 }
 
 type ParentRequest struct {
@@ -57,51 +65,50 @@ type ParentRequest struct {
 type OrphanPoolOptimized struct {
 	mu sync.RWMutex
 
-	blocks      map[string]*core.Block
+	blocks      map[string]*OrphanBlock
 	parentIndex map[string]*list.List
 	childIndex  map[string]map[string]bool
-	timestamps  map[string]time.Time
 
 	parentRequestQueue chan *ParentRequest
 	pendingRequests    map[string]*ParentRequest
 	requestCallbacks   map[string][]func(*core.Block, error)
 
-	maxSize      int
-	ttl          time.Duration
-	maxRetries   int
-	requestTimeout time.Duration
+	maxSize         int
+	ttl             time.Duration
+	maxRetries      int
+	requestTimeout  time.Duration
+	maxBackoff      time.Duration
 
 	metrics OrphanMetrics
 
 	cleanupStop chan struct{}
 	cleanupWg   sync.WaitGroup
-
-	isProcessing int32
 }
 
 func NewOrphanPoolOptimized(maxSize int, ttl time.Duration) *OrphanPoolOptimized {
 	if maxSize <= 0 {
-		maxSize = OrphanPoolMaxDepth
+		maxSize = OrphanPoolMaxSize
 	}
 	if ttl <= 0 {
 		ttl = OrphanPoolDefaultTTL
 	}
 
 	pool := &OrphanPoolOptimized{
-		blocks:             make(map[string]*core.Block),
+		blocks:             make(map[string]*OrphanBlock),
 		parentIndex:        make(map[string]*list.List),
 		childIndex:         make(map[string]map[string]bool),
-		timestamps:         make(map[string]time.Time),
 		parentRequestQueue: make(chan *ParentRequest, ParentRequestQueueSize),
 		pendingRequests:    make(map[string]*ParentRequest),
 		requestCallbacks:   make(map[string][]func(*core.Block, error)),
 		maxSize:            maxSize,
 		ttl:                ttl,
-		maxRetries:         MaxParentRequestsPerOrphan,
+		maxRetries:         MaxParentRequestRetries,
 		requestTimeout:     ParentRequestTimeout,
+		maxBackoff:         ParentRequestMaxBackoff,
 		cleanupStop:        make(chan struct{}),
 	}
 
+	pool.cleanupWg.Add(1)
 	go pool.cleanupLoop()
 	go pool.processParentRequests()
 
@@ -109,7 +116,6 @@ func NewOrphanPoolOptimized(maxSize int, ttl time.Duration) *OrphanPoolOptimized
 }
 
 func (op *OrphanPoolOptimized) cleanupLoop() {
-	op.cleanupWg.Add(1)
 	defer op.cleanupWg.Done()
 
 	ticker := time.NewTicker(OrphanPoolCleanupTicker)
@@ -159,29 +165,64 @@ func (op *OrphanPoolOptimized) handleParentRequest(request *ParentRequest) {
 
 	op.mu.Unlock()
 
-	log.Printf("[OrphanPool] Requesting parent %s for %d children",
-		request.ParentHash, len(request.ChildHashes))
+	log.Printf("[OrphanPool] Requesting parent %s for %d children (attempt %d)",
+		request.ParentHash, len(request.ChildHashes), request.RetryCount+1)
 
-	go op.waitForParent(request)
+	go op.waitForParentWithBackoff(request)
 }
 
-func (op *OrphanPoolOptimized) waitForParent(request *ParentRequest) {
-	timer := time.NewTimer(op.requestTimeout)
+func (op *OrphanPoolOptimized) waitForParentWithBackoff(request *ParentRequest) {
+	backoff := op.calculateBackoff(request.RetryCount)
+	timer := time.NewTimer(backoff)
 	defer timer.Stop()
 
 	select {
 	case <-timer.C:
 		op.mu.Lock()
+		pending, exists := op.pendingRequests[request.ParentHash]
+		if !exists {
+			op.mu.Unlock()
+			return
+		}
+
+		if pending.RetryCount >= op.maxRetries {
+			delete(op.pendingRequests, request.ParentHash)
+			atomic.AddUint64(&op.metrics.ParentTimeout, 1)
+			op.mu.Unlock()
+
+			log.Printf("[OrphanPool] Parent request exhausted retries for %s after %d attempts",
+				request.ParentHash, request.RetryCount+1)
+
+			op.notifyCallbacks(request.ParentHash, nil, fmt.Errorf("parent request exhausted after %d retries", request.RetryCount+1))
+			return
+		}
+
+		nextRequest := &ParentRequest{
+			ParentHash:  request.ParentHash,
+			ChildHashes: request.ChildHashes,
+			RetryCount:  pending.RetryCount,
+		}
 		delete(op.pendingRequests, request.ParentHash)
-		atomic.AddUint64(&op.metrics.ParentTimeout, 1)
 		op.mu.Unlock()
 
-		log.Printf("[OrphanPool] Parent request timeout for %s", request.ParentHash)
-
-		op.notifyCallbacks(request.ParentHash, nil, fmt.Errorf("parent request timeout"))
+		select {
+		case op.parentRequestQueue <- nextRequest:
+		default:
+			log.Printf("[OrphanPool] Parent request queue full on retry for %s", request.ParentHash)
+		}
 	case <-op.cleanupStop:
 		return
 	}
+}
+
+func (op *OrphanPoolOptimized) calculateBackoff(retryCount int) time.Duration {
+	baseDelay := float64(op.requestTimeout.Milliseconds())
+	exponent := math.Pow(2, float64(retryCount))
+	backoffMs := baseDelay * exponent
+	if backoffMs > float64(op.maxBackoff.Milliseconds()) {
+		backoffMs = float64(op.maxBackoff.Milliseconds())
+	}
+	return time.Duration(backoffMs) * time.Millisecond
 }
 
 func (op *OrphanPoolOptimized) notifyCallbacks(parentHash string, block *core.Block, err error) {
@@ -214,11 +255,14 @@ func (op *OrphanPoolOptimized) AddOrphan(block *core.Block) bool {
 	}
 
 	if len(op.blocks) >= op.maxSize {
-		op.removeOldestOrphan()
+		op.deleteLRU()
 	}
 
-	op.blocks[hash] = block
-	op.timestamps[hash] = time.Now()
+	orphan := &OrphanBlock{
+		Block:   block,
+		AddedAt: time.Now(),
+	}
+	op.blocks[hash] = orphan
 
 	if _, exists := op.childIndex[parentHash]; !exists {
 		op.childIndex[parentHash] = make(map[string]bool)
@@ -244,21 +288,21 @@ func (op *OrphanPoolOptimized) AddOrphan(block *core.Block) bool {
 	return true
 }
 
-func (op *OrphanPoolOptimized) removeOldestOrphan() {
+func (op *OrphanPoolOptimized) deleteLRU() {
 	var oldestHash string
 	var oldestTime time.Time
 
-	for hash, ts := range op.timestamps {
-		if oldestHash == "" || ts.Before(oldestTime) {
+	for hash, orphan := range op.blocks {
+		if oldestHash == "" || orphan.AddedAt.Before(oldestTime) {
 			oldestHash = hash
-			oldestTime = ts
+			oldestTime = orphan.AddedAt
 		}
 	}
 
 	if oldestHash != "" {
 		op.removeOrphanInternal(oldestHash)
-		atomic.AddUint64(&op.metrics.TotalExpired, 1)
-		log.Printf("[OrphanPool] Removed oldest orphan %s due to capacity limit", oldestHash)
+		atomic.AddUint64(&op.metrics.LRUEvicted, 1)
+		log.Printf("[OrphanPool] LRU evicted orphan %s due to capacity limit", oldestHash)
 	}
 }
 
@@ -273,8 +317,8 @@ func (op *OrphanPoolOptimized) GetOrphansByParent(parentHash string) []*core.Blo
 
 	result := make([]*core.Block, 0, len(children))
 	for hash := range children {
-		if block, ok := op.blocks[hash]; ok {
-			result = append(result, block)
+		if orphan, ok := op.blocks[hash]; ok {
+			result = append(result, orphan.Block)
 		}
 	}
 
@@ -289,12 +333,14 @@ func (op *OrphanPoolOptimized) RemoveOrphan(hash string) *core.Block {
 }
 
 func (op *OrphanPoolOptimized) removeOrphanInternal(hash string) *core.Block {
-	block, exists := op.blocks[hash]
+	orphan, exists := op.blocks[hash]
 	if !exists {
 		return nil
 	}
 
+	block := orphan.Block
 	parentHash := hex.EncodeToString(block.Header.PrevHash)
+
 	if children, ok := op.childIndex[parentHash]; ok {
 		delete(children, hash)
 		if len(children) == 0 {
@@ -314,7 +360,6 @@ func (op *OrphanPoolOptimized) removeOrphanInternal(hash string) *core.Block {
 		}
 	}
 
-	delete(op.timestamps, hash)
 	delete(op.blocks, hash)
 
 	atomic.AddUint64(&op.metrics.TotalRemoved, 1)
@@ -329,8 +374,8 @@ func (op *OrphanPoolOptimized) CleanupExpired() int {
 	now := time.Now()
 	removed := 0
 
-	for hash, addedAt := range op.timestamps {
-		if now.Sub(addedAt) > op.ttl {
+	for hash, orphan := range op.blocks {
+		if now.Sub(orphan.AddedAt) > op.ttl {
 			op.removeOrphanInternal(hash)
 			removed++
 			atomic.AddUint64(&op.metrics.TotalExpired, 1)
@@ -349,7 +394,10 @@ func (op *OrphanPoolOptimized) Size() int {
 func (op *OrphanPoolOptimized) GetOrphan(hash string) *core.Block {
 	op.mu.RLock()
 	defer op.mu.RUnlock()
-	return op.blocks[hash]
+	if orphan, ok := op.blocks[hash]; ok {
+		return orphan.Block
+	}
+	return nil
 }
 
 func (op *OrphanPoolOptimized) HasOrphan(hash string) bool {
@@ -394,6 +442,7 @@ func (op *OrphanPoolOptimized) GetMetrics() OrphanMetrics {
 		ParentRequested: atomic.LoadUint64(&op.metrics.ParentRequested),
 		ParentFound:     atomic.LoadUint64(&op.metrics.ParentFound),
 		ParentTimeout:   atomic.LoadUint64(&op.metrics.ParentTimeout),
+		LRUEvicted:      atomic.LoadUint64(&op.metrics.LRUEvicted),
 	}
 }
 
@@ -408,39 +457,40 @@ func (op *OrphanPoolOptimized) GetStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"size":              len(op.blocks),
-		"max_size":          op.maxSize,
-		"ttl_minutes":       op.ttl.Minutes(),
-		"pending_requests":  len(op.pendingRequests),
-		"queue_size":        len(op.parentRequestQueue),
-		"total_added":       metrics.TotalAdded,
-		"total_removed":     metrics.TotalRemoved,
-		"total_expired":     metrics.TotalExpired,
-		"parent_requested":  metrics.ParentRequested,
-		"parent_found":      metrics.ParentFound,
-		"parent_timeout":    metrics.ParentTimeout,
+		"size":                len(op.blocks),
+		"max_size":            op.maxSize,
+		"ttl_minutes":         op.ttl.Minutes(),
+		"pending_requests":    len(op.pendingRequests),
+		"queue_size":          len(op.parentRequestQueue),
+		"total_added":         metrics.TotalAdded,
+		"total_removed":       metrics.TotalRemoved,
+		"total_expired":       metrics.TotalExpired,
+		"parent_requested":    metrics.ParentRequested,
+		"parent_found":        metrics.ParentFound,
+		"parent_timeout":      metrics.ParentTimeout,
+		"lru_evicted":         metrics.LRUEvicted,
 		"parent_success_rate": successRate,
-		"is_processing":     atomic.LoadInt32(&op.isProcessing) == 1,
 	}
 }
 
 func (op *OrphanPoolOptimized) Clear() {
 	op.mu.Lock()
-	defer op.mu.Unlock()
-
-	op.blocks = make(map[string]*core.Block)
+	op.blocks = make(map[string]*OrphanBlock)
 	op.parentIndex = make(map[string]*list.List)
 	op.childIndex = make(map[string]map[string]bool)
-	op.timestamps = make(map[string]time.Time)
 	op.pendingRequests = make(map[string]*ParentRequest)
 	op.requestCallbacks = make(map[string][]func(*core.Block, error))
+	op.mu.Unlock()
 
 	close(op.cleanupStop)
 	op.cleanupWg.Wait()
 
+	op.mu.Lock()
 	op.cleanupStop = make(chan struct{})
+	op.cleanupWg.Add(1)
 	go op.cleanupLoop()
 	go op.processParentRequests()
+	op.mu.Unlock()
 }
 
 func (op *OrphanPoolOptimized) Stop() {

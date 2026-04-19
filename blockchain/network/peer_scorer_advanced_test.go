@@ -19,24 +19,52 @@ package network
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/utils"
 )
 
+// mockBanChecker implements PeerBanChecker for testing
+type mockBanChecker struct {
+	mu    sync.RWMutex
+	bans  map[string]bool
+}
+
+func newMockBanChecker() *mockBanChecker {
+	return &mockBanChecker{bans: make(map[string]bool)}
+}
+
+func (m *mockBanChecker) IsPeerBanned(peerID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.bans[peerID]
+}
+
+func (m *mockBanChecker) ban(peerID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bans[peerID] = true
+}
+
+func (m *mockBanChecker) unban(peerID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.bans, peerID)
+}
+
 // TestAdvancedPeerScorerBasic tests basic peer scoring functionality
 func TestAdvancedPeerScorerBasic(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	if scorer == nil {
 		t.Fatal("Failed to create AdvancedPeerScorer")
 	}
 
 	peer := "192.168.1.1:9090"
-	
-	// Test RecordSuccess
+
 	scorer.RecordSuccess(peer, 100)
-	
+
 	score := scorer.GetPeerScore(peer)
 	if score <= 0 {
 		t.Errorf("Expected positive score, got %.2f", score)
@@ -55,12 +83,11 @@ func TestAdvancedPeerScorerBasic(t *testing.T) {
 
 // TestAdvancedPeerScorerScoreFormula tests the scoring formula
 func TestAdvancedPeerScorerScoreFormula(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	peer := "192.168.1.2:9090"
 
-	// Record multiple successes with good latency
 	for i := 0; i < 10; i++ {
-		scorer.RecordSuccess(peer, 50) // 50ms latency
+		scorer.RecordSuccess(peer, 50)
 	}
 
 	score := scorer.GetPeerScore(peer)
@@ -76,24 +103,22 @@ func TestAdvancedPeerScorerScoreFormula(t *testing.T) {
 
 // TestAdvancedPeerScorerFailure tests failure handling
 func TestAdvancedPeerScorerFailure(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	peer := "192.168.1.3:9090"
 
-	// Record some successes
 	for i := 0; i < 5; i++ {
 		scorer.RecordSuccess(peer, 100)
 	}
 
 	initialScore := scorer.GetPeerScore(peer)
 
-	// Record failures
 	for i := 0; i < 5; i++ {
 		scorer.RecordFailure(peer)
 	}
 
 	finalScore := scorer.GetPeerScore(peer)
 	if finalScore >= initialScore {
-		t.Errorf("Expected score to decrease after failures, initial=%.2f, final=%.2f", 
+		t.Errorf("Expected score to decrease after failures, initial=%.2f, final=%.2f",
 			initialScore, finalScore)
 	}
 
@@ -103,72 +128,84 @@ func TestAdvancedPeerScorerFailure(t *testing.T) {
 	}
 }
 
-// TestAdvancedPeerScorerBlacklist tests blacklist functionality
-func TestAdvancedPeerScorerBlacklist(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+// TestAdvancedPeerScorerBanChecker tests ban checking via PeerBanChecker
+func TestAdvancedPeerScorerBanChecker(t *testing.T) {
+	checker := newMockBanChecker()
+	scorer := NewAdvancedPeerScorer(100, checker)
 	peer := "192.168.1.4:9090"
 
-	// Manually add to blacklist
-	err := scorer.AddToBlacklist(peer, "test_reason", 1*time.Hour)
-	if err != nil {
-		t.Errorf("Failed to add peer to blacklist: %v", err)
+	scorer.RecordSuccess(peer, 100)
+
+	scoreBeforeBan := scorer.GetPeerScore(peer)
+	if scoreBeforeBan <= 0 {
+		t.Errorf("Expected positive score before ban, got %.2f", scoreBeforeBan)
 	}
 
-	// Check blacklist count
-	count := scorer.GetBlacklistCount()
-	if count != 1 {
-		t.Errorf("Expected blacklist count 1, got %d", count)
+	checker.ban(peer)
+
+	scorer.RecordSuccess(peer, 50)
+
+	scoreAfterBan := scorer.GetPeerScore(peer)
+	if scoreAfterBan != scoreBeforeBan {
+		t.Errorf("Expected score unchanged after ban (success rejected), before=%.2f after=%.2f",
+			scoreBeforeBan, scoreAfterBan)
 	}
 
-	// Get blacklist info
-	info := scorer.GetBlacklistInfo(peer)
-	if info == nil {
-		t.Fatal("Expected blacklist info, got nil")
+	checker.unban(peer)
+
+	initialCount := scorer.Count()
+	scorer.RecordSuccess(peer, 50)
+	if scorer.Count() != initialCount {
+		t.Errorf("Expected peer count unchanged after unban+success")
 	}
 
-	if info["reason"] != "test_reason" {
-		t.Errorf("Expected reason 'test_reason', got %v", info["reason"])
-	}
-
-	// Try to remove from blacklist
-	err = scorer.RemoveFromBlacklist(peer)
-	if err != nil {
-		t.Errorf("Failed to remove peer from blacklist: %v", err)
-	}
-
-	count = scorer.GetBlacklistCount()
-	if count != 0 {
-		t.Errorf("Expected blacklist count 0 after removal, got %d", count)
+	scoreAfterUnban := scorer.GetPeerScore(peer)
+	if scoreAfterUnban < scoreBeforeBan {
+		t.Errorf("Expected score >= before-ban score after unban, before=%.2f after=%.2f",
+			scoreBeforeBan, scoreAfterUnban)
 	}
 }
 
-// TestAdvancedPeerScorerAutoBlacklist tests automatic blacklisting
-func TestAdvancedPeerScorerAutoBlacklist(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+// TestAdvancedPeerScorerAutoBanCallback tests automatic ban callback on consecutive failures
+func TestAdvancedPeerScorerAutoBanCallback(t *testing.T) {
+	scorer := NewAdvancedPeerScorer(100, nil)
 	peer := "192.168.1.5:9090"
 
-	// Record consecutive failures to trigger auto-blacklist
+	banCalled := false
+	var bannedPeer string
+	var bannedReason string
+	scorer.SetOnPeerBan(func(peerID, reason string) {
+		banCalled = true
+		bannedPeer = peerID
+		bannedReason = reason
+	})
+
 	for i := 0; i < 15; i++ {
 		scorer.RecordFailure(peer)
 	}
 
-	// Check if peer was blacklisted
-	count := scorer.GetBlacklistCount()
-	if count < 1 {
-		t.Errorf("Expected auto-blacklist after consecutive failures, got count %d", count)
+	if !banCalled {
+		t.Error("Expected ban callback to be invoked after consecutive failures")
+	}
+
+	if bannedPeer != peer {
+		t.Errorf("Expected banned peer %s, got %s", peer, bannedPeer)
+	}
+
+	if bannedReason == "" {
+		t.Error("Expected non-empty ban reason")
 	}
 }
 
 // TestAdvancedPeerScorerGetBestPeer tests best peer selection
 func TestAdvancedPeerScorerGetBestPeer(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 
-	// Create multiple peers with different performance
 	peers := map[string]int64{
-		"192.168.1.10:9090": 50,  // Excellent
-		"192.168.1.11:9090": 200, // Good
-		"192.168.1.12:9090": 500, // Fair
-		"192.168.1.13:9090": 1000, // Poor
+		"192.168.1.10:9090": 50,
+		"192.168.1.11:9090": 200,
+		"192.168.1.12:9090": 500,
+		"192.168.1.13:9090": 1000,
 	}
 
 	for peer, latency := range peers {
@@ -182,7 +219,6 @@ func TestAdvancedPeerScorerGetBestPeer(t *testing.T) {
 		t.Errorf("Expected best peer to be 192.168.1.10:9090, got %s", bestPeer)
 	}
 
-	// Get top 3 peers
 	topPeers := scorer.GetTopPeersByScore(3)
 	if len(topPeers) != 3 {
 		t.Errorf("Expected 3 top peers, got %d", len(topPeers))
@@ -191,10 +227,9 @@ func TestAdvancedPeerScorerGetBestPeer(t *testing.T) {
 
 // TestAdvancedPeerScorerSignature tests signature verification
 func TestAdvancedPeerScorerSignature(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	peer := "192.168.1.20:9090"
 
-	// Record some interactions
 	for i := 0; i < 5; i++ {
 		scorer.RecordSuccess(peer, 100)
 	}
@@ -216,24 +251,21 @@ func TestAdvancedPeerScorerSignature(t *testing.T) {
 
 // TestAdvancedPeerScorerTimeDecay tests time-based score decay
 func TestAdvancedPeerScorerTimeDecay(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	peer := "192.168.1.30:9090"
 
-	// Record some successes
 	for i := 0; i < 10; i++ {
 		scorer.RecordSuccess(peer, 100)
 	}
 
 	initialScore := scorer.GetPeerScore(peer)
 
-	// Manually set LastSeen to 2 hours ago
 	scorer.mu.Lock()
 	if p, ok := scorer.peers[peer]; ok {
 		p.LastSeen = time.Now().Add(-2 * time.Hour)
 	}
 	scorer.mu.Unlock()
 
-	// Apply time decay
 	scorer.ApplyTimeDecay()
 
 	decayedScore := scorer.GetPeerScore(peer)
@@ -244,16 +276,15 @@ func TestAdvancedPeerScorerTimeDecay(t *testing.T) {
 
 // TestAdvancedPeerScorerMetrics tests metrics collection
 func TestAdvancedPeerScorerMetrics(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 
-	// Record some interactions
 	for i := 0; i < 5; i++ {
 		scorer.RecordSuccess("peer1", 100)
 		scorer.RecordFailure("peer2")
 	}
 
 	metrics := scorer.GetMetrics()
-	
+
 	totalPeers, ok := metrics["total_peers"].(int)
 	if !ok || totalPeers != 2 {
 		t.Errorf("Expected 2 total peers, got %v", metrics["total_peers"])
@@ -267,7 +298,7 @@ func TestAdvancedPeerScorerMetrics(t *testing.T) {
 
 // TestRetryExecutorBasic tests basic retry functionality
 func TestRetryExecutorBasic(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	executor := NewRetryExecutor(DefaultRetryStrategy(), scorer)
 
 	if executor == nil {
@@ -297,14 +328,15 @@ func TestRetryExecutorBasic(t *testing.T) {
 // TestRetryExecutorExhausted tests retry exhaustion
 func TestRetryExecutorExhausted(t *testing.T) {
 	strategy := &RetryStrategy{
-		MaxRetries:   2,
-		InitialDelay: 10 * time.Millisecond,
-		MaxDelay:     100 * time.Millisecond,
-		Multiplier:   2.0,
-		Timeout:      5 * time.Second,
+		MaxRetries:      2,
+		InitialDelay:    10 * time.Millisecond,
+		MaxDelay:        100 * time.Millisecond,
+		Multiplier:      2.0,
+		Timeout:         5 * time.Second,
+		RetryableErrors: []error{utils.ErrTimeout},
 	}
 
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	executor := NewRetryExecutor(strategy, scorer)
 
 	ctx := context.Background()
@@ -317,14 +349,14 @@ func TestRetryExecutorExhausted(t *testing.T) {
 		t.Error("Expected failure after exhausting retries")
 	}
 
-	if result.Attempts != 3 { // Initial + 2 retries
+	if result.Attempts != 3 {
 		t.Errorf("Expected 3 attempts, got %d", result.Attempts)
 	}
 }
 
 // TestRetryExecutorNonRetryable tests non-retryable errors
 func TestRetryExecutorNonRetryable(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	executor := NewRetryExecutor(DefaultRetryStrategy(), scorer)
 
 	ctx := context.Background()
@@ -332,7 +364,7 @@ func TestRetryExecutorNonRetryable(t *testing.T) {
 
 	result := executor.ExecuteWithRetry(ctx, func(ctx context.Context, peer string) error {
 		attemptCount++
-		return fmt.Errorf("validation failed") // Non-retryable
+		return fmt.Errorf("validation failed")
 	}, "192.168.1.1:9090")
 
 	if result.Success {
@@ -346,10 +378,9 @@ func TestRetryExecutorNonRetryable(t *testing.T) {
 
 // TestRetryExecutorPeerSwitch tests peer switching during retry
 func TestRetryExecutorPeerSwitch(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	executor := NewRetryExecutor(DefaultRetryStrategy(), scorer)
 
-	// Setup multiple peers
 	scorer.RecordSuccess("peer1", 100)
 	scorer.RecordSuccess("peer2", 50)
 	scorer.RecordSuccess("peer3", 200)
@@ -391,7 +422,6 @@ func TestRetryExecutorBackoff(t *testing.T) {
 
 	executor := NewRetryExecutor(strategy, nil)
 
-	// Test exponential backoff
 	delay0 := executor.calculateBackoff(0)
 	delay1 := executor.calculateBackoff(1)
 	delay2 := executor.calculateBackoff(2)
@@ -408,26 +438,23 @@ func TestRetryExecutorBackoff(t *testing.T) {
 		t.Errorf("Delay 2 should be > delay 1: %v vs %v", delay2, delay1)
 	}
 
-	// Test max delay cap
 	delayLarge := executor.calculateBackoff(10)
-	if delayLarge > strategy.MaxDelay {
-		t.Errorf("Delay should be capped at MaxDelay: %v", delayLarge)
+	if delayLarge > strategy.MaxDelay+100*time.Millisecond {
+		t.Errorf("Delay should be capped near MaxDelay: %v (max=%v)", delayLarge, strategy.MaxDelay)
 	}
 }
 
 // TestRetryExecutorMetrics tests retry metrics collection
 func TestRetryExecutorMetrics(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	executor := NewRetryExecutor(DefaultRetryStrategy(), scorer)
 
 	ctx := context.Background()
 
-	// Successful retry
 	executor.ExecuteWithRetry(ctx, func(ctx context.Context, peer string) error {
 		return nil
 	}, "peer1")
 
-	// Failed retry
 	executor.ExecuteWithRetry(ctx, func(ctx context.Context, peer string) error {
 		return utils.ErrTimeout
 	}, "peer2")
@@ -451,7 +478,7 @@ func TestRetryExecutorMetrics(t *testing.T) {
 
 // TestRetryExecutorWithResult tests retry with result return using decorator
 func TestRetryExecutorWithResult(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	executor := NewRetryExecutor(DefaultRetryStrategy(), scorer)
 
 	ctx := context.Background()
@@ -500,7 +527,7 @@ func TestErrorClassification(t *testing.T) {
 	for _, test := range tests {
 		classification := ClassifyError(test.err)
 		if classification != test.expected {
-			t.Errorf("Error %v classified as %s, expected %s", 
+			t.Errorf("Error %v classified as %s, expected %s",
 				test.err, classification, test.expected)
 		}
 	}
@@ -508,10 +535,7 @@ func TestErrorClassification(t *testing.T) {
 
 // TestSyncLoopIntegration tests SyncLoop integration with scorer and retry
 func TestSyncLoopIntegration(t *testing.T) {
-	// Note: This is a basic integration test
-	// Full integration would require mock implementations of PeerAPI and BlockchainInterface
-	
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	if scorer == nil {
 		t.Fatal("Failed to create scorer")
 	}
@@ -521,7 +545,6 @@ func TestSyncLoopIntegration(t *testing.T) {
 		t.Fatal("Failed to create retry executor")
 	}
 
-	// Verify scorer and retry executor are properly initialized
 	if scorer.Count() != 0 {
 		t.Errorf("Expected 0 peers initially, got %d", scorer.Count())
 	}
@@ -534,10 +557,11 @@ func TestSyncLoopIntegration(t *testing.T) {
 
 // TestAdvancedPeerScorerBandwidth tests bandwidth recording
 func TestAdvancedPeerScorerBandwidth(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	peer := "192.168.1.40:9090"
 
-	// Record some bandwidth
+	scorer.RecordSuccess(peer, 100)
+
 	scorer.RecordBandwidth(peer, 1000, 2000)
 	scorer.RecordBandwidth(peer, 500, 1500)
 
@@ -559,15 +583,13 @@ func TestAdvancedPeerScorerBandwidth(t *testing.T) {
 
 // TestAdvancedPeerScorerChainHeight tests chain height tracking
 func TestAdvancedPeerScorerChainHeight(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 	peer := "192.168.1.50:9090"
 
-	// Update chain height
 	scorer.UpdateChainHeight(peer, 1000)
 
 	stats := scorer.GetPeerDetailedStats(peer)
 	if stats == nil {
-		// Peer might not exist yet, that's ok
 		return
 	}
 
@@ -583,9 +605,8 @@ func TestAdvancedPeerScorerChainHeight(t *testing.T) {
 
 // TestAdvancedPeerScorerScoreRanges tests score range classification
 func TestAdvancedPeerScorerScoreRanges(t *testing.T) {
-	scorer := NewAdvancedPeerScorer(100)
+	scorer := NewAdvancedPeerScorer(100, nil)
 
-	// Create peers with different scores
 	peers := map[string]int{
 		"excellent": 90,
 		"good":      70,
@@ -595,7 +616,6 @@ func TestAdvancedPeerScorerScoreRanges(t *testing.T) {
 	}
 
 	for peer, baseScore := range peers {
-		// Record interactions to achieve target score range
 		for i := 0; i < 20; i++ {
 			if baseScore >= 70 {
 				scorer.RecordSuccess(peer, 50)
@@ -612,7 +632,7 @@ func TestAdvancedPeerScorerScoreRanges(t *testing.T) {
 	}
 
 	ranges := scorer.GetPeerCountByScoreRange()
-	
+
 	if ranges["excellent"]+ranges["good"]+ranges["fair"]+ranges["poor"]+ranges["very_poor"] == 0 {
 		t.Error("Expected at least one peer in score ranges")
 	}

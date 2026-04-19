@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"time"
 
@@ -254,6 +255,24 @@ func (w *chainWrapper) RulesHashHex() string {
 	return w.chain.GetRulesHashHex()
 }
 
+// BestBlockHeader returns the best (tip) block header with height for block locator
+func (w *chainWrapper) BestBlockHeader() (*network.HeaderLocator, error) {
+	header, height := w.chain.GetTipHeader()
+	if header == nil {
+		return nil, fmt.Errorf("chain is empty, no tip header available")
+	}
+	return &network.HeaderLocator{Header: header, Height: height}, nil
+}
+
+// GetHeaderByHeight returns the block header at the given height for block locator
+func (w *chainWrapper) GetHeaderByHeight(height uint64) (*network.HeaderLocator, error) {
+	header, ok := w.chain.GetHeaderAtHeight(height)
+	if !ok || header == nil {
+		return nil, fmt.Errorf("header not found at height %d", height)
+	}
+	return &network.HeaderLocator{Header: header, Height: height}, nil
+}
+
 // networkChainWrapper wraps core.Chain to implement network.BlockchainInterface
 type networkChainWrapper struct {
 	chain    *core.Chain
@@ -312,6 +331,24 @@ func (w *networkChainWrapper) CanonicalWork() *big.Int {
 // RulesHashHex returns the rules hash
 func (w *networkChainWrapper) RulesHashHex() string {
 	return w.chain.GetRulesHashHex()
+}
+
+// BestBlockHeader returns the best (tip) block header with height for block locator
+func (w *networkChainWrapper) BestBlockHeader() (*network.HeaderLocator, error) {
+	header, height := w.chain.GetTipHeader()
+	if header == nil {
+		return nil, fmt.Errorf("chain is empty, no tip header available")
+	}
+	return &network.HeaderLocator{Header: header, Height: height}, nil
+}
+
+// GetHeaderByHeight returns the block header at the given height for block locator
+func (w *networkChainWrapper) GetHeaderByHeight(height uint64) (*network.HeaderLocator, error) {
+	header, ok := w.chain.GetHeaderAtHeight(height)
+	if !ok || header == nil {
+		return nil, fmt.Errorf("header not found at height %d", height)
+	}
+	return &network.HeaderLocator{Header: header, Height: height}, nil
 }
 
 // GetChainID returns the chain ID
@@ -728,120 +765,6 @@ func (e *metricsMempoolEntry) GetReceived() time.Time {
 	return e.received
 }
 
-// p2pManagerWrapper wraps network.P2PPeerManager to implement miner.PeerAPI and network.PeerManager
-type p2pManagerWrapper struct {
-	mgr *network.P2PPeerManager
-}
-
-func newP2PManagerWrapper(mgr *network.P2PPeerManager) *p2pManagerWrapper {
-	return &p2pManagerWrapper{mgr: mgr}
-}
-
-// Peers returns list of peer addresses
-func (w *p2pManagerWrapper) Peers() []string {
-	return w.mgr.Peers()
-}
-
-// FetchChainInfo fetches chain info from a peer (for miner.PeerAPI)
-func (w *p2pManagerWrapper) FetchChainInfo(ctx context.Context, peer string) (*miner.ChainInfo, error) {
-	networkInfo, err := w.mgr.FetchChainInfo(ctx, peer)
-	if err != nil {
-		return nil, err
-	}
-	// Convert network.ChainInfo to miner.ChainInfo
-	return &miner.ChainInfo{
-		Height: networkInfo.Height,
-		Work:   networkInfo.Work,
-	}, nil
-}
-
-// BroadcastBlock broadcasts a block to all peers (for miner.PeerAPI)
-func (w *p2pManagerWrapper) BroadcastBlock(ctx context.Context, block *core.Block) {
-	w.mgr.BroadcastBlock(ctx, block)
-}
-
-// FetchChainInfoNetwork fetches chain info from a peer (for network.PeerAPI)
-func (w *p2pManagerWrapper) FetchChainInfoNetwork(ctx context.Context, peer string) (*network.ChainInfo, error) {
-	return w.mgr.FetchChainInfo(ctx, peer)
-}
-
-// AddPeer adds a peer
-func (w *p2pManagerWrapper) AddPeer(addr string) bool {
-	w.mgr.AddPeer(addr)
-	return true
-}
-
-// RemovePeer removes a peer
-func (w *p2pManagerWrapper) RemovePeer(addr string) {
-	// P2PPeerManager doesn't have RemovePeer, so this is a no-op
-}
-
-// GetActivePeers returns active peers
-func (w *p2pManagerWrapper) GetActivePeers() []string {
-	return w.mgr.GetActivePeers()
-}
-
-// BroadcastTransaction broadcasts a transaction to all peers
-func (w *p2pManagerWrapper) BroadcastTransaction(ctx context.Context, tx core.Transaction, maxHops int) {
-	// P2PPeerManager doesn't have this method, so this is a no-op for now
-}
-
-// InterruptMining interrupts the mining process
-func (w *p2pManagerWrapper) InterruptMining() {
-	// P2PPeerManager doesn't have mining, so this is a no-op
-}
-
-// ResumeMining resumes the mining process
-func (w *p2pManagerWrapper) ResumeMining() {
-	// P2PPeerManager doesn't have mining, so this is a no-op
-}
-
-// IsVerifying returns true if verifying
-func (w *p2pManagerWrapper) IsVerifying() bool {
-	return false
-}
-
-// OnBlockAdded is called when a block is added
-func (w *p2pManagerWrapper) OnBlockAdded() {
-	// P2PPeerManager doesn't have block added callback, so this is a no-op
-}
-
-// EnsureAncestors ensures ancestor blocks are synced
-func (w *p2pManagerWrapper) EnsureAncestors(ctx context.Context, bc network.BlockchainInterface, missingHashHex string) error {
-	// P2PPeerManager doesn't have this method, so this is a no-op for now
-	return nil
-}
-
-// FetchBlocks fetches blocks from a peer
-func (w *p2pManagerWrapper) FetchBlocks(ctx context.Context, peer string, from uint64, count uint64) ([]*core.Block, error) {
-	// P2PPeerManager doesn't have this method, so this is a no-op for now
-	return nil, nil
-}
-
-// FetchHeaders fetches headers from a peer
-func (w *p2pManagerWrapper) FetchHeaders(ctx context.Context, peer string, from uint64, count uint64) ([]*core.BlockHeader, error) {
-	// P2PPeerManager doesn't have this method, so this is a no-op for now
-	return nil, nil
-}
-
-// FetchHeadersFrom fetches headers from a peer
-func (w *p2pManagerWrapper) FetchHeadersFrom(ctx context.Context, peer string, fromHeight uint64, count int) ([]core.BlockHeader, error) {
-	// P2PPeerManager doesn't have this method, so this is a no-op for now
-	return nil, nil
-}
-
-// FetchBlockByHash fetches a block by hash from a peer
-func (w *p2pManagerWrapper) FetchBlockByHash(ctx context.Context, peer, hashHex string) (*core.Block, error) {
-	// P2PPeerManager doesn't have this method, so this is a no-op for now
-	return nil, nil
-}
-
-// FetchAnyBlockByHash fetches a block by hash from any peer
-func (w *p2pManagerWrapper) FetchAnyBlockByHash(ctx context.Context, hashHex string) (*core.Block, string, error) {
-	// P2PPeerManager doesn't have this method, so this is a no-op for now
-	return nil, "", nil
-}
-
 // metricsChainWrapper wraps core.Chain for metrics package
 type metricsChainWrapper struct {
 	chain *core.Chain
@@ -877,7 +800,6 @@ func newSyncLoopWrapper(loop *network.SyncLoop) *syncLoopWrapper {
 
 // GetPeerManager returns peer manager
 func (w *syncLoopWrapper) GetPeerManager() metrics.PeerManager {
-	// Return nil for now since we can't access the internal peer manager
 	return nil
 }
 
@@ -899,40 +821,6 @@ func (w *syncLoopWrapper) IsMining() bool {
 // GetActiveWorkerCount returns active worker count
 func (w *syncLoopWrapper) GetActiveWorkerCount() int {
 	return w.loop.GetActiveWorkerCount()
-}
-
-// metricsPeerManager wraps network.P2PPeerManager for metrics
-type metricsPeerManager struct {
-	mgr *network.P2PPeerManager
-}
-
-func newMetricsPeerManager(mgr *network.P2PPeerManager) *metricsPeerManager {
-	return &metricsPeerManager{mgr: mgr}
-}
-
-// Peers returns list of peers
-func (w *metricsPeerManager) Peers() []string {
-	return w.mgr.Peers()
-}
-
-// Count returns peer count
-func (w *metricsPeerManager) Count() int {
-	return len(w.mgr.Peers())
-}
-
-// MaxPeers returns max peers
-func (w *metricsPeerManager) MaxPeers() int {
-	return 100 // Default max peers
-}
-
-// GetPeerScore returns peer score
-func (w *metricsPeerManager) GetPeerScore(peerID string) float64 {
-	return 1.0 // Default score
-}
-
-// GetPeerLatency returns peer latency
-func (w *metricsPeerManager) GetPeerLatency(peerID string) time.Duration {
-	return 100 * time.Millisecond // Default latency
 }
 
 // metricsWrapper wraps metrics.Metrics for api package

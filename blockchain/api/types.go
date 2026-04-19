@@ -31,12 +31,12 @@ import (
 type Blockchain = network.BlockchainInterface
 type Mempool = mempool.Mempool
 type Miner = *miner.Miner
-type PeerManager = network.P2PPeerManager
+type PeerManager = network.PeerAPI
 
 // Type aliases for concrete implementations (for backward compatibility)
 type MempoolImpl = mempool.Mempool
 type MinerImpl = miner.Miner
-type PeerManagerImpl = network.P2PPeerManager
+type PeerManagerImpl = network.PeerAPI
 type MetricsImpl = metrics.Metrics
 
 // Server type aliases for main.go compatibility
@@ -50,27 +50,27 @@ func NewHTTPServer(cfg interface{}, chain Blockchain, p2p interface{}, miner int
 	// Extract configuration from parameters
 	// For backward compatibility, we use type assertions
 	var adminToken string
-	
+
 	// Try to extract admin token from cfg if it's a config struct
 	if cfg != nil {
 		// Handle different config types via reflection or type assertion
 		// For now, extract from environment as fallback
 		adminToken = os.Getenv("ADMIN_TOKEN")
 	}
-	
+
 	// Type assertions for compatibility
 	// Note: In production code, use NewSimpleServer directly with properly typed parameters
 	var minerImpl *MinerImpl
-	var peersImpl *PeerManagerImpl
-	
+	var peersImpl PeerManager
+
 	if m, ok := miner.(*MinerImpl); ok {
 		minerImpl = m
 	}
-	
-	if p, ok := p2p.(*PeerManagerImpl); ok {
+
+	if p, ok := p2p.(PeerManager); ok {
 		peersImpl = p
 	}
-	
+
 	// Create simple server with minimal dependencies
 	return NewSimpleServer(chain, nil, minerImpl, peersImpl, adminToken)
 }
@@ -81,13 +81,13 @@ func NewHTTPServer(cfg interface{}, chain Blockchain, p2p interface{}, miner int
 func NewWSServer(cfg interface{}, chain Blockchain, p2p interface{}, miner interface{}) *WSServer {
 	// Default max connections
 	maxConnections := 100
-	
+
 	// Extract configuration if provided
 	if cfg != nil {
 		// Handle different config types
 		// For now, use defaults
 	}
-	
+
 	// Create WebSocket hub
 	return NewWSHub(maxConnections)
 }
@@ -104,12 +104,12 @@ func NewMetricsServer(addr string, handler interface{}) *HTTPServer {
 			h = handler
 		}
 	}
-	
+
 	if h == nil {
 		// Create default mux
 		h = http.NewServeMux()
 	}
-	
+
 	// Create HTTP server
 	return &HTTPServer{
 		server: &http.Server{

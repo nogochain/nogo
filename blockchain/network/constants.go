@@ -41,10 +41,11 @@ const (
 	DefaultP2PMaxAddrReturn = 100
 
 	// ProtocolVersion is the current P2P protocol version
-	ProtocolVersion = 1
+	// Must match blockchain/config.ProtocolVersionNumber
+	ProtocolVersion uint32 = 1
 
 	// MinProtocolVersion is the minimum supported protocol version
-	MinProtocolVersion = 1
+	MinProtocolVersion uint32 = 1
 )
 
 // =============================================================================
@@ -111,10 +112,10 @@ const (
 
 const (
 	// DefaultOrphanPoolSize is the default maximum number of orphan blocks
-	DefaultOrphanPoolSize = 100
+	DefaultOrphanPoolSize = 256
 
 	// DefaultOrphanTTL is the default time-to-live for orphan blocks
-	DefaultOrphanTTL = 24 * time.Hour
+	DefaultOrphanTTL = 60 * time.Minute
 )
 
 // =============================================================================
@@ -162,7 +163,7 @@ const (
 	HandshakeTimeout = 15 * time.Second
 
 	// KeepAliveInterval is the interval for keep-alive messages
-	KeepAliveInterval = 5 * time.Minute
+	KeepAliveInterval = 45 * time.Second
 
 	// PingTimeout is the timeout for ping/pong responses
 	PingTimeout = 30 * time.Second

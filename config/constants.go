@@ -292,14 +292,12 @@ const (
 	// DefaultOrphanPoolSize is the maximum number of orphan blocks to keep in memory
 	// Prevents memory exhaustion from orphan block accumulation
 	// Configurable via: NOGO_ORPHAN_POOL_MAX_SIZE
-	// Production recommendation: 1000 blocks
-	DefaultOrphanPoolSize = 1000
+	DefaultOrphanPoolSize = 256
 
 	// DefaultOrphanTTL is the time to live for orphaned blocks in the pool
 	// Orphans older than this are evicted to prevent memory leaks
 	// Configurable via: NOGO_ORPHAN_POOL_TTL
-	// Production recommendation: 24 hours
-	DefaultOrphanTTL = 24 * time.Hour
+	DefaultOrphanTTL = 60 * time.Minute
 )
 
 // =============================================================================
@@ -314,10 +312,8 @@ const (
 	DefaultSyncHeartbeatInterval = 10 * time.Second
 
 	// DefaultSyncWorkers is the number of parallel download workers
-	// Higher values increase sync speed but consume more resources
 	// Configurable via: NOGO_SYNC_WORKERS
-	// Production recommendation: 8 workers
-	DefaultSyncWorkers = 8
+	DefaultSyncWorkers = 16
 
 	// DefaultSyncMaxPendingBlocks is the maximum pending blocks to process
 	// Prevents memory exhaustion during fast sync

@@ -880,11 +880,6 @@ type MempoolCleaner interface {
 	RemoveMany(txids []string)
 }
 
-// SyncLoop represents the sync loop for P2P synchronization
-type SyncLoop struct {
-	mu sync.Mutex
-}
-
 // peerRef represents a peer reference
 type peerRef struct {
 	addr string

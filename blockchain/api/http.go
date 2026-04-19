@@ -41,6 +41,7 @@ import (
 	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/nogochain/nogo/blockchain/crypto"
 	"github.com/nogochain/nogo/blockchain/metrics"
+	"github.com/nogochain/nogo/blockchain/network"
 )
 
 const (
@@ -57,7 +58,7 @@ type Server struct {
 	mp    *MempoolImpl
 	miner *MinerImpl
 
-	peers    *PeerManagerImpl
+	peers    network.PeerAPI
 	txGossip bool
 
 	wsEnable bool
@@ -69,10 +70,7 @@ type Server struct {
 	metrics    *metrics.Metrics
 	auditLog   *AuditLogger
 
-	peerManager interface {
-		Peers() []string
-		AddPeer(addr string)
-	}
+	peerManager network.PeerAPI
 }
 
 const (
@@ -81,7 +79,7 @@ const (
 	gitCommit = "unknown"
 )
 
-func NewServer(bc Blockchain, aiAuditorURL string, mp *MempoolImpl, miner *MinerImpl, peers *PeerManagerImpl, txGossip bool, metrics *metrics.Metrics, adminToken string, limiter *IPRateLimiter, trustProxy bool, wsEnable bool, wsHub *WSHub) *Server {
+func NewServer(bc Blockchain, aiAuditorURL string, mp *MempoolImpl, miner *MinerImpl, peers network.PeerAPI, txGossip bool, metrics *metrics.Metrics, adminToken string, limiter *IPRateLimiter, trustProxy bool, wsEnable bool, wsHub *WSHub) *Server {
 	// Metrics initialization disabled - metrics interface mismatch
 	// Caller should create metrics separately if needed
 
@@ -855,16 +853,16 @@ func (s *Server) handleBlockByHeight(w http.ResponseWriter, r *http.Request) {
 	for i, tx := range b.Transactions {
 		txHash, _ := core.TxIDHex(tx)
 		enrichedTxs[i] = map[string]any{
-			"type":        tx.Type,
-			"chainId":     tx.ChainID,
-			"fromPubKey":  tx.FromPubKey,
-			"toAddress":   tx.ToAddress,
-			"amount":      tx.Amount,
-			"fee":         tx.Fee,
-			"nonce":       tx.Nonce,
-			"data":        tx.Data,
-			"signature":   tx.Signature,
-			"hash":        txHash,
+			"type":       tx.Type,
+			"chainId":    tx.ChainID,
+			"fromPubKey": tx.FromPubKey,
+			"toAddress":  tx.ToAddress,
+			"amount":     tx.Amount,
+			"fee":        tx.Fee,
+			"nonce":      tx.Nonce,
+			"data":       tx.Data,
+			"signature":  tx.Signature,
+			"hash":       txHash,
 		}
 	}
 
@@ -925,16 +923,16 @@ func (s *Server) handleBlockByHashParam(w http.ResponseWriter, r *http.Request) 
 	for i, tx := range b.Transactions {
 		txHash, _ := core.TxIDHex(tx)
 		enrichedTxs[i] = map[string]any{
-			"type":        tx.Type,
-			"chainId":     tx.ChainID,
-			"fromPubKey":  tx.FromPubKey,
-			"toAddress":   tx.ToAddress,
-			"amount":      tx.Amount,
-			"fee":         tx.Fee,
-			"nonce":       tx.Nonce,
-			"data":        tx.Data,
-			"signature":   tx.Signature,
-			"hash":        txHash,
+			"type":       tx.Type,
+			"chainId":    tx.ChainID,
+			"fromPubKey": tx.FromPubKey,
+			"toAddress":  tx.ToAddress,
+			"amount":     tx.Amount,
+			"fee":        tx.Fee,
+			"nonce":      tx.Nonce,
+			"data":       tx.Data,
+			"signature":  tx.Signature,
+			"hash":       txHash,
 		}
 	}
 
@@ -1217,8 +1215,11 @@ func (s *Server) handleAddBlock(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			s.peers.BroadcastBlock(ctx, &b)
-			log.Printf("[API] Block broadcast completed: height=%d, hash=%x", b.GetHeight(), b.Hash[:8])
+			if err := s.peers.BroadcastBlock(ctx, &b); err != nil {
+				log.Printf("[API] Block broadcast failed: height=%d, err=%v", b.GetHeight(), err)
+			} else {
+				log.Printf("[API] Block broadcast completed: height=%d, hash=%x", b.GetHeight(), b.Hash[:8])
+			}
 		}()
 	}
 
@@ -2004,7 +2005,7 @@ func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	
+
 	// Write response
 	w.WriteHeader(http.StatusOK)
 	_, err = w.Write(data)

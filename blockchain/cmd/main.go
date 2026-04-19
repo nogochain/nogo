@@ -26,7 +26,7 @@ var (
 		MineIntervalMs:       17000,
 		MetricsEnabled:       true,
 		MetricsAddr:          "0.0.0.0:9100",
-		DataDir:              "./data",
+		DataDir:              "./nogodata",
 		RateLimitReqs:        100,
 		RateLimitBurst:       50,
 	}
@@ -45,7 +45,7 @@ var (
 		MineIntervalMs:       15000,
 		MetricsEnabled:       true,
 		MetricsAddr:          "0.0.0.0:9100",
-		DataDir:              "./data-testnet",
+		DataDir:              "./nogodata-testnet",
 		RateLimitReqs:        100,
 		RateLimitBurst:       50,
 	}

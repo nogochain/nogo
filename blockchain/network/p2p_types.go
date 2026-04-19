@@ -76,16 +76,7 @@ type p2pAddrMsg struct {
 	Addresses []p2pAddrEntry `json:"addresses"`
 }
 
-// Ping/Pong with nonce (Bitcoin-style random nonce for concurrent ping matching)
-type p2pPingMsg struct {
-	Nonce uint64 `json:"nonce"`
-}
-
-type p2pPongMsg struct {
-	Nonce uint64 `json:"nonce"`
-}
-
-// Legacy types for backward compatibility
+// Ping/Pong message types
 type p2pPing struct {
 	Timestamp int64 `json:"timestamp"`
 }

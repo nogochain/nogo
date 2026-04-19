@@ -261,6 +261,15 @@ type SyncConfig struct {
 
 	// NetworkSyncCheckDelayMs is the delay before checking network state
 	NetworkSyncCheckDelayMs int64 `json:"networkSyncCheckDelayMs"`
+
+	// FastSyncMinGap is the minimum height gap required to trigger fast sync
+	FastSyncMinGap uint64 `json:"fastSyncMinGap"`
+
+	// MaxAncestorSearchSteps is the maximum steps when searching for common ancestor
+	MaxAncestorSearchSteps int `json:"maxAncestorSearchSteps"`
+
+	// MaxHeadersFetch is the maximum number of headers to fetch in a single request
+	MaxHeadersFetch uint64 `json:"maxHeadersFetch"`
 }
 
 // SecurityConfig defines security configuration parameters

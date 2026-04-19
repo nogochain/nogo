@@ -310,6 +310,8 @@ type defaultSyncManager struct {
 	currentHeight uint64
 	targetHeight  uint64
 	isSyncing     bool
+	handlers      []SyncEventHandler
+	handlerMu     sync.RWMutex
 }
 
 func (d *defaultSyncManager) IsSyncing() bool {
@@ -356,11 +358,20 @@ func (d *defaultSyncManager) ResumeSync() error {
 }
 
 func (d *defaultSyncManager) RegisterSyncHandler(handler SyncEventHandler) {
-	// Implementation would maintain a list of handlers
+	if handler == nil {
+		return
+	}
+	d.handlerMu.Lock()
+	d.handlers = append(d.handlers, handler)
+	d.handlerMu.Unlock()
 }
 
 func (d *defaultSyncManager) UnregisterSyncHandler(handler SyncEventHandler) {
-	// Implementation would remove handler from list
+	d.handlerMu.Lock()
+	if len(d.handlers) > 0 {
+		d.handlers = d.handlers[:len(d.handlers)-1]
+	}
+	d.handlerMu.Unlock()
 }
 
 func (d *defaultSyncManager) GetSyncStatus() *SyncStatus {

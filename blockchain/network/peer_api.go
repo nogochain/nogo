@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"math/big"
 
 	"github.com/nogochain/nogo/blockchain/core"
 )
@@ -22,5 +23,7 @@ type PeerAPI interface {
 	FetchBlocksByHeightRange(ctx context.Context, peer string, startHeight, count uint64) ([]*core.Block, error)
 
 	BroadcastTransaction(ctx context.Context, tx core.Transaction, hops int)
+	BroadcastBlock(ctx context.Context, block *core.Block) error
+	BroadcastNewStatus(ctx context.Context, height uint64, work *big.Int, latestHash string)
 	EnsureAncestors(ctx context.Context, bc BlockchainInterface, missingHashHex string) error
 }

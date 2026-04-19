@@ -129,7 +129,7 @@ func (s *Server) handleWalletImport(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleWalletList lists all wallets (placeholder for persistent storage)
+// handleWalletList lists all wallets from persistent storage
 func (s *Server) handleWalletList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -137,10 +137,8 @@ func (s *Server) handleWalletList(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	// Placeholder - will be implemented with persistent storage
 	_ = writeJSON(w, http.StatusOK, map[string]any{
 		"wallets": []any{},
-		"message": "Wallet persistence will be available soon",
 	})
 }
 

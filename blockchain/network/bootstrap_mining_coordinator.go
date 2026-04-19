@@ -138,16 +138,19 @@ func (c *BootstrapMiningCoordinator) handleMiningEvent(event MiningEvent) {
 		c.handleBlockMined(event.Block)
 
 	case MiningEventInterrupted:
-		// Mining interruption handling placeholder
-		log.Printf("[BootstrapMiningCoordinator] Mining interrupted")
+		c.miningState.IsMining = false
+		c.miningState.MiningEfficiency = 0
+		atomic.AddUint32(&c.metrics.MiningFailures, 1)
+		log.Printf("[BootstrapMiningCoordinator] Mining interrupted, resetting state")
 
 	case MiningEventStarted:
-		// Mining started handling placeholder
-		log.Printf("[BootstrapMiningCoordinator] Mining started: %s", event.JobID)
+		c.miningState.IsMining = true
+		log.Printf("[BootstrapMiningCoordinator] Mining started: job=%s", event.JobID)
 
 	case MiningEventStopped:
-		// Mining stopped handling placeholder
-		log.Printf("[BootstrapMiningCoordinator] Mining stopped")
+		c.miningState.IsMining = false
+		c.miningState.MiningEfficiency = 0
+		log.Printf("[BootstrapMiningCoordinator] Mining stopped, clearing job state")
 	}
 }
 
@@ -168,12 +171,17 @@ func (c *BootstrapMiningCoordinator) handleSyncEvent(event SyncEvent) {
 		}
 
 	case SyncEventBlockProcessed:
-		// Sync completed handling placeholder
-		log.Printf("[BootstrapMiningCoordinator] Sync block processed at height: %d", event.BlockHeight)
+		c.syncState.CurrentHeight = event.BlockHeight
+		c.updateSyncProgress()
+		log.Printf("[BootstrapMiningCoordinator] Sync block processed at height: %d, progress=%.2f",
+			event.BlockHeight, c.syncState.SyncProgress)
 
 	case SyncEventChainExtended:
-		// Chain extended handling 
-		log.Printf("[BootstrapMiningCoordinator] Chain extended to height: %d", event.BlockHeight)
+		c.syncState.CurrentHeight = event.BlockHeight
+		c.updateSyncProgress()
+		if c.miningState.IsMining {
+			log.Printf("[BootstrapMiningCoordinator] Chain extended to height %d during mining, evaluating restart", event.BlockHeight)
+		}
 	
 	default:
 		log.Printf("[BootstrapMiningCoordinator] Unknown sync event type: %v", event.EventType)

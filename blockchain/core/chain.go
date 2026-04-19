@@ -40,12 +40,10 @@ import (
 
 const (
 	// MaxOrphanPoolSize is the maximum number of orphan blocks to store
-	// This prevents memory exhaustion from malicious nodes sending many orphans
-	MaxOrphanPoolSize = 1000
+	MaxOrphanPoolSize = 256
 
 	// MaxOrphanPoolAge is the maximum time an orphan can stay in the pool
-	// before being evicted (prevents unbounded memory growth)
-	MaxOrphanPoolAge = 30 * time.Minute
+	MaxOrphanPoolAge = 60 * time.Minute
 )
 
 var (
@@ -277,7 +275,6 @@ type Chain struct {
 	events EventSink
 
 	// References for coordination
-	syncLoop       *SyncLoop
 	peerBlockchain *peerRef
 
 	// Block added callback - called when block is added to canonical chain
@@ -1750,6 +1747,39 @@ func (c *Chain) GetTipHash() []byte {
 	return hashCopy
 }
 
+// GetTipHeader returns the tip block header with its height
+// Used by block locator to start traversal from chain tip
+// Concurrency safety: read-only operation with RLock
+func (c *Chain) GetTipHeader() (*BlockHeader, uint64) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if len(c.blocks) == 0 {
+		return nil, 0
+	}
+
+	tip := c.blocks[len(c.blocks)-1]
+	headerCopy := tip.Header
+	return &headerCopy, tip.Height
+}
+
+// GetHeaderAtHeight returns the block header at the given height
+// Used by block locator for exponential step traversal
+// Returns (nil, false) if height is out of range
+// Concurrency safety: read-only operation with RLock
+func (c *Chain) GetHeaderAtHeight(height uint64) (*BlockHeader, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if height >= uint64(len(c.blocks)) {
+		return nil, false
+	}
+
+	block := c.blocks[height]
+	headerCopy := block.Header
+	return &headerCopy, true
+}
+
 // GetCanonicalChain returns a copy of the canonical chain
 // Concurrency safety: returns copy to prevent external modification
 func (c *Chain) GetCanonicalChain() [][]byte {
@@ -2528,8 +2558,10 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 		}
 		return c.addCanonicalBlockLocked(block, hashHex)
 	} else if block.GetHeight() < expectedHeight {
-		// Fork case: block at lower height - store as alternative
-		return c.addForkBlockLocked(block, hashHex)
+		// IMPROVED: Don't immediately mark as fork - use intelligent fork detection
+		// Consider work, timing, and whether this could be a valid late-arriving block
+		log.Printf("[Chain] Block %d < expected %d, using intelligent fork detection", block.GetHeight(), expectedHeight)
+		return c.intelligentForkDetectionLocked(block, hashHex)
 	} else if block.GetHeight() == expectedHeight+1 {
 		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 		_, parentExists := c.blocksByHash[parentHashHex]
@@ -2570,21 +2602,23 @@ func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error)
 	// Cleanup expired orphans before adding new one
 	c.cleanupExpiredOrphansLocked()
 
-	// Check if orphan pool is full and evict oldest if needed
+	// Check if orphan pool is full and evict LRU (Least Recently Used) if needed
 	if len(c.orphanPool) >= MaxOrphanPoolSize {
-		// Evict orphan blocks with lowest height (oldest/safest to remove)
-		// This is a simple eviction strategy - remove blocks farthest from chain tip
-		var lowestHeight uint64 = ^uint64(0) // Max uint64
-		var lowestHash string
-		for h, blk := range c.orphanPool {
-			if blk.GetHeight() < lowestHeight {
-				lowestHeight = blk.GetHeight()
-				lowestHash = h
+		// LRU eviction strategy: remove the oldest orphan by timestamp
+		// This is more intelligent than height-based eviction as it preserves
+		// recently received blocks that are more likely to be part of the active chain
+		var oldestTime time.Time
+		var oldestHash string
+		for hash, timestamp := range c.orphanTimestamps {
+			if oldestTime.IsZero() || timestamp.Before(oldestTime) {
+				oldestTime = timestamp
+				oldestHash = hash
 			}
 		}
-		if lowestHash != "" {
-			c.removeOrphanLocked(lowestHash)
-			log.Printf("[Chain] Orphan pool full, evicted block at height %d", lowestHeight)
+		if oldestHash != "" {
+			c.removeOrphanLocked(oldestHash)
+			log.Printf("[Chain] Orphan pool full, evicted LRU block %s (age=%v)",
+				oldestHash[:16], time.Since(oldestTime))
 		}
 	}
 
@@ -3021,6 +3055,92 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 	}
 
 	return false, nil // Fork stored but not reorganized
+}
+
+// intelligentForkDetectionLocked implements intelligent fork detection logic.
+// Instead of immediately marking a lower-height block as a fork, it considers:
+// 1. Block work (does it have significant cumulative work?)
+// 2. Block timing (was it received within acceptable delay window?)
+// 3. Block validity (does it fit into known fork chains?)
+// This prevents false fork detection due to network latency.
+// Caller must hold c.mu lock
+func (c *Chain) intelligentForkDetectionLocked(block *Block, hashHex string) (bool, error) {
+	height := block.GetHeight()
+
+	log.Printf("[Chain] IntelligentForkDetection: block %d, current tip height=%d", height, len(c.blocks)-1)
+
+	// Check if this block could be part of a known fork chain
+	if c.isPartOfKnownForkLocked(block, hashHex) {
+		log.Printf("[Chain] Block %d is part of known fork chain, adding to fork blocks", height)
+		return c.addForkBlockLocked(block, hashHex)
+	}
+
+	// Check if block arrived within acceptable delay window (e.g., 2 block times)
+	// This accounts for network latency and prevents false fork detection
+	blockTime := time.Unix(block.Header.TimestampUnix, 0)
+	timeSinceBlock := time.Since(blockTime)
+	acceptableDelay := c.getBlockTime() * 2 // Allow 2 block times delay
+
+	if timeSinceBlock < acceptableDelay {
+		// Block is recent - likely a valid late-arriving block, not a fork
+		// Check if it has significant work to be considered
+		currentWork := c.canonicalWork
+		newWork := c.calculateCumulativeWorkLocked(block)
+
+		// If new block has comparable or more work, treat as potential fork
+		// Otherwise, it's likely just a stale/orphan block from network delay
+		// Use big.Int comparison to avoid overflow issues
+		// Calculate 90% threshold: threshold = currentWork * 90 / 100
+		threshold := new(big.Int).Mul(currentWork, big.NewInt(90))
+		threshold.Div(threshold, big.NewInt(100))
+
+		if newWork.Cmp(currentWork) >= 0 || newWork.Cmp(threshold) >= 0 {
+			// Has significant work (>= 90% of current chain or more)
+			// Treat as potential fork for proper handling
+			log.Printf("[Chain] Block %d received late (%v ago) but has significant work, treating as fork",
+				height, timeSinceBlock)
+			return c.addForkBlockLocked(block, hashHex)
+		} else {
+			// Low work block - likely stale, don't treat as fork
+			log.Printf("[Chain] Block %d received late (%v ago) with low work, treating as stale",
+				height, timeSinceBlock)
+			return false, nil
+		}
+	} else {
+		// Block is old - check if it's from a known fork or truly a new fork
+		log.Printf("[Chain] Block %d is old (%v ago), checking if it's a valid fork",
+			height, timeSinceBlock)
+
+		// For old blocks, always treat as fork to maintain chain integrity
+		// But log the event for monitoring
+		return c.addForkBlockLocked(block, hashHex)
+	}
+}
+
+// isPartOfKnownForkLocked checks if a block belongs to an existing fork chain.
+// Caller must hold c.mu lock
+func (c *Chain) isPartOfKnownForkLocked(block *Block, hashHex string) bool {
+	height := block.GetHeight()
+
+	// Check if we already have fork blocks at this height
+	if forks, exists := c.forkBlocks[height]; exists {
+		for _, fork := range forks {
+			if bytes.Equal(fork.Header.PrevHash, block.Header.PrevHash) {
+				// Same parent - likely part of this fork chain
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// getBlockTime returns the average block time in seconds.
+// This is used for timing-based fork detection.
+func (c *Chain) getBlockTime() time.Duration {
+	// Default to 17 seconds
+	// In production, this could be derived from historical block data
+	return 17 * time.Second
 }
 
 // shouldReorgToLocked checks if we should reorganize to the given block

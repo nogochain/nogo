@@ -48,7 +48,7 @@ func LoadEnvVars(prefix string) (*EnvVars, error) {
 	env := &EnvVars{
 		DataDir:            getEnvString(prefix+"_DATADIR", ""),
 		Network:            getEnvString(prefix+"_NETWORK", "mainnet"),
-		P2PPort:            getEnvInt(prefix+"_P2P_PORT", 30303),
+		P2PPort:            getEnvInt(prefix+"_P2P_PORT", 9090),
 		P2PMaxPeers:        getEnvInt(prefix+"_P2P_MAX_PEERS", 50),
 		APIPort:            getEnvInt(prefix+"_API_PORT", 8545),
 		APICorsDomains:     getEnvStringList(prefix+"_API_CORS", []string{"*"}),

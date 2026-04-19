@@ -311,7 +311,7 @@ func TestHandleTxStatus_ResponseFields(t *testing.T) {
 	if resp.BlockHash == "" {
 		t.Error("BlockHash should not be empty")
 	}
-	// BlockTime is optional, skip check for now
+	// BlockTime is optional
 	if resp.Transaction == nil {
 		t.Error("Transaction should not be nil")
 	}

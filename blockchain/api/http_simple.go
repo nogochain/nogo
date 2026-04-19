@@ -36,14 +36,14 @@ type SimpleServer struct {
 	bc         Blockchain
 	mp         *MempoolImpl
 	miner      *MinerImpl
-	peers      *PeerManagerImpl
+	peers      PeerManager
 	metrics    *metrics.Metrics
 	adminToken string
 	server     *http.Server
 }
 
 // NewSimpleServer creates a new API server
-func NewSimpleServer(bc Blockchain, mp *MempoolImpl, miner *MinerImpl, peers *PeerManagerImpl, adminToken string) *SimpleServer {
+func NewSimpleServer(bc Blockchain, mp *MempoolImpl, miner *MinerImpl, peers PeerManager, adminToken string) *SimpleServer {
 	return &SimpleServer{
 		bc:         bc,
 		mp:         mp,

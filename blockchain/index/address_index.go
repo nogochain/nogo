@@ -739,7 +739,7 @@ func (ai *AddressIndex) IndexBlock(block interface {
 }
 
 // IndexBlockSimple indexes a block with raw transaction data
-// Production-grade: simplified interface for external callers
+// External interface for callers
 func (ai *AddressIndex) IndexBlockSimple(hash []byte, height uint64, timestamp int64, txs []AddressIndexEntry) error {
 	if hash == nil {
 		return fmt.Errorf("block hash is nil")

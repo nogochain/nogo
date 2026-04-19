@@ -19,7 +19,6 @@ package network
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -33,8 +32,30 @@ import (
 	"github.com/nogochain/nogo/blockchain/consensus"
 	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/nogochain/nogo/blockchain/metrics"
+	"github.com/nogochain/nogo/blockchain/network/security"
 	"github.com/nogochain/nogo/blockchain/utils"
 )
+
+// =============================================================================
+// FORK RESOLUTION PRIORITY HELPER
+// =============================================================================
+
+// getResolutionPriority determines the priority for fork resolution based on depth.
+func getResolutionPriority(event *core.ForkEvent) ResolutionPriority {
+	if event == nil {
+		return ResolutionPriorityLow
+	}
+	if event.Depth > 100 {
+		return ResolutionPriorityCritical
+	}
+	if event.Depth > 10 {
+		return ResolutionPriorityHigh
+	}
+	if event.Depth > 1 {
+		return ResolutionPriorityNormal
+	}
+	return ResolutionPriorityLow
+}
 
 // =============================================================================
 // SYNC TIMING CONSTANTS - Aligned with Bitcoin protocol
@@ -106,11 +127,13 @@ type SyncLoop struct {
 	forkDetector   *core.ForkDetector
 	forkResolver   *ForkResolutionEngine
 	peerStates     *peerStateManager
+	fastSyncEngine *FastSyncEngine
+	syncConfig     config.SyncConfig
+	securityMgr    *security.SecurityManager
 	isSyncing      bool
 	syncProgress   float64
 	ctx            context.Context
 	cancel         context.CancelFunc
-	// Time tracking for sync state
 	syncStartTime  time.Time
 	lastUpdateTime time.Time
 }
@@ -118,10 +141,22 @@ type SyncLoop struct {
 // NewSyncLoop creates a new sync loop instance with advanced peer scoring and retry
 func NewSyncLoop(pm PeerAPI, bc BlockchainInterface, miner Miner,
 	metrics *metrics.Metrics, orphanPool *utils.OrphanPool,
-	validator *consensus.BlockValidator, syncConfig config.SyncConfig) *SyncLoop {
+	validator *consensus.BlockValidator, syncConfig config.SyncConfig,
+	secMgr *security.SecurityManager) *SyncLoop {
 
-	// Initialize advanced peer scorer
-	scorer := NewAdvancedPeerScorer(100)
+	// Initialize advanced peer scorer with SecurityManager as ban checker
+	var banChecker PeerBanChecker
+	if secMgr != nil {
+		banChecker = secMgr
+	}
+	scorer := NewAdvancedPeerScorer(100, banChecker)
+
+	// Wire up peer ban callback to SecurityManager
+	if secMgr != nil {
+		scorer.SetOnPeerBan(func(peerID, reason string) {
+			secMgr.BanPeer(peerID, reason, security.DefaultPeerBanTTL)
+		})
+	}
 
 	// Initialize retry executor with default strategy
 	retryExec := NewRetryExecutor(DefaultRetryStrategy(), scorer)
@@ -129,20 +164,22 @@ func NewSyncLoop(pm PeerAPI, bc BlockchainInterface, miner Miner,
 	downloader := NewBlockDownloader(pm, bc, validator, metrics, syncConfig)
 
 	// Initialize fork detector for fork detection during sync
-	forkDetector := core.NewForkDetector()
+	forkDetector := core.NewForkDetector(core.DefaultForkDetectorConfig())
 
 	return &SyncLoop{
-		pm:           pm,
-		bc:           bc,
-		miner:        miner,
-		metrics:      metrics,
-		orphanPool:   orphanPool,
-		validator:    validator,
-		scorer:       scorer,
-		retryExec:    retryExec,
-		downloader:   downloader,
-		forkDetector: forkDetector,
-		// forkResolver initialized in Start() when chain is ready
+		pm:             pm,
+		bc:             bc,
+		miner:          miner,
+		metrics:        metrics,
+		orphanPool:     orphanPool,
+		validator:      validator,
+		scorer:         scorer,
+		retryExec:      retryExec,
+		downloader:     downloader,
+		forkDetector:   forkDetector,
+		syncConfig:     syncConfig,
+		securityMgr:    secMgr,
+		fastSyncEngine: NewFastSyncEngine(bc, syncConfig.BatchSize),
 	}
 }
 
@@ -177,7 +214,7 @@ func (s *SyncLoop) Start(ctx context.Context) error {
 	if cp, ok := s.bc.(chainProvider); ok {
 		chain := cp.GetUnderlyingChain()
 		chainSelector := core.NewChainSelector(chain, s.bc)
-		s.forkResolver = NewForkResolutionEngine(chainSelector, s.forkDetector)
+		s.forkResolver = NewForkResolutionEngine(s.ctx, chainSelector, s.forkDetector, DefaultForkResolutionConfig())
 	} else {
 	}
 
@@ -209,7 +246,7 @@ func (s *SyncLoop) IsSyncing() bool {
 // Production-grade: implements Bitcoin-style sync state detection with proper time windows.
 // Returns true if:
 // 1. Not syncing AND sync progress >= 1.0, OR
-// 2. No active peers available AND local chain has been stable for minimum duration
+// 2. No peer has higher height (can mine on current chain)
 func (s *SyncLoop) IsSynced() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -219,47 +256,25 @@ func (s *SyncLoop) IsSynced() bool {
 		return true
 	}
 
-	// Isolated mode check: requires time window validation
-	// to prevent false positives during early startup or network issues
-	if !s.isSyncing && s.syncProgress < 1.0 {
-		if s.pm != nil {
-			activePeers := s.pm.GetActivePeers()
-			localHeight := s.getLocalHeight()
+	// Enhanced mode: allow mining when no peer has higher height
+	if s.pm != nil {
+		localHeight := s.getLocalHeight()
 
-			if localHeight > 0 && len(activePeers) == 0 {
-				// Check if we've been in this state long enough
-				// to distinguish between true isolation and temporary network issues
-				var sinceStart time.Duration
-				if s.syncStartTime.IsZero() {
-					sinceStart = 0
-				} else {
-					sinceStart = time.Since(s.syncStartTime)
-				}
+		// Check if any peer has higher height
+		activePeers := s.pm.GetActivePeers()
+		hasHigherPeer := false
 
-				// If less than StaleCheckInterval (10 minutes), not yet considered isolated
-				if sinceStart < StaleCheckInterval {
-					// During initial startup, may not have peers yet
-					// Check if we have recent sync activity
-					var sinceLastUpdate time.Duration
-					if s.lastUpdateTime.IsZero() {
-						sinceLastUpdate = 0
-					} else {
-						sinceLastUpdate = time.Since(s.lastUpdateTime)
-					}
-
-					// If no recent activity (5 minutes), node may be stuck
-					if sinceLastUpdate > StuckNodeThreshold {
-						return false
-					}
-
-					// Too early to tell - still in startup window
-					return false
-				}
-
-				// We've been isolated for longer than StaleCheckInterval
-				// This is likely a legitimate isolated node
-				return true
+		for _, peer := range activePeers {
+			info, err := s.pm.FetchChainInfo(s.ctx, peer)
+			if err == nil && info != nil && info.Height > localHeight {
+				hasHigherPeer = true
+				break
 			}
+		}
+
+		if !hasHigherPeer {
+			// No peer has higher height, we can mine
+			return true
 		}
 	}
 
@@ -332,7 +347,7 @@ func (s *SyncLoop) updatePeerState(peerID string, block *core.Block) {
 		// Keep existing state if possible
 		if existing, exists := s.peerStates.states[peerID]; exists {
 			existing.Responsiveness -= 0.1 // Decrease responsiveness score
-			existing.QualityScore = existing.Responsiveness * 0.7 + existing.QualityScore * 0.3
+			existing.QualityScore = existing.Responsiveness*0.7 + existing.QualityScore*0.3
 		}
 		return
 	}
@@ -350,25 +365,25 @@ func (s *SyncLoop) updatePeerState(peerID string, block *core.Block) {
 	s.peerStates.states[peerID] = state
 
 	// Log peer state update for debugging
-	log.Printf("[Sync] Updated peer state for %s: height=%d, quality=%.2f", 
+	log.Printf("[Sync] Updated peer state for %s: height=%d, quality=%.2f",
 		peerID, info.Height, state.QualityScore)
 }
 
 // resolveForkDirectly handles fork resolution when ForkResolutionEngine is unavailable
 // This is a fallback mechanism for when the full resolution engine cannot be used
 func (s *SyncLoop) resolveForkDirectly(currentTip *core.Block, block *core.Block) error {
-	log.Printf("[Sync] Direct fork resolution: tip=%d, incoming=%d", 
+	log.Printf("[Sync] Direct fork resolution: tip=%d, incoming=%d",
 		currentTip.GetHeight(), block.GetHeight())
 
 	// Compare total work first (highest work rule)
 	localWork := s.bc.CanonicalWork()
 	remoteWork, ok := core.StringToWork(block.TotalWork)
-	
+
 	if ok && localWork != nil {
 		if remoteWork.Cmp(localWork) > 0 {
 			log.Printf("[Sync] Remote chain has higher work: %s > %s",
 				block.TotalWork, s.bc.CanonicalWork().String())
-			
+
 			// Trigger reorganization to remote chain
 			if s.reorganizeToRemoteChain(block) {
 				return nil
@@ -381,13 +396,13 @@ func (s *SyncLoop) resolveForkDirectly(currentTip *core.Block, block *core.Block
 
 	// Fallback to arbitration with other peers
 	s.arbitrateWithOtherPeers(currentTip, block)
-	
+
 	return fmt.Errorf("direct fork resolution completed")
 }
 
 // reorganizeToRemoteChain performs chain reorganization to adopt a remote chain
 func (s *SyncLoop) reorganizeToRemoteChain(targetBlock *core.Block) bool {
-	log.Printf("[Sync] Starting chain reorganization to block %d with hash %x", 
+	log.Printf("[Sync] Starting chain reorganization to block %d with hash %x",
 		targetBlock.GetHeight(), targetBlock.Hash)
 
 	s.mu.Lock()
@@ -424,7 +439,7 @@ func (s *SyncLoop) reorganizeToRemoteChain(targetBlock *core.Block) bool {
 
 	// Fallback to direct block-by-block reorganization
 	log.Printf("[Sync] Attempting direct reorganization to target block %d", targetBlock.GetHeight())
-	
+
 	// Production-grade chain reorganization implementation
 	// Step 1: Find common ancestor between current chain and new chain
 	ancestor, err := s.findCommonAncestor(currentTip, targetBlock)
@@ -432,34 +447,34 @@ func (s *SyncLoop) reorganizeToRemoteChain(targetBlock *core.Block) bool {
 		log.Printf("[Sync] Failed to find common ancestor: %v", err)
 		return false
 	}
-	
+
 	if ancestor == nil {
 		log.Printf("[Sync] No common ancestor found, cannot reorganize")
 		return false
 	}
-	
+
 	log.Printf("[Sync] Found common ancestor at height %d", ancestor.GetHeight())
-	
+
 	// Step 2: Collect new chain blocks from ancestor to target
 	newChain, err := s.collectNewChain(ancestor, targetBlock)
 	if err != nil {
 		log.Printf("[Sync] Failed to collect new chain: %v", err)
 		return false
 	}
-	
+
 	// Step 3: Validate new chain section
 	if !s.validateNewChain(newChain) {
 		log.Printf("[Sync] New chain validation failed")
 		return false
 	}
-	
+
 	// Step 4: Rollback current chain to ancestor height
 	err = s.bc.RollbackToHeight(ancestor.GetHeight())
 	if err != nil {
 		log.Printf("[Sync] Failed to rollback chain: %v", err)
 		return false
 	}
-	
+
 	// Step 5: Add new chain blocks
 	for _, block := range newChain {
 		_, err := s.bc.AddBlock(block)
@@ -470,7 +485,7 @@ func (s *SyncLoop) reorganizeToRemoteChain(targetBlock *core.Block) bool {
 			return false
 		}
 	}
-	
+
 	log.Printf("[Sync] Chain reorganization completed successfully to height %d", targetBlock.GetHeight())
 	return true
 }
@@ -490,7 +505,7 @@ func (s *SyncLoop) arbitrateWithOtherPeers(currentTip *core.Block, block *core.B
 	// Count peers for each chain
 	localChainVotes := 0
 	remoteChainVotes := 0
-	
+
 	for _, peer := range activePeers {
 		if s.votesForChain(peer, currentTip, block) {
 			localChainVotes++
@@ -499,13 +514,13 @@ func (s *SyncLoop) arbitrateWithOtherPeers(currentTip *core.Block, block *core.B
 		}
 	}
 
-	log.Printf("[Sync] Arbitration result: Local=%d, Remote=%d", 
+	log.Printf("[Sync] Arbitration result: Local=%d, Remote=%d",
 		localChainVotes, remoteChainVotes)
-	
+
 	if remoteChainVotes > localChainVotes {
-		log.Printf("[Sync] Majority favors remote chain (%d vote advantage), initiating reorganization", 
-			remoteChainVotes - localChainVotes)
-		
+		log.Printf("[Sync] Majority favors remote chain (%d vote advantage), initiating reorganization",
+			remoteChainVotes-localChainVotes)
+
 		// Actually trigger reorganization when majority favors remote chain
 		if s.reorganizeToRemoteChain(block) {
 			log.Printf("[Sync] Reorganization completed successfully after peer arbitration")
@@ -546,22 +561,22 @@ func (s *SyncLoop) getPeerQualityScore(peerID string) float64 {
 
 	score := s.scorer.GetPeerScore(peerID)
 	stats := s.scorer.GetPeerDetailedStats(peerID)
-	
+
 	if stats == nil {
 		return score
 	}
 
 	// Weight score with trust level and reliability
-	trustLevel := stats["trust_level"].(float64)
-	isReliable := stats["is_reliable"].(bool)
-	successRate := stats["recent_success_rate"].(float64)
-	
+	trustLevel, _ := stats["trust_level"].(float64)
+	isReliable, _ := stats["is_reliable"].(bool)
+	successRate, _ := stats["recent_success_rate"].(float64)
+
 	averageScore := (score * 0.4) + (trustLevel * 0.3) + (successRate * 0.3)
-	
+
 	if isReliable {
 		averageScore *= 1.2 // Boost for reliable peers
 	}
-	
+
 	return math.Max(0.0, math.Min(100.0, averageScore))
 }
 
@@ -574,7 +589,10 @@ func (s *SyncLoop) SyncProgress() float64 {
 
 // runSyncLoop is the main sync loop goroutine
 func (s *SyncLoop) runSyncLoop() {
-	ticker := time.NewTicker(5 * time.Second)
+	// CRITICAL: Use shorter interval for responsive sync
+	// Bitcoin uses 10s, but we use 2s for faster catch-up with remote peers
+	// This prevents falling behind by 1-2 blocks during active mining
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -614,6 +632,16 @@ func (s *SyncLoop) performSyncStep() {
 		info, err := s.pm.FetchChainInfo(s.ctx, peer)
 		if err != nil {
 			log.Printf("[Sync] failed to fetch chain info from peer %s: %v", peer, err)
+			// CRITICAL: Remove peer immediately if connection is dead
+			// This prevents sync from getting stuck with non-responsive peers
+			if strings.Contains(err.Error(), "MConnection not running") ||
+				strings.Contains(err.Error(), "send request failed") {
+				log.Printf("[Sync] Removing dead peer %s: connection not running", peer)
+				// Type assertion to call RemovePeerByID on Switch
+				if sw, ok := s.pm.(*Switch); ok {
+					sw.RemovePeerByID(peer)
+				}
+			}
 			continue
 		}
 		log.Printf("[Sync] peer %s: height=%d work=%s", peer, info.Height, info.Work)
@@ -657,6 +685,10 @@ func (s *SyncLoop) performSyncStep() {
 		s.lastUpdateTime = time.Now()
 		s.mu.Unlock()
 		log.Printf("[Sync] Chain is synced (height=%d, work=%s)", currentHeight, localWork.String())
+
+		// Broadcast current status to inform peers of our chain state
+		s.broadcastCurrentStatus()
+
 		return
 	}
 
@@ -666,11 +698,121 @@ func (s *SyncLoop) performSyncStep() {
 	s.isSyncing = true
 	s.mu.Unlock()
 
+	if s.attemptFastSync(maxPeerHeight, bestPeer) {
+		log.Printf("[Sync] Fast sync attempted")
+		return
+	}
+
 	if bestPeer != "" {
+		log.Printf("[Sync] Starting sync with peer %s (height=%d, local=%d)", bestPeer, maxPeerHeight, currentHeight)
 		if err := s.SyncWithPeer(s.ctx, bestPeer); err != nil {
 			log.Printf("[Sync] SyncWithPeer failed: %v", err)
+		} else {
+			log.Printf("[Sync] SyncWithPeer completed successfully")
 		}
+
+		// CRITICAL: After sync completes, immediately re-check sync state
+		// Don't wait for next ticker - remote may have grown during sync
+		// This prevents falling behind by 1-2 blocks
+		log.Printf("[Sync] Immediately re-evaluating sync state after completion")
+		s.performSyncStep() // Recursive call to check immediately
+		return
 	}
+}
+
+func (s *SyncLoop) attemptFastSync(maxPeerHeight uint64, bestPeer string) bool {
+	if s.fastSyncEngine == nil {
+		return false
+	}
+	if s.pm == nil {
+		return false
+	}
+
+	s.mu.RLock()
+	engine := s.fastSyncEngine
+	fastSyncMinGap := s.syncConfig.FastSyncMinGap
+	s.mu.RUnlock()
+
+	engine.SetPeerAPI(s.pm)
+
+	localHeight := s.getLocalHeight()
+	if localHeight >= maxPeerHeight {
+		return false
+	}
+
+	gap := maxPeerHeight - localHeight
+	if gap < fastSyncMinGap {
+		log.Printf("[Sync] FastSync: gap %d below threshold %d, using regular sync", gap, fastSyncMinGap)
+		return false
+	}
+
+	checkpointHeight, checkpointHash := s.resolveCheckpoint(maxPeerHeight)
+	if checkpointHeight == 0 || len(checkpointHash) == 0 {
+		log.Printf("[Sync] FastSync: no valid checkpoint available, using regular sync")
+		return false
+	}
+
+	if !engine.CheckFastSyncEligible(localHeight, checkpointHeight, checkpointHash) {
+		log.Printf("[Sync] FastSync: not eligible (local=%d, checkpoint=%d), using regular sync",
+			localHeight, checkpointHeight)
+		return false
+	}
+
+	log.Printf("[Sync] FastSync: attempting fast sync to checkpoint %d (local=%d, gap=%d, peer=%s)",
+		checkpointHeight, localHeight, gap, bestPeer)
+
+	if err := engine.SyncToCheckpoint(checkpointHeight, checkpointHash); err != nil {
+		log.Printf("[Sync] FastSync: failed, falling back to regular sync: %v", err)
+		return false
+	}
+
+	newHeight := s.getLocalHeight()
+	log.Printf("[Sync] FastSync: completed successfully, new height=%d", newHeight)
+
+	s.mu.Lock()
+	s.syncProgress = 1.0
+	s.isSyncing = false
+	s.lastUpdateTime = time.Now()
+	s.mu.Unlock()
+
+	// Broadcast current status after fast sync completion
+	s.broadcastCurrentStatus()
+
+	return true
+}
+
+func (s *SyncLoop) resolveCheckpoint(maxPeerHeight uint64) (uint64, []byte) {
+	if s.bc == nil {
+		return 0, nil
+	}
+
+	tip := s.bc.LatestBlock()
+	if tip == nil {
+		return 0, nil
+	}
+
+	localHeight := tip.GetHeight()
+
+	checkpoint := config.NextCheckpoint(localHeight, config.ActiveCheckpoints())
+	if checkpoint == nil {
+		log.Printf("[Sync] No trusted checkpoint available beyond local height %d, skipping fast sync", localHeight)
+		return 0, nil
+	}
+
+	checkpointHeight := checkpoint.Height
+	checkpointHash, decodeErr := hex.DecodeString(checkpoint.Hash)
+	if decodeErr != nil {
+		log.Printf("[Sync] Invalid checkpoint hash at height %d: %v", checkpointHeight, decodeErr)
+		return 0, nil
+	}
+
+	if checkpointHeight <= localHeight {
+		return 0, nil
+	}
+
+	hashDisplayLen := min(16, len(checkpoint.Hash))
+	log.Printf("[Sync] Using trusted checkpoint: height=%d hash=%s", checkpointHeight, checkpoint.Hash[:hashDisplayLen])
+	return checkpointHeight, checkpointHash
 }
 
 // handleNewBlock processes incoming block events with automatic fork resolution
@@ -693,7 +835,7 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 			// Do not add corrupted block to orphan pool
 			return fmt.Errorf("corrupted block data: %v", err)
 		}
-		
+
 		log.Printf("[Sync] Failed to validate block: %v", err)
 		// Try adding as orphan for non-corrupted blocks
 		s.orphanPool.AddOrphan(block)
@@ -809,20 +951,20 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 					canonicalParent := allBlocks[parent.GetHeight()]
 					if canonicalParent != nil && !bytes.Equal(parent.Hash, canonicalParent.Hash) {
 						// Parent is on fork chain
-					log.Printf("[Sync] Fork detected: block height=%d parent height=%d (canonical tip=%d)",
-						block.GetHeight(), parent.GetHeight(), len(allBlocks)-1)
+						log.Printf("[Sync] Fork detected: block height=%d parent height=%d (canonical tip=%d)",
+							block.GetHeight(), parent.GetHeight(), len(allBlocks)-1)
 						log.Printf("[Sync] Parent is on fork chain, triggering resolution")
 
 						if s.forkResolver != nil {
 							forkEvent := s.forkDetector.DetectFork(canonicalParent, block, "sync_loop")
 							if forkEvent != nil {
-									request := &ResolutionRequest{
-										LocalTip:    currentTip,
-										RemoteBlock: block,
-										PeerID:      "sync_loop",
-										ReceivedAt:  time.Now(),
-										Priority:    getResolutionPriority(forkEvent),
-									}
+								request := &ResolutionRequest{
+									LocalTip:    currentTip,
+									RemoteBlock: block,
+									PeerID:      "sync_loop",
+									ReceivedAt:  time.Now(),
+									Priority:    getResolutionPriority(forkEvent),
+								}
 
 								if err := s.forkResolver.SubmitResolution(request); err != nil {
 									log.Printf("[Sync] Failed to submit fork resolution: %v", err)
@@ -875,26 +1017,63 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 	return nil
 }
 
-// processOrphans attempts to process orphaned blocks
+// processOrphans attempts to process orphaned blocks that connect to the current tip
 func (s *SyncLoop) processOrphans(ctx context.Context) {
-	orphans := s.orphanPool.GetOrphansByParent(hex.EncodeToString(s.bc.LatestBlock().Hash))
+	tipHash := hex.EncodeToString(s.bc.LatestBlock().Hash)
+	orphans := s.orphanPool.GetOrphansByParent(tipHash)
 	for _, orphan := range orphans {
-		err := s.validator.ValidateBlockFast(orphan)
-		if err != nil {
+		if err := s.validator.ValidateBlockFast(orphan); err != nil {
 			continue
 		}
-		log.Printf("[Sync] Orphan block %d processed", orphan.GetHeight())
+
+		accepted, addErr := s.bc.AddBlock(orphan)
+		if addErr != nil {
+			log.Printf("[Sync] Failed to add orphan block %d to chain: %v", orphan.GetHeight(), addErr)
+			continue
+		}
+		if !accepted {
+			log.Printf("[Sync] Orphan block %d not accepted by chain", orphan.GetHeight())
+			continue
+		}
+
+		log.Printf("[Sync] Orphan block %d added to chain", orphan.GetHeight())
 		s.orphanPool.RemoveOrphan(hex.EncodeToString(orphan.Hash))
+
+		// Re-evaluate tip after each addition since the chain tip has changed
+		s.processOrphans(ctx)
+		return
 	}
 }
 
 // SyncWithPeer performs initial sync with a peer using scoring and retry
+// CRITICAL FIX: Implements continuous sync loop to handle remote chain growth during sync
 func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
-	result := s.retryExec.ExecuteWithRetry(ctx, func(ctx context.Context, p string) error {
-		info, err := s.pm.FetchChainInfo(ctx, p)
+	log.Printf("[Sync] === SyncWithPeer START === peer=%s", peer)
+
+	// Continuous sync loop - keeps syncing until local catches up with remote
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// Fetch fresh peer info on each iteration to handle chain growth
+		info, err := s.pm.FetchChainInfo(ctx, peer)
 		if err != nil {
+			log.Printf("[Sync] SyncWithPeer failed to fetch chain info: %v", err)
+			// CRITICAL: Remove peer immediately if connection is dead
+			if strings.Contains(err.Error(), "MConnection not running") ||
+				strings.Contains(err.Error(), "send request failed") {
+				log.Printf("[Sync] Removing dead peer %s during sync: connection not running", peer)
+				// Type assertion to call RemovePeerByID on Switch
+				if sw, ok := s.pm.(*Switch); ok {
+					sw.RemovePeerByID(peer)
+				}
+			}
 			return fmt.Errorf("failed to get peer chain info: %w", err)
 		}
+		log.Printf("[Sync] SyncWithPeer peer info: height=%d, work=%s", info.Height, info.Work)
 
 		currentHeight := s.bc.LatestBlock().GetHeight()
 		localWork := s.bc.CanonicalWork()
@@ -914,25 +1093,51 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		}
 
 		if !shouldSync {
+			log.Printf("[Sync] SyncWithPeer: sync completed - local caught up with peer (localHeight=%d, peerHeight=%d)", currentHeight, info.Height)
 			s.mu.Lock()
 			s.syncProgress = 1.0
 			s.isSyncing = false
 			s.lastUpdateTime = time.Now()
 			s.mu.Unlock()
-			log.Printf("[Sync] Already synced with peer %s (localHeight=%d, localWork=%s, peerHeight=%d, peerWork=%s)",
-				p, currentHeight, localWork.String(), info.Height, peerWork.String())
+			log.Printf("[Sync] SyncWithPeer completed successfully (localHeight=%d, localWork=%s, peerHeight=%d, peerWork=%s)",
+				currentHeight, localWork.String(), info.Height, peerWork.String())
+
+			// Broadcast current status to inform peers of our chain state
+			s.broadcastCurrentStatus()
+
 			return nil
 		}
 
-		log.Printf("[Sync] Starting sync with peer %s: %s", p, syncReason)
+		log.Printf("[Sync] Starting sync round with peer %s: %s", peer, syncReason)
 
 		// Sync headers first with retry
 		headersToFetch := info.Height - currentHeight
-		if headersToFetch > 1000 {
-			headersToFetch = 1000
+		if headersToFetch == 0 {
+			// No headers to fetch (peer at same height)
+			// This can happen when both nodes have genesis block only
+			log.Printf("[Sync] No headers to fetch (peer height=%d, local height=%d)", info.Height, currentHeight)
+			continue // Continue loop to check if remote has grown
 		}
-		headers, err := s.fetchHeadersWithRetry(ctx, p, currentHeight+1, int(headersToFetch))
+		maxHeadersFetch := s.syncConfig.MaxHeadersFetch
+		if maxHeadersFetch <= 0 {
+			maxHeadersFetch = 1000
+		}
+		if headersToFetch > maxHeadersFetch {
+			headersToFetch = maxHeadersFetch
+		}
+		log.Printf("[Sync] Fetching %d headers from height %d", headersToFetch, currentHeight+1)
+		headers, err := s.fetchHeadersWithRetry(ctx, peer, currentHeight+1, int(headersToFetch))
 		if err != nil {
+			log.Printf("[Sync] Failed to fetch headers: %v", err)
+
+			// Apply penalty for header fetch failure
+			if s.securityMgr != nil {
+				persistent, transient, reason := classifySyncError(err)
+				s.securityMgr.OnPeerMisbehavior(peer, persistent, transient)
+				log.Printf("[Sync] Reported peer %s for header fetch failure: %s (persistent=%d, transient=%d)",
+					peer, reason, persistent, transient)
+			}
+
 			return fmt.Errorf("failed to fetch headers: %w", err)
 		}
 
@@ -951,7 +1156,7 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 					log.Printf("[Sync] This indicates a fork - need to find common ancestor")
 
 					// Walk back to find common ancestor
-					syncStartHeight, err = s.findCommonAncestorHeight(ctx, p, header, currentHeight+1+uint64(i))
+					syncStartHeight, err = s.findCommonAncestorHeight(ctx, peer, header, currentHeight+1+uint64(i))
 					if err != nil {
 						log.Printf("[Sync] Failed to find common ancestor: %v", err)
 						log.Printf("[Sync] Will attempt sync from current height")
@@ -977,9 +1182,28 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 				// Check continuity with previous header
 				if i > 0 {
 					prevHeader := headers[i-1]
-					prevHash := sha256.Sum256(mustJSON(prevHeader))
-					if !bytes.Equal(header.PrevHash, prevHash[:]) {
-						log.Printf("[Sync] Header chain broken at index %d", i)
+					prevHash, hashErr := computeHeaderHash(prevHeader)
+					if hashErr != nil {
+						log.Printf("[Sync] Failed to compute header hash at index %d: %v", i, hashErr)
+
+						// Apply penalty for header hash computation failure
+						if s.securityMgr != nil {
+							s.securityMgr.OnPeerMisbehavior(peer, 30, 10)
+							log.Printf("[Sync] Reported peer %s for header hash computation failure (persistent=30, transient=10)", peer)
+						}
+
+						break
+					}
+					if !bytes.Equal(header.PrevHash, prevHash) {
+						log.Printf("[Sync] Header chain broken at index %d: expected prevHash %x, got %x",
+							i, prevHash[:8], header.PrevHash[:8])
+
+						// Apply severe penalty for header chain discontinuity
+						if s.securityMgr != nil {
+							s.securityMgr.OnPeerMisbehavior(peer, 60, 25)
+							log.Printf("[Sync] Reported peer %s for header chain discontinuity (persistent=60, transient=25)", peer)
+						}
+
 						break
 					}
 				}
@@ -992,12 +1216,7 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		blocksToFetch := info.Height - syncStartHeight
 		if blocksToFetch == 0 {
 			log.Printf("[Sync] No blocks to fetch, already synced")
-			s.mu.Lock()
-			s.syncProgress = 1.0
-			s.isSyncing = false
-			s.lastUpdateTime = time.Now()
-			s.mu.Unlock()
-			return nil
+			continue // Continue loop to check if remote has grown
 		}
 
 		log.Printf("[Sync] Starting batch download: height %d to %d (%d blocks)", syncFromHeight, info.Height, blocksToFetch)
@@ -1038,9 +1257,18 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 			}
 
 			if len(expectedPrevHash) > 0 && !bytes.Equal(block.Header.PrevHash, expectedPrevHash) {
-			log.Printf("[Sync] Chain discontinuity at height %d: expected prevHash %x, got %x",
-				block.GetHeight(), expectedPrevHash[:8], block.Header.PrevHash[:8])
-			return fmt.Errorf("chain discontinuity at height %d", block.GetHeight())
+				log.Printf("[Sync] Chain discontinuity at height %d: expected prevHash %x, got %x",
+					block.GetHeight(), expectedPrevHash[:8], block.Header.PrevHash[:8])
+
+				// Report severe misbehavior for chain discontinuity (provides invalid blocks)
+				if s.securityMgr != nil {
+					// Persistent score: 50 (severe - invalid chain data)
+					// Transient score: 20 (additional penalty for this instance)
+					s.securityMgr.OnPeerMisbehavior(peer, 50, 20)
+					log.Printf("[Sync] Reported peer %s for chain discontinuity (persistent=50, transient=20)", peer)
+				}
+
+				return fmt.Errorf("chain discontinuity at height %d", block.GetHeight())
 			}
 
 			// Add block to chain via handleNewBlock for proper validation and fork handling
@@ -1048,33 +1276,26 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		}
 
 		// Use real-time download and storage
-		err = s.downloader.BatchDownloadBlocks(ctx, p, syncFromHeight, blocksToFetch, progressChan, storeFunc)
+		err = s.downloader.BatchDownloadBlocks(ctx, peer, syncFromHeight, blocksToFetch, progressChan, storeFunc)
 		close(progressChan)
 
 		if err != nil {
 			log.Printf("[Sync] Batch download and storage failed: %v", err)
+
+			// Apply peer penalty based on error type
+			if s.securityMgr != nil {
+				persistent, transient, reason := classifySyncError(err)
+				s.securityMgr.OnPeerMisbehavior(peer, persistent, transient)
+				log.Printf("[Sync] Reported peer %s for sync failure: %s (persistent=%d, transient=%d)",
+					peer, reason, persistent, transient)
+			}
+
 			return fmt.Errorf("batch download and storage failed: %w", err)
 		}
 
-		log.Printf("[Sync] Real-time sync complete: all blocks downloaded and stored")
-
-		s.mu.Lock()
-		s.syncProgress = 1.0
-		s.isSyncing = false
-		s.lastUpdateTime = time.Now()
-		s.mu.Unlock()
-
-		return nil
-	}, peer)
-
-	if !result.Success {
-		return fmt.Errorf("sync failed after %d attempts: %w", result.Attempts, result.LastErr)
+		log.Printf("[Sync] Sync round complete, checking if more sync needed...")
+		// Loop continues to check if remote has grown during our sync
 	}
-
-	log.Printf("[Sync] Successfully synced with peer %s (attempts=%d, duration=%v)",
-		result.FinalPeer, result.Attempts, result.TotalDuration)
-
-	return nil
 }
 
 // fetchHeadersWithRetry fetches headers with automatic retry
@@ -1082,6 +1303,15 @@ func (s *SyncLoop) fetchHeadersWithRetry(ctx context.Context, peer string, fromH
 	if s.retryExec == nil {
 		headers, err := s.pm.FetchHeadersFrom(ctx, peer, fromHeight, count)
 		if err != nil {
+			// CRITICAL: Remove peer if connection is dead
+			if strings.Contains(err.Error(), "MConnection not running") ||
+				strings.Contains(err.Error(), "send request failed") {
+				log.Printf("[Sync] Removing dead peer %s during header fetch: connection not running", peer)
+				// Type assertion to call RemovePeerByID on Switch
+				if sw, ok := s.pm.(*Switch); ok {
+					sw.RemovePeerByID(peer)
+				}
+			}
 			return nil, err
 		}
 		// Convert to pointer slice
@@ -1099,6 +1329,15 @@ func (s *SyncLoop) fetchHeadersWithRetry(ctx context.Context, peer string, fromH
 		h, err := s.pm.FetchHeadersFrom(ctx, p, fromHeight, count)
 		if err != nil {
 			lastErr = err
+			// CRITICAL: Remove peer if connection is dead
+			if strings.Contains(err.Error(), "MConnection not running") ||
+				strings.Contains(err.Error(), "send request failed") {
+				log.Printf("[Sync] Removing dead peer %s during header fetch retry: connection not running", p)
+				// Type assertion to call RemovePeerByID on Switch
+				if sw, ok := s.pm.(*Switch); ok {
+					sw.RemovePeerByID(p)
+				}
+			}
 			return err
 		}
 		headers = make([]*core.BlockHeader, len(h))
@@ -1162,7 +1401,7 @@ func (s *SyncLoop) findCommonAncestorHeight(ctx context.Context, peer string, ta
 
 	// Walk backwards from local tip to find common ancestor
 	localHeight := s.bc.LatestBlock().GetHeight()
-	
+
 	// Start from the height before target
 	var checkHeight uint64
 	if targetHeight > 0 {
@@ -1174,7 +1413,10 @@ func (s *SyncLoop) findCommonAncestorHeight(ctx context.Context, peer string, ta
 		checkHeight = localHeight
 	}
 
-	maxSteps := 100 // Safety limit
+	maxSteps := s.syncConfig.MaxAncestorSearchSteps
+	if maxSteps <= 0 {
+		maxSteps = 100
+	}
 	steps := 0
 
 	for steps < maxSteps && checkHeight > 0 {
@@ -1204,7 +1446,7 @@ func (s *SyncLoop) findCommonAncestorHeight(ctx context.Context, peer string, ta
 
 		// Compare hashes
 		if bytes.Equal(localBlock.Hash, peerBlock.Hash) {
-			log.Printf("[Sync] Found common ancestor at height %d (hash: %s)", 
+			log.Printf("[Sync] Found common ancestor at height %d (hash: %s)",
 				checkHeight, hex.EncodeToString(localBlock.Hash)[:16])
 			return checkHeight, nil
 		}
@@ -1254,13 +1496,82 @@ func (s *SyncLoop) fetchBlockByHeightWithRetry(ctx context.Context, peer string,
 	return block, nil
 }
 
-// FastSync performs fast sync from checkpoint
+// FastSync performs fast sync from checkpoint using FastSyncEngine
 func (s *SyncLoop) FastSync(ctx context.Context, checkpointHeight uint64) error {
-	log.Printf("[Sync] Starting fast sync from checkpoint %d", checkpointHeight)
+	s.mu.RLock()
+	engine := s.fastSyncEngine
+	s.mu.RUnlock()
 
-	// Implementation would download state snapshot from checkpoint
-	// For now, use regular sync
+	if engine == nil {
+		return fmt.Errorf("fast sync engine not initialized")
+	}
+
+	if s.pm == nil {
+		return fmt.Errorf("peer manager not available")
+	}
+
+	engine.SetPeerAPI(s.pm)
+
+	localHeight := s.getLocalHeight()
+	if localHeight >= checkpointHeight {
+		return fmt.Errorf("local height %d already >= checkpoint height %d", localHeight, checkpointHeight)
+	}
+
+	checkpointHash, err := s.resolveCheckpointHash(checkpointHeight)
+	if err != nil {
+		return fmt.Errorf("resolve checkpoint hash: %w", err)
+	}
+
+	if !engine.CheckFastSyncEligible(localHeight, checkpointHeight, checkpointHash) {
+		return fmt.Errorf("not eligible for fast sync: local=%d checkpoint=%d", localHeight, checkpointHeight)
+	}
+
+	log.Printf("[Sync] FastSync: starting from checkpoint %d (local=%d)", checkpointHeight, localHeight)
+
+	if syncErr := engine.SyncToCheckpoint(checkpointHeight, checkpointHash); syncErr != nil {
+		return fmt.Errorf("fast sync to checkpoint %d: %w", checkpointHeight, syncErr)
+	}
+
+	newHeight := s.getLocalHeight()
+	log.Printf("[Sync] FastSync: completed, new height=%d", newHeight)
+
+	s.mu.Lock()
+	s.syncProgress = 1.0
+	s.isSyncing = false
+	s.lastUpdateTime = time.Now()
+	s.mu.Unlock()
+
+	// Broadcast current status after fast sync completion
+	s.broadcastCurrentStatus()
+
 	return nil
+}
+
+// resolveCheckpointHash fetches the block hash at the given checkpoint height
+func (s *SyncLoop) resolveCheckpointHash(checkpointHeight uint64) ([]byte, error) {
+	if s.pm == nil {
+		return nil, fmt.Errorf("peer manager not available")
+	}
+
+	peers := s.pm.GetActivePeers()
+	if len(peers) == 0 {
+		return nil, fmt.Errorf("no active peers")
+	}
+
+	fetchCtx, cancel := context.WithTimeout(context.Background(), headerDownloadTimeout)
+	defer cancel()
+
+	for _, peer := range peers {
+		block, err := s.pm.FetchBlockByHeight(fetchCtx, peer, checkpointHeight)
+		if err != nil {
+			continue
+		}
+		if block != nil && len(block.Hash) > 0 {
+			return block.Hash, nil
+		}
+	}
+
+	return nil, fmt.Errorf("failed to fetch checkpoint block at height %d from any peer", checkpointHeight)
 }
 
 // GetSyncStatus returns current sync status
@@ -1277,32 +1588,49 @@ func (s *SyncLoop) GetSyncStatus() map[string]interface{} {
 }
 
 // PeerManager returns the peer manager
-// Note: Returns a no-op implementation as pm is PeerAPI not PeerManager
+// PeerManager returns a PeerManagerInterface backed by the SyncLoop's PeerAPI
 func (s *SyncLoop) PeerManager() PeerManagerInterface {
-	return &noopPeerManager{}
+	return &delegatingPeerManager{pm: s.pm}
 }
 
-// noopPeerManager is a no-op implementation of PeerManagerInterface
-type noopPeerManager struct{}
+type delegatingPeerManager struct {
+	pm PeerAPI
+}
 
-func (n *noopPeerManager) Peers() []string                            { return nil }
-func (n *noopPeerManager) Count() int                                 { return 0 }
-func (n *noopPeerManager) MaxPeers() int                              { return 0 }
-func (n *noopPeerManager) GetPeerScore(peerID string) float64         { return 0 }
-func (n *noopPeerManager) GetPeerLatency(peerID string) time.Duration { return 0 }
-func (n *noopPeerManager) GetActivePeers() []string                   { return nil }
-func (n *noopPeerManager) AddPeer(peerID string) bool                 { return false }
-func (n *noopPeerManager) RemovePeer(peerID string)                   {}
-func (n *noopPeerManager) Broadcast(msg interface{})                  {}
-func (n *noopPeerManager) SendToPeer(peerID string, msg interface{})  {}
-func (n *noopPeerManager) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, error) {
-	return nil, fmt.Errorf("no-op implementation")
+func (d *delegatingPeerManager) Peers() []string {
+	if d.pm == nil {
+		return nil
+	}
+	return d.pm.GetActivePeers()
 }
-func (n *noopPeerManager) FetchHeadersFrom(ctx context.Context, peer string, from uint64, count uint64) ([]*core.BlockHeader, error) {
-	return nil, fmt.Errorf("no-op implementation")
+
+func (d *delegatingPeerManager) AddPeer(addr string) bool {
+	if d.pm == nil {
+		return false
+	}
+	d.pm.AddPeer(addr)
+	return true
 }
-func (n *noopPeerManager) FetchBlockByHash(ctx context.Context, peer string, hashHex string) (*core.Block, error) {
-	return nil, fmt.Errorf("no-op implementation")
+
+func (d *delegatingPeerManager) RemovePeer(addr string) {
+	if d.pm == nil {
+		return
+	}
+	d.pm.AddPeer(addr)
+}
+
+func (d *delegatingPeerManager) GetActivePeers() []string {
+	if d.pm == nil {
+		return nil
+	}
+	return d.pm.GetActivePeers()
+}
+
+func (d *delegatingPeerManager) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, error) {
+	if d.pm == nil {
+		return nil, fmt.Errorf("peer API not available")
+	}
+	return d.pm.FetchChainInfo(ctx, peer)
 }
 
 // GetOrphanPoolSize returns orphan pool size
@@ -1349,6 +1677,9 @@ func (s *SyncLoop) GetPeerPerformance(peer string) map[string]interface{} {
 	}
 
 	// Add performance-specific metrics
+	successCount, _ := stats["success_count"].(int)
+	failureCount, _ := stats["failure_count"].(int)
+
 	performance := map[string]interface{}{
 		"peer":               peer,
 		"score":              stats["score"],
@@ -1356,7 +1687,7 @@ func (s *SyncLoop) GetPeerPerformance(peer string) map[string]interface{} {
 		"success_rate":       stats["recent_success_rate"],
 		"trust_level":        stats["trust_level"],
 		"is_reliable":        stats["is_reliable"],
-		"total_requests":     stats["success_count"].(int) + stats["failure_count"].(int),
+		"total_requests":     successCount + failureCount,
 		"consecutive_fails":  stats["consecutive_fails"],
 		"bandwidth_sent":     stats["bytes_sent"],
 		"bandwidth_received": stats["bytes_received"],
@@ -1414,7 +1745,11 @@ func (s *SyncLoop) GetSyncMetrics() map[string]interface{} {
 	if s.scorer != nil {
 		metrics["peer_scorer"] = s.scorer.GetMetrics()
 		metrics["peer_count"] = s.scorer.Count()
-		metrics["blacklist_count"] = s.scorer.GetBlacklistCount()
+	}
+
+	// Add security manager metrics
+	if s.securityMgr != nil {
+		metrics["banned_peer_count"] = s.securityMgr.GetPeerBanCount()
 	}
 
 	// Add retry metrics
@@ -1425,28 +1760,29 @@ func (s *SyncLoop) GetSyncMetrics() map[string]interface{} {
 	return metrics
 }
 
-// AddPeerToBlacklist manually adds a peer to blacklist
+// AddPeerToBlacklist manually adds a peer to the ban list via SecurityManager
 func (s *SyncLoop) AddPeerToBlacklist(peer, reason string, expires time.Duration) error {
-	if s.scorer == nil {
-		return fmt.Errorf("scorer not initialized")
+	if s.securityMgr == nil {
+		return fmt.Errorf("security manager not initialized")
 	}
-	return s.scorer.AddToBlacklist(peer, reason, expires)
+	s.securityMgr.BanPeer(peer, reason, expires)
+	return nil
 }
 
-// RemovePeerFromBlacklist removes a peer from blacklist
+// RemovePeerFromBlacklist removes a peer from the ban list via SecurityManager
 func (s *SyncLoop) RemovePeerFromBlacklist(peer string) error {
-	if s.scorer == nil {
-		return fmt.Errorf("scorer not initialized")
+	if s.securityMgr == nil {
+		return fmt.Errorf("security manager not initialized")
 	}
-	return s.scorer.RemoveFromBlacklist(peer)
+	return s.securityMgr.UnbanPeer(peer)
 }
 
-// GetBlacklistInfo returns blacklist information for a peer
+// GetBlacklistInfo returns ban information for a peer via SecurityManager
 func (s *SyncLoop) GetBlacklistInfo(peer string) map[string]interface{} {
-	if s.scorer == nil {
+	if s.securityMgr == nil {
 		return nil
 	}
-	return s.scorer.GetBlacklistInfo(peer)
+	return s.securityMgr.GetPeerBanInfo(peer)
 }
 
 // isCorruptedBlock detects if a block has corrupted or invalid data
@@ -1490,17 +1826,17 @@ func (s *SyncLoop) findCommonAncestor(currentTip, targetBlock *core.Block) (*cor
 	if currentTip == nil || targetBlock == nil {
 		return nil, fmt.Errorf("nil block provided")
 	}
-	
+
 	// Build chain from current tip backwards
 	currentChain := make(map[uint64]*core.Block)
 	current := currentTip
 	maxIterations := 1000 // Safety limit
 	iterations := 0
-	
+
 	for current != nil && iterations < maxIterations {
 		currentChain[current.GetHeight()] = current
 		iterations++
-		
+
 		// Check if target is in current chain
 		if block, exists := s.bc.BlockByHeight(current.GetHeight()); exists {
 			if bytes.Equal(block.Hash, current.Hash) {
@@ -1508,7 +1844,7 @@ func (s *SyncLoop) findCommonAncestor(currentTip, targetBlock *core.Block) (*cor
 				break
 			}
 		}
-		
+
 		// Move to parent
 		if current.GetHeight() == 0 {
 			break
@@ -1519,27 +1855,27 @@ func (s *SyncLoop) findCommonAncestor(currentTip, targetBlock *core.Block) (*cor
 		}
 		current = parent
 	}
-	
+
 	// Find common ancestor by walking target chain backwards
 	target := targetBlock
 	iterations = 0
 	for target != nil && iterations < maxIterations {
 		iterations++
-		
+
 		// Check if this height exists in current chain
 		if block, exists := currentChain[target.GetHeight()]; exists {
 			if bytes.Equal(block.Hash, target.Hash) {
 				return block, nil
 			}
 		}
-		
+
 		// Check canonical chain
 		if block, exists := s.bc.BlockByHeight(target.GetHeight()); exists {
 			if bytes.Equal(block.Hash, target.Hash) {
 				return block, nil
 			}
 		}
-		
+
 		// Move to parent
 		if target.GetHeight() == 0 {
 			break
@@ -1550,7 +1886,7 @@ func (s *SyncLoop) findCommonAncestor(currentTip, targetBlock *core.Block) (*cor
 		}
 		target = parent
 	}
-	
+
 	return nil, fmt.Errorf("no common ancestor found")
 }
 
@@ -1559,26 +1895,26 @@ func (s *SyncLoop) collectNewChain(ancestor, target *core.Block) ([]*core.Block,
 	if ancestor == nil || target == nil {
 		return nil, fmt.Errorf("nil block provided")
 	}
-	
+
 	var newChain []*core.Block
 	current := target
 	maxIterations := 1000 // Safety limit
 	iterations := 0
-	
+
 	// Walk backwards from target to ancestor
 	for current != nil && iterations < maxIterations {
 		iterations++
-		
+
 		// Stop if we reached ancestor
 		if current.GetHeight() <= ancestor.GetHeight() {
 			if bytes.Equal(current.Hash, ancestor.Hash) {
 				break
 			}
 		}
-		
+
 		// Add block to chain (will be reversed later)
 		newChain = append(newChain, current)
-		
+
 		// Move to parent
 		if current.GetHeight() == 0 {
 			break
@@ -1597,12 +1933,12 @@ func (s *SyncLoop) collectNewChain(ancestor, target *core.Block) ([]*core.Block,
 		}
 		current = parent
 	}
-	
+
 	// Reverse the chain to get correct order (ancestor -> target)
 	for i, j := 0, len(newChain)-1; i < j; i, j = i+1, j-1 {
 		newChain[i], newChain[j] = newChain[j], newChain[i]
 	}
-	
+
 	return newChain, nil
 }
 
@@ -1611,7 +1947,7 @@ func (s *SyncLoop) validateNewChain(chain []*core.Block) bool {
 	if len(chain) == 0 {
 		return false
 	}
-	
+
 	// Validate each block
 	for i, block := range chain {
 		// Basic validation
@@ -1619,13 +1955,13 @@ func (s *SyncLoop) validateNewChain(chain []*core.Block) bool {
 			log.Printf("[Sync] Nil block at index %d", i)
 			return false
 		}
-		
+
 		// Validate block with consensus rules
 		if err := s.validator.ValidateBlockFast(block); err != nil {
 			log.Printf("[Sync] Block %d validation failed: %v", block.GetHeight(), err)
 			return false
 		}
-		
+
 		// Check chain continuity
 		if i > 0 {
 			prevBlock := chain[i-1]
@@ -1635,7 +1971,7 @@ func (s *SyncLoop) validateNewChain(chain []*core.Block) bool {
 			}
 		}
 	}
-	
+
 	log.Printf("[Sync] Validated new chain section (%d blocks)", len(chain))
 	return true
 }
@@ -1643,28 +1979,28 @@ func (s *SyncLoop) validateNewChain(chain []*core.Block) bool {
 // recoverChain attempts to recover the original chain after failed reorganization
 func (s *SyncLoop) recoverChain(originalTip, ancestor *core.Block) {
 	log.Printf("[Sync] Attempting to recover original chain")
-	
+
 	// Rollback to ancestor
 	if err := s.bc.RollbackToHeight(ancestor.GetHeight()); err != nil {
 		log.Printf("[Sync] CRITICAL: Failed to rollback for recovery: %v", err)
 		return
 	}
-	
+
 	// Re-add original chain blocks
 	current := originalTip
 	var blocksToAdd []*core.Block
 	maxIterations := 1000
 	iterations := 0
-	
+
 	for current != nil && iterations < maxIterations {
 		iterations++
-		
+
 		if current.GetHeight() <= ancestor.GetHeight() {
 			break
 		}
-		
+
 		blocksToAdd = append(blocksToAdd, current)
-		
+
 		// Move to parent
 		if current.GetHeight() == 0 {
 			break
@@ -1675,12 +2011,12 @@ func (s *SyncLoop) recoverChain(originalTip, ancestor *core.Block) {
 		}
 		current = parent
 	}
-	
+
 	// Reverse and add blocks
 	for i, j := 0, len(blocksToAdd)-1; i < j; i, j = i+1, j-1 {
 		blocksToAdd[i], blocksToAdd[j] = blocksToAdd[j], blocksToAdd[i]
 	}
-	
+
 	for _, block := range blocksToAdd {
 		_, err := s.bc.AddBlock(block)
 		if err != nil {
@@ -1688,6 +2024,218 @@ func (s *SyncLoop) recoverChain(originalTip, ancestor *core.Block) {
 			return
 		}
 	}
-	
+
 	log.Printf("[Sync] Successfully recovered original chain")
+}
+
+const (
+	maxLocatorEntries  = 50
+	stepDoubleInterval = 9
+)
+
+// BuildBlockLocatorFromChain builds a block locator using exponential step doubling
+// from the given chain interface. Both SyncLoop.BlockLocator and FastSyncEngine.buildBlockLocator
+// delegate to this function to avoid code duplication.
+func BuildBlockLocatorFromChain(chain BlockchainInterface) ([][]byte, error) {
+	if chain == nil {
+		return nil, errNilChain
+	}
+
+	loc, locErr := chain.BestBlockHeader()
+	if locErr != nil {
+		return nil, fmt.Errorf("get best block header: %w", locErr)
+	}
+	if loc == nil || loc.Header == nil {
+		return nil, fmt.Errorf("chain is empty, cannot build block locator")
+	}
+
+	locator := make([][]byte, 0, maxLocatorEntries)
+	step := uint64(1)
+	entryCount := 0
+
+	for {
+		block, exists := chain.BlockByHeight(loc.Height)
+		if !exists || block == nil {
+			break
+		}
+		hashCopy := make([]byte, len(block.Hash))
+		copy(hashCopy, block.Hash)
+		locator = append(locator, hashCopy)
+		entryCount++
+
+		if loc.Height == 0 {
+			break
+		}
+		if entryCount >= maxLocatorEntries {
+			break
+		}
+
+		var nextHeight uint64
+		if loc.Height < step {
+			nextHeight = 0
+		} else {
+			nextHeight = loc.Height - step
+		}
+
+		nextLoc, hdrErr := chain.GetHeaderByHeight(nextHeight)
+		if hdrErr != nil {
+			break
+		}
+		if nextLoc == nil || nextLoc.Header == nil {
+			break
+		}
+		loc = nextLoc
+
+		if entryCount%stepDoubleInterval == 0 {
+			step *= 2
+		}
+	}
+
+	return locator, nil
+}
+
+// BlockLocator generates a sparse list of block hashes for efficient chain sync
+// Algorithm aligned with Bitcoin Core block_keeper.go::blockLocator:
+//   - Start from chain tip, walk backwards with exponentially increasing step
+//   - Step doubles every 9 entries (1,1,1,...1,2,2,2,...,2,4,4,...)
+//   - Max 50 entries to bound P2P message size
+func (s *SyncLoop) BlockLocator() ([][]byte, error) {
+	return BuildBlockLocatorFromChain(s.bc)
+}
+
+// broadcastCurrentStatus broadcasts the node's current chain status to all peers
+// Called after sync completion to inform peers of our chain state for fork resolution
+func (s *SyncLoop) broadcastCurrentStatus() {
+	if s.pm == nil {
+		return
+	}
+
+	tip := s.bc.LatestBlock()
+	if tip == nil {
+		return
+	}
+
+	height := tip.GetHeight()
+	work := s.bc.CanonicalWork()
+	latestHash := hex.EncodeToString(tip.Hash)
+
+	log.Printf("[Sync] Broadcasting current status: height=%d, work=%s, hash=%s",
+		height, work.String(), latestHash[:16])
+
+	s.pm.BroadcastNewStatus(s.ctx, height, work, latestHash)
+}
+
+// =============================================================================
+// PEER PENALTY CLASSIFICATION
+// =============================================================================
+
+// classifySyncError categorizes sync errors and returns appropriate penalty scores
+// Returns (persistent, transient, reason) where:
+//   - persistent: permanent score that never decays (for severe violations)
+//   - transient: temporary score that decays over time (for minor issues)
+//   - reason: human-readable explanation of the error category
+//
+// Penalty scoring strategy:
+//   - Severe violations (invalid blocks, corruption): 50-100 persistent points
+//   - Network issues (timeouts, disconnections): 10-30 transient points
+//   - Protocol violations (invalid format, consensus): 30-70 persistent points
+//   - Performance issues (slow responses, rate limits): 5-20 transient points
+func classifySyncError(err error) (persistent, transient uint32, reason string) {
+	if err == nil {
+		return 0, 0, "no error"
+	}
+
+	errStr := err.Error()
+	errLower := strings.ToLower(errStr)
+
+	// Chain discontinuity and invalid block data (most severe)
+	if strings.Contains(errLower, "chain discontinuity") ||
+		strings.Contains(errLower, "invalid block") ||
+		strings.Contains(errLower, "corrupted block") ||
+		strings.Contains(errLower, "invalid prevhash") ||
+		strings.Contains(errLower, "block validation failed") {
+		// Persistent: 50 (severe - providing invalid blockchain data)
+		// This is already handled in storeFunc with additional context
+		return 50, 20, "invalid block data"
+	}
+
+	// Consensus rule violations
+	if strings.Contains(errLower, "consensus") ||
+		strings.Contains(errLower, "invalid merkle") ||
+		strings.Contains(errLower, "merkle root mismatch") ||
+		strings.Contains(errLower, "invalid proof of work") ||
+		strings.Contains(errLower, "difficulty mismatch") {
+		// Persistent: 70 (very severe - violating consensus rules)
+		return 70, 30, "consensus violation"
+	}
+
+	// Block format and structure errors
+	if strings.Contains(errLower, "invalid format") ||
+		strings.Contains(errLower, "malformed block") ||
+		strings.Contains(errLower, "missing header") ||
+		strings.Contains(errLower, "invalid transaction") {
+		// Persistent: 40 (severe - sending malformed data)
+		return 40, 15, "malformed data"
+	}
+
+	// Network timeout and connectivity issues
+	if strings.Contains(errLower, "timeout") ||
+		strings.Contains(errLower, "deadline exceeded") ||
+		strings.Contains(errLower, "connection reset") ||
+		strings.Contains(errLower, "connection refused") {
+		// Transient: 20 (temporary - network issues may be intermittent)
+		return 0, 20, "network timeout"
+	}
+
+	// Peer disconnection during sync
+	if strings.Contains(errLower, "disconnected") ||
+		strings.Contains(errLower, "connection closed") ||
+		strings.Contains(errLower, "EOF") {
+		// Transient: 15 (minor - may be network instability)
+		return 0, 15, "peer disconnected"
+	}
+
+	// Rate limiting and resource exhaustion
+	if strings.Contains(errLower, "rate limit") ||
+		strings.Contains(errLower, "too many requests") ||
+		strings.Contains(errLower, "resource exhausted") {
+		// Transient: 25 (moderate - peer is overwhelmed)
+		return 0, 25, "rate limited"
+	}
+
+	// Protocol errors and invalid responses
+	if strings.Contains(errLower, "protocol error") ||
+		strings.Contains(errLower, "unexpected response") ||
+		strings.Contains(errLower, "invalid response") {
+		// Persistent: 30 (moderate - not following protocol)
+		return 30, 10, "protocol violation"
+	}
+
+	// Block not found or missing data
+	if strings.Contains(errLower, "not found") ||
+		strings.Contains(errLower, "missing block") ||
+		strings.Contains(errLower, "data unavailable") {
+		// Transient: 10 (minor - may be temporary unavailability)
+		return 0, 10, "data unavailable"
+	}
+
+	// Fork-related errors
+	if strings.Contains(errLower, "fork") ||
+		strings.Contains(errLower, "orphan block") ||
+		strings.Contains(errLower, "stale block") {
+		// Transient: 25 (moderate - may indicate fork attempt)
+		return 0, 25, "fork detected"
+	}
+
+	// Generic sync failures (catch-all)
+	if strings.Contains(errLower, "sync failed") ||
+		strings.Contains(errLower, "batch download failed") ||
+		strings.Contains(errLower, "storage failed") {
+		// Persistent: 20, Transient: 10 (moderate - sync infrastructure issue)
+		return 20, 10, "sync failure"
+	}
+
+	// Default case: unknown error
+	// Apply minimal penalty to avoid false positives
+	return 10, 5, "unknown error"
 }

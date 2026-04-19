@@ -27,12 +27,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nogochain/nogo/blockchain/utils"
 	"github.com/nogochain/nogo/config"
 )
 
 // AdvancedPeerScorer extends PeerScorer with production-grade features
 // Implements scoring formula: Score = 0.3*Latency + 0.4*SuccessRate + 0.3*Trust
+// Blacklist management is delegated to PeerBanChecker (SecurityManager).
 type AdvancedPeerScorer struct {
 	mu sync.RWMutex
 
@@ -50,18 +50,18 @@ type AdvancedPeerScorer struct {
 	latencyGoodMs           float64
 	latencyPoorMs           float64
 
-	// Blacklist management
-	blacklist     map[string]*BlacklistEntry
-	blacklistMu   sync.RWMutex
-	maxBlacklistSize int
+	// Ban checker delegates to SecurityManager for unified ban decisions
+	banChecker PeerBanChecker
+
+	// Callback invoked when peer should be banned (delegated to SecurityManager)
+	onPeerBan func(peerID, reason string)
 
 	// Signature verification key for anti-tampering
 	signatureKey []byte
 
 	// Metrics
-	totalUpdates    uint64
-	totalDecays     uint64
-	totalBlacklists uint64
+	totalUpdates uint64
+	totalDecays  uint64
 }
 
 // AdvancedPeerScore extends PeerScore with additional production metrics
@@ -84,27 +84,17 @@ type AdvancedPeerScore struct {
 	TrustLevel       float64
 
 	// Advanced metrics
-	LatencyHistory    []float64 // Rolling window of latency samples
-	SuccessHistory    []bool    // Rolling window of success/failure
-	ScoreHistory      []float64 // Historical scores for trend analysis
-	LastScoreUpdate   time.Time
-	Signature         string    // Anti-tampering signature
-	IsBlacklisted     bool
-	BlacklistReason   string
-	BlacklistSince    time.Time
+	LatencyHistory  []float64 // Rolling window of latency samples
+	SuccessHistory  []bool    // Rolling window of success/failure
+	ScoreHistory    []float64 // Historical scores for trend analysis
+	LastScoreUpdate time.Time
+	Signature       string // Anti-tampering signature
 }
 
-// BlacklistEntry represents a blacklisted peer
-type BlacklistEntry struct {
-	Peer      string
-	Reason    string
-	Since     time.Time
-	Expires   time.Time // Zero means permanent
-	Hash      string    // Cryptographic hash of blacklist entry
-}
-
-// NewAdvancedPeerScorer creates a production-grade peer scorer
-func NewAdvancedPeerScorer(maxPeers int) *AdvancedPeerScorer {
+// NewAdvancedPeerScorer creates a production-grade peer scorer.
+// The banChecker parameter delegates ban decisions to SecurityManager.
+// If banChecker is nil, no ban checking is performed (peers are never considered banned).
+func NewAdvancedPeerScorer(maxPeers int, banChecker PeerBanChecker) *AdvancedPeerScorer {
 	if maxPeers <= 0 {
 		maxPeers = config.DefaultP2PMaxPeers
 	}
@@ -126,10 +116,17 @@ func NewAdvancedPeerScorer(maxPeers int) *AdvancedPeerScorer {
 		latencyExcellentMs: float64(config.DefaultLatencyExcellentThresholdMs),
 		latencyGoodMs:      float64(config.DefaultLatencyGoodThresholdMs),
 		latencyPoorMs:      float64(config.DefaultLatencyPoorThresholdMs),
-		blacklist:          make(map[string]*BlacklistEntry),
-		maxBlacklistSize:   10000,
+		banChecker:         banChecker,
 		signatureKey:       signatureKey,
 	}
+}
+
+// SetOnPeerBan sets the callback invoked when a peer should be banned.
+// The callback typically delegates to SecurityManager.BanPeer.
+func (aps *AdvancedPeerScorer) SetOnPeerBan(cb func(peerID, reason string)) {
+	aps.mu.Lock()
+	aps.onPeerBan = cb
+	aps.mu.Unlock()
 }
 
 // RecordSuccess records a successful peer interaction with comprehensive metrics
@@ -137,9 +134,9 @@ func (aps *AdvancedPeerScorer) RecordSuccess(peer string, latencyMs int64) {
 	aps.mu.Lock()
 	defer aps.mu.Unlock()
 
-	// Check if peer is blacklisted
-	if aps.isBlacklisted(peer) {
-		log.Printf("peer_scorer: rejected blacklisted peer %s", peer)
+	// Check if peer is banned via SecurityManager
+	if aps.banChecker != nil && aps.banChecker.IsPeerBanned(peer) {
+		log.Printf("peer_scorer: rejected banned peer %s", peer)
 		return
 	}
 
@@ -211,9 +208,14 @@ func (aps *AdvancedPeerScorer) RecordFailure(peer string) {
 		p.LastScoreUpdate = now
 		p.Signature = aps.generateSignature(p)
 
-		// Auto-blacklist on consecutive failures
+		// Delegate ban decision to SecurityManager via callback
 		if p.ConsecutiveFails >= config.DefaultPeerScorerMaxConsecutiveFails {
-			aps.blacklistPeer(peer, "consecutive_failures", p.ConsecutiveFails)
+			reason := fmt.Sprintf("consecutive_failures (%d)", p.ConsecutiveFails)
+			if aps.onPeerBan != nil {
+				aps.onPeerBan(peer, reason)
+			}
+			delete(aps.peers, peer)
+			log.Printf("peer_scorer: peer %s flagged for ban (consecutive_failures=%d)", peer, p.ConsecutiveFails)
 		}
 
 		aps.totalUpdates++
@@ -339,71 +341,15 @@ func (aps *AdvancedPeerScorer) verifySignature(p *AdvancedPeerScore) bool {
 	return p.Signature == expectedSig
 }
 
-// blacklistPeer adds a peer to the blacklist
-func (aps *AdvancedPeerScorer) blacklistPeer(peer, reason string, failCount int) {
-	aps.blacklistMu.Lock()
-	defer aps.blacklistMu.Unlock()
-
-	entry := &BlacklistEntry{
-		Peer:    peer,
-		Reason:  fmt.Sprintf("%s (failures=%d)", reason, failCount),
-		Since:   time.Now(),
-		Expires: time.Time{}, // Permanent blacklist
-	}
-
-	// Generate cryptographic hash for entry
-	hashData := fmt.Sprintf("%s:%s:%d", entry.Peer, entry.Reason, entry.Since.UnixNano())
-	hash := sha256.Sum256([]byte(hashData))
-	entry.Hash = hex.EncodeToString(hash[:])
-
-	aps.blacklist[peer] = entry
-	aps.totalBlacklists++
-
-	// Remove from active peers
-	delete(aps.peers, peer)
-
-	log.Printf("peer_scorer: blacklisted peer %s (reason=%s, hash=%s)",
-		peer, entry.Reason, entry.Hash)
-
-	// Cleanup old blacklist entries if needed
-	if len(aps.blacklist) > aps.maxBlacklistSize {
-		aps.cleanupBlacklist()
-	}
-}
-
-// isBlacklisted checks if a peer is blacklisted
-func (aps *AdvancedPeerScorer) isBlacklisted(peer string) bool {
-	aps.blacklistMu.RLock()
-	defer aps.blacklistMu.RUnlock()
-
-	entry, exists := aps.blacklist[peer]
-	if !exists {
+// isPeerBanned checks if a peer is banned via SecurityManager
+func (aps *AdvancedPeerScorer) isPeerBanned(peer string) bool {
+	if aps.banChecker == nil {
 		return false
 	}
-
-	// Check if blacklist has expired
-	if !entry.Expires.IsZero() && time.Now().After(entry.Expires) {
-		return false
-	}
-
-	return true
+	return aps.banChecker.IsPeerBanned(peer)
 }
 
-// cleanupBlacklist removes expired blacklist entries
-func (aps *AdvancedPeerScorer) cleanupBlacklist() {
-	aps.blacklistMu.Lock()
-	defer aps.blacklistMu.Unlock()
-
-	now := time.Now()
-	for peer, entry := range aps.blacklist {
-		if !entry.Expires.IsZero() && now.After(entry.Expires) {
-			delete(aps.blacklist, peer)
-			log.Printf("peer_scorer: removed expired blacklist entry for %s", peer)
-		}
-	}
-}
-
-// GetBestPeerByScore returns the highest-scoring non-blacklisted peer
+// GetBestPeerByScore returns the highest-scoring non-banned peer
 func (aps *AdvancedPeerScorer) GetBestPeerByScore() string {
 	aps.mu.RLock()
 	defer aps.mu.RUnlock()
@@ -412,8 +358,8 @@ func (aps *AdvancedPeerScorer) GetBestPeerByScore() string {
 	var bestScore float64 = -1.0
 
 	for peer, p := range aps.peers {
-		// Skip blacklisted peers
-		if aps.isBlacklisted(peer) {
+		// Skip banned peers
+		if aps.isPeerBanned(peer) {
 			continue
 		}
 
@@ -444,7 +390,7 @@ func (aps *AdvancedPeerScorer) GetTopPeersByScore(n int) []string {
 
 	var scored []scoredPeer
 	for peer, p := range aps.peers {
-		if !aps.isBlacklisted(peer) && aps.verifySignature(p) {
+		if !aps.isPeerBanned(peer) && aps.verifySignature(p) {
 			scored = append(scored, scoredPeer{peer: peer, score: p.Score})
 		}
 	}
@@ -583,27 +529,16 @@ func (aps *AdvancedPeerScorer) Count() int {
 	return len(aps.peers)
 }
 
-// GetBlacklistCount returns number of blacklisted peers
-func (aps *AdvancedPeerScorer) GetBlacklistCount() int {
-	aps.blacklistMu.RLock()
-	defer aps.blacklistMu.RUnlock()
-	return len(aps.blacklist)
-}
-
 // GetMetrics returns scorer metrics for monitoring
 func (aps *AdvancedPeerScorer) GetMetrics() map[string]interface{} {
 	aps.mu.RLock()
-	aps.blacklistMu.RLock()
 	defer aps.mu.RUnlock()
-	defer aps.blacklistMu.RUnlock()
 
 	return map[string]interface{}{
-		"total_peers":       len(aps.peers),
-		"blacklisted_peers": len(aps.blacklist),
-		"total_updates":     aps.totalUpdates,
-		"total_decays":      aps.totalDecays,
-		"total_blacklists":  aps.totalBlacklists,
-		"timestamp":         time.Now().UTC().Format(time.RFC3339),
+		"total_peers":   len(aps.peers),
+		"total_updates": aps.totalUpdates,
+		"total_decays":  aps.totalDecays,
+		"timestamp":     time.Now().UTC().Format(time.RFC3339),
 	}
 }
 
@@ -633,90 +568,23 @@ func (aps *AdvancedPeerScorer) GetPeerDetailedStats(peer string) map[string]inte
 		}
 
 		return map[string]interface{}{
-			"score":                 p.Score,
-			"success_count":         p.SuccessCount,
-			"failure_count":         p.FailureCount,
-			"consecutive_fails":     p.ConsecutiveFails,
-			"avg_latency_ms":        avgLatency,
-			"recent_success_rate":   recentSuccessRate,
-			"trust_level":           p.TrustLevel,
-			"is_reliable":           p.IsReliable,
-			"chain_height":          p.ChainHeight,
-			"bytes_sent":            p.BytesSent,
-			"bytes_received":        p.BytesReceived,
-			"last_seen":             p.LastSeen,
-			"first_seen":            p.FirstSeen,
-			"signature_valid":       aps.verifySignature(p),
-			"is_blacklisted":        aps.isBlacklisted(peer),
-			"latency_samples":       len(p.LatencyHistory),
-			"success_samples":       len(p.SuccessHistory),
-		}
-	}
-	return nil
-}
-
-// AddToBlacklist manually adds a peer to blacklist with expiration
-func (aps *AdvancedPeerScorer) AddToBlacklist(peer, reason string, expires time.Duration) error {
-	if peer == "" {
-		return utils.ErrInvalidPeer
-	}
-
-	aps.blacklistMu.Lock()
-	defer aps.blacklistMu.Unlock()
-
-	entry := &BlacklistEntry{
-		Peer:    peer,
-		Reason:  reason,
-		Since:   time.Now(),
-		Expires: time.Now().Add(expires),
-	}
-
-	hashData := fmt.Sprintf("%s:%s:%d:%d", entry.Peer, entry.Reason, entry.Since.UnixNano(), entry.Expires.UnixNano())
-	hash := sha256.Sum256([]byte(hashData))
-	entry.Hash = hex.EncodeToString(hash[:])
-
-	aps.blacklist[peer] = entry
-	aps.totalBlacklists++
-
-	// Remove from active peers if present
-	aps.mu.Lock()
-	delete(aps.peers, peer)
-	aps.mu.Unlock()
-
-	log.Printf("peer_scorer: manually blacklisted peer %s (reason=%s, expires=%v, hash=%s)",
-		peer, reason, expires, entry.Hash)
-
-	return nil
-}
-
-// RemoveFromBlacklist removes a peer from blacklist
-func (aps *AdvancedPeerScorer) RemoveFromBlacklist(peer string) error {
-	aps.blacklistMu.Lock()
-	defer aps.blacklistMu.Unlock()
-
-	if _, exists := aps.blacklist[peer]; !exists {
-		return fmt.Errorf("peer %s not in blacklist", peer)
-	}
-
-	delete(aps.blacklist, peer)
-	log.Printf("peer_scorer: removed peer %s from blacklist", peer)
-
-	return nil
-}
-
-// GetBlacklistInfo returns blacklist entry details
-func (aps *AdvancedPeerScorer) GetBlacklistInfo(peer string) map[string]interface{} {
-	aps.blacklistMu.RLock()
-	defer aps.blacklistMu.RUnlock()
-
-	if entry, exists := aps.blacklist[peer]; exists {
-		return map[string]interface{}{
-			"peer":       entry.Peer,
-			"reason":     entry.Reason,
-			"since":      entry.Since,
-			"expires":    entry.Expires,
-			"is_expired": !entry.Expires.IsZero() && time.Now().After(entry.Expires),
-			"hash":       entry.Hash,
+			"score":               p.Score,
+			"success_count":       p.SuccessCount,
+			"failure_count":       p.FailureCount,
+			"consecutive_fails":   p.ConsecutiveFails,
+			"avg_latency_ms":      avgLatency,
+			"recent_success_rate": recentSuccessRate,
+			"trust_level":         p.TrustLevel,
+			"is_reliable":         p.IsReliable,
+			"chain_height":        p.ChainHeight,
+			"bytes_sent":          p.BytesSent,
+			"bytes_received":      p.BytesReceived,
+			"last_seen":           p.LastSeen,
+			"first_seen":          p.FirstSeen,
+			"signature_valid":     aps.verifySignature(p),
+			"is_banned":           aps.isPeerBanned(peer),
+			"latency_samples":     len(p.LatencyHistory),
+			"success_samples":     len(p.SuccessHistory),
 		}
 	}
 	return nil
@@ -752,7 +620,7 @@ func (aps *AdvancedPeerScorer) GetReliablePeers() []string {
 
 	var reliable []string
 	for peer, p := range aps.peers {
-		if p.IsReliable && p.Score >= aps.minScore && !aps.isBlacklisted(peer) {
+		if p.IsReliable && p.Score >= aps.minScore && !aps.isPeerBanned(peer) {
 			reliable = append(reliable, peer)
 		}
 	}
@@ -766,7 +634,7 @@ func (aps *AdvancedPeerScorer) GetAllPeerScores() map[string]float64 {
 
 	scores := make(map[string]float64)
 	for peer, p := range aps.peers {
-		if !aps.isBlacklisted(peer) {
+		if !aps.isPeerBanned(peer) {
 			scores[peer] = p.Score
 		}
 	}
@@ -805,7 +673,7 @@ func (aps *AdvancedPeerScorer) GetPeerCountByScoreRange() map[string]int {
 	}
 
 	for _, p := range aps.peers {
-		if aps.isBlacklisted(p.Peer) {
+		if aps.isPeerBanned(p.Peer) {
 			continue
 		}
 

@@ -10,12 +10,25 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
-	MaxMessageSize  = 4 << 20
+	MaxMessageSize = 16 << 20
 )
 
 type MessageType uint8
 
+// Wire protocol message type codes.
+// Canonical types (active): Ping, Pong, GetBlocks, GetHeaders, Headers, Block,
+// GetBlock, GetChainInfo, ChainInfo, NotFound, Error, Version, VerAck, Addr,
+// Inv, GetData, Reject, MemPool, SendHeaders, SendCompactBlocks, CompactBlock.
+//
+// Deprecated aliases (reserved for backward compatibility, do not use in new code):
+//   MessageTypeBlocks(0x04)      -> use Inv+GetData flow
+//   MessageTypeGetTX(0x05)       -> use MessageTypeGetData(0x14)
+//   MessageTypeTX(0x06)          -> use MessageTypeTransaction(0x0B)
+//   MessageTypeTransaction(0x0B) -> canonical for single transaction relay
+//   MessageTypePingExtended(0x1B)-> reserved, use MessageTypePing(0x01)
+//   MessageTypePongExtended(0x1C)-> reserved, use MessageTypePong(0x02)
+//
+// Handshake protocol uses 0x80-0x8F range (see bootstrap_peer_manager.go).
 const (
 	MessageTypePing              MessageType = 0x01
 	MessageTypePong              MessageType = 0x02
@@ -78,7 +91,7 @@ type Hello struct {
 
 func NewHello(chainID uint64, rulesHash, nodeID string) Hello {
 	return Hello{
-		Protocol:  ProtocolVersion,
+		Protocol:  ProtocolVersionNumber,
 		ChainID:   chainID,
 		RulesHash: rulesHash,
 		NodeID:    nodeID,
@@ -143,20 +156,21 @@ type BlockBroadcast struct {
 }
 
 type GetDataRequest struct {
-	InvType  InvType  `json:"invType"`
+	InvType  uint8    `json:"invType"`
 	Hash     []byte   `json:"hash"`
 	BlockLoc [][]byte `json:"blockLocator,omitempty"`
 	HashStop []byte   `json:"hashStop,omitempty"`
 }
 
-type InvType uint8
-
+// Inventory type codes for GetData requests.
+// Must align with blockchain/network.InventoryType values:
+//   0 = Error, 1 = TX, 2 = Block, 3 = Filtered Block, 4 = Compact Block
 const (
-	InvTypeError        InvType = 0
-	InvTypeMSG_TX       InvType = 1
-	InvTypeMSG_BLOCK    InvType = 2
-	InvTypeMSG_COMPACT  InvType = 4
-	InvTypeMSG_FILTERED InvType = 3
+	InvTypeError        uint8 = 0
+	InvTypeMSG_TX       uint8 = 1
+	InvTypeMSG_BLOCK    uint8 = 2
+	InvTypeMSG_FILTERED uint8 = 3
+	InvTypeMSG_COMPACT  uint8 = 4
 )
 
 type InvMessage struct {
@@ -164,8 +178,8 @@ type InvMessage struct {
 }
 
 type InvItem struct {
-	Type InvType `json:"type"`
-	Hash []byte  `json:"hash"`
+	Type uint8 `json:"type"`
+	Hash []byte `json:"hash"`
 }
 
 type Address struct {

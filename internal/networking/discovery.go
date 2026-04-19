@@ -3,6 +3,7 @@ package networking
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net"
@@ -154,42 +155,68 @@ func (k *Kademlia) Ping(addr string) bool {
 	}
 
 	buf := make([]byte, 1024)
-	conn.Read(buf)
-
-	return true
+	_, err = conn.Read(buf)
+	return err == nil
 }
 
 func (k *Kademlia) FindNode(addr string, targetID []byte) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial peer for find_node: %w", err)
 	}
 	defer conn.Close()
+
+	select {
+	case <-ctx.Done():
+		conn.Close()
+		return nil, fmt.Errorf("find_node context expired: %w", ctx.Err())
+	default:
+	}
 
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	req := fmt.Sprintf(`{"method":"find_node","params":{"target":"%x"},"id":1}`, targetID)
 	_, err = conn.Write([]byte(req + "\n"))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("send find_node request: %w", err)
 	}
 
 	buf := make([]byte, 4096)
 	n, err := conn.Read(buf)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read find_node response: %w", err)
+	}
+
+	if n == 0 {
+		return nil, fmt.Errorf("empty find_node response")
+	}
+
+	var response struct {
+		Result struct {
+			Peers []struct {
+				NodeID string `json:"node_id"`
+				Addr   string `json:"addr"`
+			} `json:"peers"`
+		} `json:"result"`
+	}
+
+	if err := json.Unmarshal(buf[:n], &response); err != nil {
+		return nil, fmt.Errorf("parse find_node response: %w", err)
 	}
 
 	var peers []string
+	for _, p := range response.Result.Peers {
+		if p.Addr != "" {
+			k.AddContact([]byte(p.NodeID), p.Addr)
+			peers = append(peers, p.Addr)
+		}
+	}
 
-	_ = ctx
-	_ = n
-	_ = peers
-
-	return nil, fmt.Errorf("find_node response parsing not implemented")
+	return peers, nil
 }
 
 func (k *Kademlia) RefreshBuckets() {

@@ -8,10 +8,10 @@ import (
 )
 
 // DefaultOrphanPoolSize defines the default maximum number of orphan blocks
-const DefaultOrphanPoolSize = 1000
+const DefaultOrphanPoolSize = 256
 
 // DefaultOrphanTTL defines the default time-to-live for orphan blocks
-const DefaultOrphanTTL = 24 * time.Hour
+const DefaultOrphanTTL = 60 * time.Minute
 
 // OrphanPool manages orphan blocks (blocks with unknown parents)
 // Thread-safe implementation with TTL and size limit

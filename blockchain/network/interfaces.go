@@ -30,6 +30,13 @@ import (
 	"github.com/nogochain/nogo/blockchain/core"
 )
 
+// HeaderLocator bundles a block header with its height for chain traversal
+// BlockHeader does not store height internally, so this struct carries both
+type HeaderLocator struct {
+	Header *core.BlockHeader
+	Height uint64
+}
+
 // BlockchainInterface defines the blockchain interface for P2P operations
 // Interface-based design for decoupling and testability
 type BlockchainInterface interface {
@@ -42,6 +49,10 @@ type BlockchainInterface interface {
 	Blocks() []*core.Block
 	CanonicalWork() *big.Int
 	RulesHashHex() string
+
+	// Header-based chain access for block locator (Bitcoin-style sparse hash list)
+	BestBlockHeader() (*HeaderLocator, error)
+	GetHeaderByHeight(height uint64) (*HeaderLocator, error)
 
 	// Chain state
 	GetChainID() uint64
@@ -91,6 +102,13 @@ type Miner interface {
 	ResumeMining()
 	IsVerifying() bool
 	OnBlockAdded()
+}
+
+// PeerBanChecker is the interface for checking whether a peer is banned.
+// SecurityManager implements this interface, allowing AdvancedPeerScorer
+// to delegate ban checks to the unified security gateway.
+type PeerBanChecker interface {
+	IsPeerBanned(peerID string) bool
 }
 
 // Mempool defines the mempool interface for transaction management
@@ -329,43 +347,9 @@ func GetGlobalFormatter() LogFormatter {
 	return &defaultLogFormatter{}
 }
 
-// P2PManager is an alias for P2PPeerManager for backward compatibility
-// Production-grade: this type alias maintains compatibility with existing code
-type P2PManager = P2PPeerManager
-
-// NewP2PManager creates a new P2P manager instance (compatibility wrapper)
-// Production-grade: wrapper function for backward compatibility
-func NewP2PManager(cfg interface{}, chain interface{}, store interface{}) (*P2PManager, error) {
-	// Extract parameters from interface{} for compatibility
-	// In production code, these would be properly typed
-	chainID := uint64(1)
-	rulesHash := ""
-	nodeID := ""
-	peers := []string{}
-
-	// Try to extract chain from the interface
-	if ch, ok := chain.(*core.Chain); ok {
-		chainID = ch.GetChainID()
-	}
-
-	// Try to extract config
-	if cfgMap, ok := cfg.(map[string]interface{}); ok {
-		if cid, ok := cfgMap["chainID"].(uint64); ok {
-			chainID = cid
-		}
-		if rh, ok := cfgMap["rulesHash"].(string); ok {
-			rulesHash = rh
-		}
-		if nid, ok := cfgMap["nodeID"].(string); ok {
-			nodeID = nid
-		}
-		if p, ok := cfgMap["peers"].([]string); ok {
-			peers = p
-		}
-	}
-
-	return NewP2PPeerManager(chainID, rulesHash, nodeID, peers), nil
-}
+// P2PManager is an alias for Switch for backward compatibility.
+// Production-grade: redirects legacy references to the new Switch architecture.
+type P2PManager = Switch
 
 type defaultLogFormatter struct{}
 

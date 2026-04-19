@@ -43,26 +43,38 @@ type ForkEvent struct {
 	AlertLevel   string
 }
 
+// ForkDetectorConfig holds configurable parameters for fork detection
+type ForkDetectorConfig struct {
+	MaxEvents         int
+	AlertCooldown     time.Duration
+	DeepForkThreshold uint64
+}
+
+// DefaultForkDetectorConfig returns production-grade default configuration
+func DefaultForkDetectorConfig() ForkDetectorConfig {
+	return ForkDetectorConfig{
+		MaxEvents:         1000,
+		AlertCooldown:     30 * time.Second,
+		DeepForkThreshold: 6,
+	}
+}
+
 // ForkDetector monitors chain state for forks
 // Production-grade: real-time fork detection with alerting
 // Thread-safe: uses mutex for event management
 type ForkDetector struct {
-	mu                sync.RWMutex
-	events            []ForkEvent
-	maxEvents         int
-	alertCallback     func(ForkEvent)
-	lastAlert         time.Time
-	alertCooldown     time.Duration
-	deepForkThreshold uint64
+	mu            sync.RWMutex
+	events        []ForkEvent
+	cfg           ForkDetectorConfig
+	alertCallback func(ForkEvent)
+	lastAlert     time.Time
 }
 
 // NewForkDetector creates a new fork detector
-func NewForkDetector() *ForkDetector {
+func NewForkDetector(cfg ForkDetectorConfig) *ForkDetector {
 	return &ForkDetector{
-		events:            make([]ForkEvent, 0),
-		maxEvents:         1000,
-		alertCooldown:     30 * time.Second,
-		deepForkThreshold: 6, // Bitcoin's 6-block confirmation rule
+		events: make([]ForkEvent, 0),
+		cfg:    cfg,
 	}
 }
 
@@ -96,10 +108,19 @@ func (fd *ForkDetector) DetectFork(localBlock, remoteBlock *Block, peerID string
 	}
 
 	// Parse work values
-	localWork, _ := StringToWork(localBlock.TotalWork)
-	remoteWork, _ := StringToWork(remoteBlock.TotalWork)
+	localWork, localWorkOk := StringToWork(localBlock.TotalWork)
+	remoteWork, remoteWorkOk := StringToWork(remoteBlock.TotalWork)
 	event.LocalWork = localWork
 	event.RemoteWork = remoteWork
+
+	if !localWorkOk || !remoteWorkOk {
+		event.Type = ForkTypePersistent
+		event.AlertLevel = "HIGH"
+		event.Depth = 0
+		fd.recordEvent(event)
+		fd.triggerAlert(event)
+		return event
+	}
 
 	// Core-Geth style: Check for symmetric fork condition
 	if localBlock.GetHeight() == remoteBlock.GetHeight() {
@@ -137,14 +158,15 @@ func (fd *ForkDetector) DetectFork(localBlock, remoteBlock *Block, peerID string
 			shallowerBlock = localBlock
 		}
 
-		// Calculate approximate fork depth
+		// Approximate fork depth as height difference
+		// True fork depth requires walking back to common ancestor
 		depth := deeperBlock.GetHeight() - shallowerBlock.GetHeight()
 		event.Depth = depth
 		event.Type = ForkTypeTemporary
 		event.AlertLevel = "MEDIUM"
 
 		// Classify fork type based on depth
-		if depth >= fd.deepForkThreshold {
+		if depth >= fd.cfg.DeepForkThreshold {
 			event.Type = ForkTypeDeep
 			event.AlertLevel = "CRITICAL"
 		}
@@ -189,8 +211,8 @@ func (fd *ForkDetector) recordEvent(event *ForkEvent) {
 	fd.events = append(fd.events, *event)
 
 	// Maintain max events limit
-	if len(fd.events) > fd.maxEvents {
-		fd.events = fd.events[len(fd.events)-fd.maxEvents:]
+	if len(fd.events) > fd.cfg.MaxEvents {
+		fd.events = fd.events[len(fd.events)-fd.cfg.MaxEvents:]
 	}
 }
 
@@ -200,7 +222,7 @@ func (fd *ForkDetector) triggerAlert(event *ForkEvent) {
 	defer fd.mu.Unlock()
 
 	// Check cooldown
-	if time.Since(fd.lastAlert) < fd.alertCooldown {
+	if time.Since(fd.lastAlert) < fd.cfg.AlertCooldown {
 		return
 	}
 
@@ -255,16 +277,20 @@ func (fd *ForkDetector) GetForkStats() map[string]interface{} {
 	for _, event := range fd.events {
 		switch event.Type {
 		case ForkTypePersistent:
-			stats["persistent_forks"] = stats["persistent_forks"].(int) + 1
+			persistentForks, _ := stats["persistent_forks"].(int)
+			stats["persistent_forks"] = persistentForks + 1
 		case ForkTypeDeep:
-			stats["deep_forks"] = stats["deep_forks"].(int) + 1
+			deepForks, _ := stats["deep_forks"].(int)
+			stats["deep_forks"] = deepForks + 1
 		}
 
 		if event.AlertLevel == "CRITICAL" {
-			stats["critical_alerts"] = stats["critical_alerts"].(int) + 1
+			criticalAlerts, _ := stats["critical_alerts"].(int)
+			stats["critical_alerts"] = criticalAlerts + 1
 		}
 
-		if event.Depth > stats["max_fork_depth"].(uint64) {
+		maxForkDepth, _ := stats["max_fork_depth"].(uint64)
+		if event.Depth > maxForkDepth {
 			stats["max_fork_depth"] = event.Depth
 		}
 		totalDepth += event.Depth
@@ -290,7 +316,7 @@ func (fd *ForkDetector) SetDeepForkThreshold(threshold uint64) {
 	fd.mu.Lock()
 	defer fd.mu.Unlock()
 
-	fd.deepForkThreshold = threshold
+	fd.cfg.DeepForkThreshold = threshold
 }
 
 // GetDeepForkThreshold returns the current deep fork threshold
@@ -298,5 +324,5 @@ func (fd *ForkDetector) GetDeepForkThreshold() uint64 {
 	fd.mu.RLock()
 	defer fd.mu.RUnlock()
 
-	return fd.deepForkThreshold
+	return fd.cfg.DeepForkThreshold
 }

@@ -25,6 +25,10 @@ services:
       - HTTP_ADDR=${HTTP_ADDR:-127.0.0.1:8080}
       - WS_ENABLE=${WS_ENABLE:-true}
       - WS_MAX_CONNECTIONS=${WS_MAX_CONNECTIONS:-100}
+      - NOGO_P2P_PORT=${NOGO_P2P_PORT:-9090}
+      - NOGO_P2P_PEERS=${NOGO_P2P_PEERS:-main.nogochain.org:9090,wallet.nogochain.org:9090,node.nogochain.org:9090}
+      - NOGO_ENCRYPTION_MODE=${NOGO_ENCRYPTION_MODE:-both}
+      - NOGO_LOG_LEVEL=${NOGO_LOG_LEVEL:-info}
     restart: always # Ensure the service restarts if the watchdog triggers os.Exit(0)
     command: ["./blockchain", "server"] # Start the blockchain in server mode
     # Brand: Add container_name for brand identification

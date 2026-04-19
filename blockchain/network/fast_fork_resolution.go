@@ -5,6 +5,7 @@
 package network
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,60 +19,108 @@ import (
 	"github.com/nogochain/nogo/blockchain/core"
 )
 
+// ForkResolutionConfig holds configurable parameters for fork resolution engine
+type ForkResolutionConfig struct {
+	QueueBufferSize     int
+	Workers             int
+	MinResolutionTime   time.Duration
+	FastResolutionTime  time.Duration
+	VoteExpiry          time.Duration
+	SubmitTimeout       time.Duration
+	DefaultPeerQuality  int
+	ActivePeerTimeout   time.Duration
+	TopologyInterval    time.Duration
+	MaxNetworkEvents    int
+	LongStandingPeerAge time.Duration
+	LongStandingBonus   float64
+	InactivePeerAge     time.Duration
+	InactiveDecayFactor float64
+	MaxReorgDepth       uint64
+	MinReorgInterval    time.Duration
+}
+
+// DefaultForkResolutionConfig returns production-grade default configuration
+func DefaultForkResolutionConfig() ForkResolutionConfig {
+	return ForkResolutionConfig{
+		QueueBufferSize:     1000,
+		Workers:             4,
+		MinResolutionTime:   100 * time.Millisecond,
+		FastResolutionTime:  50 * time.Millisecond,
+		VoteExpiry:          10 * time.Minute,
+		SubmitTimeout:       100 * time.Millisecond,
+		DefaultPeerQuality:  8,
+		ActivePeerTimeout:   2 * time.Minute,
+		TopologyInterval:    30 * time.Second,
+		MaxNetworkEvents:    1000,
+		LongStandingPeerAge: 24 * time.Hour,
+		LongStandingBonus:   1.2,
+		InactivePeerAge:     1 * time.Hour,
+		InactiveDecayFactor: 0.5,
+		MaxReorgDepth:       100,
+		MinReorgInterval:    5 * time.Minute,
+	}
+}
+
 // ForkResolutionEngine provides rapid fork resolution
 // Production-grade: implements Bitcoin-style fast fork resolution with multi-node arbitration
 // Thread-safe: uses mutex for concurrent resolution attempts
 type ForkResolutionEngine struct {
 	mu                 sync.RWMutex
+	ctx                context.Context
+	cancel             context.CancelFunc
 	chainSelector      *core.ChainSelector
 	forkDetector       *core.ForkDetector
+	cfg                ForkResolutionConfig
 	resolutionQueue    chan *ResolutionRequest
-	workers            int
 	minResolutionTime  time.Duration
 	fastResolutionTime time.Duration
-	
+	broadcastCallback  func(*ResolutionMessage, string)
+	maxReorgDepth      uint64
+	lastReorgTime      time.Time
+	minReorgInterval   time.Duration
+
 	// Multi-node arbitration state
-	syncStates         map[string]*ChainSyncState // peerID -> state
-	arbitrationVotes   map[string][]*ArbitrationVote // blockHash -> votes
-	voteExpiry         time.Duration
-	topologyMonitor    *TopologyMonitor
-	arbitrationMutex   sync.Mutex
+	syncStates       map[string]*ChainSyncState    // peerID -> state
+	arbitrationVotes map[string][]*ArbitrationVote // blockHash -> votes
+	voteExpiry       time.Duration
+	topologyMonitor  *TopologyMonitor
+	arbitrationMutex sync.Mutex
 }
 
 // ChainSyncState tracks chain state for each peer
 type ChainSyncState struct {
-	PeerID              string
-	ChainTip            *core.Block
-	LastSeen            time.Time
-	ConnectionQuality   int // 1-10 scale
-	VoteWeight          float64
-	IsActive            bool
+	PeerID            string
+	ChainTip          *core.Block
+	LastSeen          time.Time
+	ConnectionQuality int // 1-10 scale
+	VoteWeight        float64
+	IsActive          bool
 }
 
 // ArbitrationVote represents a peer's vote in multi-node arbitration
 type ArbitrationVote struct {
-	PeerID           string
-	VotedBlockHash   []byte
-	VoteTime         time.Time
-	VoteWeight       float64
-	VoteConfidence   float64 // 0.0-1.0
+	PeerID         string
+	VotedBlockHash []byte
+	VoteTime       time.Time
+	VoteWeight     float64
+	VoteConfidence float64 // 0.0-1.0
 }
 
 // TopologyMonitor tracks network topology changes
 type TopologyMonitor struct {
-	activePeers      map[string]bool
-	peerJoinTimes    map[string]time.Time
-	peerLeaveTimes   map[string]time.Time
-	networkEvents    []TopologyEvent
-	topologyMutex    sync.RWMutex
+	activePeers    map[string]bool
+	peerJoinTimes  map[string]time.Time
+	peerLeaveTimes map[string]time.Time
+	networkEvents  []TopologyEvent
+	topologyMutex  sync.RWMutex
 }
 
 // TopologyEvent records network topology changes
 type TopologyEvent struct {
-	EventType    string // "join", "leave", "reconnect"
-	PeerID       string
-	Timestamp    time.Time
-	NodeCount    int
+	EventType string // "join", "leave", "reconnect"
+	PeerID    string
+	Timestamp time.Time
+	NodeCount int
 }
 
 // GetChainSelector returns the chain selector (for sharing)
@@ -118,17 +167,23 @@ type ResolutionResult struct {
 }
 
 // NewForkResolutionEngine creates a new fork resolution engine with multi-node arbitration
-func NewForkResolutionEngine(chainSelector *core.ChainSelector, forkDetector *core.ForkDetector) *ForkResolutionEngine {
+func NewForkResolutionEngine(ctx context.Context, chainSelector *core.ChainSelector, forkDetector *core.ForkDetector, cfg ForkResolutionConfig) *ForkResolutionEngine {
+	childCtx, cancel := context.WithCancel(ctx)
+
 	engine := &ForkResolutionEngine{
+		ctx:                childCtx,
+		cancel:             cancel,
 		chainSelector:      chainSelector,
 		forkDetector:       forkDetector,
-		resolutionQueue:    make(chan *ResolutionRequest, 1000),
-		workers:            4,
-		minResolutionTime:  100 * time.Millisecond,
-		fastResolutionTime: 50 * time.Millisecond,
+		cfg:                cfg,
+		resolutionQueue:    make(chan *ResolutionRequest, cfg.QueueBufferSize),
+		minResolutionTime:  cfg.MinResolutionTime,
+		fastResolutionTime: cfg.FastResolutionTime,
+		maxReorgDepth:      cfg.MaxReorgDepth,
+		minReorgInterval:   cfg.MinReorgInterval,
 		syncStates:         make(map[string]*ChainSyncState),
 		arbitrationVotes:   make(map[string][]*ArbitrationVote),
-		voteExpiry:         10 * time.Minute,
+		voteExpiry:         cfg.VoteExpiry,
 		topologyMonitor: &TopologyMonitor{
 			activePeers:    make(map[string]bool),
 			peerJoinTimes:  make(map[string]time.Time),
@@ -138,7 +193,7 @@ func NewForkResolutionEngine(chainSelector *core.ChainSelector, forkDetector *co
 	}
 
 	// Start resolution workers
-	for i := 0; i < engine.workers; i++ {
+	for i := 0; i < engine.cfg.Workers; i++ {
 		go engine.resolutionWorker(i)
 	}
 
@@ -160,47 +215,56 @@ func (fre *ForkResolutionEngine) SubmitResolution(request *ResolutionRequest) er
 	select {
 	case fre.resolutionQueue <- request:
 		return nil
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(fre.cfg.SubmitTimeout):
 		return fmt.Errorf("resolution queue is full")
 	}
 }
 
 // resolutionWorker processes resolution requests with multi-node arbitration
 func (fre *ForkResolutionEngine) resolutionWorker(id int) {
-	for request := range fre.resolutionQueue {
-		startTime := time.Now()
-
-		// Update peer state for arbitration
-		fre.UpdatePeerState(request.PeerID, request.RemoteBlock, 8) // Default quality 8
-	
-		// Determine resolution strategy based on network size
-		var result *ResolutionResult
-		activePeers := fre.getActivePeers()
-		
-		if len(activePeers) >= 3 {
-			// Multi-node network: use arbitration
-			result = fre.ArbitrateMultiNodeFork(request)
-		} else if len(activePeers) == 2 {
-			// Two-node network: enhanced deterministic resolution
-			result = fre.resolveTwoNodeFork(request)
-		} else {
-			// Single node or small network: standard resolution
-			result = fre.resolveFast(request)
-		}
-
-		if result.Resolved && result.ReorgNeeded {
-			// Execute reorganization
-			if err := fre.executeReorg(result.WinningBlock); err != nil {
-				log.Printf("reorganization failed: worker=%d error=%v winning_block=%x",
-					id, err, result.WinningBlock.Hash,
-				)
+	for {
+		select {
+		case <-fre.ctx.Done():
+			return
+		case request, ok := <-fre.resolutionQueue:
+			if !ok {
+				return
 			}
-		}
 
-		result.ResolutionTime = time.Since(startTime)
-		log.Printf("fork resolution completed: worker=%d resolved=%v strategy=%s resolution_time_ms=%d reorg_needed=%v",
-			id, result.Resolved, fre.getResolutionStrategy(len(activePeers)), result.ResolutionTime.Milliseconds(), result.ReorgNeeded,
-		)
+			startTime := time.Now()
+
+			// Update peer state for arbitration
+			fre.UpdatePeerState(request.PeerID, request.RemoteBlock, fre.cfg.DefaultPeerQuality)
+
+			// Determine resolution strategy based on network size
+			var result *ResolutionResult
+			activePeers := fre.getActivePeers()
+
+			if len(activePeers) >= 3 {
+				// Multi-node network: use arbitration
+				result = fre.ArbitrateMultiNodeFork(request)
+			} else if len(activePeers) == 2 {
+				// Two-node network: enhanced deterministic resolution
+				result = fre.resolveTwoNodeFork(request)
+			} else {
+				// Single node or small network: standard resolution
+				result = fre.resolveFast(request)
+			}
+
+			if result.Resolved && result.ReorgNeeded {
+				// Execute reorganization
+				if err := fre.executeReorg(result.WinningBlock); err != nil {
+					log.Printf("reorganization failed: worker=%d error=%v winning_block=%x",
+						id, err, result.WinningBlock.Hash,
+					)
+				}
+			}
+
+			result.ResolutionTime = time.Since(startTime)
+			log.Printf("fork resolution completed: worker=%d resolved=%v strategy=%s resolution_time_ms=%d reorg_needed=%v",
+				id, result.Resolved, fre.getResolutionStrategy(len(activePeers)), result.ResolutionTime.Milliseconds(), result.ReorgNeeded,
+			)
+		}
 	}
 }
 
@@ -272,7 +336,7 @@ func (fre *ForkResolutionEngine) ArbitrateMultiNodeFork(request *ResolutionReque
 	// Get current network topology
 	activePeers := fre.getActivePeers()
 	totalWeight := fre.calculateTotalNetworkWeight(activePeers)
-	
+
 	if len(activePeers) < 3 {
 		// Fall back to two-node resolution
 		return fre.resolveTwoNodeFork(request)
@@ -289,14 +353,14 @@ func (fre *ForkResolutionEngine) ArbitrateMultiNodeFork(request *ResolutionReque
 
 	// Multi-node arbitration algorithm (2:1 majority required)
 	winner := fre.performWeightedVoting(candidates, totalWeight)
-	
+
 	if winner != nil && string(winner.Hash) != string(request.LocalTip.Hash) {
 		// Network consensus differs from local chain
 		result.Resolved = true
 		result.WinningBlock = winner
 		result.LosingBlock = request.LocalTip
 		result.ReorgNeeded = true
-		
+
 		log.Printf("multi-node arbitration completed: winner_hash=%x votes=%d total_weight=%.2f strategy=2:1-majority",
 			winner.Hash[:8], len(candidates), totalWeight)
 	} else {
@@ -311,12 +375,12 @@ func (fre *ForkResolutionEngine) ArbitrateMultiNodeFork(request *ResolutionReque
 // resolveTwoNodeFork resolves forks in two-node networks with deterministic rules
 func (fre *ForkResolutionEngine) resolveTwoNodeFork(request *ResolutionRequest) *ResolutionResult {
 	result := fre.resolveFast(request)
-	
+
 	// Enhanced deterministic tie-breaking for two-node scenarios
 	if !result.Resolved || result.WinningBlock == nil {
 		result = fre.enhancedTwoNodeResolution(request)
 	}
-	
+
 	return result
 }
 
@@ -331,7 +395,7 @@ func (fre *ForkResolutionEngine) enhancedTwoNodeResolution(request *ResolutionRe
 	remoteBlock := request.RemoteBlock
 
 	// Enhanced deterministic rules for two-node convergence
-	
+
 	// Rule 1: Block timestamp (older blocks are more stable)
 	if remoteBlock.Header.TimestampUnix < localBlock.Header.TimestampUnix {
 		result.WinningBlock = remoteBlock
@@ -347,7 +411,7 @@ func (fre *ForkResolutionEngine) enhancedTwoNodeResolution(request *ResolutionRe
 	// Rule 2: Lexicographical hash comparison
 	localHash := localBlock.Hash
 	remoteHash := remoteBlock.Hash
-	
+
 	for i := 0; i < len(localHash) && i < len(remoteHash); i++ {
 		if localHash[i] < remoteHash[i] {
 			result.WinningBlock = localBlock
@@ -374,48 +438,48 @@ func (fre *ForkResolutionEngine) getActivePeers() map[string]*ChainSyncState {
 	defer fre.mu.RUnlock()
 
 	activePeers := make(map[string]*ChainSyncState)
-	
+
 	for peerID, state := range fre.syncStates {
-		if state.IsActive && time.Since(state.LastSeen) < 2*time.Minute {
+		if state.IsActive && time.Since(state.LastSeen) < fre.cfg.ActivePeerTimeout {
 			activePeers[peerID] = state
 		}
 	}
-	
+
 	return activePeers
 }
 
 // calculateTotalNetworkWeight calculates total voting weight
 func (fre *ForkResolutionEngine) calculateTotalNetworkWeight(peers map[string]*ChainSyncState) float64 {
 	totalWeight := 0.0
-	
+
 	for _, state := range peers {
 		totalWeight += state.VoteWeight
 	}
-	
+
 	return totalWeight
 }
 
 // collectChainCandidates collects all valid chain candidates from network
 func (fre *ForkResolutionEngine) collectChainCandidates(peers map[string]*ChainSyncState) map[string]*core.Block {
 	candidates := make(map[string]*core.Block)
-	
+
 	for peerID, state := range peers {
 		if state.ChainTip != nil {
 			blockHash := string(state.ChainTip.Hash)
 			candidates[blockHash] = state.ChainTip
-			
+
 			// Add vote for this candidate
 			fre.recordVote(peerID, state.ChainTip.Hash, state.VoteWeight)
 		}
 	}
-	
+
 	return candidates
 }
 
 // performWeightedVoting performs weighted majority voting
 func (fre *ForkResolutionEngine) performWeightedVoting(candidates map[string]*core.Block, totalWeight float64) *core.Block {
 	voteCounts := make(map[string]float64)
-	
+
 	// Count votes for each candidate
 	for blockHash := range candidates {
 		votes := fre.arbitrationVotes[blockHash]
@@ -423,23 +487,23 @@ func (fre *ForkResolutionEngine) performWeightedVoting(candidates map[string]*co
 			voteCounts[blockHash] += vote.VoteWeight
 		}
 	}
-	
-	// Find winner (majority > 50% - 2:1 ratio in 3-node scenario)
+
+	// Find winner (2:1 supermajority > 66.7%)
 	var winner *core.Block
 	maxVotes := 0.0
-	
+
 	for blockHash, votes := range voteCounts {
 		if votes > maxVotes {
 			maxVotes = votes
 			winner = candidates[blockHash]
 		}
 	}
-	
-	// Check for majority consensus (2:1 in 3-node, >50% in larger networks)
-	if maxVotes > totalWeight*0.5 {
+
+	// Check for supermajority consensus (2:1 ratio > 66.7%)
+	if maxVotes > totalWeight*0.667 {
 		return winner
 	}
-	
+
 	// No clear majority - fallback to deterministic tie-breaker
 	return fre.selectDeterministicWinner(candidates)
 }
@@ -447,7 +511,7 @@ func (fre *ForkResolutionEngine) performWeightedVoting(candidates map[string]*co
 // selectDeterministicWinner selects winner using deterministic rules
 func (fre *ForkResolutionEngine) selectDeterministicWinner(candidates map[string]*core.Block) *core.Block {
 	var winner *core.Block
-	
+
 	// Rule 1: Highest total work
 	maxWork := new(big.Int)
 	for _, block := range candidates {
@@ -457,7 +521,7 @@ func (fre *ForkResolutionEngine) selectDeterministicWinner(candidates map[string
 			winner = block
 		}
 	}
-	
+
 	// Rule 2: Oldest timestamp (fallback)
 	if winner == nil && len(candidates) > 0 {
 		oldestTime := int64(0)
@@ -468,18 +532,18 @@ func (fre *ForkResolutionEngine) selectDeterministicWinner(candidates map[string
 			}
 		}
 	}
-	
+
 	return winner
 }
 
 // recordVote records a vote in arbitration system
 func (fre *ForkResolutionEngine) recordVote(peerID string, blockHash []byte, weight float64) {
 	hashStr := string(blockHash)
-	
+
 	if fre.arbitrationVotes[hashStr] == nil {
 		fre.arbitrationVotes[hashStr] = make([]*ArbitrationVote, 0)
 	}
-	
+
 	vote := &ArbitrationVote{
 		PeerID:         peerID,
 		VotedBlockHash: blockHash,
@@ -487,7 +551,7 @@ func (fre *ForkResolutionEngine) recordVote(peerID string, blockHash []byte, wei
 		VoteWeight:     weight,
 		VoteConfidence: 1.0, // Default confidence
 	}
-	
+
 	fre.arbitrationVotes[hashStr] = append(fre.arbitrationVotes[hashStr], vote)
 }
 
@@ -522,7 +586,7 @@ func (fre *ForkResolutionEngine) resolveTieBreaker(request *ResolutionRequest) *
 	// Rule 2: Lower hash wins (Bitcoin/Ethereum standard)
 	localHash := localBlock.Hash
 	remoteHash := remoteBlock.Hash
-	
+
 	for i := 0; i < len(localHash) && i < len(remoteHash); i++ {
 		if localHash[i] < remoteHash[i] {
 			result.WinningBlock = localBlock
@@ -559,40 +623,8 @@ func (fre *ForkResolutionEngine) resolveTieBreaker(request *ResolutionRequest) *
 	return result
 }
 
-// resolveDynamicFork handles dynamic node environment forks
-func (fre *ForkResolutionEngine) resolveDynamicFork(request *ResolutionRequest) *ResolutionResult {
-	// Special handling for cases where nodes join/leave the network
-	// This addresses the issue where node exit causes sync paralysis
-
-	localBlock := request.LocalTip
-	remoteBlock := request.RemoteBlock
-
-	// Check if this might be a dynamic topology scenario
-	currentTime := time.Now()
-	timeDiff := currentTime.Sub(request.ReceivedAt)
-
-	// If remote block is significantly older, it might be from a disconnected node
-	tenMinutesAgo := time.Now().Add(-10*time.Minute).Unix()
-	if timeDiff > 5*time.Minute && remoteBlock.Header.TimestampUnix < tenMinutesAgo {
-		log.Printf("dynamic fork detected: remote_block_age=%v possible_disconnected_peer", 
-			timeDiff)
-		
-		// Prefer local chain when dealing with possibly stale data
-		return &ResolutionResult{
-			Resolved:    true,
-			WinningBlock: localBlock,
-			LosingBlock:  remoteBlock,
-			ReorgNeeded:  false,
-		}
-	}
-
-	// Fall back to standard resolution
-	return fre.resolveFast(request)
-}
-
-// executeReorg executes chain reorganization
+// executeReorg executes chain reorganization with depth and frequency limits
 func (fre *ForkResolutionEngine) executeReorg(newBlock *core.Block) error {
-	// Acquire lock to prevent concurrent reorg operations
 	fre.mu.Lock()
 	defer fre.mu.Unlock()
 
@@ -600,15 +632,31 @@ func (fre *ForkResolutionEngine) executeReorg(newBlock *core.Block) error {
 		return fmt.Errorf("chain selector not initialized")
 	}
 
+	// Check reorg depth limit
+	currentTip := fre.chainSelector.FindMostWorkChain()
+	if currentTip != nil && newBlock.GetHeight() > currentTip.GetHeight() {
+		reorgDepth := newBlock.GetHeight() - currentTip.GetHeight()
+		if reorgDepth > fre.maxReorgDepth {
+			return fmt.Errorf("reorg depth %d exceeds maximum %d", reorgDepth, fre.maxReorgDepth)
+		}
+	}
+
+	// Check reorg frequency limit
+	if !fre.lastReorgTime.IsZero() && time.Since(fre.lastReorgTime) < fre.minReorgInterval {
+		return fmt.Errorf("reorg too frequent: minimum interval %v not elapsed since last reorg", fre.minReorgInterval)
+	}
+
 	// Check if reorg is needed
 	if !fre.chainSelector.ShouldReorg(newBlock) {
-		return nil // No reorg needed
+		return nil
 	}
 
 	// Execute reorganization
 	if err := fre.chainSelector.Reorganize(newBlock); err != nil {
 		return fmt.Errorf("reorganization failed: %w", err)
 	}
+
+	fre.lastReorgTime = time.Now()
 
 	log.Printf("fast fork resolution completed: new_tip_height=%d new_tip_hash=%x new_work=%s",
 		newBlock.GetHeight(), newBlock.Hash, newBlock.TotalWork,
@@ -623,7 +671,6 @@ func (fre *ForkResolutionEngine) BroadcastResolution(result *ResolutionResult, e
 		return
 	}
 
-	// Create resolution message
 	message := &ResolutionMessage{
 		WinningBlockHash: result.WinningBlock.Hash,
 		WinningBlockWork: result.WinningBlock.TotalWork,
@@ -632,12 +679,26 @@ func (fre *ForkResolutionEngine) BroadcastResolution(result *ResolutionResult, e
 		ReorgPerformed:   result.ReorgNeeded,
 	}
 
-	// Broadcast to all peers (except the source)
-	// Implementation would integrate with P2P server's broadcast mechanism
-	_ = message // Use in actual broadcast
+	fre.mu.RLock()
+	callback := fre.broadcastCallback
+	peers := make([]string, 0, len(fre.syncStates))
+	for peerID, state := range fre.syncStates {
+		if state.IsActive && peerID != excludePeer {
+			peers = append(peers, peerID)
+		}
+	}
+	fre.mu.RUnlock()
 
-	log.Printf("broadcasting resolution: winning_block=%x work=%s reorg_performed=%v",
-		result.WinningBlock.Hash, result.WinningBlock.TotalWork, result.ReorgNeeded,
+	for _, peerID := range peers {
+		if callback != nil {
+			callback(message, peerID)
+		}
+		log.Printf("broadcasting fork resolution to peer %s: winning_block=%x reorg=%v",
+			peerID, message.WinningBlockHash[:min(16, len(message.WinningBlockHash))], message.ReorgPerformed)
+	}
+
+	log.Printf("broadcasting resolution to %d peers: winning_block=%x work=%s reorg_performed=%v",
+		len(peers), result.WinningBlock.Hash, result.WinningBlock.TotalWork, result.ReorgNeeded,
 	)
 }
 
@@ -650,11 +711,18 @@ type ResolutionMessage struct {
 	ReorgPerformed   bool
 }
 
+// SetBroadcastCallback sets the callback for broadcasting resolution messages
+func (fre *ForkResolutionEngine) SetBroadcastCallback(cb func(*ResolutionMessage, string)) {
+	fre.mu.Lock()
+	defer fre.mu.Unlock()
+	fre.broadcastCallback = cb
+}
+
 // GetResolutionStats returns resolution statistics
 func (fre *ForkResolutionEngine) GetResolutionStats() map[string]interface{} {
 	return map[string]interface{}{
 		"queue_length":       len(fre.resolutionQueue),
-		"workers":            fre.workers,
+		"workers":            fre.cfg.Workers,
 		"min_resolution_ms":  fre.minResolutionTime.Milliseconds(),
 		"fast_resolution_ms": fre.fastResolutionTime.Milliseconds(),
 	}
@@ -662,7 +730,7 @@ func (fre *ForkResolutionEngine) GetResolutionStats() map[string]interface{} {
 
 // Stop stops the resolution engine
 func (fre *ForkResolutionEngine) Stop() {
-	close(fre.resolutionQueue)
+	fre.cancel()
 }
 
 // AutoResolveFork attempts automatic fork resolution without manual intervention
@@ -694,13 +762,13 @@ func (fre *ForkResolutionEngine) AutoResolveFork(localTip *core.Block, remoteBlo
 func (fre *ForkResolutionEngine) startVoteCleanup() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
+		case <-fre.ctx.Done():
+			return
 		case <-ticker.C:
 			fre.cleanupExpiredVotes()
-		case <-fre.resolutionQueue: // Stop when queue is closed
-			return
 		}
 	}
 }
@@ -709,9 +777,9 @@ func (fre *ForkResolutionEngine) startVoteCleanup() {
 func (fre *ForkResolutionEngine) cleanupExpiredVotes() {
 	fre.arbitrationMutex.Lock()
 	defer fre.arbitrationMutex.Unlock()
-	
+
 	expiryTime := time.Now().Add(-fre.voteExpiry)
-	
+
 	for blockHash, votes := range fre.arbitrationVotes {
 		validVotes := make([]*ArbitrationVote, 0)
 		for _, vote := range votes {
@@ -719,7 +787,7 @@ func (fre *ForkResolutionEngine) cleanupExpiredVotes() {
 				validVotes = append(validVotes, vote)
 			}
 		}
-		
+
 		if len(validVotes) == 0 {
 			delete(fre.arbitrationVotes, blockHash)
 		} else {
@@ -730,15 +798,15 @@ func (fre *ForkResolutionEngine) cleanupExpiredVotes() {
 
 // startTopologyMonitoring starts topology change monitoring
 func (fre *ForkResolutionEngine) startTopologyMonitoring() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(fre.cfg.TopologyInterval)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
+		case <-fre.ctx.Done():
+			return
 		case <-ticker.C:
 			fre.monitorTopologyChanges()
-		case <-fre.resolutionQueue: // Stop when queue is closed
-			return
 		}
 	}
 }
@@ -747,30 +815,30 @@ func (fre *ForkResolutionEngine) startTopologyMonitoring() {
 func (fre *ForkResolutionEngine) monitorTopologyChanges() {
 	fre.arbitrationMutex.Lock()
 	defer fre.arbitrationMutex.Unlock()
-	
+
 	currentPeers := fre.getActivePeers()
 	previousCount := len(fre.topologyMonitor.activePeers)
 	currentCount := len(currentPeers)
-	
+
 	// Track topology changes
 	if currentCount != previousCount {
 		eventType := "net_grow"
 		if currentCount < previousCount {
 			eventType = "net_shrink"
 		}
-		
+
 		fre.trackTopologyEvent(eventType, "system", currentCount)
-		
+
 		// Trigger dynamic re-evaluation if topology changed significantly
 		if abs(currentCount-previousCount) >= 2 {
 			log.Printf("significant topology change detected: previous=%d current=%d change_type=%s",
 				previousCount, currentCount, eventType)
-			
+
 			// Re-evaluate chain on significant topology changes
 			go fre.reEvaluateChainOnTopologyChange()
 		}
 	}
-	
+
 	// Update active peers tracking
 	fre.topologyMonitor.activePeers = make(map[string]bool)
 	for peerID := range currentPeers {
@@ -803,19 +871,19 @@ func (fre *ForkResolutionEngine) reEvaluateChainOnTopologyChange() {
 func (fre *ForkResolutionEngine) UpdatePeerState(peerID string, chainTip *core.Block, quality int) {
 	fre.arbitrationMutex.Lock()
 	defer fre.arbitrationMutex.Unlock()
-	
+
 	if fre.syncStates == nil {
 		fre.syncStates = make(map[string]*ChainSyncState)
 	}
-	
+
 	// Calculate vote weight based on connection quality and uptime
 	weight := fre.calculateVoteWeight(quality, time.Now())
-	
+
 	// Track peer join time for this peer
 	if _, exists := fre.topologyMonitor.peerJoinTimes[peerID]; !exists {
 		fre.topologyMonitor.peerJoinTimes[peerID] = time.Now()
 	}
-	
+
 	fre.syncStates[peerID] = &ChainSyncState{
 		PeerID:            peerID,
 		ChainTip:          chainTip,
@@ -824,26 +892,26 @@ func (fre *ForkResolutionEngine) UpdatePeerState(peerID string, chainTip *core.B
 		VoteWeight:        weight,
 		IsActive:          true,
 	}
-	
+
 	fre.trackTopologyEvent("update", peerID, len(fre.syncStates))
 }
 
 // calculateVoteWeight calculates vote weight based on quality metrics
 func (fre *ForkResolutionEngine) calculateVoteWeight(quality int, seenTime time.Time) float64 {
 	baseWeight := float64(quality) / 10.0
-	
+
 	// Apply time-based decay for inactive peers
-	if time.Since(seenTime) > time.Hour {
-		baseWeight *= 0.5
+	if time.Since(seenTime) > fre.cfg.InactivePeerAge {
+		baseWeight *= fre.cfg.InactiveDecayFactor
 	}
-	
+
 	// Additional weight for long-standing peers
 	if joinTime, exists := fre.topologyMonitor.peerJoinTimes[fre.getCurrentPeerID()]; exists {
-		if time.Since(joinTime) > 24*time.Hour {
-			baseWeight *= 1.2 // 20% bonus for long-standing peers
+		if time.Since(joinTime) > fre.cfg.LongStandingPeerAge {
+			baseWeight *= fre.cfg.LongStandingBonus
 		}
 	}
-	
+
 	return baseWeight
 }
 
@@ -865,23 +933,23 @@ func getLocalNodePeerID() string {
 		hash := sha256.Sum256(keyData)
 		return hex.EncodeToString(hash[:16]) // Use first 16 bytes as peer ID
 	}
-	
+
 	// Generate new node key if not exists
 	nodeKey := make([]byte, 32)
 	if _, err := rand.Read(nodeKey); err != nil {
 		log.Printf("ERROR: Failed to generate node key: %v", err)
 		return "local-node-error"
 	}
-	
+
 	// Save node key for future use
 	if err := os.WriteFile(nodeKeyPath, nodeKey, 0600); err != nil {
 		log.Printf("WARNING: Failed to save node key: %v", err)
 	}
-	
+
 	// Generate peer ID from new key
 	hash := sha256.Sum256(nodeKey)
 	peerID := hex.EncodeToString(hash[:16])
-	
+
 	log.Printf("Generated new peer ID: %s", peerID)
 	return peerID
 }
@@ -891,19 +959,19 @@ func (fre *ForkResolutionEngine) trackTopologyEvent(eventType, peerID string, no
 	if fre.topologyMonitor == nil {
 		return
 	}
-	
+
 	event := TopologyEvent{
 		EventType: eventType,
 		PeerID:    peerID,
 		Timestamp: time.Now(),
 		NodeCount: nodeCount,
 	}
-	
+
 	fre.topologyMonitor.networkEvents = append(fre.topologyMonitor.networkEvents, event)
-	
+
 	// Limit event history
-	if len(fre.topologyMonitor.networkEvents) > 1000 {
-		fre.topologyMonitor.networkEvents = fre.topologyMonitor.networkEvents[len(fre.topologyMonitor.networkEvents)-1000:]
+	if len(fre.topologyMonitor.networkEvents) > fre.cfg.MaxNetworkEvents {
+		fre.topologyMonitor.networkEvents = fre.topologyMonitor.networkEvents[len(fre.topologyMonitor.networkEvents)-fre.cfg.MaxNetworkEvents:]
 	}
 }
 
@@ -919,20 +987,20 @@ func abs(x int) int {
 func (fre *ForkResolutionEngine) GetArbitrationStats() map[string]interface{} {
 	fre.arbitrationMutex.Lock()
 	defer fre.arbitrationMutex.Unlock()
-	
+
 	activePeers := fre.getActivePeers()
-	
+
 	stats := map[string]interface{}{
-		"active_peers":            len(activePeers),
-		"total_votes":             len(fre.arbitrationVotes),
-		"vote_expiry_minutes":     fre.voteExpiry.Minutes(),
-		"topology_events":         len(fre.topologyMonitor.networkEvents),
-		"arbitration_strategy":    fre.getResolutionStrategy(len(activePeers)),
+		"active_peers":         len(activePeers),
+		"total_votes":          len(fre.arbitrationVotes),
+		"vote_expiry_minutes":  fre.voteExpiry.Minutes(),
+		"topology_events":      len(fre.topologyMonitor.networkEvents),
+		"arbitration_strategy": fre.getResolutionStrategy(len(activePeers)),
 	}
-	
+
 	// Network weight distribution
 	totalWeight := fre.calculateTotalNetworkWeight(activePeers)
 	stats["total_network_weight"] = totalWeight
-	
+
 	return stats
 }

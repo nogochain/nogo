@@ -114,16 +114,36 @@ func (cs *ChainSelector) isChainValid(block *Block) bool {
 
 // isBlockDataAvailable checks if block data is fully available
 func (cs *ChainSelector) isBlockDataAvailable(block *Block) bool {
-	// Implementation would check if block data (transactions, etc.) is completely available
-	// This prevents switching to chains with missing data
-	return block != nil && block.Hash != nil && len(block.Hash) > 0
+	if block == nil || block.Hash == nil || len(block.Hash) == 0 {
+		return false
+	}
+
+	if len(block.Transactions) == 0 && block.GetHeight() > 0 {
+		return false
+	}
+
+	if block.Header.PrevHash == nil && block.GetHeight() > 0 {
+		return false
+	}
+
+	return true
 }
 
 // isBlockFailed checks if a block is marked as failed validation
 func (cs *ChainSelector) isBlockFailed(block *Block) bool {
-	// Implementation would check block status flags
-	// Similar to Bitcoin's BLOCK_FAILED_VALID check
-	return false // Default: blocks are assumed valid unless marked otherwise
+	if block == nil {
+		return true
+	}
+
+	if block.Hash == nil || len(block.Hash) == 0 {
+		return true
+	}
+
+	if block.GetHeight() > 0 && len(block.Header.PrevHash) == 0 {
+		return true
+	}
+
+	return false
 }
 
 // ShouldReorg checks if we should reorganize to a new block

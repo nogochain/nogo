@@ -31,6 +31,7 @@ import (
 
 	"github.com/nogochain/nogo/blockchain/config"
 	"github.com/nogochain/nogo/blockchain/core"
+	"github.com/nogochain/nogo/blockchain/network"
 )
 
 // getBlockVersion calculates the appropriate block version based on consensus rules
@@ -155,14 +156,11 @@ type Mempool interface {
 type PeerAPI interface {
 	Peers() []string
 	FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, error)
-	BroadcastBlock(ctx context.Context, block *core.Block)
+	BroadcastBlock(ctx context.Context, block *core.Block) error
 }
 
-// ChainInfo represents peer chain information
-type ChainInfo struct {
-	Height uint64
-	Work   *big.Int
-}
+// ChainInfo represents peer chain information (alias to network.ChainInfo)
+type ChainInfo = network.ChainInfo
 
 // SyncLoop defines the sync loop interface
 type SyncLoop interface {
@@ -390,15 +388,13 @@ func (m *Miner) Run(ctx context.Context, interval time.Duration) {
 			// CRITICAL: Pause mining during sync to prevent forks
 			// Check if sync loop is available and currently syncing
 			if m.syncLoop != nil && m.syncLoop.IsSyncing() {
-				time.Sleep(1 * time.Second) // Sleep before retry
-				continue
+				continue  // Skip mining tick, wait for next ticker
 			}
 
 			// CRITICAL: Wait for chain stability after sync completes
 			// This prevents mining on unstable chain
 			if m.syncLoop != nil && !m.syncLoop.IsSynced() {
-				time.Sleep(1 * time.Second) // Sleep before retry
-				continue
+				continue  // Skip mining tick, wait for next ticker
 			}
 
 			m.handleMiningTick(ctx, false)
@@ -491,7 +487,9 @@ func (m *Miner) broadcastBlockAsync(ctx context.Context, block *core.Block) {
 
 		// Broadcast block to peers via P2P manager
 		if m.pm != nil {
-			m.pm.BroadcastBlock(ctx, block)
+			if err := m.pm.BroadcastBlock(ctx, block); err != nil {
+				log.Printf("[Miner] failed to broadcast block: %v", err)
+			}
 		}
 	}()
 }
@@ -633,7 +631,9 @@ func (m *Miner) broadcastBlock(ctx context.Context, block *core.Block) {
 
 	// Broadcast block to peers via P2P manager
 	if m.pm != nil {
-		m.pm.BroadcastBlock(ctx, block)
+		if err := m.pm.BroadcastBlock(ctx, block); err != nil {
+			log.Printf("[Miner] failed to broadcast block: %v", err)
+		}
 	}
 }
 

@@ -85,7 +85,7 @@ type pendingRequest struct {
 
 // NewP2PSyncProtocol creates a new P2P sync protocol instance
 func NewP2PSyncProtocol(bc BlockchainInterface, pm PeerAPI) *P2PSyncProtocol {
-	scorer := NewAdvancedPeerScorer(nogoconfig.DefaultP2PMaxPeers)
+	scorer := NewAdvancedPeerScorer(nogoconfig.DefaultP2PMaxPeers, nil)
 	return &P2PSyncProtocol{
 		bc:                  bc,
 		pm:                  pm,

@@ -22,6 +22,8 @@ import (
 	"github.com/nogochain/nogo/blockchain/metrics"
 	"github.com/nogochain/nogo/blockchain/miner"
 	"github.com/nogochain/nogo/blockchain/network"
+	"github.com/nogochain/nogo/blockchain/network/reactor"
+	"github.com/nogochain/nogo/blockchain/network/security"
 	"github.com/nogochain/nogo/blockchain/storage"
 	"github.com/nogochain/nogo/blockchain/utils"
 )
@@ -57,20 +59,25 @@ type Node struct {
 	isTestnet   bool
 	networkName string
 
-	chain      *core.Chain
-	store      *storage.BoltStore
-	mempool    *mempool.Mempool
-	p2pManager *network.P2PPeerManager
-	p2pServer  *network.P2PServer
-	syncLoop   *network.SyncLoop
-	miner      *miner.Miner
-	metrics    *metrics.Metrics
-	httpServer *http.Server
-	orphanPool *utils.OrphanPool
-	validator  *consensus.BlockValidator
-	gossipIntegration *network.GossipIntegration
+	chain       *core.Chain
+	store       *storage.BoltStore
+	mempool     *mempool.Mempool
+	p2pSwitch   *network.Switch
+	syncLoop    *network.SyncLoop
+	miner       *miner.Miner
+	metrics     *metrics.Metrics
+	httpServer  *http.Server
+	orphanPool  *utils.OrphanPool
+	validator   *consensus.BlockValidator
+	securityMgr *security.SecurityManager
 
 	networkChainWrapper *networkChainWrapper
+	syncReactorHandler  *reactor.SyncReactorHandler
+	txReactorHandler    *reactor.TxReactorHandler
+	blockReactorHandler *reactor.BlockReactorHandler
+	syncReactor         *reactor.SyncReactor
+	txReactor           *reactor.TxReactor
+	blockReactor        *reactor.BlockReactor
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -153,79 +160,96 @@ func (n *Node) initializeComponents() error {
 		24*time.Hour,
 		nil,
 		n.config.ChainID,
-		chain.GetConsensus(), // Use correct consensus params from chain
+		chain.GetConsensus(),
 		chain.GetHeight()+1,
 		n.config.Mempool,
 	)
 
-	// Use direct types instead of wrappers
 	nodeID := strings.TrimSpace(n.minerAddr)
-	rulesHash := n.chain.GetRulesHash()
-	chainRules := hex.EncodeToString(rulesHash[:])
-	n.p2pManager = network.NewP2PPeerManager(
-		n.config.ChainID,
-		chainRules,
-		nodeID,
-		network.ParseP2PPeersEnv(n.config.P2PPeers),
-	)
-
-	// Create wrappers for interface compatibility
-	p2pManagerWrapper := newP2PManagerWrapper(n.p2pManager)
-	mempoolWrapper := newMempoolWrapper(n.mempool)
-	minerMempoolWrapper := newMinerMempoolWrapper(n.mempool)
 	n.networkChainWrapper = newNetworkChainWrapper(n.chain)
-	metricsChainWrapper := newMetricsChainWrapper(n.chain)
-	metricsMempoolWrapper := &metricsMempoolWrapper{mp: n.mempool}
-	metricsP2PWrapper := newMetricsPeerManager(n.p2pManager)
 
-	n.p2pServer = network.NewP2PServer(n.networkChainWrapper, n.p2pManager, mempoolWrapper, n.config.P2PListenAddr, nodeID)
-
-	// Set P2P server reference in peer manager for inbound broadcasting
-	// This allows transactions to be broadcast to inbound connections (peers without listening ports)
-	n.p2pManager.SetP2PServer(n.p2pServer)
-
-	// Set transaction handler for incoming P2P transaction broadcasts
-	// This enables local mining nodes to receive transactions from remote servers
-	n.p2pManager.SetTransactionHandler(func(tx core.Transaction) error {
-		// Add transaction to mempool without signature validation
-		// (signature was validated by the sender)
-		txid, err := n.mempool.AddWithoutSignatureValidation(tx)
-		if err != nil {
-			log.Printf("Node: failed to add incoming tx to mempool: %v", err)
-			return err
-		}
-		log.Printf("Node: received incoming tx via P2P broadcast, txid=%s", txid)
-		return nil
-	})
-
-	// Initialize gossip protocol and integration
-	gossipConfig := network.DefaultGossipConfig()
-	gossipProtocol := network.NewGossipProtocol(n.p2pManager, gossipConfig)
-	gossipIntegrationConfig := network.DefaultIntegrationConfig()
-	n.gossipIntegration = network.NewGossipIntegration(gossipProtocol, n.p2pServer, n.networkChainWrapper, mempoolWrapper, gossipIntegrationConfig)
+	seeds := network.ParseSeedNodes(n.config.P2PPeers)
 	
-	// Set gossip integration to P2P server
-	n.p2pServer.SetGossipIntegration(n.gossipIntegration)
+	// Use default seed nodes if no seeds are configured
+	if len(seeds) == 0 {
+		seeds = network.DefaultSeedNodes
+		log.Printf("Node: using default seed nodes: %v", network.DefaultSeedNodes)
+	}
+	
+	switchCfg := network.DefaultSwitchConfig()
+	switchCfg.ListenAddr = n.config.P2PListenAddr
+	switchCfg.Seeds = seeds
+	switchCfg.MaxPeers = n.config.P2PMaxPeers
+	if switchCfg.MaxPeers <= 0 {
+		switchCfg.MaxPeers = 50
+	}
+	
+	// Load Seed Mode from environment variable
+	if seedMode := os.Getenv("NOGO_SEED_MODE"); seedMode == "true" || seedMode == "1" {
+		switchCfg.SeedMode = true
+		log.Printf("Node: Seed Mode enabled - this node will act as a bootstrap node")
+	}
+
+	n.p2pSwitch = network.NewSwitch(switchCfg)
+	n.p2pSwitch.SetNodeInfo(nodeID, fmt.Sprintf("%d", n.config.ChainID), config.NodeVersion)
+
+	handlers, err := reactor.NewReactorHandlers(n.networkChainWrapper, n.mempool, n.p2pSwitch)
+	if err != nil {
+		return fmt.Errorf("failed to create reactor handlers: %w", err)
+	}
+
+	n.syncReactorHandler = reactor.NewSyncReactorHandler(handlers)
+	n.txReactorHandler = reactor.NewTxReactorHandler(handlers)
+	n.blockReactorHandler = reactor.NewBlockReactorHandler(handlers)
+
+	n.syncReactor, err = reactor.NewSyncReactor(n.syncReactorHandler)
+	if err != nil {
+		return fmt.Errorf("create sync reactor: %w", err)
+	}
+
+	n.txReactor, err = reactor.NewTxReactor(n.txReactorHandler)
+	if err != nil {
+		return fmt.Errorf("create tx reactor: %w", err)
+	}
+
+	n.blockReactor, err = reactor.NewBlockReactor(n.blockReactorHandler)
+	if err != nil {
+		return fmt.Errorf("create block reactor: %w", err)
+	}
+
+	n.p2pSwitch.AddReactor("sync", n.syncReactor)
+	n.p2pSwitch.AddReactor("tx", n.txReactor)
+	n.p2pSwitch.AddReactor("block", n.blockReactor)
+
+	secMgr, secErr := security.NewSecurityManager(n.config.DataDir)
+	if secErr != nil {
+		log.Printf("Node: failed to create SecurityManager: %v", secErr)
+		secMgr = nil
+	}
+	n.securityMgr = secMgr
 
 	n.syncLoop = network.NewSyncLoop(
-		n.p2pManager,
+		n.p2pSwitch,
 		n.networkChainWrapper,
-		minerMempoolWrapper,
+		newMinerMempoolWrapper(n.mempool),
 		nil,
 		n.orphanPool,
 		n.validator,
 		n.config.Sync,
+		n.securityMgr,
 	)
 
-	// Set sync loop reference after creation
 	n.networkChainWrapper.SetSyncLoop(n.syncLoop)
+
+	n.syncReactorHandler.SetSyncLoop(n.syncLoop)
+	n.blockReactorHandler.SetSyncLoop(n.syncLoop)
 
 	if strings.TrimSpace(n.minerAddr) != "" {
 		chainWrapper := newChainWrapper(n.chain)
 		minerImpl := miner.NewMiner(
 			chainWrapper,
-			minerMempoolWrapper,
-			p2pManagerWrapper,
+			newMinerMempoolWrapper(n.mempool),
+			n.p2pSwitch,
 			n.config.MaxTxPerBlock,
 			n.config.MineForceEmptyBlocks,
 			n.minerAddr,
@@ -234,65 +258,46 @@ func (n *Node) initializeComponents() error {
 		n.miner = minerImpl
 	}
 
-	limiter := api.NewIPRateLimiter(n.config.RateLimitReqs, n.config.RateLimitBurst)
-	trustProxy := false
-	wsEnable := true
-	wsHub := api.NewWSHub(100)
+	n.chain.SetEventSink(api.NewWSHub(100))
 
-	// Set WebSocket hub as event sink for real-time block notifications
-	// Production-grade: enables Explorer to receive new_block events via WebSocket
-	n.chain.SetEventSink(wsHub)
-
-	// CRITICAL: Inject mempool reference for automatic cleanup of confirmed transactions
-	// Production-grade: ensures all block acceptance paths trigger mempool cleanup
-	// Coverage: P2P broadcast, sync, HTTP API, and mining all benefit from this centralized cleanup
 	n.chain.SetMempool(n.mempool)
 
-	// CRITICAL: Set block added callback for broadcasting blocks from mining pool
-	// Production-grade: enables automatic broadcast of blocks added via API
-	// When a block is submitted through the API (e.g., from mining pool), this callback
-	// ensures the block is broadcast to all P2P peers for network propagation
-	if n.p2pManager != nil {
-		n.chain.SetOnBlockAdded(func(block *core.Block) {
-			n.p2pManager.BroadcastBlock(context.Background(), block)
-			// Update mempool height for correct transaction validation
-			if n.mempool != nil {
-				n.mempool.UpdateHeight(block.GetHeight() + 1)
-			}
-		})
+	n.chain.SetOnBlockAdded(func(block *core.Block) {
+		if broadcastErr := n.p2pSwitch.BroadcastBlock(context.Background(), block); broadcastErr != nil {
+			log.Printf("[Node] failed to broadcast block %d: %v", block.GetHeight(), broadcastErr)
+		}
+		if n.mempool != nil {
+			n.mempool.UpdateHeight(block.GetHeight() + 1)
+		}
+	})
 
-		// CRITICAL: Set missing block callback for requesting missing parent blocks
-		// Production-grade: enables automatic request of missing ancestors when orphan block is received
-		// This ensures chain continuity when receiving blocks out of order
-		n.chain.SetOnMissingBlock(func(parentHash []byte, height uint64) {
-			parentHashHex := hex.EncodeToString(parentHash)
-			log.Printf("[Node] Requesting missing parent block: hash=%s height=%d", parentHashHex[:16], height-1)
+	n.chain.SetOnMissingBlock(func(parentHash []byte, height uint64) {
+		parentHashHex := hex.EncodeToString(parentHash)
+		log.Printf("[Node] requesting missing parent block: hash=%s height=%d", parentHashHex[:16], height-1)
 
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 
-			// Use EnsureAncestors to recursively fetch missing blocks
-			if err := n.p2pManager.EnsureAncestors(ctx, n.networkChainWrapper, parentHashHex); err != nil {
-				log.Printf("[Node] Failed to fetch missing parent block %s: %v", parentHashHex[:16], err)
-			}
-		})
-	} else {
-		// Even without P2P, update mempool height
-		n.chain.SetOnBlockAdded(func(block *core.Block) {
-			if n.mempool != nil {
-				n.mempool.UpdateHeight(block.GetHeight() + 1)
-			}
-		})
-	}
+		if fetchErr := n.p2pSwitch.EnsureAncestors(ctx, n.networkChainWrapper, parentHashHex); fetchErr != nil {
+			log.Printf("[Node] failed to fetch missing parent block %s: %v", parentHashHex[:16], fetchErr)
+		}
+	})
 
-	n.metrics, err = metrics.NewMetrics(metricsChainWrapper, metricsMempoolWrapper, metricsP2PWrapper, nil, nodeID, n.config.ChainID)
+	n.metrics, err = metrics.NewMetrics(
+		newMetricsChainWrapper(n.chain),
+		&metricsMempoolWrapper{mp: n.mempool},
+		n.p2pSwitch,
+		nil,
+		nodeID,
+		n.config.ChainID,
+	)
 	if err != nil {
 		return fmt.Errorf("create metrics: %w", err)
 	}
 
 	n.httpServer = &http.Server{
 		Addr:              n.config.HTTPAddr,
-		Handler:           n.createHandler(limiter, trustProxy, wsEnable, wsHub),
+		Handler:           n.createHandler(n.p2pSwitch),
 		ReadTimeout:       10 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -303,7 +308,7 @@ func (n *Node) initializeComponents() error {
 	return nil
 }
 
-func (n *Node) createHandler(limiter *api.IPRateLimiter, trustProxy, wsEnable bool, wsHub *api.WSHub) http.Handler {
+func (n *Node) createHandler(switchAPI network.PeerAPI) http.Handler {
 	var minerImpl *miner.Miner
 	if n.miner != nil {
 		minerImpl = n.miner
@@ -311,19 +316,19 @@ func (n *Node) createHandler(limiter *api.IPRateLimiter, trustProxy, wsEnable bo
 		minerImpl = &miner.Miner{}
 	}
 
-	// Enable transaction gossip when P2P is configured with peers
-	// This ensures transactions are broadcast to the network for any miner to include
-	parsedPeers := network.ParseP2PPeersEnv(n.config.P2PPeers)
-	txGossip := n.p2pManager != nil && len(parsedPeers) > 0
-	log.Printf("[Node] Transaction gossip config: p2pManager=nil=%v, P2PPeers=%s, parsedPeers=%v, txGossip=%v",
-		n.p2pManager == nil, n.config.P2PPeers, parsedPeers, txGossip)
+	limiter := api.NewIPRateLimiter(n.config.RateLimitReqs, n.config.RateLimitBurst)
+	trustProxy := false
+	wsEnable := true
+	wsHub := api.NewWSHub(100)
+
+	txGossip := n.p2pSwitch != nil
 
 	srv := api.NewServer(
 		n.networkChainWrapper,
 		"",
 		n.mempool,
 		minerImpl,
-		n.p2pManager,
+		switchAPI,
 		txGossip,
 		n.metrics,
 		n.adminToken,
@@ -338,9 +343,6 @@ func (n *Node) createHandler(limiter *api.IPRateLimiter, trustProxy, wsEnable bo
 func (n *Node) startComponents() error {
 	log := GetGlobalFormatter()
 
-	// Sync loop handles fork detection and rollback automatically
-	// No need for manual startup chain sync - sync.go handles this
-
 	if n.config.SyncEnable {
 		n.syncLoop.SetMiner(n.miner)
 		if err := n.syncLoop.Start(n.ctx); err != nil {
@@ -350,34 +352,11 @@ func (n *Node) startComponents() error {
 		log.Sync("Sync Interval:   %v", 3*time.Second)
 	}
 
-	// Start P2P manager for peer discovery
-	if n.p2pManager != nil {
-		if err := n.p2pManager.Start(n.ctx); err != nil {
-			log.Error("P2P manager start error: %v", err)
-		}
+	if err := n.p2pSwitch.Start(n.ctx); err != nil {
+		return fmt.Errorf("start p2p switch: %w", err)
 	}
-
-	// Start gossip integration
-	if n.gossipIntegration != nil {
-		if err := n.gossipIntegration.Start(); err != nil {
-			log.Error("Gossip integration start error: %v", err)
-		} else {
-			log.Info("Gossip integration started successfully")
-		}
-	}
-
-	n.wg.Add(1)
-	go func() {
-		defer n.wg.Done()
-		if err := n.p2pServer.Serve(n.ctx); err != nil {
-			log.Error("P2P server error: %v", err)
-		}
-	}()
 
 	if n.autoMine && n.miner != nil {
-		// Sync loop handles fork detection and rollback automatically
-		// No need for manual chain validity check - sync.go handles this
-		// Production-grade: miner checks peer height and waits if behind
 		go func() {
 			interval := time.Duration(n.config.MineIntervalMs) * time.Millisecond
 			if interval <= 0 {
@@ -459,14 +438,9 @@ func (n *Node) Shutdown() {
 		n.syncLoop.Stop()
 	}
 
-	// Stop gossip integration
-	if n.gossipIntegration != nil {
-		n.gossipIntegration.Stop()
-	}
-
-	if n.p2pManager != nil {
-		if err := n.p2pManager.Stop(); err != nil {
-			log.Error("P2P manager shutdown error: %v", err)
+	if n.p2pSwitch != nil {
+		if err := n.p2pSwitch.Stop(); err != nil {
+			log.Error("P2P switch shutdown error: %v", err)
 		}
 	}
 
