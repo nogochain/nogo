@@ -86,6 +86,12 @@ type NodeInfoHandshake struct {
 
 const maxNodeInfoSize = 1024
 
+// blockLocatorResponse is used for JSON parsing in FetchChainInfo.
+// Defined at package level to avoid "JSON decoder out of sync" error in concurrent environment.
+type blockLocatorResponse struct {
+	Locators [][]byte `json:"locators"`
+}
+
 // Encode serializes NodeInfo to JSON bytes for wire transmission.
 func (ni NodeInfo) Encode() []byte {
 	data, err := json.Marshal(ni)
@@ -1587,12 +1593,7 @@ func (sw *Switch) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, 
 		return nil, errors.New("switch: empty chain info response")
 	}
 
-	// Parse block locator response
-	// CRITICAL: Use named struct instead of anonymous struct to avoid
-	// "JSON decoder out of sync" error in concurrent environment
-	type blockLocatorResponse struct {
-		Locators [][]byte `json:"locators"`
-	}
+	// Parse block locator response using package-level type
 	var locatorResp blockLocatorResponse
 	if unmarshalErr := json.Unmarshal(respBytes[1:], &locatorResp); unmarshalErr != nil {
 		return nil, fmt.Errorf("switch: unmarshal block locator: %w", unmarshalErr)
