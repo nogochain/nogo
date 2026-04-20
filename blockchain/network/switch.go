@@ -1593,9 +1593,15 @@ func (sw *Switch) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, 
 		return nil, errors.New("switch: empty chain info response")
 	}
 
+	// CRITICAL FIX: Copy response bytes before JSON unmarshaling to prevent
+	// "JSON decoder out of sync - data changing underfoot?" error.
+	// The respBytes may be reused or modified by concurrent goroutines.
+	respCopy := make([]byte, len(respBytes)-1)
+	copy(respCopy, respBytes[1:])
+
 	// Parse block locator response using package-level type
 	var locatorResp blockLocatorResponse
-	if unmarshalErr := json.Unmarshal(respBytes[1:], &locatorResp); unmarshalErr != nil {
+	if unmarshalErr := json.Unmarshal(respCopy, &locatorResp); unmarshalErr != nil {
 		return nil, fmt.Errorf("switch: unmarshal block locator: %w", unmarshalErr)
 	}
 
@@ -1678,8 +1684,14 @@ func (sw *Switch) FetchHeadersFrom(ctx context.Context, peer string, fromHeight 
 		Headers []byte `json:"headers"`
 		HasMore bool   `json:"hasMore"`
 	}
+
+	// CRITICAL FIX: Copy response bytes before JSON unmarshaling to prevent
+	// concurrent modification issues
+	respCopy := make([]byte, len(respBytes)-1)
+	copy(respCopy, respBytes[1:])
+
 	var resp headersResp
-	if unmarshalErr := json.Unmarshal(respBytes[1:], &resp); unmarshalErr != nil {
+	if unmarshalErr := json.Unmarshal(respCopy, &resp); unmarshalErr != nil {
 		return nil, fmt.Errorf("switch: unmarshal headers response: %w", unmarshalErr)
 	}
 
@@ -1721,12 +1733,18 @@ func (sw *Switch) FetchBlockByHash(ctx context.Context, peer string, hashHex str
 	// CRITICAL: Server sends block response as wrapped object:
 	// { "blocks": [serialized_block_1, serialized_block_2, ...] }
 	// Must parse the wrapper first, then extract blocks array
+
+	// CRITICAL FIX: Copy response bytes before JSON unmarshaling to prevent
+	// concurrent modification issues
+	respCopy := make([]byte, len(respBytes)-1)
+	copy(respCopy, respBytes[1:])
+
 	type blockResponse struct {
 		Blocks []json.RawMessage `json:"blocks"`
 	}
 
 	var resp blockResponse
-	if unmarshalErr := json.Unmarshal(respBytes[1:], &resp); unmarshalErr != nil {
+	if unmarshalErr := json.Unmarshal(respCopy, &resp); unmarshalErr != nil {
 		return nil, fmt.Errorf("switch: unmarshal block response wrapper from %s: %w", peer, unmarshalErr)
 	}
 
@@ -1762,9 +1780,14 @@ func (sw *Switch) FetchBlockByHeight(ctx context.Context, peer string, height ui
 		return nil, errors.New("switch: empty block response")
 	}
 
+	// CRITICAL FIX: Copy response bytes before JSON unmarshaling to prevent
+	// concurrent modification issues
+	respCopy := make([]byte, len(respBytes)-1)
+	copy(respCopy, respBytes[1:])
+
 	// Server sends blocks as JSON array: [block1, block2, ...]
 	var blocks []core.Block
-	if unmarshalErr := json.Unmarshal(respBytes[1:], &blocks); unmarshalErr != nil {
+	if unmarshalErr := json.Unmarshal(respCopy, &blocks); unmarshalErr != nil {
 		return nil, fmt.Errorf("switch: unmarshal blocks from %s: %w", peer, unmarshalErr)
 	}
 
@@ -1989,9 +2012,14 @@ func (sw *Switch) FetchBlocksByHeightRange(ctx context.Context, peer string, sta
 		return nil, errors.New("switch: empty blocks range response")
 	}
 
+	// CRITICAL FIX: Copy response bytes before JSON unmarshaling to prevent
+	// concurrent modification issues
+	respCopy := make([]byte, len(respBytes)-1)
+	copy(respCopy, respBytes[1:])
+
 	// Server sends blocks as JSON array: [block1, block2, ...]
 	var blocks []core.Block
-	if unmarshalErr := json.Unmarshal(respBytes[1:], &blocks); unmarshalErr != nil {
+	if unmarshalErr := json.Unmarshal(respCopy, &blocks); unmarshalErr != nil {
 		return nil, fmt.Errorf("switch: unmarshal blocks range response: %w", unmarshalErr)
 	}
 
