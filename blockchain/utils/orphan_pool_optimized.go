@@ -332,6 +332,13 @@ func (op *OrphanPoolOptimized) RemoveOrphan(hash string) *core.Block {
 	return op.removeOrphanInternal(hash)
 }
 
+// Size returns the current number of orphan blocks in the pool
+func (op *OrphanPoolOptimized) Size() int {
+	op.mu.RLock()
+	defer op.mu.RUnlock()
+	return len(op.blocks)
+}
+
 func (op *OrphanPoolOptimized) removeOrphanInternal(hash string) *core.Block {
 	orphan, exists := op.blocks[hash]
 	if !exists {
@@ -383,12 +390,6 @@ func (op *OrphanPoolOptimized) CleanupExpired() int {
 	}
 
 	return removed
-}
-
-func (op *OrphanPoolOptimized) Size() int {
-	op.mu.RLock()
-	defer op.mu.RUnlock()
-	return len(op.blocks)
 }
 
 func (op *OrphanPoolOptimized) GetOrphan(hash string) *core.Block {

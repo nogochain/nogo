@@ -1097,8 +1097,12 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 	}
 
 	if !accepted {
-		log.Printf("[Sync] Block %d was not accepted to chain", block.GetHeight())
-		return fmt.Errorf("block not accepted to chain")
+		log.Printf("[Sync] Block %d was not accepted to chain (stored as orphan or fork)", block.GetHeight())
+		// CRITICAL: Do NOT return error here!
+		// Block may have been stored as orphan, which is normal during sync.
+		// We should try to process orphans to see if we can extend the chain.
+		s.processOrphans(ctx)
+		return nil
 	}
 
 	log.Printf("[Sync] Block %d added to chain (new height: %d)", block.GetHeight(), s.bc.LatestBlock().GetHeight())
@@ -1109,35 +1113,49 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 }
 
 // processOrphans attempts to process orphaned blocks that connect to the current tip
+// CRITICAL: This must handle chains of orphans, not just single blocks
 func (s *SyncLoop) processOrphans(ctx context.Context) {
 	localTip := s.bc.LatestBlock()
 	if localTip == nil {
 		return
 	}
-	tipHash := hex.EncodeToString(localTip.Hash)
-	orphans := s.orphanPool.GetOrphansByParent(tipHash)
-	for _, orphan := range orphans {
-		if err := s.validator.ValidateBlockFast(orphan); err != nil {
-			continue
-		}
 
-		accepted, addErr := s.bc.AddBlock(orphan)
-		if addErr != nil {
-			log.Printf("[Sync] Failed to add orphan block %d to chain: %v", orphan.GetHeight(), addErr)
-			continue
-		}
-		if !accepted {
-			log.Printf("[Sync] Orphan block %d not accepted by chain", orphan.GetHeight())
-			continue
-		}
+	// Process orphans in a loop until no more can be added
+	addedAny := true
+	for addedAny {
+		addedAny = false
+		tipHash := hex.EncodeToString(localTip.Hash)
+		orphans := s.orphanPool.GetOrphansByParent(tipHash)
 
-		log.Printf("[Sync] Orphan block %d added to chain", orphan.GetHeight())
-		s.orphanPool.RemoveOrphan(hex.EncodeToString(orphan.Hash))
+		for _, orphan := range orphans {
+			if err := s.validator.ValidateBlockFast(orphan); err != nil {
+				log.Printf("[Sync] Orphan block %d validation failed: %v", orphan.GetHeight(), err)
+				s.orphanPool.RemoveOrphan(hex.EncodeToString(orphan.Hash))
+				continue
+			}
 
-		// Re-evaluate tip after each addition since the chain tip has changed
-		s.processOrphans(ctx)
-		return
+			accepted, addErr := s.bc.AddBlock(orphan)
+			if addErr != nil {
+				log.Printf("[Sync] Failed to add orphan block %d to chain: %v", orphan.GetHeight(), addErr)
+				continue
+			}
+			if !accepted {
+				log.Printf("[Sync] Orphan block %d not accepted by chain", orphan.GetHeight())
+				continue
+			}
+
+			log.Printf("[Sync] Orphan block %d added to chain", orphan.GetHeight())
+			s.orphanPool.RemoveOrphan(hex.EncodeToString(orphan.Hash))
+			addedAny = true
+
+			// Update local tip for next iteration
+			localTip = s.bc.LatestBlock()
+			break // Re-evaluate from new tip
+		}
 	}
+
+	log.Printf("[Sync] processOrphans completed, current height: %d, orphan pool size: %d",
+		localTip.GetHeight(), s.orphanPool.Size())
 }
 
 // SyncWithPeer performs initial sync with a peer using scoring and retry

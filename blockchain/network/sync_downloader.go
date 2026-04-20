@@ -209,6 +209,9 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 	progressTicker := time.NewTicker(ProgressUpdateInterval)
 	defer progressTicker.Stop()
 
+	// Track which heights we've successfully stored
+	storedHeights := make(map[uint64]bool)
+	
 	// Download blocks sequentially with real-time storage
 	for batchStart := startHeight; batchStart < startHeight+count; batchStart += ConnectionReuseBatchSize {
 		select {
@@ -227,9 +230,13 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 		// Fetch blocks using a single connection for this batch
 		blocks, err := d.pm.FetchBlocksByHeightRange(ctx, peer, batchStart, batchCount)
 		if err != nil {
-			log.Printf("[Downloader] Failed to fetch blocks %d-%d: %v", batchStart, batchEnd, err)
+			log.Printf("[Downloader] Failed to fetch blocks %d-%d: %v, will retry later", batchStart, batchEnd, err)
 			atomic.AddUint64(&d.failedCount, batchCount)
-			// Continue with next batch instead of failing completely
+			// CRITICAL: Do NOT continue! We must retry this batch
+			// Otherwise we'll have gaps in the chain
+			// Sleep and retry the same batch
+			time.Sleep(2 * time.Second)
+			batchStart -= ConnectionReuseBatchSize // Retry this batch
 			continue
 		}
 
@@ -244,6 +251,7 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 				} else {
 					storedInBatch++
 					totalStored++
+					storedHeights[block.GetHeight()] = true
 				}
 			}
 		}
