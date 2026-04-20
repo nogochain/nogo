@@ -130,6 +130,7 @@ type SyncLoop struct {
 	fastSyncEngine *FastSyncEngine
 	syncConfig     config.SyncConfig
 	securityMgr    *security.SecurityManager
+	progressStore  *SyncProgressStore
 	isSyncing      bool
 	syncProgress   float64
 	ctx            context.Context
@@ -190,6 +191,20 @@ func (s *SyncLoop) SetMiner(miner Miner) {
 	s.miner = miner
 }
 
+// SetProgressStore sets the sync progress store for persistence
+func (s *SyncLoop) SetProgressStore(store *SyncProgressStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.progressStore = store
+}
+
+// GetProgressStore returns the current progress store
+func (s *SyncLoop) GetProgressStore() *SyncProgressStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.progressStore
+}
+
 // Start begins the synchronization loop
 func (s *SyncLoop) Start(ctx context.Context) error {
 	s.mu.Lock()
@@ -207,6 +222,19 @@ func (s *SyncLoop) Start(ctx context.Context) error {
 	s.syncProgress = 0
 	s.syncStartTime = time.Now()
 	s.lastUpdateTime = time.Now()
+
+	// Start progress store auto-save if available
+	if s.progressStore != nil {
+		s.progressStore.StartAutoSave()
+		// Check for resume capability
+		if s.progressStore.CanResume() {
+			height, targetHeight, peerID, canResume := s.progressStore.GetResumePoint()
+			if canResume {
+				log.Printf("[Sync] Found resumable sync progress: height=%d, target=%d, peer=%s",
+					height, targetHeight, peerID)
+			}
+		}
+	}
 
 	// Initialize fork resolution engine for sync path
 	// This handles forks discovered during active sync
@@ -236,6 +264,11 @@ func (s *SyncLoop) Stop() {
 	}
 	s.isSyncing = false
 	s.syncProgress = 0
+
+	// Stop progress store and save final state
+	if s.progressStore != nil {
+		s.progressStore.Stop()
+	}
 }
 
 // IsSyncing returns whether sync is in progress
@@ -1222,6 +1255,13 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 			log.Printf("[Sync] SyncWithPeer completed successfully (localHeight=%d, localWork=%s, peerHeight=%d, peerWork=%s)",
 				currentHeight, localWork.String(), info.Height, peerWork.String())
 
+			// Mark sync as complete in progress store
+			if s.progressStore != nil {
+				if err := s.progressStore.MarkComplete(); err != nil {
+					log.Printf("[Sync] Failed to mark sync complete: %v", err)
+				}
+			}
+
 			// Broadcast current status to inform peers of our chain state
 			s.broadcastCurrentStatus()
 
@@ -1229,6 +1269,13 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		}
 
 		log.Printf("[Sync] Starting sync round with peer %s: %s", peer, syncReason)
+
+		// Save sync target to progress store for resume capability
+		if s.progressStore != nil {
+			if err := s.progressStore.SetTarget(info.Height, peer); err != nil {
+				log.Printf("[Sync] Failed to save sync target: %v", err)
+			}
+		}
 
 		// Sync headers first with retry
 		headersToFetch := info.Height - currentHeight
@@ -1414,7 +1461,21 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 			}
 
 			// Add block to chain via handleNewBlock for proper validation and fork handling
-			return s.handleNewBlock(ctx, block)
+			err := s.handleNewBlock(ctx, block)
+			if err != nil {
+				return err
+			}
+
+			// Save progress to progress store for resume capability
+			if s.progressStore != nil {
+				blockHash := hex.EncodeToString(block.Hash)
+				prevHash := hex.EncodeToString(block.Header.PrevHash)
+				if saveErr := s.progressStore.UpdateProgress(blockHeight, blockHash, prevHash); saveErr != nil {
+					log.Printf("[Sync] Failed to save sync progress: %v", saveErr)
+				}
+			}
+
+			return nil
 		}
 
 		// Use real-time download and storage
@@ -1423,6 +1484,13 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 
 		if err != nil {
 			log.Printf("[Sync] Batch download and storage failed: %v", err)
+
+			// Save error to progress store for resume capability
+			if s.progressStore != nil {
+				if saveErr := s.progressStore.SetError(err.Error()); saveErr != nil {
+					log.Printf("[Sync] Failed to save sync error: %v", saveErr)
+				}
+			}
 
 			// Apply peer penalty based on error type
 			if s.securityMgr != nil {
@@ -1729,12 +1797,149 @@ func (s *SyncLoop) GetSyncStatus() map[string]interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return map[string]interface{}{
+	status := map[string]interface{}{
 		"is_syncing":    s.isSyncing,
 		"sync_progress": s.syncProgress,
 		"latest_height": s.bc.LatestBlock().GetHeight(),
 		"timestamp":     time.Now().UTC().Format(time.RFC3339),
 	}
+
+	// Add progress store information if available
+	if s.progressStore != nil {
+		progress := s.progressStore.GetProgress()
+		if progress != nil {
+			status["saved_progress_height"] = progress.LastSyncedHeight
+			status["saved_target_height"] = progress.TargetHeight
+			status["saved_progress_percent"] = s.progressStore.GetProgressPercent()
+			status["can_resume"] = s.progressStore.CanResume()
+			status["retry_count"] = progress.RetryCount
+		}
+	}
+
+	return status
+}
+
+// CanResumeSync checks if there is a resumable sync progress
+func (s *SyncLoop) CanResumeSync() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.progressStore == nil {
+		return false
+	}
+
+	return s.progressStore.CanResume()
+}
+
+// GetResumeInfo returns information about the resumable sync progress
+func (s *SyncLoop) GetResumeInfo() (height uint64, targetHeight uint64, peerID string, canResume bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.progressStore == nil {
+		return 0, 0, "", false
+	}
+
+	return s.progressStore.GetResumePoint()
+}
+
+// ResumeSync attempts to resume a previously interrupted sync
+func (s *SyncLoop) ResumeSync(ctx context.Context) error {
+	s.mu.Lock()
+	if s.isSyncing {
+		s.mu.Unlock()
+		return fmt.Errorf("sync already in progress")
+	}
+
+	if s.progressStore == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("progress store not configured")
+	}
+
+	height, targetHeight, peerID, canResume := s.progressStore.GetResumePoint()
+	if !canResume {
+		s.mu.Unlock()
+		return fmt.Errorf("no resumable sync progress found")
+	}
+
+	s.isSyncing = true
+	s.mu.Unlock()
+
+	log.Printf("[Sync] Resuming sync from height %d to target %d (peer=%s)", height, targetHeight, peerID)
+
+	// Verify local chain state matches saved progress
+	localTip := s.bc.LatestBlock()
+	if localTip == nil {
+		return fmt.Errorf("local chain is empty, cannot resume")
+	}
+
+	localHeight := localTip.GetHeight()
+	if localHeight != height {
+		log.Printf("[Sync] Local height %d differs from saved height %d, adjusting resume point", localHeight, height)
+		height = localHeight
+	}
+
+	// Check if the saved peer is still available
+	if peerID != "" && s.pm != nil {
+		peers := s.pm.GetActivePeers()
+		peerAvailable := false
+		for _, p := range peers {
+			if p == peerID {
+				peerAvailable = true
+				break
+			}
+		}
+
+		if !peerAvailable {
+			log.Printf("[Sync] Saved peer %s is not available, will find alternative", peerID)
+			peerID = ""
+		}
+	}
+
+	// If no peer available, find best peer
+	if peerID == "" && s.pm != nil {
+		peers := s.pm.GetActivePeers()
+		if len(peers) == 0 {
+			s.mu.Lock()
+			s.isSyncing = false
+			s.mu.Unlock()
+			return fmt.Errorf("no active peers available for resume")
+		}
+
+		// Use scorer to find best peer
+		if s.scorer != nil {
+			peerID = s.scorer.GetBestPeerByScore()
+		}
+		if peerID == "" {
+			peerID = peers[0]
+		}
+		log.Printf("[Sync] Using peer %s for resumed sync", peerID)
+	}
+
+	// Continue sync from saved point
+	err := s.SyncWithPeer(ctx, peerID)
+	if err != nil {
+		log.Printf("[Sync] Resume sync failed: %v", err)
+		s.mu.Lock()
+		s.isSyncing = false
+		s.mu.Unlock()
+		return err
+	}
+
+	log.Printf("[Sync] Resume sync completed successfully")
+	return nil
+}
+
+// ClearSyncProgress clears any saved sync progress
+func (s *SyncLoop) ClearSyncProgress() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.progressStore == nil {
+		return nil
+	}
+
+	return s.progressStore.Clear()
 }
 
 // PeerManager returns the peer manager

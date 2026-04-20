@@ -270,6 +270,15 @@ type SyncConfig struct {
 
 	// MaxHeadersFetch is the maximum number of headers to fetch in a single request
 	MaxHeadersFetch uint64 `json:"maxHeadersFetch"`
+
+	// ProgressPersistenceEnabled enables sync progress persistence for resume capability
+	ProgressPersistenceEnabled bool `json:"progressPersistenceEnabled"`
+
+	// ProgressSaveIntervalSec is the interval in seconds between progress saves
+	ProgressSaveIntervalSec int `json:"progressSaveIntervalSec"`
+
+	// ProgressMaxAgeHours is the maximum age in hours for progress to be considered valid
+	ProgressMaxAgeHours int `json:"progressMaxAgeHours"`
 }
 
 // SecurityConfig defines security configuration parameters
