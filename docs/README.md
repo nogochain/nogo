@@ -1,7 +1,7 @@
 # NogoChain Documentation Center
 
-> **Version**: 1.1.0  
-> **Last Updated**: 2026-04-15  
+> **Version**: 1.2.0  
+> **Last Updated**: 2026-04-20  
 > **Applicable Version**: NogoChain v1.0+
 
 ---
@@ -13,6 +13,7 @@
 | Document | Description |
 |----------|-------------|
 | [Technical-Documentation.md](./Technical-Documentation.md) | Technical documentation overview |
+| [Configuration-Reference.md](./Configuration-Reference.md) | Configuration reference |
 | [core-types-README.md](./core-types-README.md) | Core data type definitions |
 | [nogopow-README.md](./nogopow-README.md) | NogoPow consensus algorithm |
 
@@ -20,15 +21,14 @@
 
 | Document | Description |
 |----------|-------------|
-| [Algorithm-Manual-Updated.md](./Algorithm-Manual-Updated.md) | Algorithm manual |
-| [Economic-Model-Updated.md](./Economic-Model-Updated.md) | Economic model |
+| [Algorithm-Manual.md](./Algorithm-Manual.md) | Algorithm manual |
+| [Economic-Model.md](./Economic-Model.md) | Economic model |
 
 ### Deployment Guides
 
 | Document | Language |
 |----------|----------|
 | [Deployment-Guide-EN.md](./Deployment-Guide-EN.md) | English |
-| [Deployment-Guide-CN.md](./Deployment-Guide-CN.md) | 中文 |
 | [Deployment-Complete-Guide-CN.md](./Deployment-Complete-Guide-CN.md) | Complete deployment guide (CN) |
 
 ### FAQ & Glossary
@@ -48,6 +48,7 @@ API documentation is located in the [API/](./API/) directory:
 |----------|-------------|
 | [API/README.md](./API/README.md) | API documentation entry |
 | [API/API_Complete_Reference.md](./API/API_Complete_Reference.md) | Complete API reference |
+| [API/Error_Codes_Reference.md](./API/Error_Codes_Reference.md) | Error codes reference |
 | [API/openapi.yaml](./API/openapi.yaml) | OpenAPI 3.0 specification |
 
 ### Other
@@ -55,7 +56,6 @@ API documentation is located in the [API/](./API/) directory:
 | Document | Description |
 |----------|-------------|
 | [Documentation-Standards.md](./Documentation-Standards.md) | Documentation standards |
-| [ERROR_CODES.md](./ERROR_CODES.md) | Error codes reference |
 
 ---
 
@@ -64,8 +64,9 @@ API documentation is located in the [API/](./API/) directory:
 ### Getting Started
 
 1. Read [Technical Documentation](./Technical-Documentation.md) to understand NogoChain
-2. Read [Deployment Guide](./Deployment-Guide-EN.md) to deploy a node
-3. Read [API Documentation](./API/README.md) to use the API
+2. Read [Configuration Reference](./Configuration-Reference.md) for configuration options
+3. Read [Deployment Guide](./Deployment-Guide-EN.md) to deploy a node
+4. Read [API Documentation](./API/README.md) to use the API
 
 ### Developers
 
@@ -88,6 +89,7 @@ API documentation is located in the [API/](./API/) directory:
 | 文档 | 描述 |
 |-----|------|
 | [技术文档-CN.md](./技术文档-CN.md) | 技术文档总览 |
+| [Configuration-Reference.md](./Configuration-Reference.md) | 配置参考 |
 | [core-types-README.md](./core-types-README.md) | 核心数据类型定义 |
 | [nogopow-README.md](./nogopow-README.md) | NogoPow 共识算法 |
 
@@ -95,16 +97,15 @@ API documentation is located in the [API/](./API/) directory:
 
 | 文档 | 描述 |
 |-----|------|
-| [Algorithm-Manual-Updated.md](./Algorithm-Manual-Updated.md) | 算法手册 |
-| [Economic-Model-Updated.md](./Economic-Model-Updated.md) | 经济模型 |
+| [Algorithm-Manual.md](./Algorithm-Manual.md) | 算法手册 |
+| [Economic-Model.md](./Economic-Model.md) | 经济模型 |
 
 ### 部署指南
 
 | 文档 | 语言 |
 |-----|------|
-| [Deployment-Guide-CN.md](./Deployment-Guide-CN.md) | 中文 |
-| [Deployment-Guide-EN.md](./Deployment-Guide-EN.md) | English |
 | [Deployment-Complete-Guide-CN.md](./Deployment-Complete-Guide-CN.md) | 完整部署指南 |
+| [Deployment-Guide-EN.md](./Deployment-Guide-EN.md) | English |
 
 ### 常见问题与术语
 
@@ -123,6 +124,7 @@ API 文档位于 [API/](./API/) 目录：
 |-----|------|
 | [API/README_cn.md](./API/README_cn.md) | API 文档入口 |
 | [API/API 完整参考_cn.md](./API/API%20完整参考_cn.md) | 完整 API 参考 |
+| [API/错误码参考_cn.md](./API/错误码参考_cn.md) | 错误码参考 |
 | [API/openapi_cn.yaml](./API/openapi_cn.yaml) | OpenAPI 3.0 规范 |
 
 ---
@@ -132,8 +134,9 @@ API 文档位于 [API/](./API/) 目录：
 ### 新手入门
 
 1. 阅读 [技术文档](./技术文档-CN.md) 了解 NogoChain
-2. 阅读 [部署指南](./Deployment-Guide-CN.md) 部署节点
-3. 阅读 [API 文档](./API/README_cn.md) 使用 API
+2. 阅读 [配置参考](./Configuration-Reference.md) 了解配置选项
+3. 阅读 [部署指南](./Deployment-Complete-Guide-CN.md) 部署节点
+4. 阅读 [API 文档](./API/README_cn.md) 使用 API
 
 ### 开发者
 
@@ -143,7 +146,7 @@ API 文档位于 [API/](./API/) 目录：
 
 ### 运维人员
 
-1. [部署指南](./Deployment-Guide-CN.md) - 部署配置
+1. [部署指南](./Deployment-Complete-Guide-CN.md) - 部署配置
 2. [API 监控指南](./API/监控和故障排除_cn.md) - 监控排错
 3. [性能调优](./API/性能调优指南_cn.md) - 性能优化
 

@@ -1,7 +1,7 @@
 # NogoChain API Complete Reference
 
-> Version: 1.2.0  
-> Last Updated: 2026-04-07  
+> Version: 1.3.0  
+> Last Updated: 2026-04-20  
 > Applicable Version: NogoChain Node v1.0.0+
 
 ## Table of Contents
@@ -20,6 +20,8 @@
    - [Mempool](#mempool)
    - [Mining](#mining)
    - [P2P Network](#p2p-network)
+   - [P2P Sync Protocol](#p2p-sync-protocol)
+   - [SPV/Light Client](#spvlight-client)
    - [Community Governance](#community-governance)
    - [WebSocket Subscription](#websocket-subscription)
 7. [Best Practices](#best-practices)
@@ -194,16 +196,32 @@ API implements rate limiting to protect node resources.
 
 ### Default Limits
 
-- **Request Rate**: 10 requests/second
-- **Burst**: 20 requests
-- **Limit Scope**: By IP address
+| Parameter | Default Value | Min | Max |
+|-----------|--------------|-----|-----|
+| Requests Per Second (RPS) | 10 | 1 | 10,000 |
+| Burst | 20 | 1 | 100,000 |
+| API Key Multiplier | 5x | 1x | 100x |
+| TTL (bucket cleanup) | 10 minutes | - | - |
+| Cleanup Interval | 1 minute | - | - |
 
-### Increase Limits
+### Rate Limiting Algorithm
 
-Limits can be increased by applying for an API Key:
+The rate limiter uses a **Token Bucket** algorithm implementation:
 
-- **API Key Multiplier**: 5x (default)
-- **Maximum Multiplier**: 100x
+- **Tokens**: Each request consumes one token
+- **Refill Rate**: Tokens are refilled at the configured RPS rate
+- **Burst Capacity**: Maximum tokens that can accumulate (allows temporary bursts)
+- **Per-Identifier**: Rate limits are applied per IP address or API key
+
+### API Key Benefits
+
+API keys provide enhanced rate limits:
+
+| Tier | Multiplier | Description |
+|------|------------|-------------|
+| Basic | 5x | Default multiplier |
+| Premium | 10x-50x | Higher limits |
+| Enterprise | 50x-100x | Maximum limits |
 
 **Apply for API Key**:
 ```bash
@@ -234,6 +252,18 @@ Retry-After: 2
 - `X-RateLimit-Reset`: Limit reset time (Unix timestamp)
 - `Retry-After`: Suggested retry time (seconds)
 
+### Rate Limit Response
+
+When rate limited, the API returns `429 Too Many Requests`:
+
+```json
+{
+  "error": "rate_limit_exceeded",
+  "message": "Too many requests",
+  "retryAfter": 2
+}
+```
+
 ### Handling Rate Limits
 
 When receiving a `429 Too Many Requests` response:
@@ -258,6 +288,31 @@ async function requestWithRetry(url, maxRetries = 3) {
     return response;
   }
   throw new Error('Max retries exceeded');
+}
+```
+
+### Configuration
+
+Rate limiting can be configured via environment variables or configuration file:
+
+```json
+{
+  "enabled": true,
+  "default": {
+    "requests_per_second": 10,
+    "burst": 20
+  },
+  "endpoints": {
+    "/tx": {
+      "requests_per_second": 5,
+      "burst": 10
+    }
+  },
+  "api_key_multiplier": 5.0,
+  "by_ip": true,
+  "by_user": false,
+  "trust_proxy": false,
+  "storage_type": "memory"
 }
 ```
 
@@ -550,7 +605,14 @@ curl http://localhost:8080/block/height/100
   "difficultyBits": 11,
   "nonce": 12345,
   "minerAddress": "NOGO...",
-  "transactions": [...]
+  "transactions": [...],
+  "txCount": 5,
+  "coinbase": {
+    "totalAmount": 800000000,
+    "minerReward": 800000000,
+    "fee": 0,
+    "data": "block reward"
+  }
 }
 ```
 
@@ -575,6 +637,15 @@ curl http://localhost:8080/blocks/from/100?count=20
 **Parameters**:
 - `count`: Number of blocks to retrieve (default 20, max 100)
 
+### GET /blocks/hash/{hash}
+
+Get block by hash (alternate endpoint).
+
+**Request**:
+```bash
+curl http://localhost:8080/blocks/hash/abc123...
+```
+
 ### GET /headers/from/{height}
 
 Batch get block headers from specified height.
@@ -596,14 +667,23 @@ Submit a signed transaction to the network.
 ```bash
 curl -X POST http://localhost:8080/tx \
   -H "Content-Type: application/json" \
-  -d '{"rawTx": "hex_encoded_signed_tx"}'
+  -d '{
+    "type": "transfer",
+    "chainId": 1,
+    "fromPubKey": "base64_pubkey",
+    "toAddress": "NOGO...",
+    "amount": 100000000,
+    "fee": 1000,
+    "nonce": 1,
+    "signature": "base64_signature"
+  }'
 ```
 
 **Response**:
 ```json
 {
   "accepted": true,
-  "message": "Transaction accepted",
+  "message": "queued",
   "txId": "abc123..."
 }
 ```
@@ -628,6 +708,28 @@ Get transaction details by ID.
 curl http://localhost:8080/tx/abc123...
 ```
 
+**Response (200)**:
+```json
+{
+  "txId": "abc123...",
+  "transaction": {
+    "type": "transfer",
+    "chainId": 1,
+    "fromPubKey": "base64_pubkey",
+    "toAddress": "NOGO...",
+    "amount": 100000000,
+    "fee": 1000,
+    "nonce": 1,
+    "signature": "base64_signature"
+  },
+  "location": {
+    "height": 100,
+    "blockHashHex": "def456...",
+    "index": 2
+  }
+}
+```
+
 ### GET /tx/status/{txid}
 
 Get transaction status and confirmation count.
@@ -637,25 +739,156 @@ Get transaction status and confirmation count.
 curl http://localhost:8080/tx/status/abc123...
 ```
 
+**Response (200)**:
+```json
+{
+  "txId": "abc123...",
+  "status": "confirmed",
+  "confirmed": true,
+  "confirmations": 10,
+  "blockHeight": 100,
+  "blockHash": "def456...",
+  "blockTime": 1712000000,
+  "txIndex": 2,
+  "transaction": {...}
+}
+```
+
+**Status Values**:
+- `pending`: Transaction in mempool
+- `confirmed`: Transaction included in block
+- `not_found`: Transaction not found
+- `error`: Error occurred
+
 ### GET /tx/receipt/{txid}
 
 Get transaction execution receipt.
+
+**Request**:
+```bash
+curl http://localhost:8080/tx/receipt/abc123...
+```
+
+**Response (200)**:
+```json
+{
+  "txId": "abc123...",
+  "blockHeight": 100,
+  "blockHash": "def456...",
+  "txIndex": 2,
+  "confirmations": 10,
+  "timestamp": 1712000000,
+  "gasUsed": 0,
+  "status": "success",
+  "transaction": {...},
+  "logs": []
+}
+```
+
+**Status Values**:
+- `success`: Transaction executed successfully
+- `failed`: Transaction execution failed
+- `error`: Error occurred
 
 ### GET /tx/proof/{txid}
 
 Get transaction Merkle proof.
 
+**Request**:
+```bash
+curl http://localhost:8080/tx/proof/abc123...
+```
+
+**Response (200)**:
+```json
+{
+  "txId": "abc123...",
+  "blockHeight": 100,
+  "blockHash": "def456...",
+  "txIndex": 2,
+  "merkleRoot": "abc123...",
+  "branch": ["hash1", "hash2", ...],
+  "siblingLeft": true
+}
+```
+
+**Note**: Merkle proofs are only available for v2 blocks (blocks with merkle root).
+
 ### GET /tx/estimate_fee
 
 Estimate transaction fee.
+
+**Request**:
+```bash
+curl "http://localhost:8080/tx/estimate_fee?speed=average&size=350"
+```
 
 **Parameters**:
 - `speed`: Speed option (fast/average/slow)
 - `size`: Transaction size in bytes (default 350)
 
+**Response (200)**:
+```json
+{
+  "estimatedFee": 1000,
+  "txSize": 350,
+  "mempoolSize": 50,
+  "speed": "average",
+  "minFee": 100,
+  "minFeePerByte": 1
+}
+```
+
 ### GET /tx/fee/recommend
 
-Get recommended transaction fee rate.
+Get recommended transaction fee rates.
+
+**Request**:
+```bash
+curl "http://localhost:8080/tx/fee/recommend?size=350"
+```
+
+**Parameters**:
+- `size`: Transaction size in bytes (default 350)
+
+**Response (200)**:
+```json
+{
+  "recommendedFees": [
+    {
+      "tier": "slow",
+      "feePerByte": 1,
+      "totalFee": 350,
+      "estimatedConfirmationTime": "1 minute",
+      "estimatedConfirmationBlocks": 6,
+      "priority": 1
+    },
+    {
+      "tier": "standard",
+      "feePerByte": 2,
+      "totalFee": 700,
+      "estimatedConfirmationTime": "30 seconds",
+      "estimatedConfirmationBlocks": 3,
+      "priority": 2
+    },
+    {
+      "tier": "fast",
+      "feePerByte": 4,
+      "totalFee": 1400,
+      "estimatedConfirmationTime": "10 seconds",
+      "estimatedConfirmationBlocks": 1,
+      "priority": 3
+    }
+  ],
+  "mempoolSize": 50,
+  "mempoolTotalSize": 17500,
+  "averageFeePerByte": 2,
+  "medianFeePerByte": 2,
+  "minFeePerByte": 1,
+  "maxFeePerByte": 10,
+  "timestamp": 1712000000
+}
+```
 
 ---
 
@@ -675,26 +908,104 @@ curl -X POST http://localhost:8080/wallet/create
 {
   "address": "NOGO...",
   "publicKey": "base64_pubkey",
-  "privateKey": "base64_privkey",
-  "mnemonic": "word1 word2 ..."
+  "privateKey": "base64_privkey"
 }
 ```
+
+**⚠️ WARNING**: Private keys are displayed only once, please save them securely!
 
 ### POST /wallet/create_persistent
 
 Create a persistent wallet saved to disk.
 
+**Request**:
+```bash
+curl -X POST http://localhost:8080/wallet/create_persistent \
+  -H "Content-Type: application/json" \
+  -d '{
+    "password": "secure_password",
+    "label": "my_wallet"
+  }'
+```
+
+**Response**:
+```json
+{
+  "address": "NOGO...",
+  "publicKey": "base64_pubkey",
+  "privateKey": "base64_privkey",
+  "label": "my_wallet",
+  "message": "Wallet created successfully. Save your private key securely!"
+}
+```
+
+**Parameters**:
+- `password`: Required, minimum 8 characters
+- `label`: Optional, wallet label
+
 ### POST /wallet/import
 
-Import wallet via mnemonic or private key.
+Import wallet via private key.
+
+**Request**:
+```bash
+curl -X POST http://localhost:8080/wallet/import \
+  -H "Content-Type: application/json" \
+  -d '{
+    "privateKey": "base64_or_hex_private_key",
+    "password": "secure_password",
+    "label": "imported_wallet"
+  }'
+```
+
+**Response**:
+```json
+{
+  "address": "NOGO...",
+  "publicKey": "base64_pubkey",
+  "label": "imported_wallet",
+  "message": "Wallet imported successfully. Save your private key securely!"
+}
+```
+
+**Parameters**:
+- `privateKey`: Required, base64 or hex encoded
+- `password`: Required, minimum 8 characters
+- `label`: Optional, wallet label
 
 ### GET /wallet/list
 
 List all imported wallet addresses.
 
+**Request**:
+```bash
+curl http://localhost:8080/wallet/list
+```
+
+**Response**:
+```json
+{
+  "wallets": []
+}
+```
+
 ### GET /wallet/balance/{address}
 
 Get wallet balance.
+
+**Request**:
+```bash
+curl http://localhost:8080/wallet/balance/NOGO...
+```
+
+**Response**:
+```json
+{
+  "address": "NOGO...",
+  "balance": 1000000000,
+  "nonce": 0
+}
+```
 
 ### POST /wallet/sign
 
@@ -702,17 +1013,131 @@ Sign transaction with private key.
 
 **⚠️ WARNING**: Do not pass private keys via API in production! Use local wallet signing.
 
+**Request**:
+```bash
+curl -X POST http://localhost:8080/wallet/sign \
+  -H "Content-Type: application/json" \
+  -d '{
+    "privateKey": "base64_private_key",
+    "toAddress": "NOGO...",
+    "amount": 100000000,
+    "fee": 1000,
+    "nonce": 1,
+    "data": ""
+  }'
+```
+
+**Response**:
+```json
+{
+  "tx": {...},
+  "txJson": "{...}",
+  "txid": "abc123...",
+  "signed": true,
+  "from": "NOGO...",
+  "nonce": 1,
+  "chainId": 1
+}
+```
+
+### POST /wallet/sign_tx
+
+Sign transaction (alternate endpoint with same functionality).
+
+**Request**:
+```bash
+curl -X POST http://localhost:8080/wallet/sign_tx \
+  -H "Content-Type: application/json" \
+  -d '{
+    "privateKey": "base64_private_key",
+    "toAddress": "NOGO...",
+    "amount": 100000000,
+    "fee": 1000
+  }'
+```
+
 ### POST /wallet/verify
 
 Verify address format.
 
+**Request**:
+```bash
+curl -X POST http://localhost:8080/wallet/verify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "address": "NOGO..."
+  }'
+```
+
+**Response**:
+```json
+{
+  "address": "NOGO...",
+  "valid": true,
+  "error": null
+}
+```
+
 ### POST /wallet/derive
 
-Derive address from mnemonic/seed.
+Derive address from seed phrase.
+
+**Request**:
+```bash
+curl -X POST http://localhost:8080/wallet/derive \
+  -H "Content-Type: application/json" \
+  -d '{
+    "seed": "your_seed_phrase"
+  }'
+```
+
+**Response**:
+```json
+{
+  "address": "NOGO...",
+  "publicKey": "base64_pubkey",
+  "message": "Wallet derived from seed successfully"
+}
+```
 
 ### POST /wallet/addresses
 
-Batch derive multiple addresses from HD wallet.
+Batch derive multiple addresses from HD wallet (BIP44 compliant).
+
+**Request**:
+```bash
+curl -X POST http://localhost:8080/wallet/addresses \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mnemonic": "word1 word2 ... word12",
+    "startIndex": 0,
+    "count": 10,
+    "chainId": 1
+  }'
+```
+
+**Response**:
+```json
+{
+  "addresses": [
+    {
+      "index": 0,
+      "address": "NOGO...",
+      "publicKey": "base64_pubkey",
+      "derivationPath": "m/44'/118'/0'/0/0"
+    },
+    ...
+  ],
+  "count": 10,
+  "chainId": 1
+}
+```
+
+**Parameters**:
+- `mnemonic`: Required, BIP39 mnemonic phrase
+- `startIndex`: Starting index (default 0)
+- `count`: Number of addresses to derive (max 100)
+- `chainId`: Chain ID for address derivation
 
 ---
 
@@ -749,6 +1174,16 @@ curl http://localhost:8080/address/NOGO.../txs?limit=50&cursor=0
 - `limit`: Items per page (default 50, max 200)
 - `cursor`: Pagination cursor
 
+**Response**:
+```json
+{
+  "address": "NOGO...",
+  "txs": [...],
+  "nextCursor": 50,
+  "more": true
+}
+```
+
 ---
 
 ## Mempool
@@ -771,6 +1206,7 @@ curl http://localhost:8080/mempool
       "txId": "abc123...",
       "fee": 1000,
       "amount": 1000000,
+      "nonce": 1,
       "fromAddr": "NOGO...",
       "toAddress": "NOGO..."
     }
@@ -788,8 +1224,31 @@ Get block template for mining.
 
 **Request**:
 ```bash
-curl http://localhost:8080/block/template
+curl "http://localhost:8080/block/template?address=NOGO..."
 ```
+
+**Parameters**:
+- `address`: Miner address (required)
+
+**Response (200)**:
+```json
+{
+  "height": 101,
+  "prevHash": "abc123...",
+  "merkleRoot": "def456...",
+  "timestamp": 1712000000,
+  "difficultyBits": 11,
+  "minerAddress": "NOGO...",
+  "chainId": 1,
+  "target": "00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "extraNonce": "00000000",
+  "transactions": [...]
+}
+```
+
+**Error Responses**:
+- `400`: Miner address required
+- `503`: Chain reorganizing, please retry
 
 ### POST /mining/submit
 
@@ -799,12 +1258,44 @@ Submit mining work (proof of work).
 ```bash
 curl -X POST http://localhost:8080/mining/submit \
   -H "Content-Type: application/json" \
-  -d '{"height": 100, "nonce": 12345, "timestamp": 1712000000, "minerAddress": "NOGO..."}'
+  -d '{
+    "height": 101,
+    "nonce": 12345,
+    "timestamp": 1712000000,
+    "minerAddress": "NOGO..."
+  }'
+```
+
+**Response**:
+```json
+{
+  "accepted": true,
+  "message": "share accepted"
+}
 ```
 
 ### GET /mining/info
 
 Get current mining status information.
+
+**Request**:
+```bash
+curl http://localhost:8080/mining/info
+```
+
+**Response**:
+```json
+{
+  "chainId": 1,
+  "height": 100,
+  "difficulty": 11,
+  "difficultyBits": 11,
+  "generate": false,
+  "genProcLimit": -1,
+  "hashesPerSec": 0,
+  "networkHashPS": 0
+}
+```
 
 ### POST /mine/once
 
@@ -812,17 +1303,69 @@ Execute one mining operation (for testing).
 
 **Requires Admin Token authentication**.
 
+**Request**:
+```bash
+curl -X POST http://localhost:8080/mine/once \
+  -H "Authorization: Bearer your_admin_token"
+```
+
+**Response**:
+```json
+{
+  "mined": true,
+  "message": "ok",
+  "height": 101,
+  "blockHash": "abc123...",
+  "difficultyBits": 11
+}
+```
+
 ### POST /block
 
 Submit complete block (administrative interface).
 
 **Requires Admin Token authentication**.
 
+**Request**:
+```bash
+curl -X POST http://localhost:8080/block \
+  -H "Authorization: Bearer your_admin_token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "height": 101,
+    "header": {...},
+    "transactions": [...],
+    "minerAddress": "NOGO..."
+  }'
+```
+
+**Response**:
+```json
+{
+  "accepted": true,
+  "reorged": false
+}
+```
+
 ### POST /audit/chain
 
 Execute blockchain integrity audit.
 
 **Requires Admin Token authentication**.
+
+**Request**:
+```bash
+curl -X POST http://localhost:8080/audit/chain \
+  -H "Authorization: Bearer your_admin_token"
+```
+
+**Response**:
+```json
+{
+  "status": "SUCCESS",
+  "message": "ok"
+}
+```
 
 ---
 
@@ -854,6 +1397,168 @@ curl http://localhost:8080/p2p/getaddr
 
 Submit own P2P address to node.
 
+**Request**:
+```bash
+curl -X POST http://localhost:8080/p2p/addr \
+  -H "Content-Type: application/json" \
+  -d '{
+    "addresses": [
+      {"ip": "192.168.1.1", "port": 9090}
+    ]
+  }'
+```
+
+**Response**:
+```json
+{
+  "status": "ok"
+}
+```
+
+---
+
+## P2P Sync Protocol
+
+### POST /sync/getblocks
+
+Request blocks from a peer (P2P internal endpoint).
+
+**Request**:
+```bash
+curl -X POST http://localhost:8080/sync/getblocks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "parent_hash": "abc123...",
+    "limit": 500,
+    "headers_only": false
+  }'
+```
+
+**Parameters**:
+- `parent_hash`: Parent block hash (empty for latest)
+- `limit`: Maximum blocks to return (default 500, max 500)
+- `headers_only`: Return only headers if true
+
+**Response**:
+```json
+{
+  "blocks": [...],
+  "headers": [],
+  "from_height": 100,
+  "to_height": 599,
+  "count": 500
+}
+```
+
+**Error Response**:
+```json
+{
+  "hashes": [],
+  "reason": "parent block not found: abc123..."
+}
+```
+
+---
+
+## SPV/Light Client
+
+### GET /spv/balance/{address}
+
+Get balance for address (SPV mode).
+
+**Request**:
+```bash
+curl http://localhost:8080/spv/balance/NOGO...
+```
+
+**Response**:
+```json
+{
+  "address": "NOGO...",
+  "balance": 1000000000
+}
+```
+
+### POST /spv/sync/{address}
+
+Sync address transaction history.
+
+**Request**:
+```bash
+curl -X POST http://localhost:8080/spv/sync/NOGO...
+```
+
+**Response**:
+```json
+{
+  "status": "synced"
+}
+```
+
+### GET /spv/tx/{txHash}
+
+Get transaction by hash (SPV mode).
+
+**Request**:
+```bash
+curl http://localhost:8080/spv/tx/abc123...
+```
+
+**Response**:
+```json
+{
+  "type": "transfer",
+  "chainId": 1,
+  "fromPubKey": "base64_pubkey",
+  "toAddress": "NOGO...",
+  "amount": 100000000,
+  "fee": 1000,
+  "nonce": 1,
+  "signature": "base64_signature"
+}
+```
+
+### GET /spv/headers
+
+Get block headers chain.
+
+**Request**:
+```bash
+curl http://localhost:8080/spv/headers
+```
+
+**Response**:
+```json
+[
+  {
+    "timestampUnix": 1712000000,
+    "prevHash": "...",
+    "difficultyBits": 11,
+    "nonce": 12345,
+    "merkleRoot": "..."
+  },
+  ...
+]
+```
+
+### GET /spv/proof/{txHash}/{blockHash}
+
+Get Merkle proof for transaction.
+
+**Request**:
+```bash
+curl http://localhost:8080/spv/proof/abc123.../def456...
+```
+
+**Response**:
+```json
+{
+  "txHash": "abc123...",
+  "blockHash": "def456...",
+  "merkleProof": ["hash1", "hash2", ...]
+}
+```
+
 ---
 
 ## Community Governance
@@ -862,9 +1567,61 @@ Submit own P2P address to node.
 
 Get all community fund proposals.
 
+**Request**:
+```bash
+curl http://localhost:8080/api/proposals
+```
+
+**Response**:
+```json
+[
+  {
+    "id": "prop_001",
+    "title": "Community Development Fund",
+    "description": "Proposal for community development",
+    "type": "treasury",
+    "proposer": "NOGO...",
+    "amount": 1000000000,
+    "recipient": "NOGO...",
+    "status": "active",
+    "deposit": 100000000,
+    "votes": {
+      "yes": 500000000,
+      "no": 100000000,
+      "abstain": 50000000
+    },
+    "createdAt": 1712000000,
+    "expiresAt": 1714000000
+  }
+]
+```
+
 ### GET /api/proposals/{proposalId}
 
 Get proposal details by ID.
+
+**Request**:
+```bash
+curl http://localhost:8080/api/proposals/prop_001
+```
+
+**Response**:
+```json
+{
+  "id": "prop_001",
+  "title": "Community Development Fund",
+  "description": "Proposal for community development",
+  "type": "treasury",
+  "proposer": "NOGO...",
+  "amount": 1000000000,
+  "recipient": "NOGO...",
+  "status": "active",
+  "deposit": 100000000,
+  "votes": {...},
+  "createdAt": 1712000000,
+  "expiresAt": 1714000000
+}
+```
 
 ### POST /api/proposals/create
 
@@ -872,13 +1629,88 @@ Create new community fund proposal.
 
 **Requires deposit payment via depositTx**.
 
+**Request**:
+```bash
+curl -X POST http://localhost:8080/api/proposals/create \
+  -H "Content-Type: application/json" \
+  -d '{
+    "proposer": "NOGO...",
+    "title": "Community Development Fund",
+    "description": "Proposal for community development",
+    "type": "treasury",
+    "amount": 1000000000,
+    "recipient": "NOGO...",
+    "deposit": 100000000,
+    "depositTx": "abc123...",
+    "signature": "base64_signature"
+  }'
+```
+
+**Response**:
+```json
+{
+  "success": true,
+  "proposalId": "prop_001",
+  "message": "Proposal created successfully",
+  "depositCollected": true
+}
+```
+
+**Proposal Types**:
+- `treasury`: Treasury spending proposal
+- `ecosystem`: Ecosystem development
+- `grant`: Grant proposal
+- `event`: Community event
+
 ### POST /api/proposals/vote
 
 Vote on proposal.
 
+**Request**:
+```bash
+curl -X POST http://localhost:8080/api/proposals/vote \
+  -H "Content-Type: application/json" \
+  -d '{
+    "proposalId": "prop_001",
+    "voter": "NOGO...",
+    "support": true,
+    "votingPower": 1000000000,
+    "signature": "base64_signature"
+  }'
+```
+
+**Response**:
+```json
+{
+  "success": true,
+  "message": "Vote submitted successfully"
+}
+```
+
 ### POST /api/proposals/deposit
 
 Create proposal deposit transaction.
+
+**Request**:
+```bash
+curl -X POST http://localhost:8080/api/proposals/deposit \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "NOGO...",
+    "to": "NOGO...",
+    "amount": 100000000,
+    "privateKey": "base64_private_key"
+  }'
+```
+
+**Response**:
+```json
+{
+  "success": true,
+  "txHash": "abc123...",
+  "message": "Deposit transaction created successfully"
+}
+```
 
 ---
 
@@ -889,8 +1721,8 @@ Create proposal deposit transaction.
 Establish WebSocket connection for real-time event subscription.
 
 **Supported Event Types**:
-- `new_block`: New block
-- `new_tx`: New transaction
+- `new_block`: New block mined
+- `new_tx`: New transaction confirmed
 - `mempool_added`: Transaction added to mempool
 - `mempool_removed`: Transaction removed from mempool
 
@@ -907,6 +1739,36 @@ ws.send(JSON.stringify({
   action: 'subscribe',
   events: ['new_block', 'new_tx']
 }));
+```
+
+**Event Examples**:
+
+**New Block Event**:
+```json
+{
+  "type": "new_block",
+  "data": {
+    "height": 101,
+    "hash": "abc123...",
+    "txCount": 5,
+    "minerAddress": "NOGO..."
+  }
+}
+```
+
+**Mempool Added Event**:
+```json
+{
+  "type": "mempool_added",
+  "data": {
+    "txId": "abc123...",
+    "fromAddr": "NOGO...",
+    "toAddress": "NOGO...",
+    "amount": 100000000,
+    "fee": 1000,
+    "nonce": 1
+  }
+}
 ```
 
 ---
@@ -937,6 +1799,14 @@ Use WebSocket instead of polling for real-time updates.
 
 Track and manage nonce values carefully to avoid transaction failures.
 
+### 7. Fee Estimation
+
+Use `/tx/fee/recommend` to get optimal fees based on current network conditions.
+
+### 8. Secure Private Key Handling
+
+Never transmit private keys over the network. Use local signing whenever possible.
+
 ---
 
 ## FAQ
@@ -960,6 +1830,18 @@ A: Mainnet (chainId=1) is the production network with real value. Testnet (chain
 ### Q: How do I run a node?
 
 A: See the [Deployment_and_Configuration_Guide.md](./Deployment_and_Configuration_Guide.md) for detailed instructions.
+
+### Q: What is the minimum fee for a transaction?
+
+A: The minimum fee is determined by `MinFeePerByte` constant. Use `/tx/estimate_fee` to get current estimates.
+
+### Q: How do I verify an address is valid?
+
+A: Use `POST /wallet/verify` with the address to check validity.
+
+### Q: What is the block time target?
+
+A: NogoChain targets 10-second block times (configurable via consensus parameters).
 
 ---
 

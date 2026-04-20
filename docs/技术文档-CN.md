@@ -1,22 +1,21 @@
 # NogoChain 技术文档
 
-## 版本信息
-- **文档版本**: 1.0.0
-- **最后更新**: 2026-04-06
-- **适用版本**: NogoChain v1.0+
+**版本:** 1.0.0  
+**最后更新:** 2026-04-20  
+**许可证:** GNU Lesser General Public License v3.0
 
 ---
 
 ## 目录
 
 1. [概述](#1-概述)
-2. [快速开始](#2-快速开始)
-3. [架构设计](#3-架构设计)
-4. [核心概念](#4-核心概念)
-5. [区块结构](#5-区块结构)
-6. [交易机制](#6-交易机制)
-7. [共识算法](#7-共识算法)
-8. [网络协议](#8-网络协议)
+2. [架构设计](#2-架构设计)
+3. [核心概念](#3-核心概念)
+4. [区块结构](#4-区块结构)
+5. [交易机制](#5-交易机制)
+6. [共识算法](#6-共识算法)
+7. [网络协议](#7-网络协议)
+8. [同步进度持久化](#8-同步进度持久化)
 9. [经济模型](#9-经济模型)
 10. [API 参考](#10-api-参考)
 11. [开发指南](#11-开发指南)
@@ -26,60 +25,833 @@
 
 ## 1. 概述
 
-### 1.1 什么是 NogoChain
+### 1.1 简介
 
-NogoChain 是一个采用原创 NogoPow（Nogo Proof of Work）共识算法的去中心化 Layer 1 公链。
+NogoChain 是一个使用 Go 语言编写的生产级区块链实现，专为主网部署而设计。系统实现了名为 **NogoPow** 的工作量证明 (PoW) 共识机制，采用 PI（比例-积分）控制器进行自适应难度调整。
 
-**核心特性**:
-- **NogoPow 共识**: 基于矩阵运算的工作量证明算法，具有抗 ASIC 特性
-- **Ed25519 签名**: 使用 Ed25519 数字签名确保交易安全
-- **P2P 网络**: 去中心化的网状网络拓扑
-- **智能货币政策**: 几何衰减的区块奖励机制
-- **高并发处理**: 支持批量交易验证和并行处理
+### 1.2 核心特性
 
-### 1.2 技术栈
+- **NogoPow 共识**: 自定义 PoW 算法，结合矩阵乘法和 PI 控制器难度调整
+- **Ed25519 密码学**: 使用 Ed25519 椭圆曲线进行安全数字签名
+- **Merkle 树支持**: 版本 2 区块包含用于交易验证的 Merkle 根
+- **P2P 网络**: 多路复用连接，支持流量控制和节点发现
+- **通缩经济学**: 交易费用被销毁，创造通缩压力
+- **诚信奖励**: 1% 的区块奖励分配给诚信节点运营者
 
-- **编程语言**: Go 1.24.0
-- **数据库**: BoltDB (嵌入式 KV 存储)
-- **密码学**: Ed25519, SHA256, SHA3-256
-- **网络协议**: 自定义 JSON-based P2P 协议
-- **监控**: Prometheus + Grafana
+### 1.3 技术栈
 
-### 1.3 项目结构
+| 组件 | 技术 |
+|------|------|
+| 语言 | Go 1.21+ |
+| 密码学 | Ed25519, SHA-256, Keccak256 |
+| 存储 | BoltDB |
+| 网络 | TCP 多路复用通道 |
+| 序列化 | JSON, RLP（用于共识）|
+
+---
+
+## 2. 架构设计
+
+### 2.1 项目结构
 
 ```
-nogo/
-├── blockchain/          # 核心区块链实现
-│   ├── core/           # 核心数据结构
-│   ├── consensus/      # 共识验证器
-│   ├── nogopow/        # NogoPow 引擎
-│   ├── network/        # P2P 网络层
-│   ├── mempool/        # 交易内存池
-│   ├── storage/        # 持久化存储
-│   └── config/         # 配置管理
-├── internal/           # 内部工具库
-│   ├── crypto/        # 密码学实现
-│   ├── metrics/       # 监控指标
-│   └── storage/       # 存储抽象
-├── api/               # API 接口层
-│   ├── http.go       # HTTP API
-│   └── ws.go         # WebSocket API
-├── cmd/              # 命令行工具
-└── docs/             # 文档
+nogo/blockchain/
+├── api/http/           # HTTP API 处理器
+├── cmd/                # CLI 和节点初始化
+├── config/             # 配置管理
+├── consensus/          # 区块验证
+├── contracts/          # 智能合约实现
+├── core/               # 核心类型（Block, Transaction, Chain）
+├── crypto/             # 密码学工具
+├── index/              # 地址索引
+├── interfaces/         # 接口定义
+├── mempool/            # 交易池
+├── metrics/            # Prometheus 指标
+├── miner/              # 挖矿逻辑
+├── network/            # P2P 网络
+│   ├── mconnection/    # 多路复用连接
+│   ├── reactor/        # 消息反应器
+│   └── security/       # 节点安全管理
+├── nogopow/            # NogoPow 共识引擎
+├── storage/            # 持久化层
+├── utils/              # 工具函数
+└── vm/                 # 虚拟机
+```
+
+### 2.2 组件交互
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         HTTP API                            │
+│  (区块浏览器, 钱包, 矿池集成)                                  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                        Chain (core)                         │
+│  - 区块验证和存储                                            │
+│  - 状态管理                                                  │
+│  - 交易索引                                                  │
+└─────────────────────────────────────────────────────────────┘
+         │                    │                    │
+         ▼                    ▼                    ▼
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   NogoPow    │    │   Mempool    │    │   Storage    │
+│   Engine     │    │              │    │  (BoltDB)    │
+└──────────────┘    └──────────────┘    └──────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Network (P2P)                            │
+│  - Switch（节点管理）                                        │
+│  - MConnection（多路复用通道）                                │
+│  - Reactors（区块、交易、同步）                               │
+│  - Security Manager（封禁评分、IP 过滤）                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 2.3 关键接口
+
+```go
+type ChainStore interface {
+    SaveBlock(block *Block) error
+    LoadBlock(hash []byte) (*Block, error)
+    LoadCanonicalChain() ([]*Block, error)
+    AppendCanonical(block *Block) error
+    RewriteCanonical(blocks []*Block) error
+    GetRulesHash() ([]byte, bool, error)
+    PutRulesHash(hash []byte) error
+}
+
+type MempoolCleaner interface {
+    RemoveMany(txids []string)
+}
+
+type MetricsCollector interface {
+    ObserveTransactionVerification(duration time.Duration)
+    ObserveBlockVerification(duration time.Duration)
+}
 ```
 
 ---
 
-## 2. 快速开始
+## 3. 核心概念
 
-### 2.1 环境要求
+### 3.1 地址
 
-- Go 1.24.0 或更高版本
-- 操作系统：Linux / macOS / Windows
-- 内存：最低 2GB，推荐 4GB+
-- 存储：SSD 推荐
+NogoChain 地址遵循特定格式，包含校验和验证：
 
-### 2.2 安装
+**格式:** `NOGO` + `hex(version + hash + checksum)`
+
+**结构:**
+- **前缀:** `NOGO`（4 字节）
+- **版本:** `0x00`（1 字节）
+- **哈希:** 公钥的 SHA-256（32 字节）
+- **校验和:** SHA-256(version + hash) 的前 4 字节
+
+**源码:** [core/types.go:38-52](../blockchain/core/types.go#L38-L52)
+
+```go
+func GenerateAddress(pubKey []byte) string {
+    hash := sha256.Sum256(pubKey)
+    addressHash := hash[:HashLen]  // 32 bytes
+
+    addressData := make([]byte, 1+len(addressHash))
+    addressData[0] = AddressVersion  // 0x00
+    copy(addressData[1:], addressHash)
+
+    checksum := sha256.Sum256(addressData)
+    addressData = append(addressData, checksum[:ChecksumLen]...)  // 4 bytes
+
+    encoded := hex.EncodeToString(addressData)
+    return fmt.Sprintf("%s%s", AddressPrefix, encoded)  // "NOGO" + hex
+}
+```
+
+**常量:**
+- `AddressPrefix = "NOGO"`
+- `AddressVersion = 0x00`
+- `ChecksumLen = 4`
+- `HashLen = 32`
+- `PubKeySize = 32` (Ed25519)
+- `SignatureSize = 64` (Ed25519)
+
+### 3.2 账户
+
+账户跟踪每个地址的余额和 nonce：
+
+**源码:** [core/types.go:477-516](../blockchain/core/types.go#L477-L516)
+
+```go
+type Account struct {
+    Balance uint64 `json:"balance"`
+    Nonce   uint64 `json:"nonce"`
+}
+
+func (a *Account) AddBalance(amount uint64) error {
+    if amount > math.MaxUint64-a.Balance {
+        return errors.New("balance overflow")
+    }
+    a.Balance += amount
+    return nil
+}
+
+func (a *Account) SubBalance(amount uint64) error {
+    if amount > a.Balance {
+        return errors.New("balance underflow")
+    }
+    a.Balance -= amount
+    return nil
+}
+
+func (a *Account) IncrementNonce() error {
+    if a.Nonce >= math.MaxUint64 {
+        return errors.New("nonce overflow")
+    }
+    a.Nonce++
+    return nil
+}
+```
+
+### 3.3 交易类型
+
+**源码:** [core/types.go:518-546](../blockchain/core/types.go#L518-L546)
+
+```go
+type TransactionType string
+
+const (
+    TxCoinbase TransactionType = "coinbase"  // 区块奖励
+    TxTransfer TransactionType = "transfer"  // 价值转移
+)
+
+type Transaction struct {
+    Type TransactionType `json:"type"`
+    ChainID uint64 `json:"chainId"`
+    FromPubKey []byte `json:"fromPubKey,omitempty"`  // Ed25519 公钥
+    ToAddress  string `json:"toAddress"`
+    Amount uint64 `json:"amount"`
+    Fee    uint64 `json:"fee"`
+    Nonce  uint64 `json:"nonce,omitempty"`
+    Data string `json:"data,omitempty"`
+    Signature []byte `json:"signature,omitempty"`  // Ed25519 签名
+}
+```
+
+---
+
+## 4. 区块结构
+
+### 4.1 区块头
+
+**源码:** [core/types.go:168-179](../blockchain/core/types.go#L168-L179)
+
+```go
+type BlockHeader struct {
+    Version        uint32 `json:"version"`
+    PrevHash       []byte `json:"prevHash"`
+    TimestampUnix  int64  `json:"timestampUnix"`
+    DifficultyBits uint32 `json:"difficultyBits"`
+    Difficulty     uint32 `json:"difficulty"`
+    Nonce          uint64 `json:"nonce"`
+    MerkleRoot     []byte `json:"merkleRoot,omitempty"`
+}
+```
+
+### 4.2 区块
+
+**源码:** [core/types.go:196-210](../blockchain/core/types.go#L196-L210)
+
+```go
+type Block struct {
+    mu sync.RWMutex
+
+    Hash         []byte        `json:"hash,omitempty"`
+    Height       uint64        `json:"height"`
+    Header       BlockHeader   `json:"header"`
+    Transactions []Transaction `json:"transactions"`
+    CoinbaseTx   *Transaction  `json:"coinbaseTx,omitempty"`
+    MinerAddress string        `json:"minerAddress"`
+    TotalWork    string        `json:"totalWork"`
+}
+```
+
+### 4.3 区块版本
+
+| 版本 | 特性 |
+|------|------|
+| 1 | 基础区块结构，传统交易根 |
+| 2 | Merkle 树支持，改进的交易验证 |
+
+**版本选择逻辑:**
+
+```go
+func (c *Chain) blockVersionForHeight(height uint64) uint32 {
+    if c.consensus.MerkleEnable && height >= c.consensus.MerkleActivationHeight {
+        return 2
+    }
+    return 1
+}
+```
+
+### 4.4 区块验证
+
+区块经过全面的验证：
+
+1. **结构验证**: 哈希存在性、交易数量、coinbase 位置
+2. **PoW 验证**: NogoPow 封印验证
+3. **难度验证**: PI 控制器一致性检查
+4. **时间戳验证**: 单调递增、未来漂移限制
+5. **Merkle 根验证**: 针对 v2+ 区块
+6. **交易验证**: 签名验证、nonce 序列
+7. **Coinbase 经济学**: 奖励计算验证
+
+**源码:** [consensus/validator.go:101-146](../blockchain/consensus/validator.go#L101-L146)
+
+---
+
+## 5. 交易机制
+
+### 5.1 交易类型
+
+#### Coinbase 交易
+
+- 每个区块的第一笔交易
+- 无 `FromPubKey`、`Signature`、`Nonce` 或 `Fee`
+- 金额等于区块奖励 + 费用份额
+- 必须发送到 `MinerAddress`
+
+#### Transfer 交易
+
+- 需要有效的 Ed25519 签名
+- Nonce 必须顺序递增（`account.Nonce + 1`）
+- 最低费用：10,000 wei
+
+### 5.2 交易签名
+
+**签名哈希计算:**
+
+```go
+func (t Transaction) SigningHash() ([]byte, error) {
+    type signingView struct {
+        Type      TransactionType `json:"type"`
+        ChainID   uint64          `json:"chainId"`
+        FromAddr  string          `json:"fromAddr,omitempty"`
+        ToAddress string          `json:"toAddress"`
+        Amount    uint64          `json:"amount"`
+        Fee       uint64          `json:"fee"`
+        Nonce     uint64          `json:"nonce,omitempty"`
+        Data      string          `json:"data,omitempty"`
+    }
+    // ... JSON marshal + SHA-256
+}
+```
+
+**源码:** [core/types.go:796-839](../blockchain/core/types.go#L796-L839)
+
+### 5.3 交易验证
+
+```go
+func (t Transaction) VerifyForConsensus(p ConsensusParams, height uint64) error {
+    switch t.Type {
+    case TxCoinbase:
+        return t.Verify()  // 基础验证
+    case TxTransfer:
+        return t.verifyTransferForConsensus(p, height)  // 完整签名验证
+    default:
+        return fmt.Errorf("unknown transaction type: %q", t.Type)
+    }
+}
+```
+
+### 5.4 费用结构
+
+| 参数 | 值 |
+|------|-----|
+| MinFee | 10,000 wei |
+| MinFeePerByte | 100 wei/字节 |
+| MinerFeeShare | 0%（费用销毁）|
+
+---
+
+## 6. 共识算法
+
+### 6.1 NogoPow 概述
+
+NogoPow 是自定义的工作量证明算法，具有以下特点：
+
+1. **矩阵乘法**: 核心计算工作
+2. **缓存系统**: 基于种子的缓存以提高效率
+3. **PI 控制器**: 自适应难度调整
+
+**源码:** [nogopow/nogopow.go](../blockchain/nogopow/nogopow.go)
+
+### 6.2 NogoPow 引擎
+
+```go
+type NogopowEngine struct {
+    config       *Config
+    sealCh       chan *Block
+    exitCh       chan struct{}
+    wg           sync.WaitGroup
+    lock         sync.RWMutex
+    running      bool
+    hashrate     uint64
+    cache        *Cache
+    diffAdjuster *DifficultyAdjuster
+    matA         *denseMatrix
+    matB         *denseMatrix
+    matRes       *denseMatrix
+}
+```
+
+### 6.3 PI 控制器难度调整
+
+PI（比例-积分）控制器根据区块时间与目标的偏差调整难度。
+
+**数学公式:**
+
+```
+error = (actualTime - targetTime) / targetTime
+integral = integral + error (限制在 [-10, 10])
+output = Kp * error + Ki * integral
+newDifficulty = parentDifficulty * (1 - output)
+```
+
+**参数:**
+- `Kp`（比例增益）: `MaxDifficultyChangePercent / 100`（默认 1.0）
+- `Ki`（积分增益）: 0.1（固定值）
+- 抗饱和: 积分限制在 [-10.0, 10.0]
+
+**源码:** [nogopow/difficulty_adjustment.go:104-176](../blockchain/nogopow/difficulty_adjustment.go#L104-L176)
+
+```go
+func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header) *big.Int {
+    // 计算实际区块时间
+    timeDiff := int64(currentTime - parent.Time)
+    
+    // 限制不合理的时间差
+    if timeDiff > maxReasonableTimeDiff {
+        timeDiff = int64(da.consensusParams.BlockTimeTargetSeconds)
+    }
+    
+    // 使用滑动窗口平均计算
+    avgBlockTime := da.calculateAverageBlockTime()
+    newDifficulty := da.calculatePIDifficulty(avgBlockTime, targetTime, parentDiff)
+    
+    // 应用边界条件
+    return da.enforceBoundaryConditions(newDifficulty, parentDiff)
+}
+```
+
+### 6.4 边界条件
+
+```go
+func (da *DifficultyAdjuster) enforceBoundaryConditions(newDifficulty, parentDiff *big.Int) *big.Int {
+    // 1. 最小难度下限
+    if newDifficulty.Cmp(minDiff) < 0 {
+        newDifficulty.Set(minDiff)
+    }
+    
+    // 2. 最大难度（2^256）
+    if newDifficulty.Cmp(maxDiff) > 0 {
+        newDifficulty.Set(maxDiff)
+    }
+    
+    // 3. 最大增幅：父区块的 2 倍
+    maxAllowed := new(big.Int).Mul(parentDiff, big.NewInt(2))
+    if newDifficulty.Cmp(maxAllowed) > 0 {
+        newDifficulty.Set(maxAllowed)
+    }
+    
+    // 4. 最大降幅：50%
+    minAllowed := new(big.Int).Div(parentDiff, big.NewInt(2))
+    if newDifficulty.Cmp(minAllowed) < 0 {
+        newDifficulty.Set(minAllowed)
+    }
+    
+    return newDifficulty
+}
+```
+
+### 6.5 共识参数
+
+**源码:** [config/config.go:369-400](../blockchain/config/config.go#L369-L400)
+
+| 参数 | 默认值 |
+|------|--------|
+| ChainID | 1 |
+| BlockTimeTargetSeconds | 17 |
+| DifficultyAdjustmentInterval | 1（每个区块）|
+| MaxBlockTimeDriftSeconds | 900 |
+| MinDifficulty | 1 |
+| MaxDifficulty | 4,294,967,295 |
+| GenesisDifficultyBits | 100 |
+| MaxDifficultyChangePercent | 100 |
+
+---
+
+## 7. 网络协议
+
+### 7.1 Switch（P2P 管理器）
+
+Switch 管理所有节点连接和消息路由：
+
+**源码:** [network/switch.go:143-176](../blockchain/network/switch.go#L143-L176)
+
+```go
+type Switch struct {
+    mu           sync.RWMutex
+    config       SwitchConfig
+    reactors     map[string]reactor.Reactor
+    reactorsByCh map[byte]reactor.Reactor
+    chDescs      []*mconnection.ChannelDescriptor
+    peers        *PeerSet
+    nodeID       string
+    chainID      string
+    version      string
+    peerFilter   func(string) bool
+    listeners    []net.Listener
+    dialing      map[string]struct{}
+    quit         chan struct{}
+    running      bool
+    ctx          context.Context
+    cancelFunc   context.CancelFunc
+    wg           sync.WaitGroup
+    mdnsService   *mdns.Service
+    mdnsDiscovery *mdns.Discovery
+    nodePrivKey    ed25519.PrivateKey
+    encryptionMode encryptionMode
+}
+```
+
+### 7.2 MConnection（多路复用连接）
+
+MConnection 在单个 TCP 连接上多路复用多个逻辑通道：
+
+**源码:** [network/mconnection/mconnection.go:43-109](../blockchain/network/mconnection/mconnection.go#L43-L109)
+
+```go
+type MConnection struct {
+    conn        net.Conn
+    bufReader   *bufio.Reader
+    bufWriter   *bufio.Writer
+    writeMu     sync.Mutex
+    channels    []*Channel
+    channelsIdx map[byte]*Channel
+    sendMonitor *FlowRate
+    recvMonitor *FlowRate
+    send        chan struct{}
+    pong        chan struct{}
+    config      MConnConfig
+    onReceive   func(chID byte, msg []byte)
+    onError     func(error)
+    errored     uint32
+    quit        chan struct{}
+    pingTicker  *time.Ticker
+    statsTicker *time.Ticker
+    running     atomic.Int32
+    wg          sync.WaitGroup
+}
+```
+
+### 7.3 通道类型
+
+| 通道 ID | 名称 | 用途 |
+|---------|------|------|
+| 0x01 | ChannelGossip | 节点发现 |
+| 0x02 | ChannelTx | 交易传播 |
+| 0x03 | ChannelBlock | 区块传播 |
+| 0x04 | ChannelSync | 链同步 |
+
+### 7.4 安全管理器
+
+SecurityManager 提供全面的节点安全功能：
+
+**源码:** [network/security/manager.go:57-77](../blockchain/network/security/manager.go#L57-L77)
+
+```go
+type SecurityManager struct {
+    banScores     map[string]*DynamicBanScore
+    bannedPeers   map[string]struct{}
+    blacklist     *Blacklist
+    ipFilter      *IPFilter
+    peerBans      map[string]*PeerBanEntry
+    mu            sync.RWMutex
+    ctx           context.Context
+    cancel        context.CancelFunc
+    dataDir       string
+    onBanCallback func(peerID, ip, reason string)
+    currentBanThreshold uint32
+    lastAdjustTime      time.Time
+    misbehaviorStats    map[string]uint32
+    networkQuality      float64
+}
+```
+
+**动态封禁阈值:**
+
+封禁阈值根据网络质量动态调整：
+
+- **良好网络（质量 > 0.8）**: 宽松阈值（50-100）
+- **正常网络（质量 0.5-0.8）**: 标准阈值（100）
+- **糟糕网络（质量 < 0.5）**: 严格阈值（100-200）
+
+### 7.5 节点发现
+
+**默认种子节点:**
+
+```go
+var DefaultSeedNodes = []string{
+    "main.nogochain.org:9090",
+    "node.nogochain.org:9090",
+    "wallet.nogochain.org:9090",
+}
+```
+
+**发现方式:**
+1. DNS 种子
+2. mDNS（局域网发现）
+3. DHT（广域网发现 - 计划中）
+
+### 7.6 NodeInfo 握手
+
+```go
+type NodeInfo struct {
+    PubKey     string `json:"pubKey"`
+    Moniker    string `json:"moniker"`
+    Network    string `json:"network"`
+    Version    string `json:"version"`
+    ListenAddr string `json:"listenAddr"`
+    Channels   string `json:"channels"`
+}
+```
+
+---
+
+## 8. 同步进度持久化
+
+### 8.1 概述
+
+SyncProgressStore 提供崩溃恢复能力的同步功能，支持自动恢复。
+
+**源码:** [network/sync_progress.go:35-60](../blockchain/network/sync_progress.go#L35-L60)
+
+### 8.2 数据结构
+
+```go
+type SyncProgressState struct {
+    Version           int       `json:"version"`
+    LastSyncedHeight  uint64    `json:"last_synced_height"`
+    TargetHeight      uint64    `json:"target_height"`
+    LastBlockHash     string    `json:"last_block_hash"`
+    LastBlockPrevHash string    `json:"last_block_prev_hash"`
+    SyncPeerID        string    `json:"sync_peer_id"`
+    StartTime         time.Time `json:"start_time"`
+    LastUpdateTime    time.Time `json:"last_update_time"`
+    IsComplete        bool      `json:"is_complete"`
+    ErrorMessage      string    `json:"error_message,omitempty"`
+    RetryCount        int       `json:"retry_count"`
+    BlocksPerSecond   float64   `json:"blocks_per_second"`
+    EstimatedTimeLeft int64     `json:"estimated_time_left_seconds"`
+}
+
+type SyncProgressStore struct {
+    mu          sync.RWMutex
+    filePath    string
+    progress    *SyncProgressState
+    lastSave    time.Time
+    dirty       bool
+    saveTicker  *time.Ticker
+    stopChan    chan struct{}
+    autoSave    bool
+}
+```
+
+### 8.3 常量
+
+| 常量 | 值 | 描述 |
+|------|-----|------|
+| SyncProgressFileName | `sync_progress.json` | 进度文件名 |
+| SyncProgressVersion | 1 | 当前版本 |
+| MaxProgressAge | 24 小时 | 恢复的最大时效 |
+| SaveInterval | 30 秒 | 自动保存间隔 |
+
+### 8.4 关键方法
+
+```go
+func NewSyncProgressStore(dataDir string) (*SyncProgressStore, error)
+func (s *SyncProgressStore) UpdateProgress(height uint64, blockHash, prevHash string) error
+func (s *SyncProgressStore) SetTarget(targetHeight uint64, peerID string) error
+func (s *SyncProgressStore) MarkComplete() error
+func (s *SyncProgressStore) SetError(errMsg string) error
+func (s *SyncProgressStore) CanResume() bool
+func (s *SyncProgressStore) GetResumePoint() (height, targetHeight uint64, peerID string, canResume bool)
+func (s *SyncProgressStore) GetProgressPercent() float64
+func (s *SyncProgressStore) GetEstimatedTimeRemaining() time.Duration
+```
+
+### 8.5 恢复逻辑
+
+```go
+func (s *SyncProgressStore) CanResume() bool {
+    if s.progress == nil || s.progress.IsComplete {
+        return false
+    }
+    if s.progress.LastSyncedHeight == 0 || s.progress.TargetHeight == 0 {
+        return false
+    }
+    if s.progress.LastSyncedHeight >= s.progress.TargetHeight {
+        return false
+    }
+    age := time.Since(s.progress.LastUpdateTime)
+    if age > MaxProgressAge {
+        return false
+    }
+    return true
+}
+```
+
+---
+
+## 9. 经济模型
+
+### 9.1 货币政策
+
+**源码:** [config/monetary_policy.go:49-89](../blockchain/config/monetary_policy.go#L49-L89)
+
+```go
+type MonetaryPolicy struct {
+    InitialBlockReward     uint64 `json:"initialBlockReward"`     // 800,000,000 wei (8 NOGO)
+    AnnualReductionPercent uint8  `json:"annualReductionPercent"` // 10%
+    MinimumBlockReward     uint64 `json:"minimumBlockReward"`     // 10,000,000 wei (0.1 NOGO)
+    UncleRewardEnabled     bool   `json:"uncleRewardEnabled"`
+    MaxUncleDepth          uint8  `json:"maxUncleDepth"`          // 6
+    MinerFeeShare          uint8  `json:"minerFeeShare"`          // 0%（销毁）
+    MinerRewardShare       uint8  `json:"minerRewardShare"`       // 96%
+    CommunityFundShare     uint8  `json:"communityFundShare"`     // 2%
+    GenesisShare           uint8  `json:"genesisShare"`           // 1%
+    IntegrityPoolShare     uint8  `json:"integrityPoolShare"`     // 1%
+}
+```
+
+### 9.2 区块奖励分配
+
+| 接收者 | 份额 | 用途 |
+|--------|------|------|
+| 矿工 | 96% | 区块生产奖励 |
+| 社区基金 | 2% | 治理控制的开发基金 |
+| 创世地址 | 1% | 预设的创世矿工地址 |
+| 诚信池 | 1% | 诚信节点奖励分配 |
+
+### 9.3 奖励计算
+
+```go
+func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
+    years := height / GetBlocksPerYear()  // ~1,847,058 blocks/year
+    
+    reward := new(big.Int).SetUint64(p.InitialBlockReward)
+    for i := uint64(0); i < years; i++ {
+        if reward.Cmp(minRewardBig) <= 0 {
+            return minReward
+        }
+        reward.Mul(reward, big.NewInt(9))   // 前一年的 90%
+        reward.Div(reward, big.NewInt(10))
+    }
+    return reward.Uint64()
+}
+```
+
+### 9.4 代币单位
+
+| 单位 | Wei 等价 |
+|------|----------|
+| NogoWei | 1 |
+| NOGO | 100,000,000 |
+
+### 9.5 通缩机制
+
+交易费用被**销毁**（MinerFeeShare = 0%），对代币供应产生通缩压力。
+
+### 9.6 特殊地址
+
+| 用途 | 地址 |
+|------|------|
+| 销毁 | `NOGO00000000000000000000000000000000000000000000000000000000BURN` |
+| 社区基金 | `NOGO111111111111111111111111111111111COMMUNITY` |
+| 诚信池 | `NOGO333333333333333333333333333333333INTEGRITY` |
+
+---
+
+## 10. API 参考
+
+### 10.1 HTTP 端点
+
+HTTP API 提供全面的区块链交互功能：
+
+| 端点 | 方法 | 描述 |
+|------|------|------|
+| `/block/{height}` | GET | 按高度获取区块 |
+| `/block/hash/{hash}` | GET | 按哈希获取区块 |
+| `/tx/{txid}` | GET | 按 ID 获取交易 |
+| `/address/{addr}` | GET | 获取地址余额和 nonce |
+| `/address/{addr}/txs` | GET | 获取地址交易（分页）|
+| `/chain/info` | GET | 获取链信息 |
+| `/mempool` | GET | 获取内存池状态 |
+| `/tx` | POST | 提交交易 |
+| `/mining/work` | GET | 获取挖矿工作 |
+| `/mining/submit` | POST | 提交已挖区块 |
+
+### 10.2 WebSocket 事件
+
+```go
+type WSEvent struct {
+    Type string      `json:"type"`
+    Data interface{} `json:"data"`
+}
+```
+
+**事件类型:**
+- `new_block`: 新区块添加到链
+- `new_tx`: 新交易进入内存池
+- `chain_reorg`: 链重组
+
+### 10.3 错误码
+
+**源码:** [api/http/error_codes.go](../blockchain/api/http/error_codes.go)
+
+| 代码 | HTTP 状态 | 描述 |
+|------|-----------|------|
+| 1000 | 400 | 无效请求 |
+| 1001 | 400 | 无效地址 |
+| 1002 | 400 | 无效交易 |
+| 2000 | 404 | 区块未找到 |
+| 2001 | 404 | 交易未找到 |
+| 3000 | 500 | 内部错误 |
+
+### 10.4 速率限制
+
+**源码:** [api/http/rate_limiter.go](../blockchain/api/http/rate_limiter.go)
+
+```go
+type RateLimiterConfig struct {
+    RequestsPerSecond int
+    Burst             int
+    Enabled           bool
+}
+```
+
+---
+
+## 11. 开发指南
+
+### 11.1 前置要求
+
+- Go 1.21 或更高版本
+- Make（用于构建命令）
+- Docker（可选，用于容器化部署）
+
+### 11.2 构建
 
 ```bash
 # 克隆仓库
@@ -89,923 +861,49 @@ cd nogo
 # 安装依赖
 go mod download
 
-# 编译
-go build -o nogo ./cmd/node
+# 构建
+go build -o bin/nogo ./blockchain/cmd
+
+# 运行测试
+go test ./blockchain/... -race -vet=all
 ```
 
-### 2.3 启动节点
+### 11.3 配置
+
+配置加载顺序：
+1. 环境变量（最高优先级）
+2. 配置文件（`config.json`）
+3. 默认值
+
+**关键环境变量:**
+
+| 变量 | 描述 |
+|------|------|
+| `NOGO_CHAIN_ID` | 链 ID（1 = 主网）|
+| `NOGO_MINER_ADDRESS` | 矿工奖励地址 |
+| `NOGO_DATA_DIR` | 数据目录路径 |
+| `NOGO_P2P_LISTEN` | P2P 监听地址 |
+| `NOGO_HTTP_ADDR` | HTTP API 地址 |
+| `NOGO_SEEDS` | 逗号分隔的种子节点 |
+| `NOGO_MINING_ENABLED` | 启用挖矿 |
+
+### 11.4 运行节点
 
 ```bash
-# 主网节点
-./nogo server NOGO<your_address> mine
+# 启动全节点
+./bin/nogo --chain-id 1 --data-dir ./data
 
-# 测试网节点
-./nogo server NOGO<your_address> mine test
-
-# 仅同步（不挖矿）
-./nogo server NOGO<your_address>
+# 启动挖矿节点
+./bin/nogo --chain-id 1 --data-dir ./data --mining-enabled --miner-address "NOGO..."
 ```
 
-### 2.4 环境变量配置
-
-```bash
-# 网络配置
-export NODE_PORT=8080           # HTTP 端口
-export P2P_PORT=9090            # P2P 端口
-export CHAIN_ID=1               # 1=主网，2=测试网
-
-# 挖矿配置
-export MINING_ENABLED=true      # 启用挖矿
-export MINING_THREADS=1         # 挖矿线程数
-
-# 节点配置
-export DATA_DIR=./data          # 数据目录
-export LOG_LEVEL=info           # 日志级别
-
-# P2P 配置
-export P2P_ENABLE=true          # 启用 P2P
-export P2P_SEEDS=seed1.nogochain.org:9090,seed2.nogochain.org:9090
-
-# 监控配置
-export METRICS_ENABLED=true     # 启用监控
-export METRICS_PORT=9100        # Prometheus 端口
-```
-
----
-
-## 3. 架构设计
-
-### 3.1 系统架构
-
-```
-┌─────────────────────────────────────────┐
-│           应用层 (Application)           │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐ │
-│  │  HTTP   │  │   WS    │  │   CLI   │ │
-│  └─────────┘  └─────────┘  └─────────┘ │
-└─────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────┐
-│           网络层 (Network)               │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐ │
-│  │  P2P    │  │  Sync   │  │  Peers  │ │
-│  └─────────┘  └─────────┘  └─────────┘ │
-└─────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────┐
-│         共识层 (Consensus)               │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐ │
-│  │Validator│  │NogoPow  │  │ Fork    │ │
-│  └─────────┘  └─────────┘  └─────────┘ │
-└─────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────┐
-│          核心层 (Core)                   │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐ │
-│  │  Block  │  │   Tx    │  │  State  │ │
-│  └─────────┘  └─────────┘  └─────────┘ │
-└─────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────┐
-│         存储层 (Storage)                 │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐ │
-│  │ BoltDB  │  │  Cache  │  │Checkpoint│ │
-│  └─────────┘  └─────────┘  └─────────┘ │
-└─────────────────────────────────────────┘
-```
-
-### 3.2 模块职责
-
-#### 核心层 (Core)
-- **Block**: 区块数据结构和操作
-- **Transaction**: 交易数据结构和验证
-- **Account**: 账户模型和状态管理
-
-#### 共识层 (Consensus)
-- **Validator**: 区块验证器，执行所有验证规则
-- **NogoPow**: PoW 引擎，实现挖矿和验证
-- **Fork Detector**: 分叉检测和解决
-
-#### 网络层 (Network)
-- **P2P Server**: P2P 服务器，处理节点连接
-- **Sync**: 区块同步，下载和验证历史区块
-- **Peer Manager**: 节点管理，维护节点列表和评分
-
-#### 存储层 (Storage)
-- **BoltDB Store**: 基于 BoltDB 的持久化存储
-- **Cache**: LRU 缓存，加速热点数据访问
-- **Checkpoint**: 检查点机制，加速同步
-
-### 3.3 数据流
-
-#### 区块产生流程
-```
-1. 矿工从内存池选择交易
-   ↓
-2. 创建候选区块（包含 coinbase 交易）
-   ↓
-3. NogoPow 引擎计算 PoW（寻找有效 nonce）
-   ↓
-4. 找到有效 nonce 后，广播区块
-   ↓
-5. 其他节点验证区块
-   ↓
-6. 验证通过后，添加到本地链
-   ↓
-7. 更新状态，确认交易
-```
-
-#### 交易处理流程
-```
-1. 用户签名交易
-   ↓
-2. 提交到节点 API（HTTP/WS）
-   ↓
-3. 节点验证交易（签名、nonce、余额）
-   ↓
-4. 添加到内存池
-   ↓
-5. 广播给其他节点
-   ↓
-6. 矿工打包进区块
-   ↓
-7. 区块确认后，交易完成
-```
-
----
-
-## 4. 核心概念
-
-### 4.1 地址 (Address)
-
-NogoChain 地址格式：
-```
-NOGO + [版本 (1 字节)] + [公钥哈希 (32 字节)] + [校验和 (4 字节)]
-```
-
-**示例地址**:
-```
-NOGO1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef123456
-```
-
-**生成地址**:
-```go
-pubKey := ed25519.PublicKey{...} // 32 字节公钥
-address := core.GenerateAddress(pubKey)
-```
-
-**验证地址**:
-```go
-err := core.ValidateAddress("NOGO...")
-if err != nil {
-    // 地址无效
-}
-```
-
-### 4.2 账户 (Account)
-
-每个账户包含：
-- **Balance**: 账户余额（uint64，最小单位：wei）
-- **Nonce**: 交易计数器（防止重放攻击）
-
-```go
-type Account struct {
-    Balance uint64 `json:"balance"`
-    Nonce   uint64 `json:"nonce"`
-}
-```
-
-### 4.3 交易 (Transaction)
-
-交易类型：
-- **TxCoinbase**: 区块奖励交易（无输入，只有输出）
-- **TxTransfer**: 普通转账交易
-
-```go
-type Transaction struct {
-    Type      TransactionType `json:"type"`
-    ChainID   uint64          `json:"chainId"`
-    FromPubKey []byte         `json:"fromPubKey,omitempty"`
-    ToAddress string          `json:"toAddress"`
-    Amount    uint64          `json:"amount"`
-    Fee       uint64          `json:"fee"`
-    Nonce     uint64          `json:"nonce,omitempty"`
-    Data      string          `json:"data,omitempty"`
-    Signature []byte          `json:"signature,omitempty"`
-}
-```
-
-**交易字段说明**:
-- **Type**: 交易类型（coinbase/transfer）
-- **ChainID**: 链 ID，防止跨链重放
-- **FromPubKey**: 发送方公钥（32 字节）
-- **ToAddress**: 接收方地址
-- **Amount**: 转账金额（wei）
-- **Fee**: 交易费用（wei）
-- **Nonce**: 发送方交易计数器
-- **Data**: 附加数据（可选）
-- **Signature**: Ed25519 签名（64 字节）
-
-### 4.4 区块 (Block)
-
-```go
-type Block struct {
-    Version      uint32        `json:"version"`
-    Hash         []byte        `json:"hash"`
-    Height       uint64        `json:"height"`
-    Header       BlockHeader   `json:"header"`
-    Transactions []Transaction `json:"transactions"`
-    CoinbaseTx   *Transaction  `json:"coinbaseTx"`
-    MinerAddress string        `json:"minerAddress"`
-    TotalWork    string        `json:"totalWork"`
-}
-```
-
-**区块头 (BlockHeader)**:
-```go
-type BlockHeader struct {
-    Version        uint32 `json:"version"`
-    PrevHash       []byte `json:"prevHash"`
-    TimestampUnix  int64  `json:"timestampUnix"`
-    DifficultyBits uint32 `json:"difficultyBits"`
-    Difficulty     uint32 `json:"difficulty"`
-    Nonce          uint64 `json:"nonce"`
-    MerkleRoot     []byte `json:"merkleRoot"`
-}
-```
-
----
-
-## 5. 区块结构
-
-### 5.1 区块组成
-
-每个区块包含：
-
-1. **区块头 (BlockHeader)**: 112 字节
-   - Version (4 字节): 区块版本
-   - PrevHash (32 字节): 父区块哈希
-   - TimestampUnix (8 字节): Unix 时间戳
-   - DifficultyBits (4 字节): 难度目标
-   - Difficulty (4 字节): 难度值
-   - Nonce (8 字节): PoW 随机数
-   - MerkleRoot (32 字节): 交易 Merkle 根
-
-2. **交易列表 (Transactions)**: 可变长度
-   - Coinbase 交易（必须为第一笔）
-   - 普通转账交易
-
-3. **元数据 (Metadata)**:
-   - Hash: 区块哈希
-   - Height: 区块高度
-   - MinerAddress: 矿工地址
-   - TotalWork: 累计工作量
-
-### 5.2 区块哈希计算
-
-区块哈希 = SHA256(区块头序列化)
-
-```go
-func (b *Block) CalculateHash() []byte {
-    headerBytes := b.Header.Serialize()
-    hash := sha256.Sum256(headerBytes)
-    return hash[:]
-}
-```
-
-### 5.3 Merkle 树
-
-Merkle 树用于高效验证交易包含性：
-
-```
-        Root (MerkleRoot)
-       /    \
-      /      \
-    Hash01   Hash23
-   /    \    /    \
- Hash0  Hash1 Hash2 Hash3
-  (Tx0) (Tx1) (Tx2) (Tx3)
-```
-
-**计算过程**:
-```go
-leaves := [][]byte{tx0.Hash(), tx1.Hash(), tx2.Hash(), tx3.Hash()}
-merkleRoot, _ := core.MerkleRoot(leaves)
-```
-
----
-
-## 6. 交易机制
-
-### 6.1 交易创建
-
-```go
-// 创建转账交易
-tx := core.Transaction{
-    Type:      core.TxTransfer,
-    ChainID:   1,
-    FromPubKey: pubKey,
-    ToAddress: "NOGO...",
-    Amount:    1000000000000000000, // 1 NOGO
-    Fee:       1000000,             // 0.001 NOGO
-    Nonce:     1,
-    Data:      "",
-}
-
-// 计算签名哈希
-signHash, _ := tx.SigningHash()
-
-// 签名
-signature := ed25519.Sign(privateKey, signHash)
-tx.Signature = signature
-
-// 验证交易
-err := tx.Verify()
-```
-
-### 6.2 交易验证
-
-验证流程：
-
-1. **基础验证**:
-   - 交易类型有效
-   - 金额 > 0
-   - 地址格式正确
-
-2. **签名验证**:
-   - 公钥长度 = 32 字节
-   - 签名长度 = 64 字节
-   - Ed25519 验证通过
-
-3. **Nonce 验证**:
-   - Nonce > 0
-   - Nonce = 账户当前 Nonce + 1
-
-4. **余额验证**:
-   - 账户余额 >= Amount + Fee
-
-### 6.3 交易费用
-
-费用市场机制：
-- **最低费用**: 由节点配置（默认 1 wei）
-- **费用优先**: 内存池按费用排序
-- **RBF (Replace-By-Fee)**: 支持费用替换
-
-```go
-// 内存池按费用排序
-entries := mempool.EntriesSortedByFeeDesc()
-
-// RBF 替换
-newTx.Fee = oldTx.Fee + 1000000 // 提高费用
-txid, replaced, _, _ := mempool.ReplaceByFee(newTx)
-```
-
----
-
-## 7. 共识算法
-
-### 7.1 NogoPow 算法
-
-NogoPow 是 NogoChain 的原创 PoW 算法，结合矩阵运算和哈希函数。
-
-**核心特性**:
-- **抗 ASIC**: 矩阵运算需要大量内存（matSize × matSize × matNum 个元素）
-- **可验证**: 验证仅需一次矩阵乘法和哈希
-- **确定性**: 相同输入产生相同输出，无随机性
-- **缓存优化**: LRU 缓存配合 singleflight 确保并发安全
-
-**算法流程**:
-
-```
-输入：区块头哈希 blockHash, 种子 seed (父区块哈希)
-输出：PoW 哈希 powHash
-
-1. 从缓存获取矩阵数据
-   cacheData = Cache.Get(seed)
-   // 缓存数据：[]uint32 数组，包含 matNum × matSize × matSize / 4 个元素
-
-2. 从 blockHash 构造输入矩阵
-   // blockHash (32 字节) 用于生成矩阵选择序列
-
-3. 矩阵乘法（定点数运算）
-   // 使用 int64 定点数表示（FixedPointFactor = 2^30）
-   // 多次矩阵乘法序列（每线程 32 次迭代）
-   Result = mulMatrix(blockHash.Bytes(), cacheData)
-   // 计算使用 4 个并行 goroutine 提升性能
-
-4. 哈希结果
-   powHash = SHA3-256(Result)
-   // 结果矩阵扁平化后使用 Keccak256 哈希
-
-5. 难度检查
-   要求：powHash < target (难度目标)
-   // target = (2^256 - 1) / difficulty
-```
-
-**矩阵参数**:
-- **matSize**: 矩阵维度（matSize × matSize 矩阵）
-- **matNum**: 缓存中预计算矩阵的数量
-- **定点数因子**: 2^30 用于高精度运算
-- **并行线程数**: 4 个 goroutine 用于矩阵计算
-
-**缓存机制**:
-- **LRU 淘汰**: 自动淘汰最少使用的条目
-- **Singleflight**: 防止相同种子的重复计算
-- **大小**: 可配置（默认 1000 个条目）
-
-**挖矿代码**:
-```go
-engine := nogopow.New(nogopow.DefaultConfig())
-
-header := &nogopow.Header{
-    Number:     big.NewInt(height),
-    Time:       uint64(timestamp),
-    ParentHash: parentHash,
-    Difficulty: difficulty,
-    Coinbase:   minerAddress,
-}
-
-// 挖矿循环
-for nonce := uint64(0); ; nonce++ {
-    header.Nonce = nonce
-    
-    // 检查是否找到有效解
-    if engine.VerifySeal(header) == nil {
-        // 找到有效区块
-        break
-    }
-}
-```
-
-### 7.2 难度调整
-
-难度调整目标：保持区块时间稳定在目标间隔（默认 15 秒）
-
-**PI 控制器算法**:
-
-NogoChain 使用比例 - 积分（PI）控制器来精确稳定区块时间。
-
-**公式**:
-```
-error = (targetTime - actualTime) / targetTime
-integral = integral + error (限制在 [-10, 10])
-adjustment = Kp × error + Ki × integral
-newDifficulty = parentDifficulty × (1 + adjustment)
-```
-
-**参数**:
-- **Kp (比例增益)**: MaxDifficultyChangePercent / 100 (默认 0.2)
-- **Ki (积分增益)**: 0.1 (固定值，确保稳定收敛)
-- **TargetBlockTime**: 15 秒
-- **Integral Anti-windup**: [-10.0, 10.0] (防止积分饱和)
-
-**调整限制**:
-- 最小难度：配置的 MinDifficulty (默认 1)
-- 最大上调：每区块 100%
-- 最大难度：2^256
-
-**经济特性**:
-1. **比例项**: 对区块时间偏差的即时响应
-2. **积分项**: 消除长期偏差，确保目标收敛
-3. **抗饱和**: 防止极端条件下的积分饱和
-4. **最小难度下限**: 确保网络活性
-
-```go
-adjuster := nogopow.NewDifficultyAdjuster(consensusParams)
-newDiff := adjuster.CalcDifficulty(currentTime, parentHeader)
-```
-
-**示例场景**:
-- 区块太慢（30 秒 vs 15 秒目标）: error = (15-30)/15 = -1.0 → 难度降低
-- 区块太快（5 秒 vs 15 秒目标）: error = (15-5)/15 = 0.67 → 难度增加
-- 区块正常（15 秒）: error = 0 → 无需调整
-
-### 7.3 分叉选择
-
-**最长链规则**（实际为最大累计工作量链）：
-
-```go
-func SelectBestChain(chains []*Chain) *Chain {
-    var best *Chain
-    var bestWork *big.Int
-    
-    for _, chain := range chains {
-        work := chain.TotalWork()
-        if best == nil || work.Cmp(bestWork) > 0 {
-            best = chain
-            bestWork = work
-        }
-    }
-    
-    return best
-}
-```
-
-**分叉解决**:
-- 自动切换到累计工作量更大的链
-- 限制重组深度（默认 100 区块）
-- 触发重新组织（reorg）时，回滚状态
-
----
-
-## 8. 网络协议
-
-### 8.1 P2P 消息类型
-
-| 消息类型 | 方向 | 描述 |
-|---------|------|------|
-| `hello` | 双向 | 握手消息 |
-| `chain_info_req` | 客户端→服务端 | 请求链信息 |
-| `chain_info` | 服务端→客户端 | 返回链信息 |
-| `headers_from_req` | 客户端→服务端 | 请求区块头 |
-| `headers` | 服务端→客户端 | 返回区块头列表 |
-| `block_by_hash_req` | 客户端→服务端 | 按哈希请求区块 |
-| `block` | 服务端→客户端 | 返回区块 |
-| `tx_req` | 客户端→服务端 | 请求交易 |
-| `tx_broadcast` | 广播 | 广播交易 |
-| `block_broadcast` | 广播 | 广播区块 |
-| `getaddr` | 客户端→服务端 | 获取节点列表 |
-| `addr` | 服务端→客户端 | 返回节点列表 |
-
-### 8.2 握手协议
-
-```json
-// 客户端发送
-{
-  "type": "hello",
-  "payload": {
-    "protocol": 1,
-    "chainId": 1,
-    "rulesHash": "abc123...",
-    "nodeId": "NOGO..."
-  }
-}
-
-// 服务端响应
-{
-  "type": "hello",
-  "payload": {
-    "protocol": 1,
-    "chainId": 1,
-    "rulesHash": "abc123...",
-    "nodeId": "NOGO..."
-  }
-}
-```
-
-**握手验证**:
-1. 协议版本匹配（protocol = 1）
-2. 链 ID 一致（chainId 匹配）
-3. 规则哈希一致（rulesHash 匹配）
-
-### 8.3 区块同步
-
-**同步流程**:
-
-```
-1. 获取链信息
-   GET chain_info_req
-   → 返回当前高度、最新哈希
-
-2. 请求区块头
-   GET headers_from_req (from=0, count=100)
-   → 返回 100 个区块头
-
-3. 验证区块头
-   - 验证 PoW
-   - 验证难度
-   - 验证时间戳
-
-4. 请求区块体
-   GET block_by_hash_req (hash)
-   → 返回完整区块
-
-5. 验证并存储区块
-   - 验证交易
-   - 应用状态转移
-   - 持久化存储
-
-6. 重复步骤 2-5，直到同步完成
-```
-
-### 8.4 节点管理
-
-**节点评分维度**:
-- **成功率**: 成功请求次数 / 总请求次数
-- **响应时间**: 平均响应延迟
-- **活跃度**: 最后活跃时间
-- **在线时长**: 累计在线时长
-
-**节点选择策略**:
-- 优先选择高评分节点
-- 限制单 IP 连接数
-- 定期清理低质量节点
-
----
-
-## 9. 经济模型
-
-### 9.1 货币政策
-
-**区块奖励公式**:
-```
-R(Y) = R₀ × (1 - r/10)^Y
-
-其中:
-- R₀: 初始区块奖励
-- r:  年衰减率（AnnualReductionPercent）
-- Y:  经过的年数
-- R(Y): 第 Y 年的区块奖励
-```
-
-**示例参数**:
-```go
-policy := MonetaryPolicy{
-    InitialBlockReward:     1000 * 1e18,  // 1000 NOGO
-    MinimumBlockReward:     10 * 1e18,    // 10 NOGO
-    AnnualReductionPercent: 10,           // 年衰减 10%
-    MinerFeeShare:          100,          // 矿工获得 100% 手续费
-}
-```
-
-**奖励计算**:
-```go
-reward := policy.BlockReward(height)
-// 第 1 年：1000 NOGO
-// 第 2 年：900 NOGO
-// 第 3 年：810 NOGO
-// ...
-// 最低：10 NOGO
-```
-
-### 9.2 费用分配
-
-**矿工收入 = 区块奖励 + 交易费用**
-
-```go
-// 计算矿工费用收入
-feeAmount := policy.MinerFeeAmount(totalFees)
-
-// 计算总奖励（包含叔块奖励）
-totalReward := policy.GetTotalMinerReward(height, uncleCount)
-```
-
-### 9.3 叔块机制
-
-**叔块奖励**:
-- 距离主链 1 个区块：7/8 区块奖励
-- 距离主链 2 个区块：6/8 区块奖励
-- ...
-- 距离主链 7 个区块：1/8 区块奖励
-- 距离≥8 个区块：无奖励
-
-**引用奖励**:
-- 引用叔块的区块获得额外奖励：1/32 区块奖励/叔块
-- 最多引用 2 个叔块
-
-### 9.4 通胀控制
-
-**供应量公式**:
-```
-S(Y) = S(Y-1) + R(Y) × N
-
-其中:
-- S(Y): 第 Y 年末的总供应量
-- N:   每年区块数（约 3,153,600 个）
-```
-
-**通胀率趋势**:
-- 第 1 年：高通胀（网络启动激励）
-- 第 2-5 年：通胀率递减
-- 第 10 年+：趋近于零（最小奖励）
-
----
-
-## 10. API 参考
-
-### 10.1 HTTP API
-
-**基础 URL**: `http://localhost:8080/api/v1`
-
-#### 获取区块高度
-
-```http
-GET /height
-```
-
-**响应**:
-```json
-{
-  "height": 123456
-}
-```
-
-#### 获取区块
-
-```http
-GET /block/{hashOrHeight}
-```
-
-**示例**:
-```http
-GET /block/0000abc123...
-GET /block/123456
-```
-
-**响应**:
-```json
-{
-  "version": 1,
-  "hash": "0000abc123...",
-  "height": 123456,
-  "header": {
-    "version": 1,
-    "prevHash": "...",
-    "timestampUnix": 1680000000,
-    "difficultyBits": 18,
-    "nonce": 12345678,
-    "merkleRoot": "..."
-  },
-  "transactions": [...],
-  "minerAddress": "NOGO..."
-}
-```
-
-#### 获取交易
-
-```http
-GET /tx/{txid}
-```
-
-**响应**:
-```json
-{
-  "type": "transfer",
-  "chainId": 1,
-  "fromPubKey": "...",
-  "toAddress": "NOGO...",
-  "amount": 1000000000000000000,
-  "fee": 1000000,
-  "nonce": 1,
-  "signature": "..."
-}
-```
-
-#### 提交交易
-
-```http
-POST /tx/send
-Content-Type: application/json
-
-{
-  "type": "transfer",
-  "fromPubKey": "...",
-  "toAddress": "NOGO...",
-  "amount": 1000000000000000000,
-  "fee": 1000000,
-  "nonce": 1,
-  "signature": "..."
-}
-```
-
-**响应**:
-```json
-{
-  "txid": "abc123..."
-}
-```
-
-#### 获取余额
-
-```http
-GET /balance/{address}
-```
-
-**响应**:
-```json
-{
-  "address": "NOGO...",
-  "balance": "1000000000000000000",
-  "nonce": 5
-}
-```
-
-### 10.2 WebSocket API
-
-**连接 URL**: `ws://localhost:8080/ws`
-
-#### 订阅事件
-
-```json
-{
-  "action": "subscribe",
-  "channel": "newBlock"
-}
-```
-
-**可用频道**:
-- `newBlock`: 新区块
-- `newTx`: 新交易
-- `chainInfo`: 链信息更新
-
-#### 接收事件
-
-```json
-{
-  "type": "newBlock",
-  "data": {
-    "height": 123456,
-    "hash": "0000abc123...",
-    "timestamp": 1680000000
-  }
-}
-```
-
----
-
-## 11. 开发指南
-
-### 11.1 SDK 使用
-
-#### Python SDK
-
-```python
-from nogochain import Client
-
-# 连接节点
-client = Client('http://localhost:8080')
-
-# 获取余额
-balance = client.get_balance('NOGO...')
-print(f'Balance: {balance}')
-
-# 发送交易
-tx = client.send_transaction(
-    from_key='private_key',
-    to_address='NOGO...',
-    amount=1.0,
-    fee=0.001
-)
-print(f'TX ID: {tx.txid}')
-```
-
-#### JavaScript SDK
-
-```javascript
-const { Client } = require('@nogochain/sdk');
-
-const client = new Client('http://localhost:8080');
-
-// 获取区块高度
-const height = await client.getHeight();
-console.log(`Height: ${height}`);
-
-// 发送交易
-const tx = await client.sendTransaction({
-  fromKey: 'private_key',
-  toAddress: 'NOGO...',
-  amount: 1.0,
-  fee: 0.001
-});
-console.log(`TX ID: ${tx.txid}`);
-```
-
-### 11.2 智能合约（未来功能）
-
-```solidity
-// 示例合约（待实现）
-pragma solidity ^0.8.0;
-
-contract SimpleStorage {
-    uint256 private value;
-    
-    function set(uint256 _value) public {
-        value = _value;
-    }
-    
-    function get() public view returns (uint256) {
-        return value;
-    }
-}
-```
-
-### 11.3 DApp 开发
-
-**前端集成**:
-
-```javascript
-// 连接钱包
-const provider = new NogoProvider();
-const signer = provider.getSigner();
-
-// 调用合约
-const contract = new Contract(address, abi, signer);
-await contract.set(42);
-
-// 查询状态
-const value = await contract.get();
-console.log(value.toString());
-```
+### 11.5 代码质量标准
+
+1. **错误处理**: 绝不忽略错误；始终添加上下文包装
+2. **并发安全**: 使用 `sync` 包保护共享内存访问
+3. **数学安全**: 金融计算使用 `math/big` 包
+4. **资源管理**: 始终使用 `defer` 关闭资源
+5. **测试**: 保持 >80% 代码覆盖率
 
 ---
 
@@ -1013,74 +911,94 @@ console.log(value.toString());
 
 ### 12.1 一般问题
 
-**Q: NogoChain 的区块时间是多少？**
-A: 目标区块时间为 10 秒，通过动态难度调整实现。
+**Q: 目标区块时间是多少？**  
+A: 17 秒，可通过共识参数调整。
 
-**Q: 总供应量是多少？**
-A: 无硬顶，但通胀率随时间递减，最终趋近于最小区块奖励。
+**Q: 难度如何调整？**  
+A: 使用 PI（比例-积分）控制器，根据区块时间与目标的偏差进行调整。
 
-**Q: 如何成为验证节点？**
-A: 运行完整节点并启用挖矿即可参与共识。
+**Q: 使用什么密码学算法？**  
+A: Ed25519 用于数字签名，SHA-256 和 Keccak-256 用于哈希。
 
 ### 12.2 技术问题
 
-**Q: 节点同步慢怎么办？**
-A: 
-1. 使用 SSD 存储
-2. 增加 P2P 连接数
-3. 启用检查点同步
+**Q: 分叉解决如何工作？**  
+A: 链遵循"最重链"规则，比较累计工作量。平局时按以下顺序打破：
+1. 较旧的区块时间戳（先见规则）
+2. 较低的区块哈希
+3. 更多交易
+4. 保留当前链（默认）
 
-**Q: 交易一直不确认怎么办？**
-A: 
-1. 检查交易费用是否足够
-2. 使用 RBF 提高费用
-3. 联系矿工优先打包
+**Q: 交易费用如何处理？**  
+A: 所有交易费用被销毁（MinerFeeShare = 0%），产生通缩压力。
 
-**Q: 如何备份节点数据？**
-A: 备份 `DATA_DIR` 目录即可，包含完整的区块链数据。
+**Q: 同步进度持久化如何工作？**  
+A: 进度每 30 秒保存到 `sync_progress.json`。重启时，如果在 24 小时内，节点可以从上次同步的高度恢复。
 
-### 12.3 开发问题
+### 12.3 挖矿问题
 
-**Q: 支持哪些编程语言？**
-A: 官方提供 Go、Python、JavaScript SDK，社区贡献其他语言 SDK。
+**Q: 什么是 NogoPow？**  
+A: 一种自定义的工作量证明算法，使用矩阵乘法和 PI 控制器进行难度调整。
 
-**Q: 如何测试智能合约？**
-A: 使用测试网部署和测试，获取测试币通过水龙头。
+**Q: 最小难度是多少？**  
+A: 1（用于创世区块和早期区块）。PI 控制器会根据网络算力自动调整。
 
-**Q: API 有速率限制吗？**
-A: 公共节点有速率限制，建议运行自己的节点。
+**Q: 区块奖励如何分配？**  
+A: 96% 给矿工，2% 给社区基金，1% 给创世地址，1% 给诚信池。
+
+### 12.4 网络问题
+
+**Q: 默认 P2P 端口是多少？**  
+A: 9090（TCP）
+
+**Q: 节点发现如何工作？**  
+A: 通过 DNS 种子、mDNS（局域网）和配置的种子节点。
+
+**Q: P2P 使用什么加密？**  
+A: 可选的 NaCl 密钥连接或 TLS，可通过 `NOGO_ENCRYPTION_MODE` 配置。
 
 ---
 
-## 附录
+## 附录 A: 文件参考
 
-### A. 术语表
+| 组件 | 文件路径 |
+|------|----------|
+| 核心类型 | `blockchain/core/types.go` |
+| 链实现 | `blockchain/core/chain.go` |
+| NogoPow 引擎 | `blockchain/nogopow/nogopow.go` |
+| 难度调整 | `blockchain/nogopow/difficulty_adjustment.go` |
+| 区块验证器 | `blockchain/consensus/validator.go` |
+| 网络 Switch | `blockchain/network/switch.go` |
+| MConnection | `blockchain/network/mconnection/mconnection.go` |
+| 安全管理器 | `blockchain/network/security/manager.go` |
+| 同步进度 | `blockchain/network/sync_progress.go` |
+| 货币政策 | `blockchain/config/monetary_policy.go` |
+| 配置 | `blockchain/config/config.go` |
 
-| 术语 | 英文 | 解释 |
-|------|------|------|
-| 区块 | Block | 包含多笔交易的数据结构 |
-| 交易 | Transaction | 价值转移的签名指令 |
-| 挖矿 | Mining | 通过计算 PoW 获得记账权的过程 |
-| 难度 | Difficulty | 挖矿难度的度量 |
-| 内存池 | Mempool | 待确认交易的临时存储池 |
-| 分叉 | Fork | 区块链出现多个分支 |
-| 叔块 | Uncle | 未被纳入主链的有效区块 |
+---
 
-### B. 链接
+## 附录 B: 许可证
 
-- **官网**: https://nogochain.org
-- **GitHub 仓库**: https://github.com/nogochain/nogo
-- **文档**: https://github.com/nogochain/nogo/tree/main/nogo/docs
-- **区块浏览器**: https://explorer.nogochain.org (待开发)
-- **问题追踪**: https://github.com/nogochain/nogo/issues
+```
+Copyright 2026 NogoChain Team
 
-### C. 社区
+This file is part of the NogoChain library.
 
-- **Discord**: https://discord.gg/HxEFPqJMEV
-- **Twitter**: https://twitter.com/nogochain
-- **Telegram**: https://t.me/nogochain
+The NogoChain library is free software: you can redistribute it and/or modify
+it under the terms of the GNU Lesser General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+The NogoChain library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public License
+along with the NogoChain library. If not, see <http://www.gnu.org/licenses/>.
+```
 
 ---
 
 *本文档由 NogoChain 团队维护*  
-*最后更新：2026-04-06*
+*最后更新：2026-04-20*
