@@ -64,6 +64,9 @@ type BlockchainInterface interface {
 	AddBlock(block *core.Block) (bool, error)
 	RollbackToHeight(height uint64) error
 
+	// Missing block callback (for fast sync from genesis)
+	SetOnMissingBlock(callback func(parentHash []byte, height uint64))
+
 	// Block retrieval (for fork resolution - matches core.BlockProvider)
 	GetBlockByHash(hash []byte) (*core.Block, bool)
 	GetBlockByHashBytes(hash []byte) (*core.Block, bool)

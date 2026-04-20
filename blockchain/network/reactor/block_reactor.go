@@ -130,14 +130,16 @@ func (br *BlockReactor) Receive(chID byte, peerID string, msgBytes []byte) {
 		return
 	}
 
-	// CRITICAL: Skip processing response messages that should be handled by sendAndWait
-	// BlockMsgBlock is a response to BlockMsgGet requests, not a broadcast
-	// It should be routed to pending request channels, not processed here
-	if msgType == BlockMsgBlock {
-		// This is a response message, skip processing
-		// It will be handled by the sendAndWait mechanism in switch.go
-		return
-	}
+	// CRITICAL FIX: BlockMsgBlock has TWO uses:
+	// 1. Response to BlockMsgGet requests (handled by sendAndWait in switch.go)
+	// 2. Block broadcast messages (must be processed here for flood propagation)
+	//
+	// The switch.go receiveMessage() already intercepts messages that match
+	// pending requests via tryHandlePendingResponse(). If we reach this point,
+	// the message is NOT a pending response, so it must be a broadcast.
+	// We MUST process it to enable block propagation and prevent chain splits.
+	//
+	// DO NOT skip BlockMsgBlock here - it will cause network partition!
 
 	br.dispatch(msgType, peerID, payload, handler)
 }

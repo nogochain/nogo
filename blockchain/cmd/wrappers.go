@@ -459,6 +459,11 @@ func (w *networkChainWrapper) RollbackToHeight(height uint64) error {
 	return w.chain.RollbackToHeight(height)
 }
 
+// SetOnMissingBlock sets the missing block callback
+func (w *networkChainWrapper) SetOnMissingBlock(callback func(parentHash []byte, height uint64)) {
+	w.chain.SetOnMissingBlock(callback)
+}
+
 // CalcNextDifficulty calculates the difficulty for the next block
 func (w *networkChainWrapper) CalcNextDifficulty(latest *core.Block, currentTime int64) uint32 {
 	return w.chain.CalcNextDifficulty(latest, currentTime)

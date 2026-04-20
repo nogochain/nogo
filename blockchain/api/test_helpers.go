@@ -230,6 +230,11 @@ func (m *mockBlockchain) GetConsensus() config.ConsensusParams {
 	return config.DefaultConfig().Consensus
 }
 
+// SetOnMissingBlock sets the missing block callback (no-op for mock)
+func (m *mockBlockchain) SetOnMissingBlock(callback func(parentHash []byte, height uint64)) {
+	// Mock implementation - no-op
+}
+
 // createTestServer creates a test server with mock dependencies
 func createTestServer(bc *mockBlockchain, mp *mempool.Mempool) *Server {
 	return NewServer(

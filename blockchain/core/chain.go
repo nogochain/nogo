@@ -1100,6 +1100,9 @@ func (c *Chain) AppendBlock(block *Block) error {
 
 	// Validate block
 	if err := c.validateBlockLocked(block); err != nil {
+		// Validation failed - block is rejected
+		// DO NOT trigger missing block callback here
+		// Sync loop will handle batch download
 		return fmt.Errorf("validate block: %w", err)
 	}
 
@@ -1487,11 +1490,14 @@ func (c *Chain) handleReorganizationLocked(newBlock *Block) error {
 	// Find common ancestor
 	ancestor, forkBlocks, err := c.findCommonAncestorLocked(newBlock)
 	if err != nil {
-		return fmt.Errorf("find common ancestor: %w", err)
+		// No common ancestor - this is an orphan block
+		// DO NOT request parent here - let sync loop handle batch download
+		return ErrOrphanBlock
 	}
 
 	if ancestor == nil {
 		// No common ancestor, treat as orphan
+		// DO NOT request parent here - let sync loop handle batch download
 		return ErrOrphanBlock
 	}
 
@@ -1538,6 +1544,8 @@ func (c *Chain) findCommonAncestorLocked(newBlock *Block) (*Block, []*Block, err
 		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
 		parent, exists := c.blocksByHash[parentHashHex]
 		if !exists {
+			// Parent not found - stop building parent map
+			// DO NOT request parent here - let sync loop handle batch download
 			break
 		}
 		current = parent
@@ -2633,8 +2641,11 @@ func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error)
 	log.Printf("[Chain] Orphan block stored: height=%d hash=%s parent=%s (pool size: %d/%d)",
 		block.GetHeight(), hashHex[:16], parentHashHex[:16], len(c.orphanPool), MaxOrphanPoolSize)
 
-	// Request missing parent block asynchronously
-	c.requestMissingParentAsync(block)
+	// DO NOT request missing parent here!
+	// Following core-main's design: orphan blocks are stored but parent is NOT requested.
+	// The sync loop (running every 5 seconds) is responsible for batch downloading blocks.
+	// This prevents deep recursion (470 levels) and allows efficient batch sync.
+	// c.requestMissingParentAsync(block) // REMOVED - let sync loop handle it
 
 	// Try to process orphan children
 	return c.tryProcessOrphansLocked()
@@ -2648,14 +2659,19 @@ func (c *Chain) requestMissingParentAsync(block *Block) {
 	c.onMissingMu.RUnlock()
 
 	if callback == nil {
+		log.Printf("[Chain] WARNING: onMissingBlock callback is nil, cannot request missing parent for block %d", block.GetHeight())
 		return
 	}
+
+	log.Printf("[Chain] requestMissingParentAsync: block %d parentHash=%x height=%d", 
+		block.GetHeight(), block.Header.PrevHash, block.GetHeight()-1)
 
 	// Request parent block asynchronously to avoid blocking
 	go func() {
 		parentHash := make([]byte, len(block.Header.PrevHash))
 		copy(parentHash, block.Header.PrevHash)
-		callback(parentHash, block.GetHeight())
+		log.Printf("[Chain] Calling onMissingBlock callback for parent height=%d", block.GetHeight()-1)
+		callback(parentHash, block.GetHeight()-1)
 	}()
 }
 

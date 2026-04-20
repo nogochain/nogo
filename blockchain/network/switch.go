@@ -24,6 +24,7 @@ import (
 	"github.com/nogochain/nogo/blockchain/network/mconnection"
 	"github.com/nogochain/nogo/blockchain/network/reactor"
 	"github.com/nogochain/nogo/internal/networking"
+	"github.com/nogochain/nogo/internal/networking/mdns"
 )
 
 // SeedNode represents a bootstrap node used for initial peer discovery.
@@ -65,6 +66,11 @@ type SwitchConfig struct {
 	UPNP             bool
 	Peers            []PeerInfo
 	MaxMsgSize       int
+
+	// Peer discovery
+	EnablemDNS bool   // Enable mDNS for LAN peer discovery
+	EnableDHT  bool   // Enable DHT for WAN peer discovery
+	NetworkID  string // Network identifier for mDNS/DHT (e.g., "nogochain-mainnet")
 }
 
 // NodeInfo holds metadata about a node for handshake and identification.
@@ -126,6 +132,11 @@ func DefaultSwitchConfig() SwitchConfig {
 		UPNP:             false,
 		Peers:            []PeerInfo{},
 		MaxMsgSize:       1048576,
+
+		// Peer discovery defaults
+		EnablemDNS: true,        // Enable mDNS by default for LAN discovery
+		EnableDHT:  true,        // Enable DHT by default for WAN discovery
+		NetworkID:  "nogochain", // Default network identifier
 	}
 }
 
@@ -149,6 +160,10 @@ type Switch struct {
 	ctx          context.Context
 	cancelFunc   context.CancelFunc
 	wg           sync.WaitGroup
+
+	// Peer discovery
+	mdnsService   *mdns.Service
+	mdnsDiscovery *mdns.Discovery
 
 	nodePrivKey    ed25519.PrivateKey
 	encryptionMode encryptionMode
@@ -194,7 +209,46 @@ func NewSwitch(cfg SwitchConfig) *Switch {
 	sw.nodePrivKey = privKey
 	sw.encryptionMode = parseSwitchEncryptionMode()
 
+	// Initialize peer discovery services
+	sw.initPeerDiscovery()
+
 	return sw
+}
+
+// initPeerDiscovery initializes mDNS and DHT peer discovery services
+func (sw *Switch) initPeerDiscovery() {
+	// Initialize mDNS for LAN discovery
+	if sw.config.EnablemDNS {
+		nodeID := sw.nodeID
+		if nodeID == "" {
+			nodeID = "unknown"
+		}
+
+		// Parse listen address to get port
+		port := "9090"
+		if sw.config.ListenAddr != "" {
+			parts := strings.Split(sw.config.ListenAddr, ":")
+			if len(parts) > 0 {
+				port = parts[len(parts)-1]
+			}
+		}
+
+		sw.mdnsService = mdns.NewService(sw.config.NetworkID, nodeID, port)
+		var err error
+		sw.mdnsDiscovery, err = mdns.NewDiscovery(sw.mdnsService)
+		if err != nil {
+			log.Printf("Switch: failed to initialize mDNS discovery: %v", err)
+		} else {
+			log.Printf("Switch: mDNS discovery initialized for network '%s'", sw.config.NetworkID)
+		}
+	}
+
+	// Initialize DHT for WAN discovery (if enabled)
+	// TODO: DHT integration pending proper Conn interface implementation
+	if sw.config.EnableDHT {
+		log.Printf("Switch: DHT discovery enabled (pending implementation)")
+		// DHT initialization will be added after Conn interface is properly defined
+	}
 }
 
 func (cfg *SwitchConfig) applyDefaults() {
@@ -291,11 +345,28 @@ func (sw *Switch) OnStart() error {
 	sw.ctx, sw.cancelFunc = context.WithCancel(context.Background())
 	sw.mu.Unlock()
 
+	// Start peer discovery services
+	sw.startPeerDiscovery()
+
 	sw.wg.Add(2) // 2 goroutines: ensureOutboundPeersLoop and reapDeadPeers
 	go sw.ensureOutboundPeersLoop()
 	go sw.runReactorRoutine() // Start periodic peer cleanup
 
 	return nil
+}
+
+// startPeerDiscovery starts mDNS peer discovery goroutines
+func (sw *Switch) startPeerDiscovery() {
+	// Start mDNS browsing
+	if sw.mdnsDiscovery != nil {
+		go sw.handleMDNSPeers(sw.mdnsDiscovery.Browse())
+		log.Printf("Switch: mDNS peer discovery started")
+	}
+
+	// DHT discovery is pending implementation
+	if sw.config.EnableDHT {
+		log.Printf("Switch: DHT peer discovery enabled (will be implemented in future version)")
+	}
 }
 
 // OnStop gracefully shuts down the switch and all connected peers.
@@ -566,6 +637,45 @@ func (sw *Switch) seedOutboundPeers(peer *Peer) {
 	}
 	if !mconn.TrySend(mconnection.ChannelGossip, seedMsg) {
 		_ = fmt.Errorf("switch: send seed peers to %s failed", peer.ID())
+	}
+}
+
+// handleMDNSPeers processes mDNS discovered peers and adds them to the peer set
+func (sw *Switch) handleMDNSPeers(events <-chan mdns.LANPeerEvent) {
+	for event := range events {
+		if event.Type == mdns.LANPeerAdded {
+			// Check if we already have this peer
+			sw.peers.mtx.RLock()
+			_, exists := sw.peers.peers[event.Addr]
+			sw.peers.mtx.RUnlock()
+
+			if !exists && sw.peers.Size() < sw.config.MaxPeers {
+				log.Printf("Switch: mDNS discovered peer: %s", event.Addr)
+				// Add to dialing list and attempt connection
+				sw.dialingMu.Lock()
+				if _, dialing := sw.dialing[event.Addr]; !dialing {
+					sw.dialing[event.Addr] = struct{}{}
+					sw.dialingMu.Unlock()
+
+					// Dial in goroutine to avoid blocking
+					go func(addr string) {
+						defer func() {
+							sw.dialingMu.Lock()
+							delete(sw.dialing, addr)
+							sw.dialingMu.Unlock()
+						}()
+
+						if err := sw.DialPeerWithAddress(addr); err != nil {
+							log.Printf("Switch: failed to dial mDNS peer %s: %v", addr, err)
+						} else {
+							log.Printf("Switch: connected to mDNS peer %s", addr)
+						}
+					}(event.Addr)
+				} else {
+					sw.dialingMu.Unlock()
+				}
+			}
+		}
 	}
 }
 
@@ -1127,8 +1237,13 @@ func (sw *Switch) tryHandlePendingResponse(peerID string, msg []byte) bool {
 				if secondLastColon > 0 {
 					reqPeerID := reqID[:secondLastColon]
 					if reqPeerID == peerID {
+						// CRITICAL FIX: Copy message bytes before sending to channel
+						// The msg slice may be reused by the underlying connection,
+						// causing data corruption if we send the slice directly.
+						msgCopy := make([]byte, len(msg))
+						copy(msgCopy, msg)
 						select {
-						case req.respCh <- msg:
+						case req.respCh <- msgCopy:
 						default:
 						}
 						delete(sw.syncPendingReqs, reqID)
@@ -1573,7 +1688,71 @@ func (sw *Switch) BroadcastBlock(ctx context.Context, block *core.Block) error {
 	return nil
 }
 
+// BroadcastBlockExcluding serializes a block and broadcasts to all peers except the specified one.
+// Used for flood broadcast to prevent sending back to the original sender (loop prevention).
+func (sw *Switch) BroadcastBlockExcluding(ctx context.Context, block *core.Block, excludePeer string) error {
+	if sw.ctx == nil {
+		return errors.New("switch: not started")
+	}
+	if block == nil {
+		return errors.New("switch: nil block")
+	}
+
+	sw.mu.RLock()
+	peers := sw.peers.List()
+	sw.mu.RUnlock()
+
+	if len(peers) == 0 {
+		return errors.New("switch: no peers to broadcast block")
+	}
+
+	blockBytes, err := reactor.BuildBlockMsg([]*core.Block{block})
+	if err != nil {
+		return fmt.Errorf("switch: build block message: %w", err)
+	}
+
+	var broadcastErr error
+	successCount := 0
+	failedCount := 0
+	for _, peer := range peers {
+		// Skip the excluded peer (original sender)
+		if peer.ID() == excludePeer {
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("switch: broadcast block cancelled: %w", ctx.Err())
+		default:
+		}
+
+		mconn := peer.MConnection()
+		if mconn == nil {
+			failedCount++
+			continue
+		}
+
+		if mconn.TrySend(mconnection.ChannelBlock, blockBytes) {
+			successCount++
+		} else {
+			failedCount++
+			broadcastErr = fmt.Errorf("switch: failed to send block to peer %s", peer.ID())
+			log.Printf("[Switch] BroadcastBlockExcluding failed to send block %d (hash=%x) to peer %s", block.GetHeight(), block.Hash[:8], peer.ID())
+		}
+	}
+
+	log.Printf("[Switch] BroadcastBlockExcluding: block %d (hash=%x) sent to %d/%d peers (excluded %s, %d failed)",
+		block.GetHeight(), block.Hash[:8], successCount, len(peers), excludePeer, failedCount)
+
+	if successCount == 0 && broadcastErr != nil {
+		return broadcastErr
+	}
+
+	return nil
+}
+
 // FetchChainInfo sends a sync channel request for chain info, waits for response.
+// Uses a 10-second timeout for faster failure detection and retry.
 func (sw *Switch) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, error) {
 	if sw.ctx == nil {
 		return nil, errors.New("switch: not started")
@@ -1584,7 +1763,11 @@ func (sw *Switch) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, 
 		return nil, fmt.Errorf("switch: build get chain info message: %w", err)
 	}
 
-	respBytes, err := sw.sendAndWait(ctx, peer, mconnection.ChannelSync, reactor.SyncMsgBlockLocator, reqMsg)
+	// Use shorter timeout for chain info fetch to enable faster retry
+	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	respBytes, err := sw.sendAndWait(fetchCtx, peer, mconnection.ChannelSync, reactor.SyncMsgBlockLocator, reqMsg)
 	if err != nil {
 		return nil, fmt.Errorf("switch: fetch chain info from %s: %w", peer, err)
 	}
@@ -2059,17 +2242,22 @@ func (sw *Switch) GetNodePubKey() ed25519.PublicKey {
 // EnsureAncestors recursively fetches ancestor blocks to ensure chain continuity.
 // It fetches the block by hash, then recursively fetches parent blocks until
 // the chain is continuous or max depth is reached.
+// OPTIMIZED: Uses breadth-first approach to collect all missing hashes first,
+// then fetches them in batch for better efficiency.
 func (sw *Switch) EnsureAncestors(ctx context.Context, bc BlockchainInterface, missingHashHex string) error {
 	log.Printf("[Switch] EnsureAncestors called for hash=%s", missingHashHex[:16])
 
 	// Create a dedicated context with longer timeout for ancestor fetching
 	// This prevents cancellation from the parent context (e.g., during sync)
-	ancestorCtx, ancestorCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ancestorCtx, ancestorCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer ancestorCancel()
 
-	need := missingHashHex
-	visited := map[string]struct{}{}
-	for depth := 0; depth < 256; depth++ {
+	// Phase 1: Collect all missing ancestor hashes (breadth-first)
+	missingHashes := []string{missingHashHex}
+	visited := map[string]struct{}{missingHashHex: struct{}{}}
+	maxDepth := 500 // Prevent infinite loops
+
+	for i := 0; i < len(missingHashes) && i < maxDepth; i++ {
 		select {
 		case <-ancestorCtx.Done():
 			log.Printf("[Switch] EnsureAncestors cancelled for hash=%s", missingHashHex[:16])
@@ -2077,43 +2265,85 @@ func (sw *Switch) EnsureAncestors(ctx context.Context, bc BlockchainInterface, m
 		default:
 		}
 
-		if _, ok := bc.BlockByHash(need); ok {
-			log.Printf("[Switch] EnsureAncestors found local block hash=%s at depth=%d", need[:16], depth)
-			return nil
-		}
-		if _, ok := visited[need]; ok {
-			return errors.New("switch: ancestor fetch cycle detected")
-		}
-		visited[need] = struct{}{}
+		currentHash := missingHashes[i]
 
-		log.Printf("[Switch] EnsureAncestors fetching hash=%s at depth=%d", need[:16], depth)
-		b, peerAddr, fetchErr := sw.FetchAnyBlockByHash(ancestorCtx, need)
+		// Check if already in local chain
+		if _, ok := bc.BlockByHash(currentHash); ok {
+			log.Printf("[Switch] EnsureAncestors found %s in local chain, skipping", currentHash[:16])
+			continue
+		}
+
+		// Fetch block header to get parent hash
+		log.Printf("[Switch] EnsureAncestors fetching header for hash=%s (collected=%d/%d)",
+			currentHash[:16], len(missingHashes), i+1)
+
+		block, peerAddr, fetchErr := sw.FetchAnyBlockByHash(ancestorCtx, currentHash)
 		if fetchErr != nil {
-			log.Printf("[Switch] EnsureAncestors failed to fetch hash=%s from peer=%s: %v", need[:16], peerAddr, fetchErr)
-			return fmt.Errorf("switch: fetch ancestor block %s: %w", need, fetchErr)
+			log.Printf("[Switch] EnsureAncestors failed to fetch hash=%s from peer=%s: %v",
+				currentHash[:16], peerAddr, fetchErr)
+			return fmt.Errorf("switch: fetch ancestor block %s: %w", currentHash, fetchErr)
 		}
 
-		parentHex := fmt.Sprintf("%x", b.Header.PrevHash)
-		log.Printf("[Switch] EnsureAncestors fetched block hash=%s parent=%s", need[:16], parentHex[:16])
-		if len(b.Header.PrevHash) != 0 {
+		// Add parent to missing list if not already in chain
+		parentHex := fmt.Sprintf("%x", block.Header.PrevHash)
+		if len(block.Header.PrevHash) != 0 {
 			if _, ok := bc.BlockByHash(parentHex); !ok {
-				if ancestorErr := sw.EnsureAncestors(ancestorCtx, bc, parentHex); ancestorErr != nil {
-					return ancestorErr
+				if _, exists := visited[parentHex]; !exists {
+					visited[parentHex] = struct{}{}
+					missingHashes = append(missingHashes, parentHex)
+					log.Printf("[Switch] EnsureAncestors will also fetch parent=%s (total missing: %d)",
+						parentHex[:16], len(missingHashes))
 				}
 			}
 		}
-		_, addErr := bc.AddBlock(b)
-		if addErr == nil {
-			log.Printf("[Switch] EnsureAncestors successfully added block hash=%s", need[:16])
-			return nil
+	}
+
+	if len(missingHashes) > maxDepth {
+		return errors.New("switch: max ancestor depth exceeded")
+	}
+
+	log.Printf("[Switch] EnsureAncestors collected %d missing blocks, now fetching...", len(missingHashes))
+
+	// Phase 2: Fetch all missing blocks (reverse order - oldest first)
+	for i := len(missingHashes) - 1; i >= 0; i-- {
+		hashHex := missingHashes[i]
+
+		select {
+		case <-ancestorCtx.Done():
+			log.Printf("[Switch] EnsureAncestors cancelled during fetch phase")
+			return fmt.Errorf("switch: ensure ancestors cancelled: %w", ancestorCtx.Err())
+		default:
 		}
-		if errors.Is(addErr, consensus.ErrUnknownParent) {
-			log.Printf("[Switch] EnsureAncestors block has unknown parent, continuing")
+
+		// Check if already added (may have been added by sync loop)
+		if _, ok := bc.BlockByHash(hashHex); ok {
+			log.Printf("[Switch] EnsureAncestors hash=%s already in chain, skipping", hashHex[:16])
 			continue
 		}
-		return fmt.Errorf("switch: add ancestor block: %w", addErr)
+
+		log.Printf("[Switch] EnsureAncestors fetching block hash=%s (%d/%d)",
+			hashHex[:16], len(missingHashes)-i, len(missingHashes))
+
+		block, _, fetchErr := sw.FetchAnyBlockByHash(ancestorCtx, hashHex)
+		if fetchErr != nil {
+			log.Printf("[Switch] EnsureAncestors failed to fetch hash=%s: %v", hashHex[:16], fetchErr)
+			return fmt.Errorf("switch: fetch block %s: %w", hashHex, fetchErr)
+		}
+
+		_, addErr := bc.AddBlock(block)
+		if addErr == nil {
+			log.Printf("[Switch] EnsureAncestors successfully added block hash=%s height=%d",
+				hashHex[:16], block.GetHeight())
+		} else if errors.Is(addErr, consensus.ErrUnknownParent) {
+			log.Printf("[Switch] EnsureAncestors block has unknown parent (should not happen), continuing")
+			continue
+		} else {
+			return fmt.Errorf("switch: add block %s: %w", hashHex, addErr)
+		}
 	}
-	return errors.New("switch: max ancestor depth exceeded")
+
+	log.Printf("[Switch] EnsureAncestors completed: fetched %d blocks", len(missingHashes))
+	return nil
 }
 
 // ParseSeedNodes parses a comma/semicolon/space-separated string of peer addresses.

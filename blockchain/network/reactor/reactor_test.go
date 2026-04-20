@@ -85,6 +85,7 @@ type mockSyncHandler struct {
 	getLocators   []getLocatorCall
 	locators      []locatorCall
 	notFounds     []notFoundCall
+	statuses      []statusCall
 }
 
 type getHeadersCall struct {
@@ -123,6 +124,13 @@ type notFoundCall struct {
 	PeerID  string
 	MsgType byte
 	IDs     []string
+}
+
+type statusCall struct {
+	PeerID     string
+	Height     uint64
+	Work       string
+	LatestHash string
 }
 
 func (m *mockSyncHandler) OnGetHeaders(peerID string, from uint64, count uint64) error {
@@ -177,6 +185,7 @@ func (m *mockSyncHandler) OnNotFound(peerID string, msgType byte, ids []string) 
 func (m *mockSyncHandler) OnStatus(peerID string, height uint64, work string, latestHash string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.statuses = append(m.statuses, statusCall{PeerID: peerID, Height: height, Work: work, LatestHash: latestHash})
 	return nil
 }
 
@@ -535,6 +544,9 @@ func TestSyncReactorMessageParsing(t *testing.T) {
 }
 
 // TestSyncReactorReceiveDispatch verifies Receive dispatches to correct handlers.
+// NOTE: Response messages (Headers, Blocks, BlockLocator, NotFound) are skipped
+// in SyncReactor.Receive() because they should be handled by switch.tryHandlePendingResponse().
+// This test only verifies request messages are dispatched correctly.
 func TestSyncReactorReceiveDispatch(t *testing.T) {
 	handler := &mockSyncHandler{}
 	r, err := NewSyncReactor(handler)
@@ -550,23 +562,11 @@ func TestSyncReactorReceiveDispatch(t *testing.T) {
 	}
 	r.Receive(mconnection.ChannelSync, peerID, getHeadersMsg)
 
-	headersMsg, err := BuildHeadersMsg([]byte("header-data"), false)
-	if err != nil {
-		t.Fatalf("BuildHeadersMsg failed: %v", err)
-	}
-	r.Receive(mconnection.ChannelSync, peerID, headersMsg)
-
 	getBlocksMsg, err := BuildGetBlocksMsg([]uint64{1, 2, 3})
 	if err != nil {
 		t.Fatalf("BuildGetBlocksMsg failed: %v", err)
 	}
 	r.Receive(mconnection.ChannelSync, peerID, getBlocksMsg)
-
-	blocksMsg, err := BuildBlocksMsg([]byte(`[{"height":1}]`))
-	if err != nil {
-		t.Fatalf("BuildBlocksMsg failed: %v", err)
-	}
-	r.Receive(mconnection.ChannelSync, peerID, blocksMsg)
 
 	getLocatorMsg, err := BuildGetBlockLocatorMsg(500)
 	if err != nil {
@@ -574,17 +574,11 @@ func TestSyncReactorReceiveDispatch(t *testing.T) {
 	}
 	r.Receive(mconnection.ChannelSync, peerID, getLocatorMsg)
 
-	locatorMsg, err := BuildBlockLocatorMsg([][]byte{{0xaa, 0xbb}})
+	statusMsg, err := BuildStatusMsg(100, "1000", "abcd1234")
 	if err != nil {
-		t.Fatalf("BuildBlockLocatorMsg failed: %v", err)
+		t.Fatalf("BuildStatusMsg failed: %v", err)
 	}
-	r.Receive(mconnection.ChannelSync, peerID, locatorMsg)
-
-	notFoundMsg, err := BuildNotFoundMsg(SyncMsgGetBlocks, []string{"missing-1"})
-	if err != nil {
-		t.Fatalf("BuildNotFoundMsg failed: %v", err)
-	}
-	r.Receive(mconnection.ChannelSync, peerID, notFoundMsg)
+	r.Receive(mconnection.ChannelSync, peerID, statusMsg)
 
 	handler.mu.Lock()
 	defer handler.mu.Unlock()
@@ -592,23 +586,14 @@ func TestSyncReactorReceiveDispatch(t *testing.T) {
 	if len(handler.getHeaders) != 1 {
 		t.Errorf("expected 1 getHeaders, got %d", len(handler.getHeaders))
 	}
-	if len(handler.headers) != 1 {
-		t.Errorf("expected 1 headers, got %d", len(handler.headers))
-	}
 	if len(handler.getBlocks) != 1 {
 		t.Errorf("expected 1 getBlocks, got %d", len(handler.getBlocks))
-	}
-	if len(handler.blocks) != 1 {
-		t.Errorf("expected 1 blocks, got %d", len(handler.blocks))
 	}
 	if len(handler.getLocators) != 1 {
 		t.Errorf("expected 1 getLocator, got %d", len(handler.getLocators))
 	}
-	if len(handler.locators) != 1 {
-		t.Errorf("expected 1 locator, got %d", len(handler.locators))
-	}
-	if len(handler.notFounds) != 1 {
-		t.Errorf("expected 1 notFound, got %d", len(handler.notFounds))
+	if len(handler.statuses) != 1 {
+		t.Errorf("expected 1 status, got %d", len(handler.statuses))
 	}
 }
 

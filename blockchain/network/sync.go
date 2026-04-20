@@ -200,7 +200,10 @@ func (s *SyncLoop) Start(ctx context.Context) error {
 	}
 
 	s.ctx, s.cancel = context.WithCancel(ctx)
-	s.isSyncing = true
+	// NOTE: Do NOT set isSyncing=true here!
+	// isSyncing should only be true when actively downloading blocks,
+	// not when the sync loop is merely running and waiting for peers.
+	// This allows TriggerSyncCheck to work correctly when peers connect.
 	s.syncProgress = 0
 	s.syncStartTime = time.Now()
 	s.lastUpdateTime = time.Now()
@@ -247,6 +250,8 @@ func (s *SyncLoop) IsSyncing() bool {
 // Returns true if:
 // 1. Not syncing AND sync progress >= 1.0, OR
 // 2. No peer has higher height (can mine on current chain)
+// CRITICAL: This method is called frequently in mining loop, so we use cached peer info
+// instead of making network requests on every call.
 func (s *SyncLoop) IsSynced() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -256,29 +261,78 @@ func (s *SyncLoop) IsSynced() bool {
 		return true
 	}
 
-	// Enhanced mode: allow mining when no peer has higher height
+	// CRITICAL: During active sync, always return false
+	// This prevents mining while sync is in progress
+	if s.isSyncing {
+		return false
+	}
+
+	// Enhanced mode: check if we have cached peer info from recent sync check
+	// Avoid making network requests on every IsSynced() call
+	// If we haven't done a sync check recently, return false to be safe
 	if s.pm != nil {
 		localHeight := s.getLocalHeight()
 
-		// Check if any peer has higher height
-		activePeers := s.pm.GetActivePeers()
-		hasHigherPeer := false
-
-		for _, peer := range activePeers {
-			info, err := s.pm.FetchChainInfo(s.ctx, peer)
-			if err == nil && info != nil && info.Height > localHeight {
-				hasHigherPeer = true
-				break
+		// If local height is 0 and we have peers, we definitely need to sync
+		// This is the most common case for new nodes
+		if localHeight == 0 {
+			activePeers := s.pm.GetActivePeers()
+			if len(activePeers) > 0 {
+				return false
 			}
 		}
 
-		if !hasHigherPeer {
-			// No peer has higher height, we can mine
-			return true
+		// For non-zero height, use cached sync progress
+		// If syncProgress < 1.0, we're not synced
+		if s.syncProgress < 1.0 {
+			return false
 		}
+	} else {
+		log.Printf("[Sync] IsSynced: pm is nil, returning false")
 	}
 
 	return false
+}
+
+// TriggerSyncCheck immediately triggers a sync check without waiting for the ticker.
+// This is called when a peer broadcasts a status message with higher height/work,
+// allowing the node to start syncing immediately instead of waiting for the next
+// scheduled sync check (up to 2 seconds delay).
+// CRITICAL for fast sync initiation when new peers connect with higher chains.
+func (s *SyncLoop) TriggerSyncCheck() {
+	if s == nil {
+		log.Printf("[Sync] TriggerSyncCheck: SyncLoop is nil")
+		return
+	}
+
+	s.mu.RLock()
+	ctx := s.ctx
+	isSyncing := s.isSyncing
+	s.mu.RUnlock()
+
+	if ctx == nil {
+		log.Printf("[Sync] TriggerSyncCheck: ctx is nil, sync loop not started yet")
+		return
+	}
+
+	// CRITICAL: Skip if already syncing to prevent duplicate sync attempts
+	// This can happen when multiple Status messages arrive during active sync
+	if isSyncing {
+		log.Printf("[Sync] TriggerSyncCheck: already syncing, skipping")
+		return
+	}
+
+	log.Printf("[Sync] TriggerSyncCheck: triggering sync check")
+
+	// Perform sync check in a goroutine to avoid blocking the caller
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[Sync] TriggerSyncCheck panic recovered: %v", r)
+			}
+		}()
+		s.performSyncStep()
+	}()
 }
 
 // getLocalHeight returns the local blockchain height
@@ -607,21 +661,41 @@ func (s *SyncLoop) runSyncLoop() {
 
 // performSyncStep executes one sync iteration
 func (s *SyncLoop) performSyncStep() {
+	// CRITICAL: Set isSyncing=true at the start to prevent mining during sync check
+	// This ensures mining is blocked even while we're just checking peer heights
+	s.mu.Lock()
+	s.isSyncing = true
+	s.mu.Unlock()
+
 	if s.pm == nil {
 		log.Printf("[Sync] performSyncStep: peer manager is nil")
+		s.mu.Lock()
+		s.isSyncing = false
+		s.mu.Unlock()
 		return
 	}
 
 	peers := s.pm.GetActivePeers()
 	if len(peers) == 0 {
 		log.Printf("[Sync] performSyncStep: no active peers")
+		s.mu.Lock()
+		s.isSyncing = false
+		s.mu.Unlock()
 		return
 	}
 
 	log.Printf("[Sync] performSyncStep: %d active peers", len(peers))
 
-	currentHeight := s.bc.LatestBlock().GetHeight()
-	localWork := s.bc.CanonicalWork()
+	localTip := s.bc.LatestBlock()
+	var currentHeight uint64
+	var localWork *big.Int
+	if localTip != nil {
+		currentHeight = localTip.GetHeight()
+		localWork = s.bc.CanonicalWork()
+	} else {
+		currentHeight = 0
+		localWork = big.NewInt(0)
+	}
 
 	var maxPeerHeight uint64
 	var bestPeer string
@@ -661,6 +735,9 @@ func (s *SyncLoop) performSyncStep() {
 
 	if maxPeerHeight == 0 || bestPeerWork == nil {
 		log.Printf("[Sync] performSyncStep: no valid peer info")
+		s.mu.Lock()
+		s.isSyncing = false
+		s.mu.Unlock()
 		return
 	}
 
@@ -707,8 +784,15 @@ func (s *SyncLoop) performSyncStep() {
 		log.Printf("[Sync] Starting sync with peer %s (height=%d, local=%d)", bestPeer, maxPeerHeight, currentHeight)
 		if err := s.SyncWithPeer(s.ctx, bestPeer); err != nil {
 			log.Printf("[Sync] SyncWithPeer failed: %v", err)
+			// CRITICAL: Reset syncing state on failure to allow retry
+			s.mu.Lock()
+			s.isSyncing = false
+			s.mu.Unlock()
 		} else {
 			log.Printf("[Sync] SyncWithPeer completed successfully")
+			// CRITICAL: Do NOT reset isSyncing here!
+			// Keep isSyncing=true until performSyncStep determines no more sync is needed
+			// This prevents mining during sync gaps
 		}
 
 		// CRITICAL: After sync completes, immediately re-check sync state
@@ -718,6 +802,12 @@ func (s *SyncLoop) performSyncStep() {
 		s.performSyncStep() // Recursive call to check immediately
 		return
 	}
+
+	// CRITICAL: No peer to sync with or no sync needed
+	// Reset isSyncing to allow mining
+	s.mu.Lock()
+	s.isSyncing = false
+	s.mu.Unlock()
 }
 
 func (s *SyncLoop) attemptFastSync(maxPeerHeight uint64, bestPeer string) bool {
@@ -856,10 +946,11 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 			}
 			log.Printf("[Sync] Block %d passed full validation (PoW, difficulty, timestamp)", block.GetHeight())
 		} else {
-			// Parent not found, add as orphan - will be validated when parent arrives
-			log.Printf("[Sync] Parent not found for block %d, adding as orphan", block.GetHeight())
-			s.orphanPool.AddOrphan(block)
-			return fmt.Errorf("parent block not found: orphan block")
+			// Parent not found - this is expected during batch sync!
+			// DO NOT return error - let the block be added to chain via AppendBlock
+			// which will handle orphan logic properly
+			log.Printf("[Sync] Parent not found for block %d, will try to add via AppendBlock", block.GetHeight())
+			// Continue to AppendBlock - it will handle orphan or valid block appropriately
 		}
 	}
 
@@ -1019,7 +1110,11 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 
 // processOrphans attempts to process orphaned blocks that connect to the current tip
 func (s *SyncLoop) processOrphans(ctx context.Context) {
-	tipHash := hex.EncodeToString(s.bc.LatestBlock().Hash)
+	localTip := s.bc.LatestBlock()
+	if localTip == nil {
+		return
+	}
+	tipHash := hex.EncodeToString(localTip.Hash)
 	orphans := s.orphanPool.GetOrphansByParent(tipHash)
 	for _, orphan := range orphans {
 		if err := s.validator.ValidateBlockFast(orphan); err != nil {
@@ -1075,8 +1170,16 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		}
 		log.Printf("[Sync] SyncWithPeer peer info: height=%d, work=%s", info.Height, info.Work)
 
-		currentHeight := s.bc.LatestBlock().GetHeight()
-		localWork := s.bc.CanonicalWork()
+		localTip := s.bc.LatestBlock()
+		var currentHeight uint64
+		var localWork *big.Int
+		if localTip != nil {
+			currentHeight = localTip.GetHeight()
+			localWork = s.bc.CanonicalWork()
+		} else {
+			currentHeight = 0
+			localWork = big.NewInt(0)
+		}
 		peerWork := info.Work
 		if peerWork == nil {
 			peerWork = big.NewInt(0)
@@ -1094,11 +1197,10 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 
 		if !shouldSync {
 			log.Printf("[Sync] SyncWithPeer: sync completed - local caught up with peer (localHeight=%d, peerHeight=%d)", currentHeight, info.Height)
-			s.mu.Lock()
-			s.syncProgress = 1.0
-			s.isSyncing = false
-			s.lastUpdateTime = time.Now()
-			s.mu.Unlock()
+			// CRITICAL: Do NOT set isSyncing=false or syncProgress=1.0 here!
+			// Let performSyncStep manage these states to prevent race conditions
+			// with mining loop. performSyncStep will set these after verifying
+			// no more sync is needed.
 			log.Printf("[Sync] SyncWithPeer completed successfully (localHeight=%d, localWork=%s, peerHeight=%d, peerWork=%s)",
 				currentHeight, localWork.String(), info.Height, peerWork.String())
 
@@ -1125,7 +1227,7 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		if headersToFetch > maxHeadersFetch {
 			headersToFetch = maxHeadersFetch
 		}
-		log.Printf("[Sync] Fetching %d headers from height %d", headersToFetch, currentHeight+1)
+		log.Printf("[Sync] Fetching %d headers from height %d (currentHeight=%d)", headersToFetch, currentHeight+1, currentHeight)
 		headers, err := s.fetchHeadersWithRetry(ctx, peer, currentHeight+1, int(headersToFetch))
 		if err != nil {
 			log.Printf("[Sync] Failed to fetch headers: %v", err)
@@ -1142,6 +1244,15 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		}
 
 		log.Printf("[Sync] Downloaded %d headers", len(headers))
+
+		// CRITICAL DEBUG: Log first few headers to verify heights
+		// Note: BlockHeader doesn't have height field, height is in Block struct
+		for i, h := range headers {
+			if i < 3 {
+				log.Printf("[Sync] Header[%d]: prevHash=%s, timestamp=%d, difficulty=%d",
+					i, hex.EncodeToString(h.PrevHash)[:16], h.TimestampUnix, h.DifficultyBits)
+			}
+		}
 
 		// Find common ancestor by checking if header prevHash matches local chain
 		syncStartHeight := currentHeight
@@ -1219,7 +1330,7 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 			continue // Continue loop to check if remote has grown
 		}
 
-		log.Printf("[Sync] Starting batch download: height %d to %d (%d blocks)", syncFromHeight, info.Height, blocksToFetch)
+		log.Printf("[Sync] Starting batch download: syncStartHeight=%d, syncFromHeight=%d, to height %d (%d blocks)", syncStartHeight, syncFromHeight, info.Height, blocksToFetch)
 
 		// Use the downloader for batch downloading with concurrent workers
 		progressChan := make(chan DownloadProgress, ProgressChannelBufferSize)
@@ -1239,26 +1350,39 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 
 		// Define storage function for real-time persistence
 		storeFunc := func(ctx context.Context, block *core.Block) error {
+			blockHeight := block.GetHeight()
+			log.Printf("[Sync] storeFunc: processing block %d (syncStartHeight=%d, syncFromHeight=%d)",
+				blockHeight, syncStartHeight, syncFromHeight)
+
 			// Validate chain continuity first
 			expectedPrevHash := []byte{}
-			if block.GetHeight() > syncStartHeight {
-				if block.GetHeight() == syncStartHeight+1 {
+			if blockHeight > syncStartHeight {
+				if blockHeight == syncStartHeight+1 {
 					localTip := s.bc.LatestBlock()
 					if localTip != nil {
 						expectedPrevHash = localTip.Hash
+						log.Printf("[Sync] storeFunc: block %d is first after syncStart, using localTip hash %x",
+							blockHeight, expectedPrevHash[:8])
+					} else {
+						log.Printf("[Sync] storeFunc: WARNING - block %d is first after syncStart but localTip is nil!", blockHeight)
 					}
 				} else {
 					// Get block at previous height for prevHash check
-					prevBlock, exists := s.bc.BlockByHeight(block.GetHeight() - 1)
+					prevBlock, exists := s.bc.BlockByHeight(blockHeight - 1)
 					if exists && prevBlock != nil {
 						expectedPrevHash = prevBlock.Hash
+						log.Printf("[Sync] storeFunc: block %d, found prev block %d with hash %x",
+							blockHeight, blockHeight-1, expectedPrevHash[:8])
+					} else {
+						log.Printf("[Sync] storeFunc: WARNING - block %d, prev block %d not found in chain!",
+							blockHeight, blockHeight-1)
 					}
 				}
 			}
 
 			if len(expectedPrevHash) > 0 && !bytes.Equal(block.Header.PrevHash, expectedPrevHash) {
 				log.Printf("[Sync] Chain discontinuity at height %d: expected prevHash %x, got %x",
-					block.GetHeight(), expectedPrevHash[:8], block.Header.PrevHash[:8])
+					blockHeight, expectedPrevHash[:8], block.Header.PrevHash[:8])
 
 				// Report severe misbehavior for chain discontinuity (provides invalid blocks)
 				if s.securityMgr != nil {
@@ -1268,7 +1392,7 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 					log.Printf("[Sync] Reported peer %s for chain discontinuity (persistent=50, transient=20)", peer)
 				}
 
-				return fmt.Errorf("chain discontinuity at height %d", block.GetHeight())
+				return fmt.Errorf("chain discontinuity at height %d", blockHeight)
 			}
 
 			// Add block to chain via handleNewBlock for proper validation and fork handling
@@ -1400,7 +1524,15 @@ func (s *SyncLoop) findCommonAncestorHeight(ctx context.Context, peer string, ta
 	log.Printf("[Sync] Finding common ancestor, target height=%d", targetHeight)
 
 	// Walk backwards from local tip to find common ancestor
-	localHeight := s.bc.LatestBlock().GetHeight()
+	localTip := s.bc.LatestBlock()
+	var localHeight uint64
+	if localTip != nil {
+		localHeight = localTip.GetHeight()
+	} else {
+		// Local chain is empty, common ancestor is 0
+		log.Printf("[Sync] Local chain is empty, common ancestor is 0")
+		return 0, nil
+	}
 
 	// Start from the height before target
 	var checkHeight uint64

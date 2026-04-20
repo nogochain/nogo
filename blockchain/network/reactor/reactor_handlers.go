@@ -1,9 +1,11 @@
 package reactor
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/nogochain/nogo/blockchain/network/mconnection"
@@ -47,6 +49,7 @@ type Mempool interface {
 type Switch interface {
 	Send(peerID string, chID byte, msg []byte) bool
 	Broadcast(chID byte, msg []byte)
+	BroadcastBlockExcluding(ctx context.Context, block *core.Block, excludePeer string) error
 }
 
 // NewReactorHandlers creates a new ReactorHandlers instance.
@@ -75,14 +78,15 @@ func NewReactorHandlers(chain Chain, mempool Mempool, sw Switch) (*ReactorHandle
 // SyncReactorHandler handles sync-protocol messages by querying the local
 // chain and responding to peers, or by processing data received from peers.
 type SyncReactorHandler struct {
-	handlers  *ReactorHandlers
-	syncLoop  SyncLoopInterface
+	handlers *ReactorHandlers
+	syncLoop SyncLoopInterface
 }
 
 // SyncLoopInterface defines the sync loop methods used by handlers
 type SyncLoopInterface interface {
 	IsSyncing() bool
 	IsSynced() bool
+	TriggerSyncCheck()
 }
 
 // SetSyncLoop sets the sync loop reference for the handler
@@ -222,6 +226,9 @@ func (h *SyncReactorHandler) OnGetBlocks(peerID string, heights []uint64) error 
 // OnBlocks processes full blocks received from a peer. The blocks bytes
 // contain a JSON array of serialized block raw messages. Each block is
 // added to the local chain via AddBlock.
+// NOTE: SyncMsgBlocks is ONLY used for sync request responses (FetchBlockByHeight),
+// NOT for block broadcast. Block broadcast uses BlockMsgBlock on ChannelBlock.
+// Therefore, flood broadcast is NOT needed here - it would cause duplicate propagation.
 func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
 	if h.handlers == nil || h.handlers.chain == nil {
 		return fmt.Errorf("sync handler: chain not available")
@@ -258,7 +265,7 @@ func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
 		}
 	}
 
-	log.Printf("[SyncHandler] Processed %d blocks from peer %s, accepted %d",
+	log.Printf("[SyncHandler] Processed %d blocks from peer %s, accepted %d (sync response - no flood broadcast)",
 		len(rawBlocks), peerID, addedCount)
 
 	return nil
@@ -356,6 +363,44 @@ func (h *SyncReactorHandler) OnNotFound(peerID string, msgType byte, ids []strin
 func (h *SyncReactorHandler) OnStatus(peerID string, height uint64, work string, latestHash string) error {
 	log.Printf("[SyncHandler] Status from peer %s: height=%d work=%s hash=%s",
 		peerID, height, work, latestHash[:16])
+
+	// CRITICAL: Trigger sync check when peer has higher chain
+	// This enables immediate sync initiation when connecting to peers with higher height/work
+	// instead of waiting for the next scheduled sync check (up to 2 seconds delay)
+
+	// Debug: log sync loop state
+	if h.syncLoop == nil {
+		log.Printf("[SyncHandler] syncLoop is nil, cannot trigger sync")
+		return nil
+	}
+
+	isSyncing := h.syncLoop.IsSyncing()
+	isSynced := h.syncLoop.IsSynced()
+	log.Printf("[SyncHandler] sync state: isSyncing=%v, isSynced=%v", isSyncing, isSynced)
+
+	if !isSyncing && !isSynced {
+		// Check if peer has higher height than local chain
+		if h.handlers != nil && h.handlers.chain != nil {
+			localTip := h.handlers.chain.LatestBlock()
+			localHeight := uint64(0)
+			if localTip != nil {
+				localHeight = localTip.GetHeight()
+			}
+			// Trigger sync if peer has higher height (including case where local chain is empty)
+			if height > localHeight {
+				log.Printf("[SyncHandler] Peer %s has higher height (%d > %d), triggering sync check",
+					peerID, height, localHeight)
+				h.syncLoop.TriggerSyncCheck()
+			} else {
+				log.Printf("[SyncHandler] Peer %s height (%d) not higher than local (%d), no sync needed",
+					peerID, height, localHeight)
+			}
+		} else {
+			log.Printf("[SyncHandler] handlers or chain is nil")
+		}
+	} else {
+		log.Printf("[SyncHandler] skipping sync trigger: isSyncing=%v, isSynced=%v", isSyncing, isSynced)
+	}
 
 	return nil
 }
@@ -637,6 +682,7 @@ func (h *BlockReactorHandler) OnGetBlock(peerID string, blockHashes []string) er
 // OnBlock handles received full blocks from a peer. Each block is added
 // to the local chain via AddBlock, which performs full validation,
 // fork detection, and chain reorganization if necessary.
+// CRITICAL: Implements flood broadcast to propagate blocks to all peers.
 func (h *BlockReactorHandler) OnBlock(peerID string, blocks []*core.Block) error {
 	if h.handlers == nil || h.handlers.chain == nil {
 		return fmt.Errorf("block handler: chain not available")
@@ -660,10 +706,24 @@ func (h *BlockReactorHandler) OnBlock(peerID string, blocks []*core.Block) error
 		}
 		if accepted {
 			addedCount++
+
+			// CRITICAL: Flood broadcast - forward block to all other peers
+			// This ensures blocks propagate through the entire network even if
+			// the original broadcaster is not directly connected to all nodes.
+			// Prevents network partition leading to chain splits.
+			if h.handlers.sw != nil {
+				go func(b *core.Block, sender string) {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if err := h.handlers.sw.BroadcastBlockExcluding(ctx, b, sender); err != nil {
+						log.Printf("[BlockHandler] Flood broadcast failed: %v", err)
+					}
+				}(block, peerID)
+			}
 		}
 	}
 
-	log.Printf("[BlockHandler] Processed %d blocks from peer %s, accepted %d",
+	log.Printf("[BlockHandler] Processed %d blocks from peer %s, accepted %d (flood broadcast enabled)",
 		len(blocks), peerID, addedCount)
 
 	return nil
