@@ -1340,6 +1340,7 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 
 		// Find common ancestor by checking if header prevHash matches local chain
 		syncStartHeight := currentHeight
+		headerChainBroken := false
 		for i, header := range headers {
 			expectedHeight := currentHeight + 1 + uint64(i)
 			if expectedHeight == currentHeight+1 {
@@ -1370,6 +1371,8 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 								return fmt.Errorf("rollback chain to height %d failed: %w", syncStartHeight, rollbackErr)
 							}
 							log.Printf("[Sync] Chain rolled back successfully to height %d", syncStartHeight)
+							// Update currentHeight after rollback
+							currentHeight = syncStartHeight
 						}
 					}
 				}
@@ -1387,6 +1390,7 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 							log.Printf("[Sync] Reported peer %s for header hash computation failure (persistent=30, transient=10)", peer)
 						}
 
+						headerChainBroken = true
 						break
 					}
 					if !bytes.Equal(header.PrevHash, prevHash) {
@@ -1399,10 +1403,18 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 							log.Printf("[Sync] Reported peer %s for header chain discontinuity (persistent=60, transient=25)", peer)
 						}
 
+						headerChainBroken = true
 						break
 					}
 				}
 			}
+		}
+
+		// CRITICAL: If header chain is broken, do not continue with block download
+		// Return error to allow retry with different peer or fresh headers
+		if headerChainBroken {
+			log.Printf("[Sync] Header chain validation failed, aborting sync with peer %s", peer)
+			return fmt.Errorf("header chain discontinuity detected, peer may be on different fork")
 		}
 
 		// Download blocks in batches using BlockDownloader for efficient parallel download
