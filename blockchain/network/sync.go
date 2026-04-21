@@ -719,6 +719,36 @@ func (s *SyncLoop) performSyncStep() {
 
 	log.Printf("[Sync] performSyncStep: %d active peers", len(peers))
 
+	// Check for resume capability from previous sync
+	if s.progressStore != nil {
+		if s.progressStore.CanResume() {
+			resumeHeight, targetHeight, resumePeerID, canResume := s.progressStore.GetResumePoint()
+			if canResume && resumeHeight > 0 {
+				log.Printf("[Sync] Resuming from previous sync: height=%d, target=%d, peer=%s",
+					resumeHeight, targetHeight, resumePeerID)
+				
+				// Verify local chain is at or before resume height
+				localTip := s.bc.LatestBlock()
+				localHeight := uint64(0)
+				if localTip != nil {
+					localHeight = localTip.GetHeight()
+				}
+				
+				// If local chain is behind resume point, we need to sync from local height
+				// If local chain is ahead, the resume point is stale
+				if localHeight < resumeHeight {
+					log.Printf("[Sync] Local height %d < resume height %d, continuing from local height", 
+						localHeight, resumeHeight)
+				} else if localHeight > resumeHeight {
+					log.Printf("[Sync] Local height %d > resume height %d, resume point is stale", 
+						localHeight, resumeHeight)
+					s.progressStore.Clear()
+				}
+				// If local height equals resume height, we can continue from there
+			}
+		}
+	}
+
 	localTip := s.bc.LatestBlock()
 	var currentHeight uint64
 	var localWork *big.Int
@@ -739,15 +769,9 @@ func (s *SyncLoop) performSyncStep() {
 		info, err := s.pm.FetchChainInfo(s.ctx, peer)
 		if err != nil {
 			log.Printf("[Sync] failed to fetch chain info from peer %s: %v", peer, err)
-			// CRITICAL: Remove peer immediately if connection is dead
-			// This prevents sync from getting stuck with non-responsive peers
-			if strings.Contains(err.Error(), "MConnection not running") ||
-				strings.Contains(err.Error(), "send request failed") {
-				log.Printf("[Sync] Removing dead peer %s: connection not running", peer)
-				// Type assertion to call RemovePeerByID on Switch
-				if sw, ok := s.pm.(*Switch); ok {
-					sw.RemovePeerByID(peer)
-				}
+			// Use handlePeerError for graceful error handling with retry mechanism
+			if sw, ok := s.pm.(*Switch); ok {
+				sw.handlePeerError(peer, peer, err)
 			}
 			continue
 		}
@@ -1208,14 +1232,9 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		info, err := s.pm.FetchChainInfo(ctx, peer)
 		if err != nil {
 			log.Printf("[Sync] SyncWithPeer failed to fetch chain info: %v", err)
-			// CRITICAL: Remove peer immediately if connection is dead
-			if strings.Contains(err.Error(), "MConnection not running") ||
-				strings.Contains(err.Error(), "send request failed") {
-				log.Printf("[Sync] Removing dead peer %s during sync: connection not running", peer)
-				// Type assertion to call RemovePeerByID on Switch
-				if sw, ok := s.pm.(*Switch); ok {
-					sw.RemovePeerByID(peer)
-				}
+			// Use handlePeerError for graceful error handling with retry mechanism
+			if sw, ok := s.pm.(*Switch); ok {
+				sw.handlePeerError(peer, peer, err)
 			}
 			return fmt.Errorf("failed to get peer chain info: %w", err)
 		}
@@ -1513,14 +1532,9 @@ func (s *SyncLoop) fetchHeadersWithRetry(ctx context.Context, peer string, fromH
 	if s.retryExec == nil {
 		headers, err := s.pm.FetchHeadersFrom(ctx, peer, fromHeight, count)
 		if err != nil {
-			// CRITICAL: Remove peer if connection is dead
-			if strings.Contains(err.Error(), "MConnection not running") ||
-				strings.Contains(err.Error(), "send request failed") {
-				log.Printf("[Sync] Removing dead peer %s during header fetch: connection not running", peer)
-				// Type assertion to call RemovePeerByID on Switch
-				if sw, ok := s.pm.(*Switch); ok {
-					sw.RemovePeerByID(peer)
-				}
+			// Use handlePeerError for graceful error handling with retry mechanism
+			if sw, ok := s.pm.(*Switch); ok {
+				sw.handlePeerError(peer, peer, err)
 			}
 			return nil, err
 		}
@@ -1539,14 +1553,9 @@ func (s *SyncLoop) fetchHeadersWithRetry(ctx context.Context, peer string, fromH
 		h, err := s.pm.FetchHeadersFrom(ctx, p, fromHeight, count)
 		if err != nil {
 			lastErr = err
-			// CRITICAL: Remove peer if connection is dead
-			if strings.Contains(err.Error(), "MConnection not running") ||
-				strings.Contains(err.Error(), "send request failed") {
-				log.Printf("[Sync] Removing dead peer %s during header fetch retry: connection not running", p)
-				// Type assertion to call RemovePeerByID on Switch
-				if sw, ok := s.pm.(*Switch); ok {
-					sw.RemovePeerByID(p)
-				}
+			// Use handlePeerError for graceful error handling with retry mechanism
+			if sw, ok := s.pm.(*Switch); ok {
+				sw.handlePeerError(p, p, err)
 			}
 			return err
 		}

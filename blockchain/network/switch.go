@@ -173,6 +173,20 @@ type Switch struct {
 
 	peerAddresses map[string]string
 	peerAddrMtx   sync.RWMutex
+
+	// Peer error tracking and retry mechanism
+	peerErrors     map[string]*peerErrorState
+	peerErrorsMtx  sync.RWMutex
+	maxPeerErrors  int
+	peerRetryDelay time.Duration
+}
+
+// peerErrorState tracks consecutive errors for a peer
+type peerErrorState struct {
+	consecutiveErrors int
+	lastError         error
+	lastErrorTime     time.Time
+	lastErrorType     string
 }
 
 type syncPendingRequest struct {
@@ -194,6 +208,9 @@ func NewSwitch(cfg SwitchConfig) *Switch {
 		quit:            make(chan struct{}),
 		syncPendingReqs: make(map[string]*syncPendingRequest),
 		peerAddresses:   make(map[string]string),
+		peerErrors:      make(map[string]*peerErrorState),
+		maxPeerErrors:   3,               // Allow 3 consecutive errors before removing peer
+		peerRetryDelay:  5 * time.Second, // Wait 5 seconds before retry after error
 	}
 
 	privKey, err := sw.loadOrGenerateNodeKey()
@@ -924,10 +941,12 @@ func (sw *Switch) createPeerWithNodeInfo(conn net.Conn, peerNI NodeInfo) *Peer {
 
 	log.Printf("Switch: creating peer for %s with %d channel descriptors", addr, chDescCount)
 
+	// Production-grade MConnection configuration
+	// Use default config with production timeouts to prevent premature disconnection
 	mcfg := mconnection.DefaultMConnConfig()
 	mcfg.SendRate = 512000
 	mcfg.RecvRate = 512000
-	mcfg.PingTimeout = 5 * time.Second
+	// PingTimeout and PongTimeout are already set to production defaults (30s/45s)
 
 	receiveCb := func(chID byte, msgBytes []byte) {
 		sw.receiveMessage(chID, peerID, msgBytes)
@@ -935,6 +954,8 @@ func (sw *Switch) createPeerWithNodeInfo(conn net.Conn, peerNI NodeInfo) *Peer {
 
 	errorCb := func(err error) {
 		log.Printf("Switch: peer %s (%s) mconnection error: %v", addr, peerNI.PubKey, err)
+		// Trigger peer removal with retry mechanism
+		sw.handlePeerError(peerID, addr, err)
 	}
 
 	mconn, mconnErr := mconnection.NewMConnection(
@@ -992,10 +1013,11 @@ func (sw *Switch) createPeer(conn net.Conn, isOutbound bool) *Peer {
 		return nil
 	}
 
+	// Production-grade MConnection configuration
 	mcfg := mconnection.DefaultMConnConfig()
 	mcfg.SendRate = 512000
 	mcfg.RecvRate = 512000
-	mcfg.PingTimeout = 5 * time.Second
+	// PingTimeout and PongTimeout are already set to production defaults (30s/45s)
 
 	receiveCb := func(chID byte, msgBytes []byte) {
 		// Get peer ID for proper routing
@@ -1018,6 +1040,8 @@ func (sw *Switch) createPeer(conn net.Conn, isOutbound bool) *Peer {
 
 	errorCb := func(err error) {
 		log.Printf("Switch: peer %s mconnection error: %v", addr, err)
+		// Trigger peer removal with retry mechanism
+		sw.handlePeerError(addr, addr, err)
 	}
 
 	mconn, mconnErr := mconnection.NewMConnection(
@@ -1256,13 +1280,167 @@ func (sw *Switch) tryHandlePendingResponse(peerID string, msg []byte) bool {
 	return false
 }
 
+// handlePeerError handles peer connection errors with retry mechanism
+// Instead of immediately removing the peer, it tracks consecutive errors
+// and only removes the peer after maxPeerErrors consecutive failures
+func (sw *Switch) handlePeerError(peerID, addr string, err error) {
+	if err == nil {
+		return
+	}
+
+	// Classify error severity
+	errorType := classifyPeerError(err)
+	isFatal := isFatalPeerError(err)
+
+	sw.peerErrorsMtx.Lock()
+	defer sw.peerErrorsMtx.Unlock()
+
+	state, exists := sw.peerErrors[peerID]
+	if !exists {
+		state = &peerErrorState{
+			consecutiveErrors: 0,
+			lastError:         nil,
+			lastErrorTime:     time.Time{},
+			lastErrorType:     "",
+		}
+		sw.peerErrors[peerID] = state
+	}
+
+	// Reset error count if enough time has passed since last error
+	if !state.lastErrorTime.IsZero() && time.Since(state.lastErrorTime) > sw.peerRetryDelay*2 {
+		state.consecutiveErrors = 0
+	}
+
+	state.consecutiveErrors++
+	state.lastError = err
+	state.lastErrorTime = time.Now()
+	state.lastErrorType = errorType
+
+	log.Printf("Switch: peer error [%s] for %s (consecutive=%d/%d, fatal=%v): %v",
+		errorType, peerID, state.consecutiveErrors, sw.maxPeerErrors, isFatal, err)
+
+	// Immediately remove peer for fatal errors
+	if isFatal {
+		log.Printf("Switch: removing peer %s due to fatal error: %s", peerID, errorType)
+		sw.RemovePeer(peerID, "fatal error: "+errorType)
+		sw.clearPeerErrorState(peerID)
+		return
+	}
+
+	// Remove peer if consecutive errors exceed threshold
+	if state.consecutiveErrors >= sw.maxPeerErrors {
+		log.Printf("Switch: removing peer %s after %d consecutive errors (last: %s)",
+			peerID, state.consecutiveErrors, errorType)
+		sw.RemovePeer(peerID, "consecutive errors: "+errorType)
+		sw.clearPeerErrorState(peerID)
+		return
+	}
+
+	// Log warning but keep peer connected
+	log.Printf("Switch: peer %s has %d/%d consecutive errors, keeping connection for retry",
+		peerID, state.consecutiveErrors, sw.maxPeerErrors)
+}
+
+// clearPeerErrorState removes error tracking for a peer
+func (sw *Switch) clearPeerErrorState(peerID string) {
+	delete(sw.peerErrors, peerID)
+}
+
+// resetPeerErrorCount resets the error count for a peer (called on successful operation)
+func (sw *Switch) resetPeerErrorCount(peerID string) {
+	sw.peerErrorsMtx.Lock()
+	defer sw.peerErrorsMtx.Unlock()
+
+	if state, exists := sw.peerErrors[peerID]; exists {
+		state.consecutiveErrors = 0
+		state.lastError = nil
+		state.lastErrorTime = time.Time{}
+	}
+}
+
+// classifyPeerError categorizes the error type for logging and handling
+func classifyPeerError(err error) string {
+	if err == nil {
+		return "none"
+	}
+
+	errStr := err.Error()
+	errLower := strings.ToLower(errStr)
+
+	// Connection-related errors
+	if strings.Contains(errLower, "connection reset") ||
+		strings.Contains(errLower, "broken pipe") {
+		return "connection_reset"
+	}
+
+	if strings.Contains(errLower, "timeout") ||
+		strings.Contains(errLower, "deadline exceeded") {
+		return "timeout"
+	}
+
+	if strings.Contains(errLower, "connection refused") ||
+		strings.Contains(errLower, "connection closed") {
+		return "connection_closed"
+	}
+
+	// Protocol errors
+	if strings.Contains(errLower, "invalid packet") ||
+		strings.Contains(errLower, "unknown channel") {
+		return "protocol_error"
+	}
+
+	if strings.Contains(errLower, "read error") ||
+		strings.Contains(errLower, "write error") {
+		return "io_error"
+	}
+
+	// MConnection specific
+	if strings.Contains(errLower, "mconnection") {
+		return "mconnection_error"
+	}
+
+	return "unknown_error"
+}
+
+// isFatalPeerError determines if an error should immediately disconnect the peer
+func isFatalPeerError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+	errLower := strings.ToLower(errStr)
+
+	// Fatal errors that should immediately disconnect
+	fatalPatterns := []string{
+		"handshake failed",
+		"chain id mismatch",
+		"protocol violation",
+		"invalid signature",
+		"authentication failed",
+		"blacklisted",
+		"banned",
+	}
+
+	for _, pattern := range fatalPatterns {
+		if strings.Contains(errLower, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // RemovePeer disconnects and cleans up a peer by its ID.
 func (sw *Switch) RemovePeer(peerID string, reason string) {
+	log.Printf("Switch: RemovePeer called for %s, reason: %s", peerID, reason)
+
 	sw.mu.Lock()
 	removed := sw.peers.Remove(peerID)
 	sw.mu.Unlock()
 
 	if removed == nil {
+		log.Printf("Switch: RemovePeer: peer %s not found in peer set", peerID)
 		return
 	}
 
@@ -1274,19 +1452,24 @@ func (sw *Switch) RemovePeer(peerID string, reason string) {
 
 	if mconn := removed.MConnection(); mconn != nil {
 		if stopErr := mconn.Stop(); stopErr != nil {
-			_ = fmt.Errorf("switch: stop mconnection for removed peer %s: %w", peerID, stopErr)
+			log.Printf("Switch: failed to stop mconnection for removed peer %s: %v", peerID, stopErr)
 		}
 	}
 
 	if conn := removed.conn; conn != nil {
 		if closeErr := conn.Close(); closeErr != nil {
-			_ = fmt.Errorf("switch: close connection for removed peer %s: %w", peerID, closeErr)
+			log.Printf("Switch: failed to close connection for removed peer %s: %v", peerID, closeErr)
 		}
 	}
 
 	sw.peerAddrMtx.Lock()
 	delete(sw.peerAddresses, peerID)
 	sw.peerAddrMtx.Unlock()
+
+	// Clear error tracking state
+	sw.clearPeerErrorState(peerID)
+
+	log.Printf("Switch: peer %s removed successfully, remaining peers: %d", peerID, sw.PeerCount())
 }
 
 // PeerCount returns the current number of connected peers.

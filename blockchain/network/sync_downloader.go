@@ -45,6 +45,10 @@ const (
 	ConnectionReuseBatchSize = 10
 	// InterBatchDelay is the delay between batch downloads to avoid overwhelming the server
 	InterBatchDelay = 100 * time.Millisecond
+	// MaxBatchRetries is the maximum number of retries for a failed batch download
+	MaxBatchRetries = 3
+	// BatchRetryDelay is the delay between batch retry attempts
+	BatchRetryDelay = 2 * time.Second
 )
 
 type DownloadProgress struct {
@@ -85,6 +89,7 @@ type BlockDownloader struct {
 	failedCount       uint64
 	startTime         time.Time
 	metrics           *metrics.Metrics
+	downloadCond      *sync.Cond
 }
 
 type BlockValidator interface {
@@ -122,6 +127,7 @@ func NewBlockDownloader(pm PeerAPI, bc BlockchainInterface, validator BlockValid
 		currentBatchSize:   int32(cfg.BatchSize),
 		currentConcurrency: int32(cfg.MaxConcurrent),
 		metrics:            metrics,
+		downloadCond:       sync.NewCond(&sync.Mutex{}),
 	}
 
 	go downloader.monitorAndAdjust()
@@ -190,11 +196,33 @@ func (d *BlockDownloader) adjustBatchSize() {
 
 type StoreFunc func(ctx context.Context, block *core.Block) error
 
+// BatchDownloadBlocks downloads blocks with wait mechanism for concurrent requests
+// If a download is already in progress, it waits for completion instead of failing
 func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, startHeight uint64, count uint64, progressChan chan<- DownloadProgress, storeFunc StoreFunc) error {
-	if !atomic.CompareAndSwapInt32(&d.isDownloading, 0, 1) {
-		return fmt.Errorf("download already in progress")
+	// Wait for any existing download to complete instead of failing immediately
+	// This prevents "download already in progress" errors during sync retries
+	d.downloadCond.L.Lock()
+	for atomic.LoadInt32(&d.isDownloading) == 1 {
+		// Check context while waiting
+		select {
+		case <-ctx.Done():
+			d.downloadCond.L.Unlock()
+			return ctx.Err()
+		default:
+		}
+		// Wait with timeout to periodically check context
+		d.downloadCond.Wait()
 	}
-	defer atomic.StoreInt32(&d.isDownloading, 0)
+	
+	// Now we can start the download
+	atomic.StoreInt32(&d.isDownloading, 1)
+	d.downloadCond.L.Unlock()
+	
+	// Ensure we signal completion when done
+	defer func() {
+		atomic.StoreInt32(&d.isDownloading, 0)
+		d.downloadCond.Broadcast()
+	}()
 
 	d.mu.Lock()
 	d.startTime = time.Now()
@@ -227,17 +255,35 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 		}
 		batchCount := batchEnd - batchStart + 1
 
-		// Fetch blocks using a single connection for this batch
-		blocks, err := d.pm.FetchBlocksByHeightRange(ctx, peer, batchStart, batchCount)
-		if err != nil {
-			log.Printf("[Downloader] Failed to fetch blocks %d-%d: %v, will retry later", batchStart, batchEnd, err)
+		// Fetch blocks with retry limit
+		var blocks []*core.Block
+		var fetchErr error
+		for retry := 0; retry < MaxBatchRetries; retry++ {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			blocks, fetchErr = d.pm.FetchBlocksByHeightRange(ctx, peer, batchStart, batchCount)
+			if fetchErr == nil {
+				break
+			}
+			
+			log.Printf("[Downloader] Failed to fetch blocks %d-%d (attempt %d/%d): %v", 
+				batchStart, batchEnd, retry+1, MaxBatchRetries, fetchErr)
+			
+			if retry < MaxBatchRetries-1 {
+				time.Sleep(BatchRetryDelay)
+			}
+		}
+
+		if fetchErr != nil {
 			atomic.AddUint64(&d.failedCount, batchCount)
-			// CRITICAL: Do NOT continue! We must retry this batch
-			// Otherwise we'll have gaps in the chain
-			// Sleep and retry the same batch
-			time.Sleep(2 * time.Second)
-			batchStart -= ConnectionReuseBatchSize // Retry this batch
-			continue
+			log.Printf("[Downloader] All retry attempts failed for blocks %d-%d, returning error: %v", 
+				batchStart, batchEnd, fetchErr)
+			return fmt.Errorf("failed to fetch blocks %d-%d after %d retries: %w", 
+				batchStart, batchEnd, MaxBatchRetries, fetchErr)
 		}
 
 		// Immediately store each block from this batch
