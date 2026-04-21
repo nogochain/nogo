@@ -747,7 +747,6 @@ func (sw *Switch) ensureOutboundPeers() {
 			}
 
 			if dialErr := sw.DialPeerWithAddress(dialAddr); dialErr != nil {
-				log.Printf("Switch: seed dial failed: %v", dialErr)
 				continue
 			}
 			outboundCount++
@@ -765,7 +764,6 @@ func (sw *Switch) ensureOutboundPeers() {
 			}
 
 			if dialErr := sw.DialPeerWithAddress(pi.Address); dialErr != nil {
-				log.Printf("Switch: peer dial failed: %v", dialErr)
 				continue
 			}
 			outboundCount++
@@ -896,25 +894,13 @@ func (sw *Switch) handshakePeerWithTimeout(conn net.Conn, isInitiator bool, time
 		return NodeInfo{}, fmt.Errorf("handshake: decode peer node info: %w", decodeErr)
 	}
 
-	// Log NodeInfo for debugging
-	log.Printf("Switch: handshake successful - our Network=%s, peer Network=%s", sw.chainID, peerNI.Network)
-	log.Printf("Switch: our version=%s, peer version=%s", sw.version, peerNI.Version)
-	log.Printf("Switch: our channels=%s, peer channels=%s", sw.buildChannelsString(), peerNI.Channels)
-
-	// Validate chain ID - extract numeric part for comparison
 	if peerNI.Network != "" {
-		// Normalize chain IDs by removing prefix if present
 		localChainID := strings.TrimPrefix(sw.chainID, "nogo-")
 		peerChainID := strings.TrimPrefix(peerNI.Network, "nogo-")
 
-		log.Printf("Switch: chain ID validation - local=%s (normalized: %s), peer=%s (normalized: %s)",
-			sw.chainID, localChainID, peerNI.Network, peerChainID)
-
 		if localChainID != peerChainID {
-			log.Printf("Switch: REJECTING peer - chain ID mismatch")
 			return NodeInfo{}, fmt.Errorf("chain ID mismatch: local=%s, remote=%s", sw.chainID, peerNI.Network)
 		}
-		log.Printf("Switch: chain ID validated successfully")
 	}
 
 	return peerNI, nil
@@ -935,26 +921,18 @@ func (sw *Switch) createPeerWithNodeInfo(conn net.Conn, peerNI NodeInfo) *Peer {
 	sw.mu.RUnlock()
 
 	if chDescCount == 0 {
-		log.Printf("Switch: no channel descriptors registered for peer %s", addr)
 		return nil
 	}
 
-	log.Printf("Switch: creating peer for %s with %d channel descriptors", addr, chDescCount)
-
-	// Production-grade MConnection configuration
-	// Use default config with production timeouts to prevent premature disconnection
 	mcfg := mconnection.DefaultMConnConfig()
 	mcfg.SendRate = 512000
 	mcfg.RecvRate = 512000
-	// PingTimeout and PongTimeout are already set to production defaults (30s/45s)
 
 	receiveCb := func(chID byte, msgBytes []byte) {
 		sw.receiveMessage(chID, peerID, msgBytes)
 	}
 
 	errorCb := func(err error) {
-		log.Printf("Switch: peer %s (%s) mconnection error: %v", addr, peerNI.PubKey, err)
-		// Trigger peer removal with retry mechanism
 		sw.handlePeerError(peerID, addr, err)
 	}
 
@@ -966,17 +944,13 @@ func (sw *Switch) createPeerWithNodeInfo(conn net.Conn, peerNI NodeInfo) *Peer {
 		mcfg,
 	)
 	if mconnErr != nil {
-		log.Printf("Switch: failed to create MConnection for %s: %v", addr, mconnErr)
 		return nil
 	}
 
 	if startErr := mconn.Start(); startErr != nil {
-		log.Printf("Switch: failed to start MConnection for %s: %v", addr, startErr)
 		return nil
 	}
-	log.Printf("Switch: MConnection started for %s (channels=%d)", addr, len(chDescs))
 
-	// Store NodeInfo as a proper struct for serialization
 	nodeInfoMap := map[string]string{
 		"pubKey":     peerNI.PubKey,
 		"moniker":    peerNI.Moniker,
@@ -995,7 +969,6 @@ func (sw *Switch) createPeerWithNodeInfo(conn net.Conn, peerNI NodeInfo) *Peer {
 		isLAN:    false,
 	}
 
-	log.Printf("Switch: peer created successfully for %s (pubkey=%s)", addr, peerNI.PubKey)
 	return peer
 }
 
@@ -1087,7 +1060,6 @@ func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, 
 
 	// If peer already exists, close this connection and return success
 	if existingPeer != nil {
-		log.Printf("Switch: peer %s already in peer set, closing duplicate connection", addr)
 		conn.Close()
 		return nil
 	}
@@ -1100,23 +1072,18 @@ func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, 
 	sw.dialingMu.Unlock()
 
 	if dialing {
-		log.Printf("Switch: duplicate dial to %s, closing duplicate connection (original dial will add peer)", addr)
 		conn.Close()
-		return nil // Return nil to indicate success - the original dial will handle it
+		return nil
 	}
 
-	log.Printf("Switch: calling createPeerWithNodeInfo for %s", addr)
 	peer := sw.createPeerWithNodeInfo(conn, peerNI)
 	if peer == nil {
-		log.Printf("Switch: createPeerWithNodeInfo returned nil for %s", addr)
 		return fmt.Errorf("switch: failed to create peer from %s", addr)
 	}
-	log.Printf("Switch: peer object created for %s, adding to peers set", addr)
 
 	sw.mu.Lock()
 	if sw.peers.Size() >= sw.config.MaxPeers {
 		sw.mu.Unlock()
-		log.Printf("Switch: peer limit reached for %s (%d/%d)", addr, sw.peers.Size(), sw.config.MaxPeers)
 		if mconn := peer.MConnection(); mconn != nil {
 			if stopErr := mconn.Stop(); stopErr != nil {
 				_ = fmt.Errorf("switch: stop mconnection after peer limit: %w", stopErr)
@@ -1124,10 +1091,8 @@ func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, 
 		}
 		return fmt.Errorf("switch: peer limit reached during add (%d/%d)", sw.peers.Size(), sw.config.MaxPeers)
 	}
-	log.Printf("Switch: adding peer %s to peers set (current size: %d)", addr, sw.peers.Size())
 	if added := sw.peers.Add(peer); !added {
 		sw.mu.Unlock()
-		log.Printf("Switch: peer %s already exists in peers set, rejecting duplicate", addr)
 		if mconn := peer.MConnection(); mconn != nil {
 			if stopErr := mconn.Stop(); stopErr != nil {
 				_ = fmt.Errorf("switch: stop mconnection for duplicate peer %s: %w", addr, stopErr)
@@ -1136,10 +1101,6 @@ func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, 
 		return fmt.Errorf("switch: peer %s already in set", addr)
 	}
 	sw.mu.Unlock()
-	log.Printf("Switch: peer %s added to peers set successfully (new size: %d)", addr, sw.peers.Size())
-
-	// Dialing set was already cleaned up by caller before invoking AddPeerConnectionWithNodeInfo
-	// This prevents race conditions where duplicate dials would interfere with peer addition
 
 	sw.mu.RLock()
 	for name, r := range sw.reactors {
@@ -1151,9 +1112,6 @@ func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, 
 		}
 	}
 	sw.mu.RUnlock()
-
-	log.Printf("Switch: peer added %s (pubkey=%s, moniker=%s, outbound=%v)",
-		addr, peerNI.PubKey, peerNI.Moniker, isOutbound)
 
 	return nil
 }
@@ -1227,9 +1185,6 @@ func (sw *Switch) receiveMessage(chID byte, peerID string, msgBytes []byte) {
 		return
 	}
 
-	// CRITICAL: Check if this is a pending sync/block request response
-	// Both ChannelSync and ChannelBlock use sendAndWait for request/response
-	// This must be checked BEFORE forwarding to reactor to prevent message misrouting
 	if chID == mconnection.ChannelSync || chID == mconnection.ChannelBlock {
 		if sw.tryHandlePendingResponse(peerID, msgBytes) {
 			return
@@ -1249,21 +1204,13 @@ func (sw *Switch) tryHandlePendingResponse(peerID string, msg []byte) bool {
 	defer sw.syncPendingReqMtx.Unlock()
 
 	for reqID, req := range sw.syncPendingReqs {
-		// reqID format: "peerID:msgType:timestamp"
-		// peerID can contain colons (e.g., "192.168.1.1:9090")
-		// So we need to find the last two colons to extract msgType and timestamp
 		if req.msgType == msgType && time.Now().Before(req.deadline) {
-			// Extract peerID from reqID for matching
-			// Find last colon to separate timestamp, then second-to-last for msgType
-			lastColon := strings.LastIndex(reqID, ":")
-			if lastColon > 0 {
-				secondLastColon := strings.LastIndex(reqID[:lastColon], ":")
-				if secondLastColon > 0 {
-					reqPeerID := reqID[:secondLastColon]
+			lastSep := strings.LastIndex(reqID, "|")
+			if lastSep > 0 {
+				secondLastSep := strings.LastIndex(reqID[:lastSep], "|")
+				if secondLastSep > 0 {
+					reqPeerID := reqID[:secondLastSep]
 					if reqPeerID == peerID {
-						// CRITICAL FIX: Copy message bytes before sending to channel
-						// The msg slice may be reused by the underlying connection,
-						// causing data corruption if we send the slice directly.
 						msgCopy := make([]byte, len(msg))
 						copy(msgCopy, msg)
 						select {
@@ -1748,7 +1695,6 @@ func (sw *Switch) ListenOnTCP(addr string) error {
 	sw.wg.Add(1)
 	go sw.listenerRoutine(listener)
 
-	log.Printf("Switch: listening on tcp://%s", addr)
 	return nil
 }
 
@@ -1858,11 +1804,8 @@ func (sw *Switch) BroadcastBlock(ctx context.Context, block *core.Block) error {
 		} else {
 			failedCount++
 			broadcastErr = fmt.Errorf("switch: failed to send block to peer %s", peer.ID())
-			log.Printf("[Switch] BroadcastBlock failed to send block %d (hash=%x) to peer %s", block.GetHeight(), block.Hash[:8], peer.ID())
 		}
 	}
-
-	log.Printf("[Switch] BroadcastBlock: block %d (hash=%x) sent to %d/%d peers (%d failed)", block.GetHeight(), block.Hash[:8], successCount, len(peers), failedCount)
 
 	if successCount == 0 && broadcastErr != nil {
 		return broadcastErr
@@ -1920,12 +1863,8 @@ func (sw *Switch) BroadcastBlockExcluding(ctx context.Context, block *core.Block
 		} else {
 			failedCount++
 			broadcastErr = fmt.Errorf("switch: failed to send block to peer %s", peer.ID())
-			log.Printf("[Switch] BroadcastBlockExcluding failed to send block %d (hash=%x) to peer %s", block.GetHeight(), block.Hash[:8], peer.ID())
 		}
 	}
-
-	log.Printf("[Switch] BroadcastBlockExcluding: block %d (hash=%x) sent to %d/%d peers (excluded %s, %d failed)",
-		block.GetHeight(), block.Hash[:8], successCount, len(peers), excludePeer, failedCount)
 
 	if successCount == 0 && broadcastErr != nil {
 		return broadcastErr
@@ -2027,20 +1966,15 @@ func (sw *Switch) FetchHeadersFrom(ctx context.Context, peer string, fromHeight 
 		return nil, errors.New("switch: count exceeds maximum allowed value")
 	}
 
-	log.Printf("[Switch] FetchHeadersFrom: requesting %d headers from height %d from peer %s", count, fromHeight, peer)
-
 	reqMsg, err := reactor.BuildGetHeadersMsg(fromHeight, uint64(count))
 	if err != nil {
 		return nil, fmt.Errorf("switch: build get headers message: %w", err)
 	}
 
-	log.Printf("[Switch] FetchHeadersFrom: sending request to %s", peer)
 	respBytes, err := sw.sendAndWait(ctx, peer, mconnection.ChannelSync, reactor.SyncMsgHeaders, reqMsg)
 	if err != nil {
-		log.Printf("[Switch] FetchHeadersFrom: failed to fetch headers from %s: %v", peer, err)
 		return nil, fmt.Errorf("switch: fetch headers from %s: %w", peer, err)
 	}
-	log.Printf("[Switch] FetchHeadersFrom: received %d bytes response from %s", len(respBytes), peer)
 
 	if len(respBytes) < 1 {
 		return nil, errors.New("switch: empty headers response")
@@ -2068,7 +2002,6 @@ func (sw *Switch) FetchHeadersFrom(ctx context.Context, peer string, fromHeight 
 		}
 	}
 
-	log.Printf("[Switch] FetchHeadersFrom: successfully parsed %d headers from %s", len(headers), peer)
 	return headers, nil
 }
 
@@ -2219,7 +2152,7 @@ func (sw *Switch) sendAndWait(ctx context.Context, peerID string, chID byte, exp
 }
 
 func (sw *Switch) generateRequestID(peerID string, msgType byte) string {
-	return fmt.Sprintf("%s:%d:%d", peerID, msgType, time.Now().UnixNano())
+	return fmt.Sprintf("%s|%d|%d", peerID, msgType, time.Now().UnixNano())
 }
 
 // Peers returns a list of connected peer addresses for PeerAPI compatibility.

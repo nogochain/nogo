@@ -176,12 +176,8 @@ type BlockHeader struct {
 	Difficulty     uint32 `json:"difficulty"`
 	Nonce          uint64 `json:"nonce"`
 	MerkleRoot     []byte `json:"merkleRoot,omitempty"`
-}
-
-// Height returns the block height from header context
-// Note: BlockHeader itself doesn't store height, this is a convenience method
-func (h *BlockHeader) Height(blockHeight uint64) uint64 {
-	return blockHeight
+	Height         uint64 `json:"height,omitempty"`
+	MinerAddress   string `json:"minerAddress,omitempty"`
 }
 
 // HashHex returns the block hash as hex string

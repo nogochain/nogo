@@ -290,7 +290,8 @@ func (e *FastSyncEngine) verifyHeaderChain(headers []*core.BlockHeader, localTip
 				errHeaderChainBroken, i, len(curr.PrevHash))
 		}
 
-		prevHeaderHash, hashErr := computeHeaderHash(prev)
+		prevHeight := localTip.GetHeight() + uint64(i)
+		prevHeaderHash, hashErr := computeHeaderHash(prev, prevHeight, prev.MinerAddress)
 		if hashErr != nil {
 			return fmt.Errorf("compute header hash at index %d: %w", i-1, hashErr)
 		}
@@ -311,29 +312,58 @@ func (e *FastSyncEngine) verifyHeaderChain(headers []*core.BlockHeader, localTip
 	return nil
 }
 
-func computeHeaderHash(h *core.BlockHeader) ([]byte, error) {
+func computeHeaderHash(h *core.BlockHeader, height uint64, minerAddress string) ([]byte, error) {
+	const binaryEncodingVersionV1 byte = 0x01
+
+	miner, err := hex.DecodeString(minerAddress)
+	if err != nil {
+		miner = make([]byte, 32)
+	}
+	if len(miner) != 32 {
+		padded := make([]byte, 32)
+		copy(padded, miner)
+		miner = padded
+	}
+
+	var root [32]byte
+	if len(h.MerkleRoot) == 32 {
+		copy(root[:], h.MerkleRoot)
+	}
+
+	var prev [32]byte
+	if len(h.PrevHash) == 32 {
+		copy(prev[:], h.PrevHash)
+	}
+
 	var buf bytes.Buffer
+	if err := buf.WriteByte(binaryEncodingVersionV1); err != nil {
+		return nil, fmt.Errorf("write encoding version: %w", err)
+	}
 	if err := binary.Write(&buf, binary.LittleEndian, h.Version); err != nil {
 		return nil, fmt.Errorf("write version: %w", err)
 	}
-	if len(h.PrevHash) > 0 {
-		buf.Write(h.PrevHash)
+	if err := binary.Write(&buf, binary.LittleEndian, height); err != nil {
+		return nil, fmt.Errorf("write height: %w", err)
 	}
 	if err := binary.Write(&buf, binary.LittleEndian, h.TimestampUnix); err != nil {
 		return nil, fmt.Errorf("write timestamp: %w", err)
 	}
-	if err := binary.Write(&buf, binary.LittleEndian, h.DifficultyBits); err != nil {
-		return nil, fmt.Errorf("write difficulty bits: %w", err)
+	if _, err := buf.Write(prev[:]); err != nil {
+		return nil, fmt.Errorf("write prevHash: %w", err)
 	}
-	if err := binary.Write(&buf, binary.LittleEndian, h.Difficulty); err != nil {
-		return nil, fmt.Errorf("write difficulty: %w", err)
+	if _, err := buf.Write(root[:]); err != nil {
+		return nil, fmt.Errorf("write root: %w", err)
+	}
+	if err := binary.Write(&buf, binary.LittleEndian, h.DifficultyBits); err != nil {
+		return nil, fmt.Errorf("write difficultyBits: %w", err)
+	}
+	if _, err := buf.Write(miner[:]); err != nil {
+		return nil, fmt.Errorf("write minerAddress: %w", err)
 	}
 	if err := binary.Write(&buf, binary.LittleEndian, h.Nonce); err != nil {
 		return nil, fmt.Errorf("write nonce: %w", err)
 	}
-	if len(h.MerkleRoot) > 0 {
-		buf.Write(h.MerkleRoot)
-	}
+
 	sum := sha256.Sum256(buf.Bytes())
 	return sum[:], nil
 }

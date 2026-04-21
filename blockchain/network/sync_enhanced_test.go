@@ -37,8 +37,10 @@ func newFastSyncMockBC(blockCount int) *fastSyncMockBC {
 			DifficultyBits: uint32(1 << 20),
 			Difficulty:     1 << 20,
 			Nonce:          uint64(i),
+			Height:         uint64(i),
+			MinerAddress:   "test_miner",
 		}
-		hash, hashErr := computeHeaderHash(&hdr)
+		hash, hashErr := computeHeaderHash(&hdr, uint64(i), "test_miner")
 		if hashErr != nil {
 			panic(fmt.Sprintf("computeHeaderHash failed at block %d: %v", i, hashErr))
 		}
@@ -317,8 +319,10 @@ func buildPeerChain(localBlockCount, peerBlockCount int) (*fastSyncMockBC, *fast
 			DifficultyBits: uint32(1 << 20),
 			Difficulty:     1 << 20,
 			Nonce:          uint64(i),
+			Height:         uint64(i),
+			MinerAddress:   "test_miner",
 		}
-		hash, hashErr := computeHeaderHash(&hdr)
+		hash, hashErr := computeHeaderHash(&hdr, uint64(i), "test_miner")
 		if hashErr != nil {
 			panic(fmt.Sprintf("computeHeaderHash failed at block %d: %v", i, hashErr))
 		}
@@ -425,8 +429,10 @@ func TestVerifyHeaderChain_ValidChain(t *testing.T) {
 			DifficultyBits: uint32(1 << 20),
 			Difficulty:     1 << 20,
 			Nonce:          uint64(10 + i),
+			Height:         uint64(10 + i),
+			MinerAddress:   "test_miner",
 		}
-		hash, hashErr := computeHeaderHash(&hdr)
+		hash, hashErr := computeHeaderHash(&hdr, uint64(10+i), "test_miner")
 		if hashErr != nil {
 			t.Fatalf("computeHeaderHash failed at index %d: %v", i, hashErr)
 		}

@@ -210,7 +210,18 @@ func (w *chainWrapper) HeadersFrom(from uint64, count uint64) []*core.BlockHeade
 	blocks := w.chain.GetBlocksFrom(from, count)
 	headers := make([]*core.BlockHeader, len(blocks))
 	for i, block := range blocks {
-		headers[i] = &block.Header
+		header := &core.BlockHeader{
+			Version:        block.Header.Version,
+			PrevHash:       block.Header.PrevHash,
+			TimestampUnix:  block.Header.TimestampUnix,
+			DifficultyBits: block.Header.DifficultyBits,
+			Difficulty:     block.Header.Difficulty,
+			Nonce:          block.Header.Nonce,
+			MerkleRoot:     block.Header.MerkleRoot,
+			Height:         from + uint64(i),
+			MinerAddress:   block.MinerAddress,
+		}
+		headers[i] = header
 	}
 	return headers
 }
@@ -308,7 +319,18 @@ func (w *networkChainWrapper) HeadersFrom(from uint64, count uint64) []*core.Blo
 	blocks := w.chain.GetBlocksFrom(from, count)
 	headers := make([]*core.BlockHeader, len(blocks))
 	for i, block := range blocks {
-		headers[i] = &block.Header
+		header := &core.BlockHeader{
+			Version:        block.Header.Version,
+			PrevHash:       block.Header.PrevHash,
+			TimestampUnix:  block.Header.TimestampUnix,
+			DifficultyBits: block.Header.DifficultyBits,
+			Difficulty:     block.Header.Difficulty,
+			Nonce:          block.Header.Nonce,
+			MerkleRoot:     block.Header.MerkleRoot,
+			Height:         from + uint64(i),
+			MinerAddress:   block.MinerAddress,
+		}
+		headers[i] = header
 	}
 	return headers
 }

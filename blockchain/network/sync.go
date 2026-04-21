@@ -1380,7 +1380,8 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 				// Check continuity with previous header
 				if i > 0 {
 					prevHeader := headers[i-1]
-					prevHash, hashErr := computeHeaderHash(prevHeader)
+					prevHeight := currentHeight + 1 + uint64(i-1)
+					prevHash, hashErr := computeHeaderHash(prevHeader, prevHeight, prevHeader.MinerAddress)
 					if hashErr != nil {
 						log.Printf("[Sync] Failed to compute header hash at index %d: %v", i, hashErr)
 

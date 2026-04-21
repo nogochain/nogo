@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"log"
 	"math"
 	"net"
 	"runtime/debug"
@@ -191,8 +190,6 @@ func (m *MConnection) Stop() error {
 	if !m.running.CompareAndSwap(1, 0) {
 		return nil // Already stopped.
 	}
-
-	log.Printf("MConnection: stopping connection (channels=%d)", len(m.channels))
 
 	// Signal all goroutines to exit.
 	close(m.quit)
@@ -668,7 +665,6 @@ func (m *MConnection) _recover() {
 // stopForError gracefully stops the connection and reports the error to the onError callback.
 // Uses atomic compare-and-swap to ensure the error is reported only once.
 func (m *MConnection) stopForError(err error) {
-	log.Printf("MConnection: stopForError called: %v", err)
 	// Attempt to stop the connection.
 	if m.IsRunning() {
 		if stopErr := m.Stop(); stopErr != nil {
@@ -678,7 +674,6 @@ func (m *MConnection) stopForError(err error) {
 	}
 
 	// Report the error callback exactly once.
-	log.Printf("MConnection: calling onError: errored=%d, onError=%v", atomic.LoadUint32(&m.errored), m.onError != nil)
 	if atomic.CompareAndSwapUint32(&m.errored, 0, 1) && m.onError != nil {
 		m.onError(err)
 	}

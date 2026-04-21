@@ -2256,7 +2256,19 @@ func (c *Chain) HeadersFrom(from uint64, count uint64) []*BlockHeader {
 
 	headers := make([]*BlockHeader, 0, end-from)
 	for i := from; i < end; i++ {
-		headers = append(headers, &c.blocks[i].Header)
+		block := c.blocks[i]
+		header := &BlockHeader{
+			Version:        block.Header.Version,
+			PrevHash:       block.Header.PrevHash,
+			TimestampUnix:  block.Header.TimestampUnix,
+			DifficultyBits: block.Header.DifficultyBits,
+			Difficulty:     block.Header.Difficulty,
+			Nonce:          block.Header.Nonce,
+			MerkleRoot:     block.Header.MerkleRoot,
+			Height:         uint64(i),
+			MinerAddress:   block.MinerAddress,
+		}
+		headers = append(headers, header)
 	}
 
 	return headers
