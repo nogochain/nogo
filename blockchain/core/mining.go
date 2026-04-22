@@ -58,36 +58,31 @@ func (c *Chain) GetHeaderByHash(hash nogopow.Hash) *nogopow.Header {
 // Fork-aware: checks for heavier chain before mining
 // Context-aware: responds to mining interruption for fast chain switching
 func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Block, error) {
-	c.mu.RLock()
-	latest := c.GetTip()
-	if latest == nil {
-		c.mu.RUnlock()
+	c.mu.Lock()
+	
+	if len(c.blocks) == 0 {
+		c.mu.Unlock()
 		return nil, fmt.Errorf("no genesis block")
 	}
+	latest := c.blocks[len(c.blocks)-1]
 
-	// Fork prevention: check if we should reorganize before mining
-	// This ensures we're mining on the heaviest chain
 	if c.shouldReorgToHeaviestLocked() {
-		c.mu.RUnlock()
 		log.Printf("[Mining] Heavier fork detected, triggering reorganization before mining")
 		if err := c.reorganizeToHeaviestLocked(); err != nil {
 			log.Printf("[Mining] Reorganization failed: %v", err)
 		} else {
 			log.Printf("[Mining] Reorganization completed, resuming mining")
 		}
-		// Re-lock and get latest block after reorg
-		c.mu.RLock()
-		latest = c.GetTip()
-		if latest == nil {
-			c.mu.RUnlock()
+		if len(c.blocks) == 0 {
+			c.mu.Unlock()
 			return nil, fmt.Errorf("no genesis block after reorg")
 		}
+		latest = c.blocks[len(c.blocks)-1]
 	}
 
 	prevHash := append([]byte(nil), latest.Hash...)
 	height := latest.GetHeight() + 1
 
-	// Use NTP synchronized time for block timestamp
 	now := getNetworkTimeUnix()
 	ts := now
 	if ts <= latest.Header.TimestampUnix {
@@ -97,24 +92,23 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 	var fees uint64
 	for _, tx := range transfers {
 		if tx.Type != TxTransfer {
-			c.mu.RUnlock()
+			c.mu.Unlock()
 			return nil, fmt.Errorf("only transfer txs can be mined")
 		}
 		if tx.ChainID == 0 {
 			tx.ChainID = c.chainID
 		}
 		if tx.ChainID != c.chainID {
-			c.mu.RUnlock()
+			c.mu.Unlock()
 			return nil, fmt.Errorf("wrong chainId: %d", tx.ChainID)
 		}
 		if err := tx.VerifyForConsensus(c.consensus, height); err != nil {
-			c.mu.RUnlock()
+			c.mu.Unlock()
 			return nil, err
 		}
-		// Validate transaction fee using FeeChecker
 		feeChecker := NewFeeChecker(MinFee, MinFeePerByte)
 		if err := feeChecker.ValidateFee(&tx); err != nil {
-			c.mu.RUnlock()
+			c.mu.Unlock()
 			return nil, err
 		}
 		fees += tx.Fee
@@ -123,41 +117,35 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 	policy := c.monetaryPolicy
 	baseReward := policy.BlockReward(height)
 
-	// Debug: verify policy is loaded correctly
 	if policy.MinerRewardShare == 0 {
-		fmt.Printf("[ERROR] MinerRewardShare is 0! policy=%+v\n", policy)
+		c.mu.Unlock()
 		return nil, errors.New("monetary policy not loaded correctly")
 	}
 	if policy.InitialBlockReward == 0 {
-		fmt.Printf("[ERROR] InitialBlockReward is 0! policy=%+v\n", policy)
+		c.mu.Unlock()
 		return nil, errors.New("monetary policy not loaded correctly")
 	}
 
-	// Add 1% of block reward to integrity pool (if integrity system is enabled)
 	if c.integrityDistributor != nil {
 		c.integrityDistributor.AddToPool(baseReward)
 	}
 
-	// Calculate reward distribution (convert uint8 to uint64 for multiplication)
 	minerReward := baseReward * uint64(policy.MinerRewardShare) / 100
 	communityFund := baseReward * uint64(policy.CommunityFundShare) / 100
 	genesisReward := baseReward * uint64(policy.GenesisShare) / 100
 	integrityPool := baseReward * uint64(policy.IntegrityPoolShare) / 100
 
-	// Coinbase data includes all reward distribution information
 	coinbaseData := fmt.Sprintf("block reward (height=%d, miner=%d, community=%d, genesis=%d, integrity=%d)",
 		height, minerReward, communityFund, genesisReward, integrityPool)
 	if height == 1 {
 		coinbaseData = "Memphis"
 	}
 
-	// Create coinbase transaction - miner receives miner's share (96%) only
-	// Transaction fees are 100% burned (not distributed to anyone)
 	coinbase := Transaction{
 		Type:      TxCoinbase,
 		ChainID:   c.chainID,
 		ToAddress: c.minerAddress,
-		Amount:    minerReward, // Miner receives 96% of block reward only (fees burned)
+		Amount:    minerReward,
 		Data:      coinbaseData,
 	}
 
@@ -165,27 +153,22 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 	txs = append(txs, coinbase)
 	txs = append(txs, transfers...)
 
-	// Calculate next difficulty using NogoPow engine
-	// Use Chain's consensus params for correct difficulty calculation
 	var engine *nogopow.NogopowEngine
 	powMode := os.Getenv("POW_MODE")
 	if powMode == "fake" {
 		engine = nogopow.NewFaker()
 	} else {
-		// Create config with Chain's actual consensus params
 		powConfig := nogopow.DefaultConfig()
 		powConfig.ConsensusParams = &c.consensus
 		engine = nogopow.New(powConfig)
 	}
 
-	// Get parent header for difficulty calculation
 	parentHeader := &nogopow.Header{
 		Number:     big.NewInt(int64(latest.GetHeight())),
 		Time:       uint64(latest.Header.TimestampUnix),
 		Difficulty: big.NewInt(int64(latest.Header.DifficultyBits)),
 	}
 
-	// Calculate next difficulty
 	nextDifficulty := engine.CalcDifficulty(c, uint64(ts), parentHeader)
 
 	newBlock := &Block{
@@ -200,16 +183,14 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 		},
 	}
 
-	// Create NogoPow block
 	parentHash := nogopow.Hash{}
 	copy(parentHash[:], newBlock.Header.PrevHash)
 
-	// Compute merkle root from transactions
 	leaves := make([][]byte, 0, len(newBlock.Transactions))
 	for _, tx := range newBlock.Transactions {
 		th, err := txSigningHashForConsensus(tx, c.consensus, height)
 		if err != nil {
-			c.mu.RUnlock()
+			c.mu.Unlock()
 			return nil, fmt.Errorf("compute tx hash: %w", err)
 		}
 		leaves = append(leaves, th)
@@ -217,7 +198,7 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 
 	merkleRoot, err := MerkleRoot(leaves)
 	if err != nil {
-		c.mu.RUnlock()
+		c.mu.Unlock()
 		return nil, fmt.Errorf("compute merkle root: %w", err)
 	}
 
@@ -225,7 +206,7 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 
 	powCoinbase, err := StringToAddress(c.minerAddress)
 	if err != nil {
-		c.mu.RUnlock()
+		c.mu.Unlock()
 		return nil, fmt.Errorf("invalid miner address: %w", err)
 	}
 
@@ -243,8 +224,9 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 
 	newBlock.Header.DifficultyBits = uint32(header.Difficulty.Uint64())
 
-	// Create block for mining
 	block := nogopow.NewBlock(header, nil, nil, nil)
+
+	c.mu.Unlock()
 
 	stop := make(chan struct{})
 	resultCh := make(chan *nogopow.Block, 1)
@@ -260,13 +242,11 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 	select {
 	case <-ctx.Done():
 		close(stop)
-		c.mu.RUnlock()
 		log.Printf("[Mining] Mining interrupted by context cancellation")
 		return nil, ctx.Err()
 	case result = <-resultCh:
 		if result == nil {
 			close(stop)
-			c.mu.RUnlock()
 			return nil, fmt.Errorf("mining failed: nil result")
 		}
 	}
@@ -275,8 +255,6 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 	newBlock.Header.Nonce = binary.LittleEndian.Uint64(sealedHeader.Nonce[:8])
 	newBlock.Hash = sealedHeader.Hash().Bytes()
 
-	// Release read lock and acquire write lock for state modification
-	c.mu.RUnlock()
 	c.mu.Lock()
 
 	// Verify parent block exists in blocks slice

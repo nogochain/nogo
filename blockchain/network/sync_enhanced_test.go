@@ -155,6 +155,7 @@ func (m *fastSyncMockBC) CalcNextDifficulty(latest *core.Block, currentTime int6
 }
 func (m *fastSyncMockBC) AuditChain() error       { return nil }
 func (m *fastSyncMockBC) IsReorgInProgress() bool { return false }
+func (m *fastSyncMockBC) SetOnMissingBlock(cb func(hash []byte, height uint64)) {}
 func (m *fastSyncMockBC) TxByID(txid string) (*core.Transaction, *core.TxLocation, bool) {
 	return nil, nil, false
 }

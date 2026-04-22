@@ -1605,10 +1605,16 @@ func (c *Chain) calculateChainWorkFromAncestorLocked(ancestor *Block, tip *Block
 func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	log.Printf("Chain reorganization: ancestor height=%d, new tip height=%d", ancestor.GetHeight(), newTip.GetHeight())
 
-	// Build new chain from ancestor
+	ancestorHeight := ancestor.GetHeight()
+	currentChainLen := len(c.blocks)
+
+	if int(ancestorHeight) >= currentChainLen {
+		return fmt.Errorf("ancestor height %d exceeds current chain length %d", ancestorHeight, currentChainLen)
+	}
+
 	newChain := []*Block{ancestor}
 	current := newTip
-	for current.GetHeight() > ancestor.GetHeight() {
+	for current.GetHeight() > ancestorHeight {
 		newChain = append([]*Block{current}, newChain...)
 		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
 		parent, exists := c.blocksByHash[parentHashHex]
@@ -1618,42 +1624,37 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 		current = parent
 	}
 
-	// Remove forked blocks from canonical chain
-	oldCanonical := c.blocks[ancestor.GetHeight()+1:]
-	for _, block := range oldCanonical {
-		hashHex := hex.EncodeToString(block.Hash)
-		delete(c.blocksByHash, hashHex)
+	removeStart := int(ancestorHeight) + 1
+	if removeStart < currentChainLen {
+		oldCanonical := c.blocks[removeStart:]
+		for _, block := range oldCanonical {
+			hashHex := hex.EncodeToString(block.Hash)
+			delete(c.blocksByHash, hashHex)
+		}
 	}
 
-	// Add new blocks to canonical chain
-	c.blocks = c.blocks[:ancestor.GetHeight()+1]
+	c.blocks = c.blocks[:removeStart]
 	for _, block := range newChain[1:] {
 		c.blocks = append(c.blocks, block)
 		c.blocksByHash[hex.EncodeToString(block.Hash)] = block
 	}
 
-	// Recompute state
 	if err := c.recomputeStateLocked(); err != nil {
 		return fmt.Errorf("recompute state after reorg: %w", err)
 	}
 
-	// Update indexes
 	c.reindexAllTxsLocked()
 	c.reindexAllAddressTxsLocked()
 
-	// Update tip
 	c.bestTipHash = hex.EncodeToString(newTip.Hash)
 
-	// Recalculate total work and update TotalWork on each block
 	c.canonicalWork = big.NewInt(0)
 	for _, block := range c.blocks {
 		work := WorkForDifficultyBits(block.Header.DifficultyBits)
 		c.canonicalWork.Add(c.canonicalWork, work)
-		// Update TotalWork on each block for fork resolution
 		block.TotalWork = c.canonicalWork.String()
 	}
 
-	// Update storage
 	if err := c.store.RewriteCanonical(c.blocks); err != nil {
 		return fmt.Errorf("rewrite canonical: %w", err)
 	}
@@ -3173,8 +3174,8 @@ func (c *Chain) getBlockTime() time.Duration {
 
 // shouldReorgToLocked checks if we should reorganize to the given block
 // Production-grade: implements heaviest chain rule with proper work comparison
-// Handles both same-height forks and lower-height forks with more work
-// CRITICAL FIX: Also handles equal work using deterministic tie-breaker
+// CRITICAL FIX: Height alone is NOT sufficient - must compare cumulative work
+// This prevents reorg to a longer chain with less total work
 // Caller must hold c.mu lock
 func (c *Chain) shouldReorgToLocked(newBlock *Block) bool {
 	if len(c.blocks) == 0 {
@@ -3182,13 +3183,20 @@ func (c *Chain) shouldReorgToLocked(newBlock *Block) bool {
 	}
 
 	currentTip := c.blocks[len(c.blocks)-1]
-
-	if currentTip.GetHeight() < newBlock.GetHeight() {
-		return true
-	}
-
 	currentWork := c.canonicalWork
 	newWork := c.calculateCumulativeWorkLocked(newBlock)
+
+	if currentTip.GetHeight() < newBlock.GetHeight() {
+		workCmp := newWork.Cmp(currentWork)
+		if workCmp >= 0 {
+			log.Printf("[Chain] Reorg decision: higher height %d > %d, newWork=%s >= currentWork=%s, will reorg",
+				newBlock.GetHeight(), currentTip.GetHeight(), newWork.String(), currentWork.String())
+			return true
+		}
+		log.Printf("[Chain] Reorg decision: higher height but LESS work, newWork=%s < currentWork=%s, staying",
+			newWork.String(), currentWork.String())
+		return false
+	}
 
 	if currentTip.GetHeight() == newBlock.GetHeight() {
 		workCmp := newWork.Cmp(currentWork)
@@ -3197,8 +3205,6 @@ func (c *Chain) shouldReorgToLocked(newBlock *Block) bool {
 				newWork.String(), currentWork.String())
 			return true
 		} else if workCmp == 0 {
-			// CRITICAL FIX: Equal work - use deterministic tie-breaker
-			// This ensures all nodes make the same decision
 			if c.shouldSwitchBasedOnTieBreakerLocked(newBlock, currentTip) {
 				log.Printf("[Chain] Reorg decision: same height, equal work, tie-breaker chose new block")
 				return true
@@ -3217,7 +3223,6 @@ func (c *Chain) shouldReorgToLocked(newBlock *Block) bool {
 			newWork.String(), currentWork.String())
 		return true
 	} else if workCmp == 0 {
-		// CRITICAL FIX: Equal work at different heights - use tie-breaker
 		if c.shouldSwitchBasedOnTieBreakerLocked(newBlock, currentTip) {
 			log.Printf("[Chain] Reorg decision: lower height, equal work, tie-breaker chose new block")
 			return true

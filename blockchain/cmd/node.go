@@ -256,6 +256,8 @@ func (n *Node) initializeComponents() error {
 			n.config.ChainID,
 		)
 		n.miner = minerImpl
+		// CRITICAL: Set syncLoop to prevent mining during sync
+		n.miner.SetSyncLoop(n.syncLoop)
 	}
 
 	n.chain.SetEventSink(api.NewWSHub(100))
@@ -268,6 +270,11 @@ func (n *Node) initializeComponents() error {
 		}
 		if n.mempool != nil {
 			n.mempool.UpdateHeight(block.GetHeight() + 1)
+		}
+		// CRITICAL: Notify miner about new block for fork handling
+		// This ensures miner pauses during verification and can respond to chain changes
+		if n.miner != nil {
+			n.miner.OnBlockAdded()
 		}
 	})
 
@@ -358,13 +365,54 @@ func (n *Node) startComponents() error {
 
 	if n.autoMine && n.miner != nil {
 		go func() {
+			log.Info("Mining startup goroutine started")
 			interval := time.Duration(n.config.MineIntervalMs) * time.Millisecond
 			if interval <= 0 {
 				interval = 17 * time.Second
 			}
-			log.Info("Starting mining (sync loop handles fork resolution)")
+			log.Info("Mining interval: %v", interval)
+
+			// CRITICAL: Wait for initial sync before starting mining
+			// This prevents mining on stale chain when starting from height 0
+			if n.syncLoop != nil {
+				log.Info("Waiting for initial sync before starting mining...")
+				syncWaitTimeout := 30 * time.Second
+				syncWaitStart := time.Now()
+				syncCheckInterval := 1 * time.Second
+				syncCheckTicker := time.NewTicker(syncCheckInterval)
+				defer syncCheckTicker.Stop()
+
+			syncWaitLoop:
+				for {
+					select {
+					case <-n.ctx.Done():
+						log.Info("Context cancelled during sync wait, aborting mining startup")
+						return
+					case <-syncCheckTicker.C:
+						// Check if synced
+						isSynced := n.syncLoop.IsSynced()
+						log.Info("Sync check: isSynced=%v, elapsed=%v", isSynced, time.Since(syncWaitStart))
+						if isSynced {
+							log.Info("Initial sync completed, starting mining (localHeight=%d)",
+								n.chain.GetHeight())
+							break syncWaitLoop
+						}
+
+						// Check for timeout - after timeout, start mining anyway
+						if time.Since(syncWaitStart) > syncWaitTimeout {
+							log.Info("Sync wait timeout reached, starting mining anyway (localHeight=%d, peers=%d)",
+								n.chain.GetHeight(), len(n.p2pSwitch.GetActivePeers()))
+							break syncWaitLoop
+						}
+					}
+				}
+			}
+
+			log.Info("Starting mining loop with interval %v", interval)
 			go n.miner.Run(n.ctx, interval)
 		}()
+	} else {
+		log.Info("Mining not started: autoMine=%v, miner=%v", n.autoMine, n.miner != nil)
 	}
 
 	ln, err := n.createListener(n.config.HTTPAddr)

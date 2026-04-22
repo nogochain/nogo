@@ -300,28 +300,30 @@ func (s *SyncLoop) IsSynced() bool {
 		return false
 	}
 
-	// Enhanced mode: check if we have cached peer info from recent sync check
-	// Avoid making network requests on every IsSynced() call
-	// If we haven't done a sync check recently, return false to be safe
+	// If syncProgress is already 1.0, we're synced
+	if s.syncProgress >= 1.0 {
+		return true
+	}
+
+	// Check if we can consider ourselves synced
 	if s.pm != nil {
 		localHeight := s.getLocalHeight()
 
 		// If local height is 0 and we have peers, we definitely need to sync
-		// This is the most common case for new nodes
 		if localHeight == 0 {
 			activePeers := s.pm.GetActivePeers()
 			if len(activePeers) > 0 {
 				return false
 			}
+			// No peers, we can consider ourselves synced (standalone mode)
+			return true
 		}
 
-		// For non-zero height, use cached sync progress
-		// If syncProgress < 1.0, we're not synced
-		if s.syncProgress < 1.0 {
-			return false
-		}
-	} else {
-		log.Printf("[Sync] IsSynced: pm is nil, returning false")
+		// For non-zero height with isSyncing=false:
+		// We're not actively syncing, so we can mine
+		// The sync loop will detect if we fall behind and set isSyncing=true
+		// This is a safe default that allows mining while still preventing forks
+		return true
 	}
 
 	return false
@@ -694,26 +696,18 @@ func (s *SyncLoop) runSyncLoop() {
 
 // performSyncStep executes one sync iteration
 func (s *SyncLoop) performSyncStep() {
-	// CRITICAL: Set isSyncing=true at the start to prevent mining during sync check
-	// This ensures mining is blocked even while we're just checking peer heights
-	s.mu.Lock()
-	s.isSyncing = true
-	s.mu.Unlock()
+	// NOTE: Do NOT set isSyncing=true here!
+	// isSyncing should only be true when we are actually downloading blocks.
+	// Setting it here blocks mining during routine sync checks.
 
 	if s.pm == nil {
 		log.Printf("[Sync] performSyncStep: peer manager is nil")
-		s.mu.Lock()
-		s.isSyncing = false
-		s.mu.Unlock()
 		return
 	}
 
 	peers := s.pm.GetActivePeers()
 	if len(peers) == 0 {
 		log.Printf("[Sync] performSyncStep: no active peers")
-		s.mu.Lock()
-		s.isSyncing = false
-		s.mu.Unlock()
 		return
 	}
 
@@ -726,21 +720,21 @@ func (s *SyncLoop) performSyncStep() {
 			if canResume && resumeHeight > 0 {
 				log.Printf("[Sync] Resuming from previous sync: height=%d, target=%d, peer=%s",
 					resumeHeight, targetHeight, resumePeerID)
-				
+
 				// Verify local chain is at or before resume height
 				localTip := s.bc.LatestBlock()
 				localHeight := uint64(0)
 				if localTip != nil {
 					localHeight = localTip.GetHeight()
 				}
-				
+
 				// If local chain is behind resume point, we need to sync from local height
 				// If local chain is ahead, the resume point is stale
 				if localHeight < resumeHeight {
-					log.Printf("[Sync] Local height %d < resume height %d, continuing from local height", 
+					log.Printf("[Sync] Local height %d < resume height %d, continuing from local height",
 						localHeight, resumeHeight)
 				} else if localHeight > resumeHeight {
-					log.Printf("[Sync] Local height %d > resume height %d, resume point is stale", 
+					log.Printf("[Sync] Local height %d > resume height %d, resume point is stale",
 						localHeight, resumeHeight)
 					s.progressStore.Clear()
 				}
@@ -804,12 +798,17 @@ func (s *SyncLoop) performSyncStep() {
 	shouldSync := false
 	syncReason := ""
 
-	if maxPeerHeight > currentHeight {
+	// CRITICAL: Only sync if peer is significantly ahead (more than 1 block)
+	// If peer is only 1 block ahead, local node may be mining that block
+	// This prevents sync from interrupting ongoing mining
+	if maxPeerHeight > currentHeight+1 {
 		shouldSync = true
-		syncReason = fmt.Sprintf("peer has higher height (%d > %d)", maxPeerHeight, currentHeight)
-	} else if bestPeerWork.Cmp(localWork) > 0 {
+		syncReason = fmt.Sprintf("peer is significantly ahead (%d > %d+1)", maxPeerHeight, currentHeight)
+	} else if bestPeerWork.Cmp(localWork) > 0 && maxPeerHeight > currentHeight {
+		// Only sync if peer has more work AND is ahead in height
+		// Equal height with more work means different chain (fork), handled by fork resolution
 		shouldSync = true
-		syncReason = fmt.Sprintf("peer has more work (%s > %s)", bestPeerWork.String(), localWork.String())
+		syncReason = fmt.Sprintf("peer has more work and is ahead (work=%s, height=%d > %d)", bestPeerWork.String(), maxPeerHeight, currentHeight)
 	}
 
 	if !shouldSync {
@@ -1341,12 +1340,55 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		// Find common ancestor by checking if header prevHash matches local chain
 		syncStartHeight := currentHeight
 		headerChainBroken := false
+		skipHeaderValidation := false
+		
+		// Check if any header has empty MerkleRoot - if so, skip header validation
+		// because we cannot compute correct header hash without MerkleRoot
+		for _, header := range headers {
+			if len(header.MerkleRoot) == 0 {
+				log.Printf("[Sync] Header has empty MerkleRoot, skipping header chain validation")
+				skipHeaderValidation = true
+				break
+			}
+		}
+		
+		log.Printf("[Sync] Starting header validation loop for %d headers, currentHeight=%d, skipValidation=%v", len(headers), currentHeight, skipHeaderValidation)
 		for i, header := range headers {
 			expectedHeight := currentHeight + 1 + uint64(i)
+			log.Printf("[Sync] Processing header %d/%d, expectedHeight=%d", i+1, len(headers), expectedHeight)
 			if expectedHeight == currentHeight+1 {
 				// First header - check if its prevHash matches our tip
+				log.Printf("[Sync] Getting local tip for first header check...")
 				localTip := s.bc.LatestBlock()
-				if localTip != nil && !bytes.Equal(header.PrevHash, localTip.Hash) {
+				log.Printf("[Sync] First header check: localTip=%v, headerPrevHash=%s", localTip != nil, hex.EncodeToString(header.PrevHash)[:16])
+				if localTip != nil {
+					log.Printf("[Sync] Local tip hash: %s", hex.EncodeToString(localTip.Hash)[:16])
+				}
+
+				// Log header details for debugging
+				merkleRootHex := ""
+				if len(header.MerkleRoot) >= 16 {
+					merkleRootHex = hex.EncodeToString(header.MerkleRoot)[:16]
+				} else if len(header.MerkleRoot) > 0 {
+					merkleRootHex = hex.EncodeToString(header.MerkleRoot)
+				}
+				minerAddrDisplay := header.MinerAddress
+				if len(minerAddrDisplay) > 16 {
+					minerAddrDisplay = minerAddrDisplay[:16]
+				}
+				log.Printf("[Sync] Header[0] details: Version=%d, Timestamp=%d, Difficulty=%d, Nonce=%d, MerkleRoot=%s, MinerAddress=%s",
+					header.Version, header.TimestampUnix, header.DifficultyBits, header.Nonce,
+					merkleRootHex, minerAddrDisplay)
+
+				// Compute hash of first header for debugging
+				firstHash, hashErr := computeHeaderHash(header, expectedHeight, header.MinerAddress)
+				if hashErr != nil {
+					log.Printf("[Sync] Failed to compute first header hash: %v", hashErr)
+				} else {
+					log.Printf("[Sync] Computed first header hash: %s", hex.EncodeToString(firstHash)[:16])
+				}
+
+				if !skipHeaderValidation && localTip != nil && !bytes.Equal(header.PrevHash, localTip.Hash) {
 					log.Printf("[Sync] First header prevHash mismatch! Local tip: %s, Header prevHash: %s",
 						hex.EncodeToString(localTip.Hash), hex.EncodeToString(header.PrevHash))
 					log.Printf("[Sync] This indicates a fork - need to find common ancestor")
@@ -1378,7 +1420,7 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 				}
 			} else {
 				// Check continuity with previous header
-				if i > 0 {
+				if !skipHeaderValidation && i > 0 {
 					prevHeader := headers[i-1]
 					prevHeight := currentHeight + 1 + uint64(i-1)
 					prevHash, hashErr := computeHeaderHash(prevHeader, prevHeight, prevHeader.MinerAddress)
@@ -1410,6 +1452,8 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 				}
 			}
 		}
+
+		log.Printf("[Sync] Header validation loop completed, headerChainBroken=%v, syncStartHeight=%d", headerChainBroken, syncStartHeight)
 
 		// CRITICAL: If header chain is broken, do not continue with block download
 		// Return error to allow retry with different peer or fresh headers

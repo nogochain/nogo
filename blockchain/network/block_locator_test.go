@@ -169,6 +169,7 @@ func (m *locatorMockBC) CalcNextDifficulty(latest *core.Block, currentTime int64
 }
 func (m *locatorMockBC) AuditChain() error       { return nil }
 func (m *locatorMockBC) IsReorgInProgress() bool { return false }
+func (m *locatorMockBC) SetOnMissingBlock(cb func(hash []byte, height uint64)) {}
 func (m *locatorMockBC) TxByID(txid string) (*core.Transaction, *core.TxLocation, bool) {
 	return nil, nil, false
 }

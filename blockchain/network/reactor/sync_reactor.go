@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -200,20 +201,25 @@ func (sr *SyncReactor) RemovePeer(_ string, _ interface{}) {
 // Thread-safety: handler is accessed under read lock.
 func (sr *SyncReactor) Receive(chID byte, peerID string, msgBytes []byte) {
 	if peerID == "" {
+		log.Printf("[SyncReactor] Receive: empty peerID, chID=%d, msgLen=%d", chID, len(msgBytes))
 		return
 	}
 	if len(msgBytes) < syncMinMsgSize {
+		log.Printf("[SyncReactor] Receive: message too short from peer %s, len=%d, minSize=%d", peerID, len(msgBytes), syncMinMsgSize)
 		return
 	}
 
 	msgType := msgBytes[0]
 	payload := msgBytes[syncMinMsgSize:]
 
+	log.Printf("[SyncReactor] Receive: peer=%s, chID=%d, msgType=%d, payloadLen=%d", peerID, chID, msgType, len(payload))
+
 	sr.mu.RLock()
 	handler := sr.handler
 	sr.mu.RUnlock()
 
 	if handler == nil {
+		log.Printf("[SyncReactor] Receive: handler is nil for peer %s", peerID)
 		return
 	}
 
@@ -224,6 +230,7 @@ func (sr *SyncReactor) Receive(chID byte, peerID string, msgBytes []byte) {
 	if msgType == SyncMsgHeaders || msgType == SyncMsgBlocks || msgType == SyncMsgBlockLocator || msgType == SyncMsgNotFound {
 		// These are response messages, skip processing
 		// They will be handled by the sendAndWait mechanism in switch.go
+		log.Printf("[SyncReactor] Receive: skipping response message type %d from peer %s", msgType, peerID)
 		return
 	}
 
@@ -258,15 +265,20 @@ func (sr *SyncReactor) dispatch(msgType byte, peerID string, payload []byte, han
 // handleGetHeaders parses and dispatches a GetHeaders request.
 func (sr *SyncReactor) handleGetHeaders(peerID string, payload []byte, handler SyncHandler) {
 	if len(payload) == 0 {
+		log.Printf("[SyncReactor] handleGetHeaders: empty payload from peer %s", peerID)
 		return
 	}
 
 	var req getHeadersPayload
 	if err := json.Unmarshal(payload, &req); err != nil {
+		log.Printf("[SyncReactor] handleGetHeaders: failed to unmarshal payload from peer %s: %v", peerID, err)
 		return
 	}
 
+	log.Printf("[SyncReactor] handleGetHeaders: peer=%s, from=%d, count=%d", peerID, req.From, req.Count)
+
 	if err := handler.OnGetHeaders(peerID, req.From, req.Count); err != nil {
+		log.Printf("[SyncReactor] handleGetHeaders: OnGetHeaders failed for peer %s: %v", peerID, err)
 		return
 	}
 }

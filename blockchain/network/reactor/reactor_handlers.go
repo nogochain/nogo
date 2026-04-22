@@ -103,10 +103,13 @@ func NewSyncReactorHandler(handlers *ReactorHandlers) *SyncReactorHandler {
 // the given height. Headers are serialized as JSON bytes and sent on the
 // sync channel.
 func (h *SyncReactorHandler) OnGetHeaders(peerID string, from uint64, count uint64) error {
+	log.Printf("[SyncHandler] OnGetHeaders: peerID=%s, from=%d, count=%d", peerID, from, count)
 	if h.handlers == nil || h.handlers.chain == nil {
+		log.Printf("[SyncHandler] OnGetHeaders ERROR: chain not available for peer %s", peerID)
 		return fmt.Errorf("sync handler: chain not available")
 	}
 	if count == 0 {
+		log.Printf("[SyncHandler] OnGetHeaders ERROR: count must be > 0 for peer %s", peerID)
 		return fmt.Errorf("sync handler: OnGetHeaders count must be > 0")
 	}
 
@@ -114,6 +117,7 @@ func (h *SyncReactorHandler) OnGetHeaders(peerID string, from uint64, count uint
 	if headers == nil {
 		headers = []*core.BlockHeader{}
 	}
+	log.Printf("[SyncHandler] OnGetHeaders: found %d headers for peer %s", len(headers), peerID)
 
 	hasMore := uint64(len(headers)) == count
 	if tip := h.handlers.chain.LatestBlock(); tip != nil {
@@ -122,18 +126,22 @@ func (h *SyncReactorHandler) OnGetHeaders(peerID string, from uint64, count uint
 
 	headersJSON, err := json.Marshal(headers)
 	if err != nil {
+		log.Printf("[SyncHandler] OnGetHeaders ERROR: marshal headers failed for peer %s: %v", peerID, err)
 		return fmt.Errorf("sync handler: marshal headers for peer %s: %w", peerID, err)
 	}
 
 	msg, buildErr := BuildHeadersMsg(headersJSON, hasMore)
 	if buildErr != nil {
+		log.Printf("[SyncHandler] OnGetHeaders ERROR: build headers message failed for peer %s: %v", peerID, buildErr)
 		return fmt.Errorf("sync handler: build headers message for peer %s: %w", peerID, buildErr)
 	}
 
 	if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, msg) {
+		log.Printf("[SyncHandler] OnGetHeaders ERROR: failed to send headers to peer %s", peerID)
 		return fmt.Errorf("sync handler: failed to send headers to peer %s", peerID)
 	}
 
+	log.Printf("[SyncHandler] OnGetHeaders: sent %d headers to peer %s, hasMore=%v", len(headers), peerID, hasMore)
 	return nil
 }
 

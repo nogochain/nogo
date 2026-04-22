@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -315,14 +316,9 @@ func (e *FastSyncEngine) verifyHeaderChain(headers []*core.BlockHeader, localTip
 func computeHeaderHash(h *core.BlockHeader, height uint64, minerAddress string) ([]byte, error) {
 	const binaryEncodingVersionV1 byte = 0x01
 
-	miner, err := hex.DecodeString(minerAddress)
+	miner, err := decodeMinerAddress(minerAddress)
 	if err != nil {
-		miner = make([]byte, 32)
-	}
-	if len(miner) != 32 {
-		padded := make([]byte, 32)
-		copy(padded, miner)
-		miner = padded
+		return nil, fmt.Errorf("decode miner address: %w", err)
 	}
 
 	var root [32]byte
@@ -366,6 +362,40 @@ func computeHeaderHash(h *core.BlockHeader, height uint64, minerAddress string) 
 
 	sum := sha256.Sum256(buf.Bytes())
 	return sum[:], nil
+}
+
+func decodeMinerAddress(addrHex string) ([32]byte, error) {
+	var out [32]byte
+
+	if len(addrHex) == 0 {
+		return out, nil
+	}
+
+	if len(addrHex) > 4 && addrHex[:4] == core.AddressPrefix {
+		encoded := addrHex[4:]
+		b, err := hex.DecodeString(encoded)
+		if err != nil {
+			return out, fmt.Errorf("decode NOGO address: %w", err)
+		}
+		if len(b) < 33 {
+			return out, errors.New("NOGO address too short")
+		}
+		if len(b) == 37 {
+			copy(out[:], b[1:33])
+		} else {
+			return out, errors.New("invalid NOGO address length")
+		}
+	} else {
+		b, err := hex.DecodeString(addrHex)
+		if err != nil {
+			return out, fmt.Errorf("decode hex: %w", err)
+		}
+		if len(b) != 32 {
+			return out, fmt.Errorf("expected 32 bytes, got %d", len(b))
+		}
+		copy(out[:], b)
+	}
+	return out, nil
 }
 
 func (e *FastSyncEngine) processBatch(ctx context.Context, pm PeerAPI, headers []*core.BlockHeader, startHeight uint64, peers []string) error {

@@ -263,19 +263,23 @@ func blockHeaderPreimageBinaryV1(b *Block, nonce uint64, p ConsensusParams) ([]b
 	}
 
 	var root [32]byte
-	switch b.Header.Version {
-	case 2:
-		r, err := b.MerkleRootV2ForConsensus(p)
-		if err != nil {
-			return nil, fmt.Errorf("compute Merkle root: %w", err)
+	if len(b.Header.MerkleRoot) == 32 {
+		copy(root[:], b.Header.MerkleRoot)
+	} else {
+		switch b.Header.Version {
+		case 2:
+			r, err := b.MerkleRootV2ForConsensus(p)
+			if err != nil {
+				return nil, fmt.Errorf("compute Merkle root: %w", err)
+			}
+			copy(root[:], r)
+		default:
+			r, err := b.MerkleRootV2ForConsensus(p)
+			if err != nil {
+				return nil, fmt.Errorf("compute Merkle root: %w", err)
+			}
+			copy(root[:], r)
 		}
-		copy(root[:], r)
-	default:
-		r, err := b.TxRootLegacyForConsensus(p)
-		if err != nil {
-			return nil, fmt.Errorf("compute Tx root: %w", err)
-		}
-		copy(root[:], r)
 	}
 
 	var prev [32]byte

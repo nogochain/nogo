@@ -1182,6 +1182,7 @@ func (sw *Switch) receiveMessage(chID byte, peerID string, msgBytes []byte) {
 	sw.mu.RUnlock()
 
 	if !exists {
+		log.Printf("[Switch] receiveMessage: no reactor for channel %d from peer %s", chID, peerID)
 		return
 	}
 
@@ -1203,13 +1204,17 @@ func (sw *Switch) tryHandlePendingResponse(peerID string, msg []byte) bool {
 	sw.syncPendingReqMtx.Lock()
 	defer sw.syncPendingReqMtx.Unlock()
 
+	log.Printf("[Switch] tryHandlePendingResponse: peerID=%s, msgType=%d, pendingReqs=%d", peerID, msgType, len(sw.syncPendingReqs))
+
 	for reqID, req := range sw.syncPendingReqs {
+		log.Printf("[Switch] checking reqID=%s, req.msgType=%d, deadline=%v", reqID, req.msgType, req.deadline)
 		if req.msgType == msgType && time.Now().Before(req.deadline) {
 			lastSep := strings.LastIndex(reqID, "|")
 			if lastSep > 0 {
 				secondLastSep := strings.LastIndex(reqID[:lastSep], "|")
 				if secondLastSep > 0 {
 					reqPeerID := reqID[:secondLastSep]
+					log.Printf("[Switch] comparing peerIDs: reqPeerID=%s, responsePeerID=%s", reqPeerID, peerID)
 					if reqPeerID == peerID {
 						msgCopy := make([]byte, len(msg))
 						copy(msgCopy, msg)
@@ -2120,6 +2125,8 @@ func (sw *Switch) sendAndWait(ctx context.Context, peerID string, chID byte, exp
 		return nil, fmt.Errorf("switch: request to %s has invalid timeout (deadline in past)", peerID)
 	}
 
+	log.Printf("[Switch] sendAndWait: peer=%s, chID=%d, msgType=%d, timeout=%v", peerID, chID, expectedMsgType, timeUntilTimeout)
+
 	sw.syncPendingReqMtx.Lock()
 	sw.syncPendingReqs[reqID] = &syncPendingRequest{
 		msgType:  expectedMsgType,
@@ -2137,6 +2144,7 @@ func (sw *Switch) sendAndWait(ctx context.Context, peerID string, chID byte, exp
 
 	select {
 	case resp := <-respCh:
+		log.Printf("[Switch] sendAndWait: received response from %s, len=%d", peerID, len(resp))
 		return resp, nil
 	case <-ctx.Done():
 		sw.syncPendingReqMtx.Lock()
