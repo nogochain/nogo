@@ -46,6 +46,14 @@ const (
 	MaxOrphanPoolAge = 60 * time.Minute
 )
 
+// SyncNotifier defines the interface for notifying sync loop about chain events
+// Production-grade: enables coordination between chain and sync loop
+type SyncNotifier interface {
+	// OnChainReorganized is called after chain reorganization completes
+	// Allows sync loop to re-evaluate chain state and trigger sync if needed
+	OnChainReorganized(newTip *Block)
+}
+
 var (
 	// ErrInvalidPoW is returned when POW verification fails
 	ErrInvalidPoW = errors.New("invalid proof of work")
@@ -303,6 +311,10 @@ type Chain struct {
 	// Production-grade: enables automatic removal of confirmed transactions
 	// Thread-safety: MempoolCleaner implementation must be thread-safe
 	mempool MempoolCleaner
+
+	// Sync notifier - called after chain reorganization to trigger sync check
+	// CRITICAL: Enables sync loop to re-evaluate chain state after fork rollback
+	syncNotifier SyncNotifier
 }
 
 // ChainConfig holds chain configuration
@@ -332,6 +344,16 @@ func (c *Chain) SetMempool(mp MempoolCleaner) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.mempool = mp
+}
+
+// SetSyncNotifier sets the sync notifier for chain reorganization callbacks
+// Production-grade: enables sync loop to re-evaluate state after fork rollback
+// Dependency injection: called during node initialization
+// Thread-safety: uses mutex to ensure safe concurrent access
+func (c *Chain) SetSyncNotifier(notifier SyncNotifier) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.syncNotifier = notifier
 }
 
 // SetOnBlockAdded sets the callback function to be called when a block is added
@@ -1529,10 +1551,40 @@ func (c *Chain) IsReorgInProgress() bool {
 
 // findCommonAncestorLocked finds common ancestor between chains
 // Returns ancestor block and fork blocks to remove
+// Production-grade: handles forks at any depth, including immediate fork from tip
+// CRITICAL: Only considers blocks in canonical chain (c.blocks), not orphan blocks in c.blocksByHash
 func (c *Chain) findCommonAncestorLocked(newBlock *Block) (*Block, []*Block, error) {
-	// Build parent map for new block
+	// CRITICAL FIX: Only check if parent is in CANONICAL chain (c.blocks), not just in blocksByHash
+	// This prevents mistaking orphan chain blocks for common ancestors
+	if len(newBlock.Header.PrevHash) > 0 && len(c.blocks) > 0 {
+		parentHashHex := hex.EncodeToString(newBlock.Header.PrevHash)
+		
+		// Check if parent is the current tip (most common case for forks)
+		currentTip := c.blocks[len(c.blocks)-1]
+		if hex.EncodeToString(currentTip.Hash) == parentHashHex {
+			// Parent is canonical tip - this is a fork right after current tip
+			log.Printf("[Chain] Common ancestor found: current tip at height %d (fork point)", currentTip.GetHeight())
+			return currentTip, []*Block{}, nil
+		}
+		
+		// Check if parent is anywhere in canonical chain (for deep forks)
+		parentHeight := newBlock.GetHeight() - 1
+		if parentHeight < uint64(len(c.blocks)) {
+			canonicalParent := c.blocks[parentHeight]
+			if hex.EncodeToString(canonicalParent.Hash) == parentHashHex {
+				// Parent found in canonical chain at expected height
+				log.Printf("[Chain] Common ancestor found: canonical block at height %d", canonicalParent.GetHeight())
+				return canonicalParent, []*Block{}, nil
+			}
+		}
+	}
+
+	// Parent not in canonical chain - build parent map to search for deeper forks
+	// Only include blocks that we can trace back to canonical chain
 	parentMap := make(map[string]*Block)
 	current := newBlock
+	foundCanonicalAncestor := false
+	
 	for {
 		hashHex := hex.EncodeToString(current.Hash)
 		parentMap[hashHex] = current
@@ -1542,30 +1594,59 @@ func (c *Chain) findCommonAncestorLocked(newBlock *Block) (*Block, []*Block, err
 		}
 
 		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
+		
+		// Check if parent is in canonical chain
+		// Use height-based lookup to ensure we only get canonical blocks
+		if current.GetHeight() > 0 {
+			potentialParentHeight := current.GetHeight() - 1
+			if potentialParentHeight < uint64(len(c.blocks)) {
+				canonicalParent := c.blocks[potentialParentHeight]
+				if hex.EncodeToString(canonicalParent.Hash) == parentHashHex {
+					// Found canonical ancestor
+					foundCanonicalAncestor = true
+					log.Printf("[Chain] Common ancestor found: canonical block at height %d via parent walk", 
+						canonicalParent.GetHeight())
+					return canonicalParent, []*Block{}, nil
+				}
+			}
+		}
+		
+		// Parent not in canonical chain - check if it's in blocksByHash (might be another orphan)
 		parent, exists := c.blocksByHash[parentHashHex]
 		if !exists {
-			// Parent not found - stop building parent map
-			// DO NOT request parent here - let sync loop handle batch download
+			// Parent not found anywhere - stop building parent map
+			log.Printf("[Chain] Parent %s not found in chain or index, stopping parent map build", parentHashHex)
 			break
 		}
+		
+		// Parent exists but is not in canonical chain - continue walking up
+		// This block is part of an orphan chain, not a true fork
 		current = parent
 	}
 
-	// Walk canonical chain to find ancestor
-	var forkBlocks []*Block
-	for i := len(c.blocks) - 1; i >= 0; i-- {
-		canonicalBlock := c.blocks[i]
-		canonicalHashHex := hex.EncodeToString(canonicalBlock.Hash)
+	// No canonical ancestor found in parent walk - walk canonical chain backwards
+	// This handles cases where we have partial fork chains stored
+	if !foundCanonicalAncestor {
+		log.Printf("[Chain] Walking canonical chain to search for common ancestor (chain length: %d)", len(c.blocks))
+		var forkBlocks []*Block
+		for i := len(c.blocks) - 1; i >= 0; i-- {
+			canonicalBlock := c.blocks[i]
+			canonicalHashHex := hex.EncodeToString(canonicalBlock.Hash)
 
-		if _, exists := parentMap[canonicalHashHex]; exists {
-			// Found common ancestor
-			return canonicalBlock, forkBlocks, nil
+			if _, exists := parentMap[canonicalHashHex]; exists {
+				// Found common ancestor in parent map
+				log.Printf("[Chain] Common ancestor found: canonical block at height %d via chain walk", 
+					canonicalBlock.GetHeight())
+				return canonicalBlock, forkBlocks, nil
+			}
+
+			forkBlocks = append(forkBlocks, canonicalBlock)
 		}
-
-		forkBlocks = append(forkBlocks, canonicalBlock)
 	}
 
-	return nil, forkBlocks, errors.New("no common ancestor found")
+	log.Printf("[Chain] No common ancestor found after exhaustive search (canonical height %d, new block height %d)",
+		len(c.blocks)-1, newBlock.GetHeight())
+	return nil, []*Block{}, errors.New("no common ancestor found")
 }
 
 // calculateChainWorkLocked calculates total work for a chain segment
@@ -3770,6 +3851,14 @@ func (c *Chain) RollbackToHeight(height uint64) error {
 	}
 
 	log.Printf("[Chain] Rolled back to height %d and rebuilt state", height)
+	
+	// CRITICAL: Notify sync loop to re-evaluate chain state after rollback
+	// This prevents the node from getting stuck on outdated chain after fork resolution
+	if c.syncNotifier != nil {
+		tip := c.blocks[len(c.blocks)-1]
+		go c.syncNotifier.OnChainReorganized(tip)
+	}
+	
 	return nil
 }
 

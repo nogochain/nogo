@@ -22,6 +22,7 @@ type ReactorHandlers struct {
 	chain   Chain
 	mempool Mempool
 	sw      Switch
+	miner   Miner
 }
 
 // Chain defines the subset of blockchain methods required by the reactor
@@ -52,9 +53,15 @@ type Switch interface {
 	BroadcastBlockExcluding(ctx context.Context, block *core.Block, excludePeer string) error
 }
 
+// Miner defines the miner interface for verification coordination
+type Miner interface {
+	StartVerification()
+	EndVerification()
+}
+
 // NewReactorHandlers creates a new ReactorHandlers instance.
 // All parameters must be non-nil; otherwise an error is returned.
-func NewReactorHandlers(chain Chain, mempool Mempool, sw Switch) (*ReactorHandlers, error) {
+func NewReactorHandlers(chain Chain, mempool Mempool, sw Switch, miner Miner) (*ReactorHandlers, error) {
 	if chain == nil {
 		return nil, fmt.Errorf("reactor handlers: chain must not be nil")
 	}
@@ -64,11 +71,19 @@ func NewReactorHandlers(chain Chain, mempool Mempool, sw Switch) (*ReactorHandle
 	if sw == nil {
 		return nil, fmt.Errorf("reactor handlers: switch must not be nil")
 	}
+	// Miner can be nil initially, but should be set before block processing
 	return &ReactorHandlers{
 		chain:   chain,
 		mempool: mempool,
 		sw:      sw,
+		miner:   miner,
 	}, nil
+}
+
+// SetMiner sets the miner instance after it's created
+// This is needed because miner is created after ReactorHandlers in node initialization
+func (h *ReactorHandlers) SetMiner(miner Miner) {
+	h.miner = miner
 }
 
 // =============================================================================
@@ -585,6 +600,13 @@ func (h *BlockReactorHandler) SetSyncLoop(sl SyncLoopInterface) {
 	h.syncLoop = sl
 }
 
+// SetMiner sets the miner instance after it's created
+func (h *BlockReactorHandler) SetMiner(miner Miner) {
+	if h.handlers != nil {
+		h.handlers.SetMiner(miner)
+	}
+}
+
 // NewBlockReactorHandler creates a block handler backed by ReactorHandlers.
 func NewBlockReactorHandler(handlers *ReactorHandlers) *BlockReactorHandler {
 	return &BlockReactorHandler{handlers: handlers}
@@ -699,6 +721,11 @@ func (h *BlockReactorHandler) OnBlock(peerID string, blocks []*core.Block) error
 		return fmt.Errorf("block handler: OnBlock blocks must not be empty")
 	}
 
+	// CRITICAL: Signal verification start to pause mining while processing blocks
+	if h.handlers.miner != nil {
+		h.handlers.miner.StartVerification()
+	}
+
 	addedCount := 0
 	for _, block := range blocks {
 		if block == nil {
@@ -733,6 +760,11 @@ func (h *BlockReactorHandler) OnBlock(peerID string, blocks []*core.Block) error
 
 	log.Printf("[BlockHandler] Processed %d blocks from peer %s, accepted %d (flood broadcast enabled)",
 		len(blocks), peerID, addedCount)
+
+	// CRITICAL: Signal verification end to resume mining after all blocks processed
+	if h.handlers.miner != nil {
+		h.handlers.miner.EndVerification()
+	}
 
 	return nil
 }

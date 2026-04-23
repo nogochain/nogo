@@ -193,7 +193,7 @@ func (n *Node) initializeComponents() error {
 	n.p2pSwitch = network.NewSwitch(switchCfg)
 	n.p2pSwitch.SetNodeInfo(nodeID, fmt.Sprintf("%d", n.config.ChainID), config.NodeVersion)
 
-	handlers, err := reactor.NewReactorHandlers(n.networkChainWrapper, n.mempool, n.p2pSwitch)
+	handlers, err := reactor.NewReactorHandlers(n.networkChainWrapper, n.mempool, n.p2pSwitch, n.miner)
 	if err != nil {
 		return fmt.Errorf("failed to create reactor handlers: %w", err)
 	}
@@ -256,13 +256,23 @@ func (n *Node) initializeComponents() error {
 			n.config.ChainID,
 		)
 		n.miner = minerImpl
-		// CRITICAL: Set syncLoop to prevent mining during sync
-		n.miner.SetSyncLoop(n.syncLoop)
+		
+		// CRITICAL: Set miner to reactor handlers after creation
+		// This enables verification coordination for P2P block processing
+		if n.blockReactorHandler != nil {
+			n.blockReactorHandler.SetMiner(minerImpl)
+		}
 	}
 
 	n.chain.SetEventSink(api.NewWSHub(100))
 
 	n.chain.SetMempool(n.mempool)
+	
+	// CRITICAL: Set sync notifier to trigger sync check after chain reorganization
+	// This prevents node from getting stuck on outdated chain after fork rollback
+	if n.syncLoop != nil {
+		n.chain.SetSyncNotifier(n.syncLoop)
+	}
 
 	n.chain.SetOnBlockAdded(func(block *core.Block) {
 		if broadcastErr := n.p2pSwitch.BroadcastBlock(context.Background(), block); broadcastErr != nil {
@@ -365,20 +375,18 @@ func (n *Node) startComponents() error {
 
 	if n.autoMine && n.miner != nil {
 		go func() {
-			log.Info("Mining startup goroutine started")
 			interval := time.Duration(n.config.MineIntervalMs) * time.Millisecond
 			if interval <= 0 {
 				interval = 17 * time.Second
 			}
-			log.Info("Mining interval: %v", interval)
 
 			// CRITICAL: Wait for initial sync before starting mining
 			// This prevents mining on stale chain when starting from height 0
 			if n.syncLoop != nil {
 				log.Info("Waiting for initial sync before starting mining...")
-				syncWaitTimeout := 30 * time.Second
+				syncWaitTimeout := 5 * time.Minute
 				syncWaitStart := time.Now()
-				syncCheckInterval := 1 * time.Second
+				syncCheckInterval := 2 * time.Second
 				syncCheckTicker := time.NewTicker(syncCheckInterval)
 				defer syncCheckTicker.Stop()
 
@@ -389,30 +397,32 @@ func (n *Node) startComponents() error {
 						log.Info("Context cancelled during sync wait, aborting mining startup")
 						return
 					case <-syncCheckTicker.C:
-						// Check if synced
-						isSynced := n.syncLoop.IsSynced()
-						log.Info("Sync check: isSynced=%v, elapsed=%v", isSynced, time.Since(syncWaitStart))
-						if isSynced {
+						if n.syncLoop.IsSynced() {
 							log.Info("Initial sync completed, starting mining (localHeight=%d)",
 								n.chain.GetHeight())
 							break syncWaitLoop
 						}
 
-						// Check for timeout - after timeout, start mining anyway
+						// Check for timeout
 						if time.Since(syncWaitStart) > syncWaitTimeout {
-							log.Info("Sync wait timeout reached, starting mining anyway (localHeight=%d, peers=%d)",
-								n.chain.GetHeight(), len(n.p2pSwitch.GetActivePeers()))
-							break syncWaitLoop
+							log.Info("Sync wait timeout reached, checking if we can mine anyway...")
+							// If no peers available, we can start mining (standalone mode)
+							activePeers := n.p2pSwitch.GetActivePeers()
+							if len(activePeers) == 0 {
+								log.Info("No peers available, starting mining in standalone mode")
+								break syncWaitLoop
+							}
+							// Continue waiting if peers are available but sync not complete
+							log.Info("Still waiting for sync... (elapsed=%v, peers=%d)",
+								time.Since(syncWaitStart), len(activePeers))
 						}
 					}
 				}
 			}
 
-			log.Info("Starting mining loop with interval %v", interval)
+			log.Info("Starting mining (sync loop handles fork resolution)")
 			go n.miner.Run(n.ctx, interval)
 		}()
-	} else {
-		log.Info("Mining not started: autoMine=%v, miner=%v", n.autoMine, n.miner != nil)
 	}
 
 	ln, err := n.createListener(n.config.HTTPAddr)

@@ -659,6 +659,26 @@ func (w *minerMempoolWrapper) OnBlockAdded() {
 	// Mempool doesn't have block added callback, so this is a no-op
 }
 
+// StartVerification signals that block verification is starting (pauses mining)
+// Mempool doesn't need to do anything here, this is handled by the miner
+func (w *minerMempoolWrapper) StartVerification() {
+	// No-op for mempool wrapper
+}
+
+// EndVerification signals that verification is complete (resumes mining)
+// Mempool doesn't need to do anything here, this is handled by the miner
+func (w *minerMempoolWrapper) EndVerification() {
+	// No-op for mempool wrapper
+}
+
+// OnPeerBlockBroadcast is called when P2P receives block broadcast from peers
+// Production-grade: enables real-time fork detection and mining coordination
+func (w *minerMempoolWrapper) OnPeerBlockBroadcast(block *core.Block) {
+	// Mempool doesn't directly handle P2P broadcasts
+	// This is handled by the miner and sync loop
+	// No-op here, but method required for interface compliance
+}
+
 // minerMempoolEntry implements miner.MempoolEntry
 type minerMempoolEntry struct {
 	tx       core.Transaction

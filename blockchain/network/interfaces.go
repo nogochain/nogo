@@ -99,12 +99,24 @@ type BlockchainInterface interface {
 }
 
 // Miner defines the miner interface for P2P coordination
+// Production-grade: enables real-time fork detection via P2P broadcasts
 type Miner interface {
 	// Mining control
 	InterruptMining()
 	ResumeMining()
 	IsVerifying() bool
 	OnBlockAdded()
+
+	// Verification coordination - CRITICAL for P2P block processing
+	// StartVerification signals that block verification is starting (pauses mining)
+	// EndVerification signals that verification is complete (resumes mining)
+	StartVerification()
+	EndVerification()
+
+	// P2P broadcast coordination
+	// CRITICAL: Called when P2P receives block broadcast from peers
+	// Enables miner to pause mining and verify forks in real-time
+	OnPeerBlockBroadcast(block *core.Block)
 }
 
 // PeerBanChecker is the interface for checking whether a peer is banned.

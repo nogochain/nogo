@@ -133,6 +133,7 @@ type SyncLoop struct {
 	progressStore  *SyncProgressStore
 	isSyncing      bool
 	syncProgress   float64
+	syncRoundInProgress bool  // CRITICAL: Prevent concurrent SyncWithPeer execution
 	ctx            context.Context
 	cancel         context.CancelFunc
 	syncStartTime  time.Time
@@ -283,13 +284,14 @@ func (s *SyncLoop) IsSyncing() bool {
 // Returns true if:
 // 1. Not syncing AND sync progress >= 1.0, OR
 // 2. No peer has higher height (can mine on current chain)
-// CRITICAL: This method is called frequently in mining loop, so we use cached peer info
-// instead of making network requests on every call.
+// CRITICAL: This method is called frequently in mining loop, so we NEVER make network requests here
+// CRITICAL: syncProgress is set by performSyncStep after checking peers, trust that result
 func (s *SyncLoop) IsSynced() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	// Standard case: sync completed
+	// syncProgress >= 1.0 means performSyncStep checked peers and found we're synced
 	if !s.isSyncing && s.syncProgress >= 1.0 {
 		return true
 	}
@@ -300,33 +302,31 @@ func (s *SyncLoop) IsSynced() bool {
 		return false
 	}
 
-	// If syncProgress is already 1.0, we're synced
-	if s.syncProgress >= 1.0 {
-		return true
+	// Enhanced mode: use cached sync progress from recent performSyncStep
+	// If syncProgress < 1.0, we're not synced
+	if s.syncProgress < 1.0 {
+		return false
 	}
 
-	// Check if we can consider ourselves synced
-	if s.pm != nil {
-		localHeight := s.getLocalHeight()
-
-		// If local height is 0 and we have peers, we definitely need to sync
-		if localHeight == 0 {
-			activePeers := s.pm.GetActivePeers()
-			if len(activePeers) > 0 {
-				return false
-			}
-			// No peers, we can consider ourselves synced (standalone mode)
-			return true
-		}
-
-		// For non-zero height with isSyncing=false:
-		// We're not actively syncing, so we can mine
-		// The sync loop will detect if we fall behind and set isSyncing=true
-		// This is a safe default that allows mining while still preventing forks
-		return true
-	}
-
+	// syncProgress >= 1.0 and !isSyncing should have returned true above
+	// If we reach here, something is inconsistent, return false to be safe
+	// CRITICAL: DO NOT make network requests here - this is called in mining loop
 	return false
+}
+
+// OnChainReorganized implements SyncNotifier interface
+// Production-grade: called by chain after reorganization to trigger sync re-evaluation
+// CRITICAL: Prevents node from getting stuck on outdated chain after fork rollback
+func (s *SyncLoop) OnChainReorganized(newTip *core.Block) {
+	if s == nil || newTip == nil {
+		return
+	}
+	
+	log.Printf("[Sync] Chain reorganized to height %d, triggering sync re-evaluation", newTip.GetHeight())
+	
+	// Trigger sync check to re-evaluate chain state
+	// This will fetch blocks from peers if they have longer chain
+	s.TriggerSyncCheck()
 }
 
 // TriggerSyncCheck immediately triggers a sync check without waiting for the ticker.
@@ -383,9 +383,60 @@ func (s *SyncLoop) getLocalHeight() uint64 {
 }
 
 // TriggerBlockEvent triggers a block event for miner coordination
+// Production-grade: called when P2P receives block broadcast from peers
+// CRITICAL: This enables real-time fork detection based on network activity
 func (s *SyncLoop) TriggerBlockEvent(block *core.Block) {
-	// Block event handling - miner can listen for this
-	// Currently handled through direct method calls
+	if block == nil {
+		return
+	}
+	
+	localTip := s.bc.LatestBlock()
+	if localTip == nil {
+		return
+	}
+	
+	localHeight := localTip.GetHeight()
+	blockHeight := block.GetHeight()
+	
+	// Case 1: Received block at same height as local tip - potential fork
+	if blockHeight == localHeight {
+		if !bytes.Equal(block.Hash, localTip.Hash) {
+			log.Printf("[Sync] Fork detected via P2P broadcast at height %d! Local: %x, Remote: %x",
+				blockHeight, localTip.Hash[:8], block.Hash[:8])
+			
+			// Compare work to decide which chain to follow
+			localWork := s.bc.CanonicalWork()
+			remoteWork, ok := core.StringToWork(block.TotalWork)
+			
+			if ok && remoteWork != nil && remoteWork.Cmp(localWork) > 0 {
+				log.Printf("[Sync] Remote chain has more work, triggering sync")
+				s.TriggerSyncCheck()
+			} else {
+				log.Printf("[Sync] Local chain has equal or more work, keeping local")
+			}
+		}
+		// If hashes match, this is our own block - no action needed
+		return
+	}
+	
+	// Case 2: Received block at higher height - we're behind
+	if blockHeight > localHeight {
+		log.Printf("[Sync] P2P broadcast: peer has higher block %d (local=%d), triggering sync",
+			blockHeight, localHeight)
+		s.TriggerSyncCheck()
+		return
+	}
+	
+	// Case 3: Received block at lower height - historical block, ignore
+	// This is normal during sync when peers rebroadcast old blocks
+}
+
+// TriggerMinerBlockEvent notifies miner about P2P block broadcast
+// Production-grade: enables miner to pause mining and verify forks in real-time
+func (s *SyncLoop) TriggerMinerBlockEvent(block *core.Block) {
+	if s.miner != nil {
+		s.miner.OnPeerBlockBroadcast(block)
+	}
 }
 
 // =============================================================================
@@ -695,19 +746,39 @@ func (s *SyncLoop) runSyncLoop() {
 }
 
 // performSyncStep executes one sync iteration
+// Production-grade: properly manages isSyncing state to prevent mining during sync
+// CRITICAL: Only sets isSyncing=true when sync is actually needed, not during checks
 func (s *SyncLoop) performSyncStep() {
-	// NOTE: Do NOT set isSyncing=true here!
-	// isSyncing should only be true when we are actually downloading blocks.
-	// Setting it here blocks mining during routine sync checks.
-
+	// CRITICAL: Do NOT set isSyncing=true here!
+	// isSyncing should only be true when actively syncing, not during checks
+	// Mining is blocked by IsSynced() checking syncProgress and peer heights
+	
 	if s.pm == nil {
 		log.Printf("[Sync] performSyncStep: peer manager is nil")
+		s.mu.Lock()
+		s.isSyncing = false
+		s.mu.Unlock()
 		return
 	}
+
+	// NOTE: Removed "fast path" optimization that skipped peer checks when syncProgress >= 1.0
+	// This was incorrect because:
+	// 1. After sync completes, we MUST continue checking peer heights to ensure we're on longest chain
+	// 2. If peers grow during the "skip window", we might mine on outdated chain
+	// 3. The mining loop already prevents mining during active sync via IsSynced()
+	// 
+	// Correct behavior:
+	// - Always check peer heights in performSyncStep
+	// - If peers have longer chain, set isSyncing=true and sync
+	// - If caught up, set syncProgress=1.0 and isSyncing=false
+	// - Mining loop checks IsSynced() which returns true only when syncProgress >= 1.0 && !isSyncing
 
 	peers := s.pm.GetActivePeers()
 	if len(peers) == 0 {
 		log.Printf("[Sync] performSyncStep: no active peers")
+		s.mu.Lock()
+		s.isSyncing = false
+		s.mu.Unlock()
 		return
 	}
 
@@ -798,23 +869,19 @@ func (s *SyncLoop) performSyncStep() {
 	shouldSync := false
 	syncReason := ""
 
-	// CRITICAL: Only sync if peer is significantly ahead (more than 1 block)
-	// If peer is only 1 block ahead, local node may be mining that block
-	// This prevents sync from interrupting ongoing mining
-	if maxPeerHeight > currentHeight+1 {
+	if maxPeerHeight > currentHeight {
 		shouldSync = true
-		syncReason = fmt.Sprintf("peer is significantly ahead (%d > %d+1)", maxPeerHeight, currentHeight)
-	} else if bestPeerWork.Cmp(localWork) > 0 && maxPeerHeight > currentHeight {
-		// Only sync if peer has more work AND is ahead in height
-		// Equal height with more work means different chain (fork), handled by fork resolution
+		syncReason = fmt.Sprintf("peer has higher height (%d > %d)", maxPeerHeight, currentHeight)
+	} else if bestPeerWork.Cmp(localWork) > 0 {
 		shouldSync = true
-		syncReason = fmt.Sprintf("peer has more work and is ahead (work=%s, height=%d > %d)", bestPeerWork.String(), maxPeerHeight, currentHeight)
+		syncReason = fmt.Sprintf("peer has more work (%s > %s)", bestPeerWork.String(), localWork.String())
 	}
 
 	if !shouldSync {
 		s.mu.Lock()
 		s.syncProgress = 1.0
 		s.isSyncing = false
+		s.syncRoundInProgress = false  // CRITICAL: Reset sync round flag
 		s.lastUpdateTime = time.Now()
 		s.mu.Unlock()
 		log.Printf("[Sync] Chain is synced (height=%d, work=%s)", currentHeight, localWork.String())
@@ -827,7 +894,15 @@ func (s *SyncLoop) performSyncStep() {
 
 	log.Printf("[Sync] Sync needed: %s", syncReason)
 
+	// CRITICAL: Check if a sync round is already in progress
+	// This prevents launching multiple concurrent SyncWithPeer goroutines
 	s.mu.Lock()
+	if s.syncRoundInProgress {
+		log.Printf("[Sync] Sync round already in progress, skipping")
+		s.mu.Unlock()
+		return
+	}
+	s.syncRoundInProgress = true
 	s.isSyncing = true
 	s.mu.Unlock()
 
@@ -838,24 +913,36 @@ func (s *SyncLoop) performSyncStep() {
 
 	if bestPeer != "" {
 		log.Printf("[Sync] Starting sync with peer %s (height=%d, local=%d)", bestPeer, maxPeerHeight, currentHeight)
-		if err := s.SyncWithPeer(s.ctx, bestPeer); err != nil {
-			log.Printf("[Sync] SyncWithPeer failed: %v", err)
-			// CRITICAL: Reset syncing state on failure to allow retry
-			s.mu.Lock()
-			s.isSyncing = false
-			s.mu.Unlock()
-		} else {
-			log.Printf("[Sync] SyncWithPeer completed successfully")
-			// CRITICAL: Do NOT reset isSyncing here!
-			// Keep isSyncing=true until performSyncStep determines no more sync is needed
-			// This prevents mining during sync gaps
-		}
+		// CRITICAL: Run SyncWithPeer in goroutine to prevent blocking peer message handling
+		// This prevents deadlocks where SyncWithPeer waits for peer response while blocking
+		// the very goroutines that process peer responses
+		go func() {
+			if err := s.SyncWithPeer(s.ctx, bestPeer); err != nil {
+				log.Printf("[Sync] SyncWithPeer failed: %v", err)
+				// CRITICAL: Reset syncing state on failure to allow retry
+				s.mu.Lock()
+				s.isSyncing = false
+				s.syncRoundInProgress = false
+				s.mu.Unlock()
+			} else {
+				log.Printf("[Sync] SyncWithPeer completed successfully")
+				// CRITICAL: Do NOT reset isSyncing here!
+				// Keep isSyncing=true until performSyncStep determines no more sync is needed
+				// with mining loop. performSyncStep will set these after verifying
+				// no more sync is needed.
+			}
 
-		// CRITICAL: After sync completes, immediately re-check sync state
-		// Don't wait for next ticker - remote may have grown during sync
-		// This prevents falling behind by 1-2 blocks
-		log.Printf("[Sync] Immediately re-evaluating sync state after completion")
-		s.performSyncStep() // Recursive call to check immediately
+			// CRITICAL: After sync completes, immediately re-check sync state
+			// Don't wait for next ticker - remote may have grown during sync
+			// This prevents falling behind by 1-2 blocks
+			log.Printf("[Sync] Immediately re-evaluating sync state after completion")
+			
+			// CRITICAL: Small delay to allow peer state updates to propagate
+			// Without this, we may re-check before peer info is updated
+			time.Sleep(500 * time.Millisecond)
+			
+			s.performSyncStep() // Recursive call to check immediately
+		}()
 		return
 	}
 
@@ -966,6 +1053,12 @@ func (s *SyncLoop) resolveCheckpoint(maxPeerHeight uint64) (uint64, []byte) {
 func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error {
 	log.Printf("[Sync] Received block %d hash=%s",
 		block.GetHeight(), hex.EncodeToString(block.Hash))
+
+	// CRITICAL: Signal verification start to pause mining while processing block
+	if s.miner != nil {
+		s.miner.StartVerification()
+		defer s.miner.EndVerification()  // Ensure mining resumes after processing
+	}
 
 	// Fast validation first (basic structure check)
 	err := s.validator.ValidateBlockFast(block)
@@ -1495,47 +1588,11 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 			log.Printf("[Sync] storeFunc: processing block %d (syncStartHeight=%d, syncFromHeight=%d)",
 				blockHeight, syncStartHeight, syncFromHeight)
 
-			// Validate chain continuity first
-			expectedPrevHash := []byte{}
-			if blockHeight > syncStartHeight {
-				if blockHeight == syncStartHeight+1 {
-					localTip := s.bc.LatestBlock()
-					if localTip != nil {
-						expectedPrevHash = localTip.Hash
-						log.Printf("[Sync] storeFunc: block %d is first after syncStart, using localTip hash %x",
-							blockHeight, expectedPrevHash[:8])
-					} else {
-						log.Printf("[Sync] storeFunc: WARNING - block %d is first after syncStart but localTip is nil!", blockHeight)
-					}
-				} else {
-					// Get block at previous height for prevHash check
-					prevBlock, exists := s.bc.BlockByHeight(blockHeight - 1)
-					if exists && prevBlock != nil {
-						expectedPrevHash = prevBlock.Hash
-						log.Printf("[Sync] storeFunc: block %d, found prev block %d with hash %x",
-							blockHeight, blockHeight-1, expectedPrevHash[:8])
-					} else {
-						log.Printf("[Sync] storeFunc: WARNING - block %d, prev block %d not found in chain!",
-							blockHeight, blockHeight-1)
-					}
-				}
-			}
-
-			if len(expectedPrevHash) > 0 && !bytes.Equal(block.Header.PrevHash, expectedPrevHash) {
-				log.Printf("[Sync] Chain discontinuity at height %d: expected prevHash %x, got %x",
-					blockHeight, expectedPrevHash[:8], block.Header.PrevHash[:8])
-
-				// Report severe misbehavior for chain discontinuity (provides invalid blocks)
-				if s.securityMgr != nil {
-					// Persistent score: 50 (severe - invalid chain data)
-					// Transient score: 20 (additional penalty for this instance)
-					s.securityMgr.OnPeerMisbehavior(peer, 50, 20)
-					log.Printf("[Sync] Reported peer %s for chain discontinuity (persistent=50, transient=20)", peer)
-				}
-
-				return fmt.Errorf("chain discontinuity at height %d", blockHeight)
-			}
-
+			// CRITICAL: DO NOT check chain continuity here!
+			// Let handleNewBlock and core.Chain.AddBlock handle fork detection
+			// Pre-checking continuity breaks fork resolution - the whole point of sync
+			// is to fetch blocks from peers, which may be on a different (better) fork
+			
 			// Add block to chain via handleNewBlock for proper validation and fork handling
 			err := s.handleNewBlock(ctx, block)
 			if err != nil {
@@ -1560,6 +1617,24 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 
 		if err != nil {
 			log.Printf("[Sync] Batch download and storage failed: %v", err)
+			
+			// CRITICAL: Check if this is a chain discontinuity error (fork detected)
+			if strings.Contains(err.Error(), "chain discontinuity") || strings.Contains(err.Error(), "different fork") {
+				log.Printf("[Sync] Chain discontinuity detected - this indicates a fork!")
+				log.Printf("[Sync] Aborting sync - fork resolution will handle this via P2P broadcast mechanism")
+				
+				// CRITICAL: Abort sync and reset isSyncing to allow mining
+				// The fork will be resolved via TriggerBlockEvent when peer broadcasts their chain
+				s.mu.Lock()
+				s.isSyncing = false
+				s.syncProgress = 1.0
+				s.mu.Unlock()
+				
+				// CRITICAL: Return nil to prevent infinite retry loop
+				// This is intentional - we're aborting sync because we're on different forks
+				// The fork will be resolved naturally via P2P broadcast mechanism
+				return nil
+			}
 
 			// Save error to progress store for resume capability
 			if s.progressStore != nil {

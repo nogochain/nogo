@@ -17,6 +17,7 @@
 package miner
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -118,10 +119,11 @@ type Miner struct {
 
 	events EventSink
 
-	wakeCh       chan struct{}
-	stopped      chan struct{}
-	isVerifying  bool
-	verifyDoneCh chan struct{}
+	wakeCh          chan struct{}
+	stopped         chan struct{}
+	verificationCtx context.Context
+	verifyCancel    context.CancelFunc
+	verifyDoneCh    chan struct{}
 
 	miningCtx    context.Context
 	miningCancel context.CancelFunc
@@ -165,6 +167,7 @@ type ChainInfo = network.ChainInfo
 type SyncLoop interface {
 	IsSyncing() bool
 	IsSynced() bool
+	TriggerSyncCheck()
 }
 
 // EventSink defines the event sink interface
@@ -230,8 +233,9 @@ func NewMiner(
 		forceEmptyBlocks: forceEmptyBlocks,
 		wakeCh:           make(chan struct{}, 1),
 		stopped:          make(chan struct{}),
-		isVerifying:      false,
-		verifyDoneCh:     nil,
+		verificationCtx:  nil,
+		verifyCancel:     nil,
+		verifyDoneCh:     make(chan struct{}, 1),
 		minerAddress:     minerAddress,
 		chainID:          chainID,
 	}
@@ -246,55 +250,13 @@ func (m *Miner) SetEventSink(sink EventSink) {
 	m.events = sink
 }
 
-// SetSyncLoop sets the sync loop for mining coordination
-// CRITICAL: This must be called before mining starts to prevent forks
-func (m *Miner) SetSyncLoop(syncLoop SyncLoop) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.syncLoop = syncLoop
-}
-
 // OnBlockAdded is called when a block is added to the chain
-// Pauses mining during verification
-// CRITICAL FIX: Use very short verification time (1 second) to avoid blocking mining
-// Block propagation typically completes within 1-2 seconds in healthy networks
+// This signals that block processing is complete, mining can resume
+// CRITICAL: This is called AFTER block validation completes
 func (m *Miner) OnBlockAdded() {
-	m.mu.Lock()
-	// Cancel any existing verification timeout
-	if m.verifyDoneCh != nil {
-		close(m.verifyDoneCh)
-	}
-
-	// Start new verification with very short timeout
-	m.isVerifying = true
-	doneCh := make(chan struct{})
-	m.verifyDoneCh = doneCh
-	m.mu.Unlock()
-
-	logf(colorBrightCyan, "🔍 ", fmt.Sprintf("OnBlockAdded: verification started (isVerifying=true)"))
-
-	// Single timeout goroutine with 1 second timeout (not 5 seconds!)
-	go func() {
-		select {
-		case <-time.After(1000 * time.Millisecond): // 1 second, not 5!
-			m.mu.Lock()
-			// Only end if this is still the active done channel
-			if m.verifyDoneCh == doneCh && m.isVerifying {
-				m.isVerifying = false
-				m.verifyDoneCh = nil
-				m.mu.Unlock()
-				logf(colorBrightCyan, "🔍 ", "OnBlockAdded: verification timeout (isVerifying=false)")
-			} else {
-				m.mu.Unlock()
-				logf(colorYellow, "⚠️ ", "OnBlockAdded: verification already ended")
-			}
-		case <-doneCh:
-			// Channel closed by newer block
-			return
-		case <-m.stopped:
-			return
-		}
-	}()
+	// Block processing completed, ensure verification is ended
+	// This allows mining to resume immediately
+	m.EndVerification()
 }
 
 // Wake triggers an immediate mining attempt
@@ -305,11 +267,47 @@ func (m *Miner) Wake() {
 	}
 }
 
+// StartVerification signals that block verification is starting
+// Mining pauses until verification completes
+func (m *Miner) StartVerification() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.verifyCancel != nil {
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.verificationCtx = ctx
+	m.verifyCancel = cancel
+}
+
+// EndVerification signals that block verification has completed
+// Mining can now resume
+func (m *Miner) EndVerification() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.verifyCancel != nil {
+		m.verifyCancel()
+		m.verifyCancel = nil
+	}
+	// CRITICAL: Set to nil, NOT context.Background()
+	// context.Background().Done() returns nil, which causes isVerificationActive()
+	// to always return true (reading from nil channel blocks forever)
+	m.verificationCtx = nil
+
+	select {
+	case m.verifyDoneCh <- struct{}{}:
+	default:
+	}
+}
+
 // IsVerifying returns true if verification is in progress
 func (m *Miner) IsVerifying() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.isVerifying
+	return m.verifyCancel != nil
 }
 
 // InterruptMining stops any ongoing mining operation
@@ -319,12 +317,8 @@ func (m *Miner) InterruptMining() {
 	defer m.miningMu.Unlock()
 
 	if m.isMining && m.miningCancel != nil {
-		logf(colorYellow, "⚠️ ", "InterruptMining: cancelling mining context")
 		m.miningCancel()
 		m.isMining = false
-		logf(colorYellow, "⚠️ ", "InterruptMining: mining context cancelled, isMining=false")
-	} else {
-		logf(colorYellow, "⚠️ ", "InterruptMining: no active mining to interrupt")
 	}
 }
 
@@ -335,7 +329,6 @@ func (m *Miner) ResumeMining() {
 
 	m.miningCtx, m.miningCancel = context.WithCancel(context.Background())
 	m.isMining = true
-	logf(colorBrightGreen, "✅ ", "ResumeMining: mining context recreated, isMining=true")
 }
 
 // isMiningActive checks if mining context is active
@@ -344,30 +337,33 @@ func (m *Miner) isMiningActive() bool {
 	defer m.miningMu.Unlock()
 
 	if !m.isMining || m.miningCtx == nil {
-		logf(colorYellow, "⚠️ ", fmt.Sprintf("isMiningActive: false (isMining=%v, miningCtx=%v)", m.isMining, m.miningCtx != nil))
 		return false
 	}
 
 	select {
 	case <-m.miningCtx.Done():
 		m.isMining = false
-		logf(colorYellow, "⚠️ ", "isMiningActive: context done, returning false")
 		return false
 	default:
 		return true
 	}
 }
 
-// isVerificationActive checks if verification is in progress
+// isVerificationActive checks if verification context is active
 func (m *Miner) isVerificationActive() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	active := m.isVerifying
-	if active {
-		logf(colorBrightCyan, "🔍 ", "isVerificationActive: true")
+	if m.verificationCtx == nil {
+		return false
 	}
-	return active
+
+	select {
+	case <-m.verificationCtx.Done():
+		return false
+	default:
+		return true
+	}
 }
 
 // Run starts the continuous mining loop
@@ -413,9 +409,11 @@ func (m *Miner) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// End any ongoing verification
-	m.isVerifying = false
-	m.verifyDoneCh = nil
+	if m.verifyCancel != nil {
+		m.verifyCancel()
+		m.verifyCancel = nil
+	}
+	m.verificationCtx = context.Background()
 
 	m.miningMu.Lock()
 	if m.miningCancel != nil {
@@ -434,34 +432,31 @@ func (m *Miner) Stop() error {
 }
 
 // handleMiningTick handles a single mining tick
+// Production-grade: implements all coordination checks before mining
 func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 	if m.syncLoop != nil && m.syncLoop.IsSyncing() {
-		logf(colorYellow, "⚠️ ", "handleMiningTick: sync in progress, skipping")
+		logf(colorBrightYellow, "⏸️ ", "Mining tick: sync in progress, waiting...")
 		time.Sleep(time.Second)
 		return
 	}
 
 	if m.syncLoop != nil && !m.syncLoop.IsSynced() {
-		logf(colorYellow, "⚠️ ", "handleMiningTick: not synced, skipping")
+		logf(colorBrightYellow, "⏸️ ", "Mining tick: not synced, waiting...")
 		time.Sleep(time.Second)
 		return
 	}
 
 	if m.isVerificationActive() {
-		// CRITICAL: Do NOT skip mining during verification!
-		// Verification is just a short delay to allow block propagation.
-		// Mining should continue to maintain block production rate.
-		// If there's a fork, the sync loop will handle it.
-		logf(colorBrightCyan, "🔍 ", "handleMiningTick: verification active but continuing mining")
-		// Fall through to continue mining
-	}
-
-	if !m.isMiningActive() {
-		logf(colorRed, "❌ ", "handleMiningTick: mining not active, skipping")
+		logf(colorBrightYellow, "⏸️ ", "Mining tick: verification active, waiting...")
 		return
 	}
 
-	logf(colorBrightCyan, "🔍 ", "handleMiningTick: starting mining...")
+	if !m.isMiningActive() {
+		logf(colorBrightYellow, "⏸️ ", "Mining tick: mining not active, waiting...")
+		return
+	}
+
+	logf(colorBrightGreen, "⛏️ ", "Mining tick: attempting to mine...")
 	block, err := m.MineOnce(ctx, force)
 	if err != nil {
 		logf(colorRed, "❌ ", fmt.Sprintf("Mine once failed: %v", err))
@@ -471,7 +466,7 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 	if block != nil {
 		m.handleMinedBlock(ctx, block)
 	} else {
-		logf(colorYellow, "⚠️ ", "handleMiningTick: no block mined (empty mempool or no force)")
+		logf(colorBrightYellow, "⏸️ ", "Mining tick: MineOnce returned nil, no block mined")
 	}
 }
 
@@ -479,6 +474,21 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 // Fixed: Broadcast block before checking network work
 func (m *Miner) handleMinedBlock(ctx context.Context, block *core.Block) {
 	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block #%d mined successfully, hash=%x", block.GetHeight(), block.Hash))
+
+	// CRITICAL: Before broadcasting, check if peer has grown during mining
+	// This prevents adding our block to a fork when we're already behind
+	if m.pm != nil {
+		localHeight := m.bc.LatestBlock().GetHeight()
+		peerHeight := getPeerHeight(m.pm)
+
+		if peerHeight > localHeight {
+			logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Peer has higher height (%d > %d) after mining - triggering sync instead of broadcast", peerHeight, localHeight))
+			if m.syncLoop != nil {
+				m.syncLoop.TriggerSyncCheck()
+			}
+			return // Don't broadcast or add our block - we're behind
+		}
+	}
 
 	// Broadcast block to network (non-blocking)
 	if m.syncLoop != nil && m.pm != nil {
@@ -506,42 +516,78 @@ func (m *Miner) broadcastBlockAsync(ctx context.Context, block *core.Block) {
 	}()
 }
 
-// checkNetworkWork checks if network has more work after broadcasting block
-// CRITICAL FIX: After mining a block, we should NOT interrupt mining just because
-// network appears to have more work. The 刚 mined block hasn't propagated yet,
-// so peer work values are temporarily stale. The sync loop will detect if we're
-// actually behind and trigger sync if needed. Mining should continue uninterrupted.
+// checkNetworkWork checks if network has more work and triggers sync if needed
+// Production-grade: actively triggers sync loop when network has more work
+// CRITICAL: Called after broadcasting our mined block to detect forks early
 func (m *Miner) checkNetworkWork(ctx context.Context, block *core.Block) {
-	logf(colorBrightCyan, "🔍 ", fmt.Sprintf("checkNetworkWork: block #%d", block.GetHeight()))
-
 	networkMaxWork := m.getNetworkMaxWork(ctx)
 	localWork := m.bc.CanonicalWork()
 
-	logf(colorBrightCyan, "🔍 ", fmt.Sprintf("checkNetworkWork: localWork=%v, networkMaxWork=%v", localWork, networkMaxWork))
-
 	if networkMaxWork != nil && networkMaxWork.Cmp(localWork) > 0 {
-		logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Network has more work (local=%v, network=%v) - but continuing mining (刚 mined block not yet propagated)", localWork, networkMaxWork))
-		// CRITICAL: Do NOT interrupt mining here!
-		// The 刚 mined block hasn't propagated to peers yet, so their work values
-		// are temporarily higher. The sync loop will detect if we're actually
-		// behind and trigger sync if needed.
-		// Interrupting mining here causes a deadlock: mining stops, but sync
-		// never starts because we're not significantly behind.
-	} else {
-		logf(colorBrightGreen, "✅ ", "Local chain has most work, continuing mining")
+		logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Network has more work (local=%v, network=%v) - triggering sync", localWork, networkMaxWork))
+		m.InterruptMining()
+
+		// CRITICAL: Actively trigger sync loop to fetch heavier chain
+		// This prevents the node from getting stuck after fork rollback
+		if m.syncLoop != nil {
+			m.syncLoop.TriggerSyncCheck()
+		}
+		return
 	}
 
-	// CRITICAL: Always resume mining to ensure continuous block production
-	// This is safe because:
-	// 1. If we're actually behind, sync loop will set isSyncing=true and stop mining
-	// 2. If we're synced, mining should continue
-	// 3. If we just mined a block, mining should continue for next block
-	logf(colorBrightCyan, "🔍 ", "checkNetworkWork: calling ResumeMining()")
+	logf(colorBrightGreen, "✅ ", "Local chain has most work, continuing mining")
+	// Resume mining to ensure continuous block production
 	m.ResumeMining()
-	logf(colorBrightCyan, "🔍 ", "checkNetworkWork: ResumeMining() completed")
+}
+
+// OnPeerBlockBroadcast is called when P2P receives a block broadcast from peers
+// Production-grade: enables real-time fork detection and mining coordination
+// CRITICAL: This is the key integration point between P2P and mining
+func (m *Miner) OnPeerBlockBroadcast(block *core.Block) {
+	if block == nil || m.syncLoop == nil {
+		return
+	}
+
+	localTip := m.bc.LatestBlock()
+	if localTip == nil {
+		return
+	}
+
+	localHeight := localTip.GetHeight()
+	blockHeight := block.GetHeight()
+
+	// Case 1: Peer broadcast block at same height - FORK DETECTED
+	if blockHeight == localHeight {
+		if !bytes.Equal(block.Hash, localTip.Hash) {
+			logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Fork detected via P2P at height %d! Pausing mining for verification", blockHeight))
+
+			// CRITICAL: Pause mining immediately to prevent extending wrong chain
+			m.InterruptMining()
+
+			// Trigger sync check to compare work and resolve fork
+			m.syncLoop.TriggerSyncCheck()
+
+			// Note: Mining will be resumed by checkNetworkWork after fork resolution
+			return
+		}
+		// Same hash - this is our own block being echoed back, ignore
+		return
+	}
+
+	// Case 2: Peer has higher block - we're behind
+	if blockHeight > localHeight {
+		logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Peer has higher block %d (local=%d) - pausing mining", blockHeight, localHeight))
+		m.InterruptMining()
+		m.syncLoop.TriggerSyncCheck()
+		return
+	}
+
+	// Case 3: Lower height block - ignore, normal during sync
 }
 
 // getNetworkMaxWork gets the maximum work from all peers
+// Production-grade: also checks peer heights to detect when peers are ahead
+// Returns: max work from peers, or nil if no valid peer info available
 func (m *Miner) getNetworkMaxWork(ctx context.Context) *big.Int {
 	var networkMaxWork *big.Int
 	localWork := m.bc.CanonicalWork()
@@ -560,33 +606,76 @@ func (m *Miner) getNetworkMaxWork(ctx context.Context) *big.Int {
 	return networkMaxWork
 }
 
+// hasHigherPeer checks if any peer has higher height or more work than local chain
+// Production-grade: used to prevent mining when network is ahead
+// Returns: true if at least one peer is ahead in height or work
+func (m *Miner) hasHigherPeer(ctx context.Context) bool {
+	localHeight := m.bc.LatestBlock().GetHeight()
+	localWork := m.bc.CanonicalWork()
+
+	for _, peer := range m.pm.Peers() {
+		info, err := m.pm.FetchChainInfo(ctx, peer)
+		if err != nil {
+			continue
+		}
+
+		// Check height first (most common case)
+		if info.Height > localHeight {
+			return true
+		}
+
+		// If same height, check work
+		if info.Height == localHeight && info.Work != nil && localWork != nil {
+			if info.Work.Cmp(localWork) > 0 {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // MineOnce attempts to mine a single block
 // Production-grade: implements complete mining logic with validation
+// Fork-aware: checks for higher peers and triggers sync if needed
 func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 	if m.mp == nil {
 		return nil, nil
 	}
 
-	// CRITICAL: Ensure mining context is valid before attempting to mine
-	// This fixes the issue where mining stops after the first block
 	m.miningMu.Lock()
-	if !m.isMining || m.miningCtx == nil {
-		logf(colorBrightCyan, "🔍 ", "MineOnce: recreating mining context (was not active)")
-		m.miningCtx, m.miningCancel = context.WithCancel(context.Background())
-		m.isMining = true
-	} else {
-		// Check if context is already done
-		select {
-		case <-m.miningCtx.Done():
-			logf(colorBrightCyan, "🔍 ", "MineOnce: context was done, recreating")
-			m.miningCtx, m.miningCancel = context.WithCancel(context.Background())
-			m.isMining = true
-		default:
-			// Context is still valid, just ensure isMining is true
-			m.isMining = true
+	m.isMining = true
+	m.miningMu.Unlock()
+
+	pm := m.pm
+	if isPeerAPIValid(pm) {
+		localHeight := m.bc.LatestBlock().GetHeight()
+		peerHeight := getPeerHeight(pm)
+
+		if peerHeight > localHeight {
+			// CRITICAL: Peer has higher height, should sync instead of mining
+			// Trigger sync check to fetch missing blocks
+			if m.syncLoop != nil {
+				m.syncLoop.TriggerSyncCheck()
+			}
+			return nil, nil
+		}
+
+		if peerHeight == localHeight || peerHeight == 0 {
+			if config.DefaultBlockPropagationDelayMs > 0 {
+				time.Sleep(time.Duration(config.DefaultBlockPropagationDelayMs) * time.Millisecond)
+
+				newPeerHeight := getPeerHeight(pm)
+				if newPeerHeight > localHeight {
+					// CRITICAL: Peer advanced during delay, trigger sync
+					if m.syncLoop != nil {
+						m.syncLoop.TriggerSyncCheck()
+					}
+					return nil, nil
+				}
+			}
 		}
 	}
-	m.miningMu.Unlock()
 
 	selected, selectedIDs, err := m.bc.SelectMempoolTxs(m.mp, m.maxTxPerBlock)
 	if err != nil {
@@ -611,11 +700,16 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		return nil, err
 	}
 
-	if b == nil {
+	// Redundant POW validation removed for the following reasons:
+	// 1. POW already validated by NogoPow engine during Seal
+	// 2. validateBlockLocked performs additional POW validation in MineTransfers
+	// 3. This validation is redundant and incomplete
+	latest := m.bc.LatestBlock()
+	if latest == nil || latest.Hash == nil || string(latest.Hash) != string(b.Hash) {
 		return nil, nil
 	}
 
-	propagationDelay := calculateAdaptivePropagationDelay(m.pm)
+	propagationDelay := calculateAdaptivePropagationDelay(pm)
 	time.Sleep(time.Duration(propagationDelay) * time.Millisecond)
 
 	go m.broadcastBlock(ctx, b)
