@@ -1551,40 +1551,10 @@ func (c *Chain) IsReorgInProgress() bool {
 
 // findCommonAncestorLocked finds common ancestor between chains
 // Returns ancestor block and fork blocks to remove
-// Production-grade: handles forks at any depth, including immediate fork from tip
-// CRITICAL: Only considers blocks in canonical chain (c.blocks), not orphan blocks in c.blocksByHash
 func (c *Chain) findCommonAncestorLocked(newBlock *Block) (*Block, []*Block, error) {
-	// CRITICAL FIX: Only check if parent is in CANONICAL chain (c.blocks), not just in blocksByHash
-	// This prevents mistaking orphan chain blocks for common ancestors
-	if len(newBlock.Header.PrevHash) > 0 && len(c.blocks) > 0 {
-		parentHashHex := hex.EncodeToString(newBlock.Header.PrevHash)
-		
-		// Check if parent is the current tip (most common case for forks)
-		currentTip := c.blocks[len(c.blocks)-1]
-		if hex.EncodeToString(currentTip.Hash) == parentHashHex {
-			// Parent is canonical tip - this is a fork right after current tip
-			log.Printf("[Chain] Common ancestor found: current tip at height %d (fork point)", currentTip.GetHeight())
-			return currentTip, []*Block{}, nil
-		}
-		
-		// Check if parent is anywhere in canonical chain (for deep forks)
-		parentHeight := newBlock.GetHeight() - 1
-		if parentHeight < uint64(len(c.blocks)) {
-			canonicalParent := c.blocks[parentHeight]
-			if hex.EncodeToString(canonicalParent.Hash) == parentHashHex {
-				// Parent found in canonical chain at expected height
-				log.Printf("[Chain] Common ancestor found: canonical block at height %d", canonicalParent.GetHeight())
-				return canonicalParent, []*Block{}, nil
-			}
-		}
-	}
-
-	// Parent not in canonical chain - build parent map to search for deeper forks
-	// Only include blocks that we can trace back to canonical chain
+	// Build parent map for new block
 	parentMap := make(map[string]*Block)
 	current := newBlock
-	foundCanonicalAncestor := false
-	
 	for {
 		hashHex := hex.EncodeToString(current.Hash)
 		parentMap[hashHex] = current
@@ -1594,59 +1564,30 @@ func (c *Chain) findCommonAncestorLocked(newBlock *Block) (*Block, []*Block, err
 		}
 
 		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
-		
-		// Check if parent is in canonical chain
-		// Use height-based lookup to ensure we only get canonical blocks
-		if current.GetHeight() > 0 {
-			potentialParentHeight := current.GetHeight() - 1
-			if potentialParentHeight < uint64(len(c.blocks)) {
-				canonicalParent := c.blocks[potentialParentHeight]
-				if hex.EncodeToString(canonicalParent.Hash) == parentHashHex {
-					// Found canonical ancestor
-					foundCanonicalAncestor = true
-					log.Printf("[Chain] Common ancestor found: canonical block at height %d via parent walk", 
-						canonicalParent.GetHeight())
-					return canonicalParent, []*Block{}, nil
-				}
-			}
-		}
-		
-		// Parent not in canonical chain - check if it's in blocksByHash (might be another orphan)
 		parent, exists := c.blocksByHash[parentHashHex]
 		if !exists {
-			// Parent not found anywhere - stop building parent map
-			log.Printf("[Chain] Parent %s not found in chain or index, stopping parent map build", parentHashHex)
+			// Parent not found - stop building parent map
+			// DO NOT request parent here - let sync loop handle batch download
 			break
 		}
-		
-		// Parent exists but is not in canonical chain - continue walking up
-		// This block is part of an orphan chain, not a true fork
 		current = parent
 	}
 
-	// No canonical ancestor found in parent walk - walk canonical chain backwards
-	// This handles cases where we have partial fork chains stored
-	if !foundCanonicalAncestor {
-		log.Printf("[Chain] Walking canonical chain to search for common ancestor (chain length: %d)", len(c.blocks))
-		var forkBlocks []*Block
-		for i := len(c.blocks) - 1; i >= 0; i-- {
-			canonicalBlock := c.blocks[i]
-			canonicalHashHex := hex.EncodeToString(canonicalBlock.Hash)
+	// Walk canonical chain to find ancestor
+	var forkBlocks []*Block
+	for i := len(c.blocks) - 1; i >= 0; i-- {
+		canonicalBlock := c.blocks[i]
+		canonicalHashHex := hex.EncodeToString(canonicalBlock.Hash)
 
-			if _, exists := parentMap[canonicalHashHex]; exists {
-				// Found common ancestor in parent map
-				log.Printf("[Chain] Common ancestor found: canonical block at height %d via chain walk", 
-					canonicalBlock.GetHeight())
-				return canonicalBlock, forkBlocks, nil
-			}
-
-			forkBlocks = append(forkBlocks, canonicalBlock)
+		if _, exists := parentMap[canonicalHashHex]; exists {
+			// Found common ancestor
+			return canonicalBlock, forkBlocks, nil
 		}
+
+		forkBlocks = append(forkBlocks, canonicalBlock)
 	}
 
-	log.Printf("[Chain] No common ancestor found after exhaustive search (canonical height %d, new block height %d)",
-		len(c.blocks)-1, newBlock.GetHeight())
-	return nil, []*Block{}, errors.New("no common ancestor found")
+	return nil, forkBlocks, errors.New("no common ancestor found")
 }
 
 // calculateChainWorkLocked calculates total work for a chain segment
@@ -1689,8 +1630,66 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	ancestorHeight := ancestor.GetHeight()
 	currentChainLen := len(c.blocks)
 
-	if int(ancestorHeight) >= currentChainLen {
-		return fmt.Errorf("ancestor height %d exceeds current chain length %d", ancestorHeight, currentChainLen)
+	if currentChainLen == 0 {
+		return fmt.Errorf("cannot reorganize empty chain")
+	}
+
+	if int(ancestorHeight) > currentChainLen-1 {
+		return fmt.Errorf("ancestor height %d exceeds maximum valid height %d", ancestorHeight, currentChainLen-1)
+	}
+
+	if int(ancestorHeight) == currentChainLen-1 {
+		ancestorHash := hex.EncodeToString(ancestor.Hash)
+		tipHash := hex.EncodeToString(c.blocks[currentChainLen-1].Hash)
+		if ancestorHash == tipHash {
+			log.Printf("[Chain] Ancestor is current tip, extending chain from %d to %d", ancestorHeight, newTip.GetHeight())
+			current := newTip
+			var newBlocks []*Block
+			for current.GetHeight() > ancestorHeight {
+				newBlocks = append([]*Block{current}, newBlocks...)
+				parentHashHex := hex.EncodeToString(current.Header.PrevHash)
+				parent, exists := c.blocksByHash[parentHashHex]
+				if !exists {
+					return errors.New("parent block not found during chain extension")
+				}
+				current = parent
+			}
+			for _, block := range newBlocks {
+				c.blocks = append(c.blocks, block)
+				c.blocksByHash[hex.EncodeToString(block.Hash)] = block
+			}
+			if err := c.recomputeStateLocked(); err != nil {
+				return fmt.Errorf("recompute state after chain extension: %w", err)
+			}
+			c.reindexAllTxsLocked()
+			c.reindexAllAddressTxsLocked()
+			c.bestTipHash = hex.EncodeToString(newTip.Hash)
+			c.canonicalWork = big.NewInt(0)
+			for _, block := range c.blocks {
+				work := WorkForDifficultyBits(block.Header.DifficultyBits)
+				c.canonicalWork.Add(c.canonicalWork, work)
+				block.TotalWork = c.canonicalWork.String()
+			}
+			if err := c.store.RewriteCanonical(c.blocks); err != nil {
+				return fmt.Errorf("rewrite canonical after extension: %w", err)
+			}
+			if c.mempool != nil {
+				var allTxIDs []string
+				for _, block := range newBlocks {
+					if len(block.Transactions) > 0 {
+						txids := c.extractTransactionIDs(block.Transactions)
+						allTxIDs = append(allTxIDs, txids...)
+					}
+				}
+				if len(allTxIDs) > 0 {
+					c.mempool.RemoveMany(allTxIDs)
+					log.Printf("[Chain] Removed %d transactions from mempool after chain extension", len(allTxIDs))
+				}
+			}
+			log.Printf("Chain extension complete: new height=%d, new tip=%s",
+				c.blocks[len(c.blocks)-1].GetHeight(), c.bestTipHash)
+			return nil
+		}
 	}
 
 	newChain := []*Block{ancestor}
@@ -2624,11 +2623,22 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 	if _, exists := c.blocksByHash[hashHex]; exists {
 		// Block already indexed - check if it's on canonical chain
 		expectedHeight := uint64(len(c.blocks))
-		if block.GetHeight() < expectedHeight {
-			canonicalBlock := c.blocks[block.GetHeight()]
-			if canonicalBlock != nil && hex.EncodeToString(canonicalBlock.Hash) == hashHex {
-				log.Printf("[Chain] Block %d already on canonical chain, skipping", block.GetHeight())
-				return false, nil
+		if block.GetHeight() <= expectedHeight {
+			if block.GetHeight() < expectedHeight {
+				canonicalBlock := c.blocks[block.GetHeight()]
+				if canonicalBlock != nil && hex.EncodeToString(canonicalBlock.Hash) == hashHex {
+					log.Printf("[Chain] Block %d already on canonical chain, skipping", block.GetHeight())
+					return false, nil
+				}
+			} else {
+				// Block height equals expected height - check if it's the current tip
+				if expectedHeight > 0 {
+					currentTip := c.blocks[expectedHeight-1]
+					if currentTip != nil && hex.EncodeToString(currentTip.Hash) == hashHex {
+						log.Printf("[Chain] Block %d is current tip, skipping duplicate", block.GetHeight())
+						return false, nil
+					}
+				}
 			}
 		}
 		// Block exists but not on canonical chain - likely orphan or fork
@@ -2757,7 +2767,7 @@ func (c *Chain) requestMissingParentAsync(block *Block) {
 		return
 	}
 
-	log.Printf("[Chain] requestMissingParentAsync: block %d parentHash=%x height=%d", 
+	log.Printf("[Chain] requestMissingParentAsync: block %d parentHash=%x height=%d",
 		block.GetHeight(), block.Header.PrevHash, block.GetHeight()-1)
 
 	// Request parent block asynchronously to avoid blocking
@@ -2853,13 +2863,32 @@ func (c *Chain) tryProcessOrphansLocked() (bool, error) {
 // isParentInForkBlocksLocked checks if a parent hash exists in fork blocks
 // Caller must hold c.mu lock
 func (c *Chain) isParentInForkBlocksLocked(parentHashHex string) bool {
-	for _, forkBlocks := range c.forkBlocks {
+	parentBlock, exists := c.blocksByHash[parentHashHex]
+	if !exists {
+		return false
+	}
+
+	if len(c.blocks) > 0 {
+		parentHeight := parentBlock.GetHeight()
+		if parentHeight < uint64(len(c.blocks)) {
+			canonicalBlock := c.blocks[parentHeight]
+			if canonicalBlock != nil && hex.EncodeToString(canonicalBlock.Hash) == parentHashHex {
+				return false
+			}
+		}
+	}
+
+	for height, forkBlocks := range c.forkBlocks {
+		if height < uint64(len(c.blocks)) {
+			continue
+		}
 		for _, forkBlock := range forkBlocks {
 			if hex.EncodeToString(forkBlock.Hash) == parentHashHex {
 				return true
 			}
 		}
 	}
+
 	return false
 }
 
@@ -3851,14 +3880,14 @@ func (c *Chain) RollbackToHeight(height uint64) error {
 	}
 
 	log.Printf("[Chain] Rolled back to height %d and rebuilt state", height)
-	
+
 	// CRITICAL: Notify sync loop to re-evaluate chain state after rollback
 	// This prevents the node from getting stuck on outdated chain after fork resolution
 	if c.syncNotifier != nil {
 		tip := c.blocks[len(c.blocks)-1]
 		go c.syncNotifier.OnChainReorganized(tip)
 	}
-	
+
 	return nil
 }
 

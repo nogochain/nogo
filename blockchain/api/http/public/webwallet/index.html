@@ -2430,7 +2430,8 @@ body {
                     fee = 45000; // Fallback to safe default (MinFee + 350*MinFeePerByte)
                 }
                 
-                console.log('💰 [DEBUG] Final fee value before signing:', fee);
+                // Production: Remove debug logging
+                // console.log('💰 [DEBUG] Final fee value before signing:', fee);
                 
                 // Calculate next nonce considering pending transactions in mempool
                 // First check mempool for pending transactions
@@ -2439,24 +2440,27 @@ body {
                     const mempoolData = await mempoolResp.json();
                     const pendingTxs = mempoolData.txs || [];
                     
-                    console.log(`[Nonce Debug] Mempool size: ${pendingTxs.length}`);
+                    // Production: Remove debug logging
+                    // console.log(`[Nonce Debug] Mempool size: ${pendingTxs.length}`);
                     
                     // Find pending txs from this address
                     const pendingFromThisAddress = pendingTxs.filter(tx => 
                         tx.fromAddr === currentWallet.address
                     );
                     
-                    console.log(`[Nonce Debug] Pending txs from this address: ${pendingFromThisAddress.length}`);
-                    pendingFromThisAddress.forEach(tx => {
-                        console.log(`[Nonce Debug]   Pending tx: nonce=${tx.nonce}, txId=${tx.txId}`);
-                    });
+                    // Production: Remove debug logging
+                    // console.log(`[Nonce Debug] Pending txs from this address: ${pendingFromThisAddress.length}`);
+                    // pendingFromThisAddress.forEach(tx => {
+                    //     console.log(`[Nonce Debug]   Pending tx: nonce=${tx.nonce}, txId=${tx.txId}`);
+                    // });
                     
                     if (pendingFromThisAddress.length > 0) {
                         // Find the highest nonce in pending transactions
                         const maxPendingNonce = Math.max(...pendingFromThisAddress.map(tx => tx.nonce));
                         // Next transaction should use nonce = maxPendingNonce + 1
                         nonce = maxPendingNonce + 1;
-                        console.log(`[Nonce Debug] Using max pending nonce + 1: ${nonce}`);
+                        // Production: Remove debug logging
+                        // console.log(`[Nonce Debug] Using max pending nonce + 1: ${nonce}`);
                         
                         // Check if we're replacing a specific nonce
                         const pendingTx = pendingFromThisAddress.find(tx => tx.nonce === nonce - 1);

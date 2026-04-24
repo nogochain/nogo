@@ -436,13 +436,11 @@ func (m *Miner) Stop() error {
 func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 	if m.syncLoop != nil && m.syncLoop.IsSyncing() {
 		logf(colorBrightYellow, "⏸️ ", "Mining tick: sync in progress, waiting...")
-		time.Sleep(time.Second)
 		return
 	}
 
 	if m.syncLoop != nil && !m.syncLoop.IsSynced() {
 		logf(colorBrightYellow, "⏸️ ", "Mining tick: not synced, waiting...")
-		time.Sleep(time.Second)
 		return
 	}
 

@@ -401,6 +401,9 @@ func (h *SyncReactorHandler) OnStatus(peerID string, height uint64, work string,
 	isSynced := h.syncLoop.IsSynced()
 	log.Printf("[SyncHandler] sync state: isSyncing=%v, isSynced=%v", isSyncing, isSynced)
 
+	// Only trigger sync check if not already syncing or synced
+	// This prevents redundant sync triggers while allowing re-trigger after sync completes
+	// Note: isSyncing will be properly reset after sync completes (fixed earlier)
 	if !isSyncing && !isSynced {
 		// Check if peer has higher height than local chain
 		if h.handlers != nil && h.handlers.chain != nil {

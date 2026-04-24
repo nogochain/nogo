@@ -68,6 +68,20 @@ func DefaultConfig() *Config {
 	}
 }
 
+// LogLevel represents the logging level
+type LogLevel int
+
+const (
+	LogLevelDebug LogLevel = iota
+	LogLevelInfo
+	LogLevelWarn
+	LogLevelError
+)
+
+// GlobalLogLevel controls the minimum log level to display
+// Production environments should set this to LogLevelInfo or higher
+var GlobalLogLevel = LogLevelInfo
+
 type Logger interface {
 	Info(msg string, args ...interface{})
 	Debug(msg string, args ...interface{})
@@ -78,19 +92,27 @@ type Logger interface {
 type defaultLogger struct{}
 
 func (l *defaultLogger) Info(msg string, args ...interface{}) {
-	println(formatLog("INFO", msg, args...))
+	if GlobalLogLevel <= LogLevelInfo {
+		println(formatLog("INFO", msg, args...))
+	}
 }
 
 func (l *defaultLogger) Debug(msg string, args ...interface{}) {
-	println(formatLog("DEBUG", msg, args...))
+	if GlobalLogLevel <= LogLevelDebug {
+		println(formatLog("DEBUG", msg, args...))
+	}
 }
 
 func (l *defaultLogger) Error(msg string, args ...interface{}) {
-	println(formatLog("ERROR", msg, args...))
+	if GlobalLogLevel <= LogLevelError {
+		println(formatLog("ERROR", msg, args...))
+	}
 }
 
 func (l *defaultLogger) Warn(msg string, args ...interface{}) {
-	println(formatLog("WARN", msg, args...))
+	if GlobalLogLevel <= LogLevelWarn {
+		println(formatLog("WARN", msg, args...))
+	}
 }
 
 func formatLog(level, msg string, args ...interface{}) string {

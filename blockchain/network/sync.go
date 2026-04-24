@@ -114,30 +114,30 @@ type peerStateManager struct {
 
 // SyncLoop manages blockchain synchronization with peers
 type SyncLoop struct {
-	mu             sync.RWMutex
-	pm             PeerAPI
-	bc             BlockchainInterface
-	miner          Miner
-	metrics        *metrics.Metrics
-	orphanPool     *utils.OrphanPool
-	validator      *consensus.BlockValidator
-	scorer         *AdvancedPeerScorer
-	retryExec      *RetryExecutor
-	downloader     *BlockDownloader
-	forkDetector   *core.ForkDetector
-	forkResolver   *ForkResolutionEngine
-	peerStates     *peerStateManager
-	fastSyncEngine *FastSyncEngine
-	syncConfig     config.SyncConfig
-	securityMgr    *security.SecurityManager
-	progressStore  *SyncProgressStore
-	isSyncing      bool
-	syncProgress   float64
-	syncRoundInProgress bool  // CRITICAL: Prevent concurrent SyncWithPeer execution
-	ctx            context.Context
-	cancel         context.CancelFunc
-	syncStartTime  time.Time
-	lastUpdateTime time.Time
+	mu                  sync.RWMutex
+	pm                  PeerAPI
+	bc                  BlockchainInterface
+	miner               Miner
+	metrics             *metrics.Metrics
+	orphanPool          *utils.OrphanPool
+	validator           *consensus.BlockValidator
+	scorer              *AdvancedPeerScorer
+	retryExec           *RetryExecutor
+	downloader          *BlockDownloader
+	forkDetector        *core.ForkDetector
+	forkResolver        *ForkResolutionEngine
+	peerStates          *peerStateManager
+	fastSyncEngine      *FastSyncEngine
+	syncConfig          config.SyncConfig
+	securityMgr         *security.SecurityManager
+	progressStore       *SyncProgressStore
+	isSyncing           bool
+	syncProgress        float64
+	syncRoundInProgress bool // CRITICAL: Prevent concurrent SyncWithPeer execution
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	syncStartTime       time.Time
+	lastUpdateTime      time.Time
 }
 
 // NewSyncLoop creates a new sync loop instance with advanced peer scoring and retry
@@ -321,9 +321,9 @@ func (s *SyncLoop) OnChainReorganized(newTip *core.Block) {
 	if s == nil || newTip == nil {
 		return
 	}
-	
+
 	log.Printf("[Sync] Chain reorganized to height %d, triggering sync re-evaluation", newTip.GetHeight())
-	
+
 	// Trigger sync check to re-evaluate chain state
 	// This will fetch blocks from peers if they have longer chain
 	s.TriggerSyncCheck()
@@ -389,25 +389,25 @@ func (s *SyncLoop) TriggerBlockEvent(block *core.Block) {
 	if block == nil {
 		return
 	}
-	
+
 	localTip := s.bc.LatestBlock()
 	if localTip == nil {
 		return
 	}
-	
+
 	localHeight := localTip.GetHeight()
 	blockHeight := block.GetHeight()
-	
+
 	// Case 1: Received block at same height as local tip - potential fork
 	if blockHeight == localHeight {
 		if !bytes.Equal(block.Hash, localTip.Hash) {
 			log.Printf("[Sync] Fork detected via P2P broadcast at height %d! Local: %x, Remote: %x",
 				blockHeight, localTip.Hash[:8], block.Hash[:8])
-			
+
 			// Compare work to decide which chain to follow
 			localWork := s.bc.CanonicalWork()
 			remoteWork, ok := core.StringToWork(block.TotalWork)
-			
+
 			if ok && remoteWork != nil && remoteWork.Cmp(localWork) > 0 {
 				log.Printf("[Sync] Remote chain has more work, triggering sync")
 				s.TriggerSyncCheck()
@@ -418,7 +418,7 @@ func (s *SyncLoop) TriggerBlockEvent(block *core.Block) {
 		// If hashes match, this is our own block - no action needed
 		return
 	}
-	
+
 	// Case 2: Received block at higher height - we're behind
 	if blockHeight > localHeight {
 		log.Printf("[Sync] P2P broadcast: peer has higher block %d (local=%d), triggering sync",
@@ -426,7 +426,7 @@ func (s *SyncLoop) TriggerBlockEvent(block *core.Block) {
 		s.TriggerSyncCheck()
 		return
 	}
-	
+
 	// Case 3: Received block at lower height - historical block, ignore
 	// This is normal during sync when peers rebroadcast old blocks
 }
@@ -752,7 +752,7 @@ func (s *SyncLoop) performSyncStep() {
 	// CRITICAL: Do NOT set isSyncing=true here!
 	// isSyncing should only be true when actively syncing, not during checks
 	// Mining is blocked by IsSynced() checking syncProgress and peer heights
-	
+
 	if s.pm == nil {
 		log.Printf("[Sync] performSyncStep: peer manager is nil")
 		s.mu.Lock()
@@ -766,7 +766,7 @@ func (s *SyncLoop) performSyncStep() {
 	// 1. After sync completes, we MUST continue checking peer heights to ensure we're on longest chain
 	// 2. If peers grow during the "skip window", we might mine on outdated chain
 	// 3. The mining loop already prevents mining during active sync via IsSynced()
-	// 
+	//
 	// Correct behavior:
 	// - Always check peer heights in performSyncStep
 	// - If peers have longer chain, set isSyncing=true and sync
@@ -872,16 +872,19 @@ func (s *SyncLoop) performSyncStep() {
 	if maxPeerHeight > currentHeight {
 		shouldSync = true
 		syncReason = fmt.Sprintf("peer has higher height (%d > %d)", maxPeerHeight, currentHeight)
-	} else if bestPeerWork.Cmp(localWork) > 0 {
+	} else if maxPeerHeight == currentHeight && bestPeerWork.Cmp(localWork) > 0 {
 		shouldSync = true
-		syncReason = fmt.Sprintf("peer has more work (%s > %s)", bestPeerWork.String(), localWork.String())
+		syncReason = fmt.Sprintf("peer has same height but more work (%s > %s)", bestPeerWork.String(), localWork.String())
+	} else if maxPeerHeight < currentHeight {
+		// Peer has lower height - we are ahead, no sync needed
+		log.Printf("[Sync] Peer has lower height (%d < %d) - no sync needed, local chain is longer", maxPeerHeight, currentHeight)
 	}
 
 	if !shouldSync {
 		s.mu.Lock()
 		s.syncProgress = 1.0
 		s.isSyncing = false
-		s.syncRoundInProgress = false  // CRITICAL: Reset sync round flag
+		s.syncRoundInProgress = false // CRITICAL: Reset sync round flag
 		s.lastUpdateTime = time.Now()
 		s.mu.Unlock()
 		log.Printf("[Sync] Chain is synced (height=%d, work=%s)", currentHeight, localWork.String())
@@ -917,30 +920,34 @@ func (s *SyncLoop) performSyncStep() {
 		// This prevents deadlocks where SyncWithPeer waits for peer response while blocking
 		// the very goroutines that process peer responses
 		go func() {
-			if err := s.SyncWithPeer(s.ctx, bestPeer); err != nil {
-				log.Printf("[Sync] SyncWithPeer failed: %v", err)
-				// CRITICAL: Reset syncing state on failure to allow retry
-				s.mu.Lock()
-				s.isSyncing = false
-				s.syncRoundInProgress = false
-				s.mu.Unlock()
+			syncResult := s.SyncWithPeer(s.ctx, bestPeer)
+			if syncResult != nil {
+				log.Printf("[Sync] SyncWithPeer failed: %v", syncResult)
 			} else {
 				log.Printf("[Sync] SyncWithPeer completed successfully")
-				// CRITICAL: Do NOT reset isSyncing here!
-				// Keep isSyncing=true until performSyncStep determines no more sync is needed
-				// with mining loop. performSyncStep will set these after verifying
-				// no more sync is needed.
 			}
+
+			// CRITICAL: Reset sync round flag before re-evaluating sync state
+			// This allows performSyncStep() to actually execute and properly
+			// update isSyncing and syncProgress states based on current peer heights.
+			// Without this reset, performSyncStep() would return early at the
+			// syncRoundInProgress check, leaving the node stuck.
+			s.mu.Lock()
+			s.syncRoundInProgress = false
+			// Always reset isSyncing to allow the sync state machine to re-evaluate
+			// This prevents the stuck state where isSyncing=true blocks all sync attempts
+			s.isSyncing = false
+			s.mu.Unlock()
 
 			// CRITICAL: After sync completes, immediately re-check sync state
 			// Don't wait for next ticker - remote may have grown during sync
 			// This prevents falling behind by 1-2 blocks
 			log.Printf("[Sync] Immediately re-evaluating sync state after completion")
-			
+
 			// CRITICAL: Small delay to allow peer state updates to propagate
 			// Without this, we may re-check before peer info is updated
 			time.Sleep(500 * time.Millisecond)
-			
+
 			s.performSyncStep() // Recursive call to check immediately
 		}()
 		return
@@ -1057,7 +1064,7 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 	// CRITICAL: Signal verification start to pause mining while processing block
 	if s.miner != nil {
 		s.miner.StartVerification()
-		defer s.miner.EndVerification()  // Ensure mining resumes after processing
+		defer s.miner.EndVerification() // Ensure mining resumes after processing
 	}
 
 	// Fast validation first (basic structure check)
@@ -1247,9 +1254,23 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 
 	if !accepted {
 		log.Printf("[Sync] Block %d was not accepted to chain (stored as orphan or fork)", block.GetHeight())
-		// CRITICAL: Do NOT return error here!
-		// Block may have been stored as orphan, which is normal during sync.
-		// We should try to process orphans to see if we can extend the chain.
+
+		// CRITICAL: Check if peer has more work - if so, we should trigger reorg
+		// This handles the "same height but more work" fork scenario
+		localWork := s.bc.CanonicalWork()
+		remoteWork, ok := core.StringToWork(block.TotalWork)
+
+		if ok && localWork != nil && remoteWork.Cmp(localWork) > 0 {
+			log.Printf("[Sync] Peer chain has more work (remote=%s > local=%s), triggering reorg",
+				remoteWork.String(), localWork.String())
+
+			// CRITICAL: Return error to break the infinite download loop
+			// Include "chain discontinuity" so SyncWithPeer can detect and handle
+			return fmt.Errorf("chain discontinuity: reorg needed: peer has more work (remote=%s > local=%s)",
+				remoteWork.String(), localWork.String())
+		}
+
+		// No reorg needed, just process orphans
 		s.processOrphans(ctx)
 		return nil
 	}
@@ -1270,15 +1291,26 @@ func (s *SyncLoop) processOrphans(ctx context.Context) {
 	}
 
 	// Process orphans in a loop until no more can be added
+	// CRITICAL: Limit iterations to prevent infinite loops in pathological fork scenarios
 	addedAny := true
-	for addedAny {
+	maxIterations := 100 // Safety limit
+	iterations := 0
+
+	for addedAny && iterations < maxIterations {
+		iterations++
 		addedAny = false
 		tipHash := hex.EncodeToString(localTip.Hash)
 		orphans := s.orphanPool.GetOrphansByParent(tipHash)
 
+		if len(orphans) == 0 {
+			break
+		}
+
+		log.Printf("[Sync] processOrphans iteration %d: found %d orphans at tip %s", iterations, len(orphans), tipHash[:16])
+
 		for _, orphan := range orphans {
 			if err := s.validator.ValidateBlockFast(orphan); err != nil {
-				log.Printf("[Sync] Orphan block %d validation failed: %v", orphan.GetHeight(), err)
+				log.Printf("[Sync] Orphan block %d validation failed: %v, removing from pool", orphan.GetHeight(), err)
 				s.orphanPool.RemoveOrphan(hex.EncodeToString(orphan.Hash))
 				continue
 			}
@@ -1289,7 +1321,7 @@ func (s *SyncLoop) processOrphans(ctx context.Context) {
 				continue
 			}
 			if !accepted {
-				log.Printf("[Sync] Orphan block %d not accepted by chain", orphan.GetHeight())
+				log.Printf("[Sync] Orphan block %d not accepted by chain, keeping for next iteration", orphan.GetHeight())
 				continue
 			}
 
@@ -1303,8 +1335,12 @@ func (s *SyncLoop) processOrphans(ctx context.Context) {
 		}
 	}
 
-	log.Printf("[Sync] processOrphans completed, current height: %d, orphan pool size: %d",
-		localTip.GetHeight(), s.orphanPool.Size())
+	if iterations >= maxIterations {
+		log.Printf("[Sync] processOrphans: reached max iterations (%d), some orphans may remain unprocessed", maxIterations)
+	}
+
+	log.Printf("[Sync] processOrphans completed after %d iterations, current height: %d, orphan pool size: %d",
+		iterations, localTip.GetHeight(), s.orphanPool.Size())
 }
 
 // SyncWithPeer performs initial sync with a peer using scoring and retry
@@ -1352,9 +1388,14 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		if info.Height > currentHeight {
 			shouldSync = true
 			syncReason = fmt.Sprintf("peer has higher height (%d > %d)", info.Height, currentHeight)
-		} else if peerWork.Cmp(localWork) > 0 {
+		} else if info.Height == currentHeight && peerWork.Cmp(localWork) > 0 {
 			shouldSync = true
-			syncReason = fmt.Sprintf("peer has more work (%s > %s)", peerWork.String(), localWork.String())
+			syncReason = fmt.Sprintf("peer has same height but more work (%s > %s)", peerWork.String(), localWork.String())
+		} else if info.Height < currentHeight {
+			// CRITICAL: Peer has lower height - we should NOT sync to this peer
+			// This is a case where peer is behind us, not ahead
+			// Log warning but do not sync - our chain is longer
+			log.Printf("[Sync] Peer has lower height (%d < %d) - NOT syncing, local chain is longer", info.Height, currentHeight)
 		}
 
 		if !shouldSync {
@@ -1389,12 +1430,19 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		}
 
 		// Sync headers first with retry
+		// CRITICAL: Distinguish between two scenarios:
+		// 1. Peer has higher height - normal sync (fetch headers from currentHeight+1)
+		// 2. Same height but peer has more work - download peer's tip and trigger reorg via AddBlock
+
 		headersToFetch := info.Height - currentHeight
+		startHeight := currentHeight + 1 // Default: fetch from next height
+
 		if headersToFetch == 0 {
-			// No headers to fetch (peer at same height)
-			// This can happen when both nodes have genesis block only
-			log.Printf("[Sync] No headers to fetch (peer height=%d, local height=%d)", info.Height, currentHeight)
-			continue // Continue loop to check if remote has grown
+			// Peer at same height - this is a fork scenario
+			// We need to download peer's tip block and let AddBlock trigger reorg
+			log.Printf("[Sync] Peer at same height with more work - downloading peer's tip block to trigger reorg")
+			headersToFetch = 1
+			startHeight = info.Height // Download peer's tip block
 		}
 		maxHeadersFetch := s.syncConfig.MaxHeadersFetch
 		if maxHeadersFetch <= 0 {
@@ -1403,8 +1451,8 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		if headersToFetch > maxHeadersFetch {
 			headersToFetch = maxHeadersFetch
 		}
-		log.Printf("[Sync] Fetching %d headers from height %d (currentHeight=%d)", headersToFetch, currentHeight+1, currentHeight)
-		headers, err := s.fetchHeadersWithRetry(ctx, peer, currentHeight+1, int(headersToFetch))
+		log.Printf("[Sync] Fetching %d headers from height %d (currentHeight=%d)", headersToFetch, startHeight, currentHeight)
+		headers, err := s.fetchHeadersWithRetry(ctx, peer, startHeight, int(headersToFetch))
 		if err != nil {
 			log.Printf("[Sync] Failed to fetch headers: %v", err)
 
@@ -1434,7 +1482,7 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 		syncStartHeight := currentHeight
 		headerChainBroken := false
 		skipHeaderValidation := false
-		
+
 		// Check if any header has empty MerkleRoot - if so, skip header validation
 		// because we cannot compute correct header hash without MerkleRoot
 		for _, header := range headers {
@@ -1444,7 +1492,7 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 				break
 			}
 		}
-		
+
 		log.Printf("[Sync] Starting header validation loop for %d headers, currentHeight=%d, skipValidation=%v", len(headers), currentHeight, skipHeaderValidation)
 		for i, header := range headers {
 			expectedHeight := currentHeight + 1 + uint64(i)
@@ -1557,8 +1605,27 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 
 		// Download blocks in batches using BlockDownloader for efficient parallel download
 		// BatchDownloadBlocks handles concurrent downloads with automatic retry and validation
-		syncFromHeight := syncStartHeight + 1
-		blocksToFetch := info.Height - syncStartHeight
+
+		blocksToFetch := uint64(0)
+		syncFromHeight := uint64(0)
+
+		if info.Height > syncStartHeight {
+			// Normal sync: download blocks from syncStartHeight+1 to info.Height
+			syncFromHeight = syncStartHeight + 1
+			blocksToFetch = info.Height - syncStartHeight
+		} else if info.Height == syncStartHeight {
+			// Same height fork: need to fetch peer's tip block to trigger reorg decision
+			// Download from info.Height (peer's tip), 1 block
+			syncFromHeight = info.Height
+			blocksToFetch = 1
+			log.Printf("[Sync] Same height fork: downloading peer's tip block at height %d for reorg", syncFromHeight)
+		} else {
+			// info.Height < syncStartHeight: peer is behind, no sync needed
+			log.Printf("[Sync] Peer height (%d) < syncStartHeight (%d) - peer behind, no sync needed",
+				info.Height, syncStartHeight)
+			continue
+		}
+
 		if blocksToFetch == 0 {
 			log.Printf("[Sync] No blocks to fetch, already synced")
 			continue // Continue loop to check if remote has grown
@@ -1592,7 +1659,7 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 			// Let handleNewBlock and core.Chain.AddBlock handle fork detection
 			// Pre-checking continuity breaks fork resolution - the whole point of sync
 			// is to fetch blocks from peers, which may be on a different (better) fork
-			
+
 			// Add block to chain via handleNewBlock for proper validation and fork handling
 			err := s.handleNewBlock(ctx, block)
 			if err != nil {
@@ -1617,19 +1684,19 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 
 		if err != nil {
 			log.Printf("[Sync] Batch download and storage failed: %v", err)
-			
+
 			// CRITICAL: Check if this is a chain discontinuity error (fork detected)
 			if strings.Contains(err.Error(), "chain discontinuity") || strings.Contains(err.Error(), "different fork") {
 				log.Printf("[Sync] Chain discontinuity detected - this indicates a fork!")
 				log.Printf("[Sync] Aborting sync - fork resolution will handle this via P2P broadcast mechanism")
-				
+
 				// CRITICAL: Abort sync and reset isSyncing to allow mining
 				// The fork will be resolved via TriggerBlockEvent when peer broadcasts their chain
 				s.mu.Lock()
 				s.isSyncing = false
 				s.syncProgress = 1.0
 				s.mu.Unlock()
-				
+
 				// CRITICAL: Return nil to prevent infinite retry loop
 				// This is intentional - we're aborting sync because we're on different forks
 				// The fork will be resolved naturally via P2P broadcast mechanism
@@ -2350,6 +2417,12 @@ func (s *SyncLoop) findCommonAncestor(currentTip, targetBlock *core.Block) (*cor
 			break
 		}
 		current = parent
+	}
+
+	// CRITICAL: Check if we reached max iterations without finding common ancestor
+	if iterations >= maxIterations {
+		log.Printf("[Sync] findCommonAncestor: max iterations (%d) reached, current tip height=%d",
+			maxIterations, currentTip.GetHeight())
 	}
 
 	// Find common ancestor by walking target chain backwards
