@@ -536,7 +536,19 @@ func (bk *blockKeeper) startSync() bool {
 
 	blockHeight := bk.chain.LatestBlock().GetHeight()
 	peer = bk.peers.bestPeer(SFFullNode)
-	if peer != nil && peer.Height() > blockHeight {
+
+	if peer == nil {
+		log.Printf("[BlockKeeper] startSync: no peer available (localHeight=%d)", blockHeight)
+		return false
+	}
+
+	peerHeight, peerWork, peerTipHash, chainInfoErr := bk.peers.GetPeerChainInfo(peer.ID())
+	if chainInfoErr != nil {
+		log.Printf("[BlockKeeper] startSync: GetPeerChainInfo for %s failed: %v (will use cached height=%d)",
+			peer.ID(), chainInfoErr, peer.Height())
+	}
+
+	if peer.Height() > blockHeight {
 		bk.syncPeer = peer
 		targetHeight := blockHeight + maxBlockPerMsg
 		if targetHeight > peer.Height() {
@@ -557,30 +569,104 @@ func (bk *blockKeeper) startSync() bool {
 		return true
 	}
 
-	if peer != nil && peer.Height() <= blockHeight {
-		if bk.detectAndHandleFork(peer) {
+	if peer.Height() <= blockHeight {
+		log.Printf("[BlockKeeper] startSync: peer %s height(%d) <= localHeight(%d), checking for fork...",
+			peer.ID(), peer.Height(), blockHeight)
+		if bk.detectAndHandleForkWithInfo(peer, peerHeight, peerWork, peerTipHash, chainInfoErr) {
 			return true
 		}
 	}
 
-	log.Printf("[BlockKeeper] startSync: No sync needed - no suitable peer found or already synced (localHeight=%d)", blockHeight)
+	log.Printf("[BlockKeeper] startSync: No sync needed (localHeight=%d, peer=%s, peerHeight=%d)",
+		blockHeight, peer.ID(), peer.Height())
 	return false
 }
 
 func (bk *blockKeeper) detectAndHandleFork(peer PeerInterface) bool {
 	localBlock := bk.chain.LatestBlock()
 	if localBlock == nil {
+		log.Printf("[BlockKeeper] ForkDetection: skipped - local block is nil")
 		return false
 	}
 
 	peerHeight, peerWork, peerTipHash, err := bk.peers.GetPeerChainInfo(peer.ID())
 	if err != nil {
+		log.Printf("[BlockKeeper] ForkDetection: skipped - GetPeerChainInfo failed for %s: %v", peer.ID(), err)
 		return false
 	}
 
 	localTipHash := hex.EncodeToString(localBlock.Hash)
 
 	if localTipHash == peerTipHash {
+		log.Printf("[BlockKeeper] ForkDetection: same chain (tip=%s), no fork", localTipHash[:16])
+		return false
+	}
+
+	log.Printf("[BlockKeeper] ForkDetection: local tip=%s (height=%d) vs peer %s tip=%s (height=%d, work=%s)",
+		localTipHash[:16], localBlock.GetHeight(), peer.ID(), peerTipHash[:16], peerHeight, peerWork.String())
+
+	localWork := big.NewInt(0)
+	if cp, ok := bk.chain.(interface{ CanonicalWork() *big.Int }); ok {
+		localWork = cp.CanonicalWork()
+	}
+
+	workCmp := peerWork.Cmp(localWork)
+
+	if workCmp > 0 {
+		log.Printf("[BlockKeeper] ForkDetection: PEER HAS HEAVIER CHAIN! localWork=%s < peerWork=%s, triggering reorg",
+			localWork.String(), peerWork.String())
+
+		bk.rollbackForReorg(peerHeight, localBlock.GetHeight(), peer.ID())
+		return true
+	}
+
+	if workCmp == 0 {
+		log.Printf("[BlockKeeper] ForkDetection: WORK TIE (%s), comparing tip hashes as tiebreaker", localWork.String())
+
+		if strings.Compare(peerTipHash, localTipHash) < 0 {
+			log.Printf("[BlockKeeper] ForkDetection: PEER WINS TIEBREAKER! peer tip=%s < local tip=%s, triggering reorg",
+				peerTipHash[:16], localTipHash[:16])
+
+			bk.rollbackForReorg(peerHeight, localBlock.GetHeight(), peer.ID())
+			return true
+		}
+
+		log.Printf("[BlockKeeper] ForkDetection: LOCAL WINS TIEBREAKER or hash equal, no reorg needed")
+		return false
+	}
+
+	log.Printf("[BlockKeeper] ForkDetection: tips differ but local chain is heavier, no reorg needed")
+	return false
+}
+
+func (bk *blockKeeper) detectAndHandleForkWithInfo(peer PeerInterface, peerHeight uint64, peerWork *big.Int, peerTipHash string, chainInfoErr error) bool {
+	localBlock := bk.chain.LatestBlock()
+	if localBlock == nil {
+		log.Printf("[BlockKeeper] ForkDetection: skipped - local block is nil")
+		return false
+	}
+
+	if chainInfoErr != nil {
+		log.Printf("[BlockKeeper] ForkDetection: using cached height=%d (ChainInfo query failed: %v)", peer.Height(), chainInfoErr)
+		peerHeight = peer.Height()
+		peerWork = big.NewInt(0)
+		peerTipHash = ""
+	}
+
+	localTipHash := hex.EncodeToString(localBlock.Hash)
+
+	if peerTipHash != "" && localTipHash == peerTipHash {
+		log.Printf("[BlockKeeper] ForkDetection: same chain (tip=%s), no fork", localTipHash[:16])
+		return false
+	}
+
+	if peerTipHash == "" {
+		log.Printf("[BlockKeeper] ForkDetection: no tip hash available (query failed), checking if heights differ")
+		if peerHeight == localBlock.GetHeight() {
+			log.Printf("[BlockKeeper] ForkDetection: same height (%d) but unknown tips, assuming synced", peerHeight)
+			return false
+		}
+		log.Printf("[BlockKeeper] ForkDetection: height mismatch (local=%d, peer=%d) without tip hash, cannot determine fork direction", localBlock.GetHeight(), peerHeight)
 		return false
 	}
 
