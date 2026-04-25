@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/config"
@@ -591,34 +592,57 @@ func (bk *blockKeeper) detectAndHandleFork(peer PeerInterface) bool {
 		localWork = cp.CanonicalWork()
 	}
 
-	if peerWork.Cmp(localWork) > 0 {
+	workCmp := peerWork.Cmp(localWork)
+
+	if workCmp > 0 {
 		log.Printf("[BlockKeeper] ForkDetection: PEER HAS HEAVIER CHAIN! localWork=%s < peerWork=%s, triggering reorg",
 			localWork.String(), peerWork.String())
 
-		rollbackHeight := uint64(0)
-		if peerHeight > 0 {
-			rollbackHeight = peerHeight
-		}
-		if rollbackHeight >= localBlock.GetHeight() {
-			rollbackHeight = localBlock.GetHeight()
-			if rollbackHeight > 0 {
-				rollbackHeight--
-			}
+		bk.rollbackForReorg(peerHeight, localBlock.GetHeight(), peer.ID())
+		return true
+	}
+
+	if workCmp == 0 {
+		log.Printf("[BlockKeeper] ForkDetection: WORK TIE (%s), comparing tip hashes as tiebreaker", localWork.String())
+
+		if strings.Compare(peerTipHash, localTipHash) < 0 {
+			log.Printf("[BlockKeeper] ForkDetection: PEER WINS TIEBREAKER! peer tip=%s < local tip=%s, triggering reorg",
+				peerTipHash[:16], localTipHash[:16])
+
+			bk.rollbackForReorg(peerHeight, localBlock.GetHeight(), peer.ID())
+			return true
 		}
 
-		if chainProvider, ok := bk.chain.(interface {
-			RollbackToHeight(height uint64) error
-		}); ok {
-			if err := chainProvider.RollbackToHeight(rollbackHeight); err != nil {
-				log.Printf("[BlockKeeper] ForkDetection: RollbackToHeight(%d) failed: %v", rollbackHeight, err)
-				return false
-			}
-			log.Printf("[BlockKeeper] ForkDetection: Rolled back to height=%d, will re-sync from peer %s on next cycle", rollbackHeight, peer.ID())
-			return true
+		log.Printf("[BlockKeeper] ForkDetection: LOCAL WINS TIEBREAKER or hash equal, no reorg needed")
+		return false
+	}
+
+	log.Printf("[BlockKeeper] ForkDetection: tips differ but local chain is heavier, no reorg needed")
+	return false
+}
+
+func (bk *blockKeeper) rollbackForReorg(peerHeight, localHeight uint64, peerID string) bool {
+	rollbackHeight := uint64(0)
+	if peerHeight > 0 {
+		rollbackHeight = peerHeight
+	}
+	if rollbackHeight >= localHeight {
+		rollbackHeight = localHeight
+		if rollbackHeight > 0 {
+			rollbackHeight--
 		}
 	}
 
-	log.Printf("[BlockKeeper] ForkDetection: tips differ but local chain is heavier or equal, no reorg needed")
+	if chainProvider, ok := bk.chain.(interface {
+		RollbackToHeight(height uint64) error
+	}); ok {
+		if err := chainProvider.RollbackToHeight(rollbackHeight); err != nil {
+			log.Printf("[BlockKeeper] ForkDetection: RollbackToHeight(%d) failed: %v", rollbackHeight, err)
+			return false
+		}
+		log.Printf("[BlockKeeper] ForkDetection: Rolled back to height=%d, will re-sync from peer %s on next cycle", rollbackHeight, peerID)
+		return true
+	}
 	return false
 }
 
