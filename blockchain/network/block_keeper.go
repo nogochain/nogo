@@ -733,6 +733,18 @@ func (bk *blockKeeper) detectAndHandleForkWithInfo(peer PeerInterface, peerHeigh
 	}
 
 	workCmp := peerWork.Cmp(localWork)
+	heightDiff := int64(peerHeight) - int64(localBlock.GetHeight())
+
+	log.Printf("[BlockKeeper] ForkDetection: height diff=%d (peer=%d, local=%d), work cmp=%d (peer=%s, local=%s)",
+		heightDiff, peerHeight, localBlock.GetHeight(), workCmp, peerWork.String(), localWork.String())
+
+	heightAdvantageThreshold := uint64(6)
+
+	if heightDiff > 0 && uint64(heightDiff) >= heightAdvantageThreshold {
+		log.Printf("[BlockKeeper] ForkDetection: PEER HAS SIGNIFICANT HEIGHT ADVANTAGE (+%d blocks >= %d threshold), forcing reorg to longer chain",
+			heightDiff, heightAdvantageThreshold)
+		return bk.executeForkReorg(peer, peerTipHash, peerHeight, fmt.Sprintf("significant height advantage (+%d blocks)", heightDiff))
+	}
 
 	if workCmp > 0 {
 		log.Printf("[BlockKeeper] ForkDetection: PEER HAS HEAVIER CHAIN! localWork=%s < peerWork=%s",
