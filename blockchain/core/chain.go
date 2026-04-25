@@ -303,6 +303,8 @@ type Chain struct {
 	// Reorg protection - prevent template generation during reorg
 	reorgInProgress bool
 	reorgMu         sync.Mutex
+	lastReorgTime   time.Time
+	reorgCount      int
 
 	// Contract management
 	contractManager *ContractManager
@@ -315,6 +317,11 @@ type Chain struct {
 	// Sync notifier - called after chain reorganization to trigger sync check
 	// CRITICAL: Enables sync loop to re-evaluate chain state after fork rollback
 	syncNotifier SyncNotifier
+
+	// Fork resolved callback - called after rollback completes with new height and rolled back count
+	// CRITICAL: Triggers immediate re-sync via BlockKeeper.forkResolvedCh
+	// Thread-safety: callback is invoked under mutex lock, must not block
+	onForkResolved func(newHeight uint64, rolledBack uint64)
 }
 
 // ChainConfig holds chain configuration
@@ -354,6 +361,19 @@ func (c *Chain) SetSyncNotifier(notifier SyncNotifier) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.syncNotifier = notifier
+}
+
+// SetOnForkResolved sets the callback function to be called after fork rollback completes
+// Production-grade: triggers immediate re-sync via BlockKeeper.forkResolvedCh
+// CRITICAL: This callback must be non-blocking (use channel send with select+default)
+// Dependency injection: called during node initialization after BlockKeeper creation
+// Parameters:
+//   - newHeight: the chain height after rollback
+//   - rolledBack: number of blocks that were rolled back
+func (c *Chain) SetOnForkResolved(callback func(newHeight uint64, rolledBack uint64)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onForkResolved = callback
 }
 
 // SetOnBlockAdded sets the callback function to be called when a block is added
@@ -1714,7 +1734,10 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	}
 
 	c.blocks = c.blocks[:removeStart]
-	for _, block := range newChain[1:] {
+
+	newBlockCount := len(newChain) - 1
+	for i := 0; i < newBlockCount; i++ {
+		block := newChain[i]
 		c.blocks = append(c.blocks, block)
 		c.blocksByHash[hex.EncodeToString(block.Hash)] = block
 	}
@@ -1744,7 +1767,8 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	// Rationale: after reorg, transactions in new chain are confirmed and should be removed
 	if c.mempool != nil {
 		var allTxIDs []string
-		for _, block := range newChain[1:] {
+		for i := 0; i < newBlockCount; i++ {
+			block := newChain[i]
 			if len(block.Transactions) > 0 {
 				txids := c.extractTransactionIDs(block.Transactions)
 				allTxIDs = append(allTxIDs, txids...)
@@ -1758,6 +1782,44 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 
 	log.Printf("Chain reorganization complete: new height=%d, new tip=%s",
 		c.blocks[len(c.blocks)-1].GetHeight(), c.bestTipHash)
+
+	newHeight := c.blocks[len(c.blocks)-1].GetHeight()
+
+	if newHeight <= ancestorHeight {
+		log.Printf("[Chain] WARNING: Reorg did not advance chain! ancestor=%d, new=%d, expected>%d. This indicates a bug in reorganizeChainLocked.",
+			ancestorHeight, newHeight, ancestorHeight)
+	}
+
+	now := time.Now()
+	c.lastReorgTime = now
+	c.reorgCount++
+
+	if c.reorgCount > 5 {
+		timeSinceLastReorg := now.Sub(c.lastReorgTime)
+		if timeSinceLastReorg < 30*time.Second {
+			log.Printf("[Chain] WARNING: Rapid reorgs detected (%d in %v), possible fork loop", c.reorgCount, timeSinceLastReorg)
+		}
+	}
+
+	if c.forkBlocks != nil {
+		for forkHeight := range c.forkBlocks {
+			if forkHeight > newHeight {
+				delete(c.forkBlocks, forkHeight)
+			}
+		}
+	}
+
+	c.cleanOrphanPoolAboveHeight(newHeight)
+
+	if c.onForkResolved != nil {
+		log.Printf("[Chain] Reorganization complete: publishing ForkResolvedEvent height=%d", newHeight)
+		c.onForkResolved(newHeight, 0)
+	}
+
+	if c.syncNotifier != nil {
+		tip := c.blocks[len(c.blocks)-1]
+		go c.syncNotifier.OnChainReorganized(tip)
+	}
 
 	return nil
 }
@@ -1956,6 +2018,44 @@ func (c *Chain) CanonicalWork() *big.Int {
 // Concurrency safety: thread-safe read-only operation
 func (c *Chain) LatestBlock() *Block {
 	return c.GetTip()
+}
+
+func (c *Chain) BestBlockHeader() (*HeaderLocator, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if len(c.blocks) == 0 {
+		return nil, fmt.Errorf("chain is empty")
+	}
+
+	latest := c.blocks[len(c.blocks)-1]
+	if latest == nil {
+		return nil, fmt.Errorf("latest block is nil")
+	}
+
+	return &HeaderLocator{
+		Header: latest.Header,
+		Height: latest.GetHeight(),
+	}, nil
+}
+
+func (c *Chain) GetHeaderByHeight(height uint64) (*HeaderLocator, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if height >= uint64(len(c.blocks)) {
+		return nil, fmt.Errorf("height %d out of range (chain height=%d)", height, len(c.blocks)-1)
+	}
+
+	block := c.blocks[height]
+	if block == nil {
+		return nil, fmt.Errorf("block at height %d is nil", height)
+	}
+
+	return &HeaderLocator{
+		Header: block.Header,
+		Height: height,
+	}, nil
 }
 
 // GetCanonicalWork returns the total work on canonical chain
@@ -3779,6 +3879,43 @@ func (c *Chain) CanonicalTxCount() uint64 {
 	return c.GetTxCount()
 }
 
+// cleanOrphanPoolAboveHeight intelligently cleans orphan pool after rollback
+// Production-grade: only removes orphans above target height, preserving valid blocks
+// CRITICAL FIX: Previous implementation cleared entire orphan pool, causing permanent desync
+// Thread-safety: must be called with mutex held (called from RollbackToHeight)
+func (c *Chain) cleanOrphanPoolAboveHeight(height uint64) {
+	if c.orphanPool == nil {
+		return
+	}
+
+	log.Printf("[Chain] Smart orphan cleanup: retaining blocks <= height %d", height)
+
+	removedCount := 0
+	retainedCount := 0
+
+	for hash, orphan := range c.orphanPool {
+		if orphan.GetHeight() > height {
+			delete(c.orphanPool, hash)
+			removedCount++
+			log.Printf("[Chain] Removed orphan at height %d (hash=%s...)",
+				orphan.GetHeight(), hash[:min(16, len(hash))])
+		} else {
+			retainedCount++
+		}
+	}
+
+	if c.orphanByParent != nil {
+		c.orphanByParent = make(map[string][]string)
+		for hash, orphan := range c.orphanPool {
+			parentHash := hex.EncodeToString(orphan.Header.PrevHash)
+			c.orphanByParent[parentHash] = append(c.orphanByParent[parentHash], hash)
+		}
+	}
+
+	log.Printf("[Chain] Orphan cleanup complete: retained=%d removed=%d total=%d",
+		retainedCount, removedCount, retainedCount+removedCount)
+}
+
 // RollbackToHeight rolls back the chain to a given height
 // Concurrency safety: uses mutex to protect chain state
 // Persistence: updates storage to reflect the rollback
@@ -3847,14 +3984,11 @@ func (c *Chain) RollbackToHeight(height uint64) error {
 		}
 	}
 
-	// Clear orphan pool - orphan blocks reference chain state that no longer exists
-	// New blocks will be re-fetched during sync
-	if c.orphanPool != nil {
-		c.orphanPool = make(map[string]*Block)
-	}
-	if c.orphanByParent != nil {
-		c.orphanByParent = make(map[string][]string)
-	}
+	c.cleanOrphanPoolAboveHeight(height)
+
+	rolledBack := originalHeight - height
+
+	log.Printf("[Chain] Smart orphan cleanup completed for rollback to height %d", height)
 
 	// Recompute canonical work based on remaining blocks
 	c.canonicalWork = big.NewInt(0)
@@ -3879,7 +4013,16 @@ func (c *Chain) RollbackToHeight(height uint64) error {
 		}
 	}
 
-	log.Printf("[Chain] Rolled back to height %d and rebuilt state", height)
+	log.Printf("[Chain] Rollback completed: %d → %d (rolled back %d blocks)",
+		originalHeight, height, rolledBack)
+
+	// CRITICAL: Publish ForkResolved event to trigger immediate re-sync via BlockKeeper
+	// This fixes the fatal bug where nodes get permanently stuck after fork rollback
+	if c.onForkResolved != nil {
+		log.Printf("[Chain] Publishing ForkResolvedEvent: newHeight=%d, rolledBack=%d",
+			height, rolledBack)
+		c.onForkResolved(height, rolledBack)
+	}
 
 	// CRITICAL: Notify sync loop to re-evaluate chain state after rollback
 	// This prevents the node from getting stuck on outdated chain after fork resolution
@@ -3912,38 +4055,53 @@ func (c *Chain) initAddressIndexLocked() error {
 
 	c.addressIndexBolt = addrIndex
 
-	if len(c.blocks) > 0 {
-		log.Printf("Building address index from %d blocks...", len(c.blocks))
-		for _, block := range c.blocks {
-			entries := make([]index.AddressIndexEntry, 0, len(block.Transactions))
-			for _, tx := range block.Transactions {
-				if tx.Type != TxTransfer {
-					continue
-				}
-				fromAddr, err := tx.FromAddress()
-				if err != nil {
-					continue
-				}
-				txID, err := tx.GetIDWithError()
-				if err != nil {
-					continue
-				}
-				entries = append(entries, index.AddressIndexEntry{
-					TxID:      txID,
-					FromAddr:  fromAddr,
-					ToAddress: tx.ToAddress,
-					Amount:    tx.Amount,
-					Fee:       tx.Fee,
-					Nonce:     tx.Nonce,
-					Type:      index.TransactionType(tx.Type),
-				})
-			}
-			if err := c.addressIndexBolt.IndexBlockSimple(block.Hash, block.GetHeight(), block.Header.TimestampUnix, entries); err != nil {
-				log.Printf("WARNING: index block %d: %v", block.GetHeight(), err)
-			}
-		}
-		log.Printf("Address index built successfully")
+	if len(c.blocks) == 0 {
+		return nil
 	}
+
+	currentHeight := uint64(len(c.blocks) - 1)
+	lastIndexed, _ := c.addressIndexBolt.GetIndexedHeight()
+
+	if lastIndexed >= currentHeight {
+		log.Printf("[Chain] Address index already up to date (height=%d, blocks=%d), skipping rebuild", lastIndexed, len(c.blocks))
+		return nil
+	}
+
+	startFrom := lastIndexed + 1
+	log.Printf("[Chain] Incremental address index build: height %d -> %d (%d new blocks)...", startFrom-1, currentHeight, currentHeight-lastIndexed+1)
+
+	for i := startFrom; i <= currentHeight; i++ {
+		block := c.blocks[i]
+		entries := make([]index.AddressIndexEntry, 0, len(block.Transactions))
+		for _, tx := range block.Transactions {
+			if tx.Type != TxTransfer {
+				continue
+			}
+			fromAddr, err := tx.FromAddress()
+			if err != nil {
+				continue
+			}
+			txID, err := tx.GetIDWithError()
+			if err != nil {
+				continue
+			}
+			entries = append(entries, index.AddressIndexEntry{
+				TxID:      txID,
+				FromAddr:  fromAddr,
+				ToAddress: tx.ToAddress,
+				Amount:    tx.Amount,
+				Fee:       tx.Fee,
+				Nonce:     tx.Nonce,
+				Type:      index.TransactionType(tx.Type),
+			})
+		}
+		if err := c.addressIndexBolt.IndexBlockSimple(block.Hash, block.GetHeight(), block.Header.TimestampUnix, entries); err != nil {
+			log.Printf("WARNING: index block %d: %v", block.GetHeight(), err)
+		}
+	}
+
+	c.addressIndexBolt.SetIndexedHeight(currentHeight)
+	log.Printf("[Chain] Address index built successfully (height=%d)", currentHeight)
 
 	return nil
 }

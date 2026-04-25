@@ -272,7 +272,7 @@ func (w *chainWrapper) BestBlockHeader() (*network.HeaderLocator, error) {
 	if header == nil {
 		return nil, fmt.Errorf("chain is empty, no tip header available")
 	}
-	return &network.HeaderLocator{Header: header, Height: height}, nil
+	return &network.HeaderLocator{Header: *header, Height: height}, nil
 }
 
 // GetHeaderByHeight returns the block header at the given height for block locator
@@ -281,7 +281,7 @@ func (w *chainWrapper) GetHeaderByHeight(height uint64) (*network.HeaderLocator,
 	if !ok || header == nil {
 		return nil, fmt.Errorf("header not found at height %d", height)
 	}
-	return &network.HeaderLocator{Header: header, Height: height}, nil
+	return &network.HeaderLocator{Header: *header, Height: height}, nil
 }
 
 // networkChainWrapper wraps core.Chain to implement network.BlockchainInterface
@@ -340,6 +340,11 @@ func (w *networkChainWrapper) BlocksFrom(from uint64, count uint64) []*core.Bloc
 	return w.chain.GetBlocksFrom(from, count)
 }
 
+// GetBlocksFrom returns blocks from a given height (ChainInterface for BlockKeeper)
+func (w *networkChainWrapper) GetBlocksFrom(from uint64, count uint64) []*core.Block {
+	return w.chain.GetBlocksFrom(from, count)
+}
+
 // Blocks returns all blocks on canonical chain
 func (w *networkChainWrapper) Blocks() []*core.Block {
 	return w.chain.GetCanonicalBlocks()
@@ -361,7 +366,7 @@ func (w *networkChainWrapper) BestBlockHeader() (*network.HeaderLocator, error) 
 	if header == nil {
 		return nil, fmt.Errorf("chain is empty, no tip header available")
 	}
-	return &network.HeaderLocator{Header: header, Height: height}, nil
+	return &network.HeaderLocator{Header: *header, Height: height}, nil
 }
 
 // GetHeaderByHeight returns the block header at the given height for block locator
@@ -370,7 +375,7 @@ func (w *networkChainWrapper) GetHeaderByHeight(height uint64) (*network.HeaderL
 	if !ok || header == nil {
 		return nil, fmt.Errorf("header not found at height %d", height)
 	}
-	return &network.HeaderLocator{Header: header, Height: height}, nil
+	return &network.HeaderLocator{Header: *header, Height: height}, nil
 }
 
 // GetChainID returns the chain ID

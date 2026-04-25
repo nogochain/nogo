@@ -384,19 +384,12 @@ func (m *Miner) Run(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// CRITICAL: Pause mining during sync to prevent forks
-			// Check if sync loop is available and currently syncing
 			if m.syncLoop != nil && m.syncLoop.IsSyncing() {
-				continue // Skip mining tick, wait for next ticker
+				continue
 			}
 
-			// CRITICAL: Wait for chain stability after sync completes
-			// This prevents mining on unstable chain
-			if m.syncLoop != nil && !m.syncLoop.IsSynced() {
-				continue // Skip mining tick, wait for next ticker
-			}
-
-			m.handleMiningTick(ctx, false)
+			synced := m.syncLoop == nil || m.syncLoop.IsSynced()
+			m.handleMiningTick(ctx, !synced)
 		case <-m.wakeCh:
 			m.handleMiningTick(ctx, false)
 		}
@@ -440,8 +433,8 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 	}
 
 	if m.syncLoop != nil && !m.syncLoop.IsSynced() {
-		logf(colorBrightYellow, "⏸️ ", "Mining tick: not synced, waiting...")
-		return
+		force = true
+		logf(colorBrightYellow, "⛏️ ", "Mining tick: syncing, mining empty block to maintain network...")
 	}
 
 	if m.isVerificationActive() {
@@ -497,6 +490,7 @@ func (m *Miner) handleMinedBlock(ctx context.Context, block *core.Block) {
 }
 
 // broadcastBlockAsync broadcasts block asynchronously to prevent blocking mining
+// Retries up to 3 times with 1s backoff for transient connection failures
 func (m *Miner) broadcastBlockAsync(ctx context.Context, block *core.Block) {
 	go func() {
 		defer func() {
@@ -505,12 +499,32 @@ func (m *Miner) broadcastBlockAsync(ctx context.Context, block *core.Block) {
 			}
 		}()
 
-		// Broadcast block to peers via P2P manager
-		if m.pm != nil {
-			if err := m.pm.BroadcastBlock(ctx, block); err != nil {
-				log.Printf("[Miner] failed to broadcast block: %v", err)
-			}
+		if m.pm == nil {
+			return
 		}
+
+		maxRetries := 3
+		var lastErr error
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			if err := m.pm.BroadcastBlock(ctx, block); err != nil {
+				lastErr = err
+				if attempt < maxRetries {
+					log.Printf("[Miner] broadcast attempt %d/%d failed: %v, retrying in 1s...", attempt, maxRetries, err)
+					time.Sleep(1 * time.Second)
+				}
+				continue
+			}
+
+			return
+		}
+
+		log.Printf("[Miner] failed to broadcast block after %d attempts: %v", maxRetries, lastErr)
 	}()
 }
 

@@ -815,3 +815,39 @@ func (ai *AddressIndex) HasAddress(address string) (bool, error) {
 func (ai *AddressIndex) GetDB() *bbolt.DB {
 	return ai.db
 }
+
+const indexedHeightKey = "_indexed_height"
+
+// GetIndexedHeight returns the last block height that was indexed, or 0 if empty
+func (ai *AddressIndex) GetIndexedHeight() (uint64, error) {
+	var height uint64
+	err := ai.db.View(func(tx *bbolt.Tx) error {
+		metaBucket := tx.Bucket([]byte(AddressMetaBucket))
+		if metaBucket == nil {
+			return nil
+		}
+		data := metaBucket.Get([]byte(indexedHeightKey))
+		if data == nil {
+			return nil
+		}
+		if len(data) < 8 {
+			return nil
+		}
+		height = binary.BigEndian.Uint64(data)
+		return nil
+	})
+	return height, err
+}
+
+// SetIndexedHeight persists the last indexed height for incremental rebuild on startup
+func (ai *AddressIndex) SetIndexedHeight(height uint64) error {
+	return ai.db.Update(func(tx *bbolt.Tx) error {
+		metaBucket := tx.Bucket([]byte(AddressMetaBucket))
+		if metaBucket == nil {
+			return fmt.Errorf("address meta bucket not found")
+		}
+		buf := make([]byte, 8)
+		binary.BigEndian.PutUint64(buf, height)
+		return metaBucket.Put([]byte(indexedHeightKey), buf)
+	})
+}

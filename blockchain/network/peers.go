@@ -3,6 +3,7 @@ package network
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -443,4 +444,202 @@ func getPeerHeight(pm PeerAPI) uint64 {
 		log.Printf("miner: getPeerHeight returns height=%d from peer=%s (total peers=%d)", maxHeight, bestPeer, len(pm.Peers()))
 	}
 	return maxHeight
+}
+
+// CRITICAL: These 3 methods implement PeerSetInterface for blockKeeper integration
+// Without these, blockKeeper cannot be created and the new sync architecture won't activate
+
+// peerAdapter implements PeerInterface for PeerManager
+type peerAdapter struct {
+	id     string
+	height uint64
+	pm     *PeerManager
+}
+
+func (p *peerAdapter) ID() string {
+	return p.id
+}
+
+func (p *peerAdapter) Height() uint64 {
+	return p.height
+}
+
+func (p *peerAdapter) getBlockByHeight(height uint64) bool {
+	log.Printf("[peerAdapter] getBlockByHeight called (not implemented for HTTP peers)")
+	return false
+}
+
+func (p *peerAdapter) getBlocks(locator [][]byte, stopHash []byte) bool {
+	log.Printf("[peerAdapter] getBlocks called (not implemented for HTTP peers)")
+	return false
+}
+
+func (p *peerAdapter) getHeaders(locator [][]byte, stopHash []byte) bool {
+	log.Printf("[peerAdapter] getHeaders called (not implemented for HTTP peers)")
+	return false
+}
+
+func (pm *PeerManager) bestPeer(serviceFlag int) PeerInterface {
+	pm.peersMu.RLock()
+	defer pm.peersMu.RUnlock()
+
+	var maxHeight uint64
+	var bestAddr string
+
+	for _, addr := range pm.peers {
+		entry, exists := pm.peerMap[addr]
+		if !exists || !entry.IsActive {
+			continue
+		}
+
+		info, err := pm.FetchChainInfo(context.Background(), addr)
+		if err != nil {
+			continue
+		}
+
+		if info.Height > maxHeight {
+			maxHeight = info.Height
+			bestAddr = addr
+		}
+	}
+
+	if bestAddr == "" {
+		return nil
+	}
+
+	log.Printf("[PeerManager] bestPeer selected: %s (height=%d, total peers=%d)",
+		bestAddr, maxHeight, len(pm.peers))
+
+	return &peerAdapter{
+		id:     bestAddr,
+		height: maxHeight,
+		pm:     pm,
+	}
+}
+
+func (pm *PeerManager) ProcessIllegal(peerID string, level byte, reason string) {
+	pm.peersMu.Lock()
+	defer pm.peersMu.Unlock()
+
+	log.Printf("[PeerManager] ProcessIllegal: peer=%s, level=%d, reason=%s", peerID, level, reason)
+
+	switch level {
+	case 1:
+		if entry, exists := pm.peerMap[peerID]; exists {
+			entry.FailCount++
+			if entry.FailCount >= 10 {
+				entry.IsActive = false
+				log.Printf("[PeerManager] Peer %s disabled after too many failures", peerID)
+			}
+		}
+	case 2:
+		if entry, exists := pm.peerMap[peerID]; exists {
+			entry.IsActive = false
+			log.Printf("[PeerManager] Peer %s banned due to illegal behavior", peerID)
+		}
+	default:
+		if entry, exists := pm.peerMap[peerID]; exists {
+			entry.FailCount++
+		}
+	}
+}
+
+func (pm *PeerManager) broadcastMinedBlock(block *core.Block) error {
+	if pm == nil || len(pm.peers) == 0 {
+		return fmt.Errorf("no peers available")
+	}
+
+	blockData, err := json.Marshal(block)
+	if err != nil {
+		return fmt.Errorf("failed to marshal block: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var lastErr error
+	successCount := 0
+
+	for _, peer := range pm.peers {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, peer+"/block", bytes.NewReader(blockData))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := pm.client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			successCount++
+		}
+	}
+
+	if successCount == 0 {
+		return fmt.Errorf("broadcast failed to all peers, last error: %v", lastErr)
+	}
+
+	log.Printf("[PeerManager] broadcastMinedBlock success: sent to %d/%d peers", successCount, len(pm.peers))
+	return nil
+}
+
+func (pm *PeerManager) broadcastNewStatus(bestBlock, genesisBlock *core.Block) error {
+	if pm == nil || len(pm.peers) == 0 {
+		return fmt.Errorf("no peers available")
+	}
+
+	bestHash := bestBlock.GetHash()
+	genesisHash := genesisBlock.GetHash()
+
+	statusData := map[string]interface{}{
+		"height":       bestBlock.GetHeight(),
+		"hash":         hex.EncodeToString(bestHash),
+		"genesis_hash": hex.EncodeToString(genesisHash),
+	}
+
+	jsonData, err := json.Marshal(statusData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal status: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var lastErr error
+	successCount := 0
+
+	for _, peer := range pm.peers {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, peer+"/status", bytes.NewReader(jsonData))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := pm.client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			successCount++
+		}
+	}
+
+	if successCount == 0 && lastErr != nil {
+		return fmt.Errorf("broadcastNewStatus failed to all peers, last error: %v", lastErr)
+	}
+
+	log.Printf("[PeerManager] broadcastNewStatus success: sent to %d/%d peers (height=%d)",
+		successCount, len(pm.peers), bestBlock.GetHeight())
+	return nil
 }

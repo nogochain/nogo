@@ -189,6 +189,13 @@ func (h *BlockHeader) HashHex(blockHash []byte) string {
 	return hex.EncodeToString(blockHash)
 }
 
+// HeaderLocator bundles a block header with its height for chain traversal
+// BlockHeader does not store height internally in all contexts, so this struct carries both
+type HeaderLocator struct {
+	Header BlockHeader
+	Height uint64
+}
+
 // Block represents a blockchain block
 // Production-grade: includes all necessary fields for consensus
 // Concurrency safety: use mutex for write operations, safe for concurrent reads

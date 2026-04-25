@@ -102,6 +102,7 @@ type SyncLoopInterface interface {
 	IsSyncing() bool
 	IsSynced() bool
 	TriggerSyncCheck()
+	DeliverSyncBlock(peerID string, block *core.Block)
 }
 
 // SetSyncLoop sets the sync loop reference for the handler
@@ -247,15 +248,13 @@ func (h *SyncReactorHandler) OnGetBlocks(peerID string, heights []uint64) error 
 }
 
 // OnBlocks processes full blocks received from a peer. The blocks bytes
-// contain a JSON array of serialized block raw messages. Each block is
-// added to the local chain via AddBlock.
+// contain a JSON array of serialized block raw messages.
+// Routes each block to blockKeeper's blockProcessCh so that requireBlock()
+// in regularBlockSync can receive them and continue sequential sync.
+// This matches core-main's handleBlocksMsg → blockKeeper.processBlocks pattern.
 // NOTE: SyncMsgBlocks is ONLY used for sync request responses (FetchBlockByHeight),
 // NOT for block broadcast. Block broadcast uses BlockMsgBlock on ChannelBlock.
-// Therefore, flood broadcast is NOT needed here - it would cause duplicate propagation.
 func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
-	if h.handlers == nil || h.handlers.chain == nil {
-		return fmt.Errorf("sync handler: chain not available")
-	}
 	if blocks == nil {
 		return fmt.Errorf("sync handler: OnBlocks received nil blocks from peer %s", peerID)
 	}
@@ -269,7 +268,7 @@ func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
 		return fmt.Errorf("sync handler: empty blocks from peer %s", peerID)
 	}
 
-	addedCount := 0
+	deliveredCount := 0
 	for _, raw := range rawBlocks {
 		var block core.Block
 		if err := json.Unmarshal(raw, &block); err != nil {
@@ -277,19 +276,24 @@ func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
 			continue
 		}
 
-		accepted, addErr := h.handlers.chain.AddBlock(&block)
-		if addErr != nil {
-			log.Printf("[SyncHandler] Failed to add block %d from peer %s: %v",
-				block.GetHeight(), peerID, addErr)
-			continue
-		}
-		if accepted {
-			addedCount++
+		if h.syncLoop != nil {
+			h.syncLoop.DeliverSyncBlock(peerID, &block)
+			deliveredCount++
+		} else if h.handlers != nil && h.handlers.chain != nil {
+			accepted, addErr := h.handlers.chain.AddBlock(&block)
+			if addErr != nil {
+				log.Printf("[SyncHandler] Failed to add block %d from peer %s: %v",
+					block.GetHeight(), peerID, addErr)
+				continue
+			}
+			if accepted {
+				deliveredCount++
+			}
 		}
 	}
 
-	log.Printf("[SyncHandler] Processed %d blocks from peer %s, accepted %d (sync response - no flood broadcast)",
-		len(rawBlocks), peerID, addedCount)
+	log.Printf("[SyncHandler] Processed %d blocks from peer %s, delivered %d to blockKeeper",
+		len(rawBlocks), peerID, deliveredCount)
 
 	return nil
 }

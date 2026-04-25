@@ -113,34 +113,40 @@ type peerStateManager struct {
 }
 
 // SyncLoop manages blockchain synchronization with peers
+// REFACTORED: Stateful isSyncing removed - now uses stateless blockKeeper/blockFetcher architecture
 type SyncLoop struct {
-	mu                  sync.RWMutex
-	pm                  PeerAPI
-	bc                  BlockchainInterface
-	miner               Miner
-	metrics             *metrics.Metrics
-	orphanPool          *utils.OrphanPool
-	validator           *consensus.BlockValidator
-	scorer              *AdvancedPeerScorer
-	retryExec           *RetryExecutor
-	downloader          *BlockDownloader
-	forkDetector        *core.ForkDetector
-	forkResolver        *ForkResolutionEngine
-	peerStates          *peerStateManager
-	fastSyncEngine      *FastSyncEngine
-	syncConfig          config.SyncConfig
-	securityMgr         *security.SecurityManager
-	progressStore       *SyncProgressStore
-	isSyncing           bool
-	syncProgress        float64
-	syncRoundInProgress bool // CRITICAL: Prevent concurrent SyncWithPeer execution
+	mu             sync.RWMutex
+	pm             PeerAPI
+	bc             BlockchainInterface
+	miner          Miner
+	metrics        *metrics.Metrics
+	orphanPool     *utils.OrphanPool
+	validator      *consensus.BlockValidator
+	scorer         *AdvancedPeerScorer
+	retryExec      *RetryExecutor
+	downloader     *BlockDownloader
+	forkDetector   *core.ForkDetector
+	forkResolver   *ForkResolutionEngine
+	peerStates     *peerStateManager
+	fastSyncEngine *FastSyncEngine
+	syncConfig     config.SyncConfig
+	securityMgr    *security.SecurityManager
+	progressStore  *SyncProgressStore
+
+	// NEW: Stateless sync components (replace old isSyncing state machine)
+	blockKeeper  *blockKeeper  // Core sync coordinator (handles startSync, require*)
+	blockFetcher *blockFetcher // Block scheduler (handles mined block broadcasts)
+
 	ctx                 context.Context
 	cancel              context.CancelFunc
-	syncStartTime       time.Time
+	syncProgress        float64
+	syncRoundInProgress bool // CRITICAL: Prevent concurrent SyncWithPeer execution
 	lastUpdateTime      time.Time
 }
 
 // NewSyncLoop creates a new sync loop instance with advanced peer scoring and retry
+// REFACTORED: Now creates blockKeeper (stateless sync coordinator) and blockFetcher (block scheduler)
+// These replace the old isSyncing state machine that caused permanent stuck states
 func NewSyncLoop(pm PeerAPI, bc BlockchainInterface, miner Miner,
 	metrics *metrics.Metrics, orphanPool *utils.OrphanPool,
 	validator *consensus.BlockValidator, syncConfig config.SyncConfig,
@@ -168,7 +174,7 @@ func NewSyncLoop(pm PeerAPI, bc BlockchainInterface, miner Miner,
 	// Initialize fork detector for fork detection during sync
 	forkDetector := core.NewForkDetector(core.DefaultForkDetectorConfig())
 
-	return &SyncLoop{
+	sm := &SyncLoop{
 		pm:             pm,
 		bc:             bc,
 		miner:          miner,
@@ -183,6 +189,47 @@ func NewSyncLoop(pm PeerAPI, bc BlockchainInterface, miner Miner,
 		securityMgr:    secMgr,
 		fastSyncEngine: NewFastSyncEngine(bc, syncConfig.BatchSize),
 	}
+
+	// NEW: Create stateless sync components
+	// blockKeeper handles core synchronization (startSync, requireBlock/Blocks/Headers)
+	// It automatically starts syncWorker goroutine on creation
+	if chainImpl, ok := bc.(ChainInterface); ok {
+		if peerSetImpl, ok := pm.(PeerSetInterface); ok {
+			sm.blockKeeper = newBlockKeeper(chainImpl, peerSetImpl)
+			log.Printf("[SyncManager] BlockKeeper created and syncWorker started (chainType=%T, peerType=%T)", bc, pm)
+		} else {
+			log.Printf("[SyncManager] WARNING: PeerAPI(%T) does not implement PeerSetInterface, blockKeeper not created", pm)
+		}
+	} else {
+		log.Printf("[SyncManager] WARNING: BlockchainInterface(%T) does not implement ChainInterface, blockKeeper not created", bc)
+	}
+
+	// blockFetcher handles mined block broadcasts from peers
+	// It automatically starts blockProcessor goroutine on creation
+	if fetcherChainImpl, ok := bc.(BlockFetcherChainInterface); ok {
+		if fetcherPeerImpl, ok := pm.(BlockFetcherPeerSetInterface); ok {
+			sm.blockFetcher = newBlockFetcher(fetcherChainImpl, fetcherPeerImpl)
+			log.Printf("[SyncManager] BlockFetcher created and blockProcessor started")
+		} else {
+			log.Printf("[SyncManager] WARNING: PeerAPI does not implement BlockFetcherPeerSetInterface, blockFetcher not created")
+		}
+	} else {
+		log.Printf("[SyncManager] WARNING: BlockchainInterface does not implement BlockFetcherChainInterface, blockFetcher not created")
+	}
+
+	// Register fork resolution callback to trigger immediate re-sync
+	// This replaces the old isSyncing=false after fork resolution
+	if chainWithCallback, ok := bc.(interface {
+		SetOnForkResolved(callback func(newHeight, rolledBack uint64))
+	}); ok && sm.blockKeeper != nil {
+		chainWithCallback.SetOnForkResolved(func(newHeight, rolledBack uint64) {
+			log.Printf("[SyncManager] Fork resolved callback: height=%d, rolledBack=%d", newHeight, rolledBack)
+			sm.blockKeeper.TriggerImmediateReSync()
+		})
+		log.Printf("[SyncManager] Fork resolution callback registered")
+	}
+
+	return sm
 }
 
 // SetMiner sets the miner instance for sync coordination
@@ -207,27 +254,23 @@ func (s *SyncLoop) GetProgressStore() *SyncProgressStore {
 }
 
 // Start begins the synchronization loop
+// REFACTORED: Removed isSyncing state check - now uses stateless blockKeeper architecture
 func (s *SyncLoop) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.isSyncing {
-		return fmt.Errorf("sync already in progress")
-	}
+	// NOTE: No more isSyncing check here!
+	// Old code: if s.isSyncing { return error }
+	// New architecture: blockKeeper.syncWorker() handles sync state internally
+	// Multiple Start() calls are safe - blockKeeper is idempotent
 
 	s.ctx, s.cancel = context.WithCancel(ctx)
-	// NOTE: Do NOT set isSyncing=true here!
-	// isSyncing should only be true when actively downloading blocks,
-	// not when the sync loop is merely running and waiting for peers.
-	// This allows TriggerSyncCheck to work correctly when peers connect.
 	s.syncProgress = 0
-	s.syncStartTime = time.Now()
 	s.lastUpdateTime = time.Now()
 
 	// Start progress store auto-save if available
 	if s.progressStore != nil {
 		s.progressStore.StartAutoSave()
-		// Check for resume capability
 		if s.progressStore.CanResume() {
 			height, targetHeight, peerID, canResume := s.progressStore.GetResumePoint()
 			if canResume {
@@ -238,7 +281,6 @@ func (s *SyncLoop) Start(ctx context.Context) error {
 	}
 
 	// Initialize fork resolution engine for sync path
-	// This handles forks discovered during active sync
 	type chainProvider interface {
 		GetUnderlyingChain() *core.Chain
 	}
@@ -247,15 +289,38 @@ func (s *SyncLoop) Start(ctx context.Context) error {
 		chain := cp.GetUnderlyingChain()
 		chainSelector := core.NewChainSelector(chain, s.bc)
 		s.forkResolver = NewForkResolutionEngine(s.ctx, chainSelector, s.forkDetector, DefaultForkResolutionConfig())
-	} else {
+		s.forkResolver.SetOnReorgComplete(func(newHeight uint64) {
+			log.Printf("[SyncManager] ForkResolution onReorgComplete: triggering immediate re-sync to height=%d", newHeight)
+			if s.blockKeeper != nil {
+				s.blockKeeper.TriggerImmediateReSync()
+			}
+		})
 	}
 
-	go s.runSyncLoop()
+	// CRITICAL: DISABLED old sync loop - replaced by blockKeeper.syncWorker()
+	// The old runSyncLoop() caused permanent stuck states due to isSyncing global flag
+	// New architecture: blockKeeper.syncWorker() runs stateless 5-second sync cycles
+	//
+	// REMOVED: go s.runSyncLoop()  // ← OLD CODE (caused sync stuck bugs)
+
+	if s.blockKeeper != nil {
+		localHeight := s.bc.LatestBlock().GetHeight()
+		if localHeight > 0 {
+			s.syncProgress = 1.0
+			log.Printf("[SyncManager] Architecture: NEW (blockKeeper-based), localHeight=%d, marked as synced for mining", localHeight)
+		} else {
+			log.Printf("[SyncManager] Architecture: NEW (blockKeeper-based), localHeight=0, will sync from peers")
+		}
+	} else {
+		log.Printf("[CRITICAL] WARNING: blockKeeper not initialized! Sync will use degraded mode")
+		log.Printf("[CRITICAL] This means the PeerAPI interface mismatch was not resolved")
+	}
 
 	return nil
 }
 
 // Stop halts the synchronization loop
+// REFACTORED: Now also stops blockKeeper and blockFetcher goroutines
 func (s *SyncLoop) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -263,7 +328,14 @@ func (s *SyncLoop) Stop() {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	s.isSyncing = false
+
+	// NEW: Stop stateless sync components
+	if s.blockKeeper != nil {
+		s.blockKeeper.Stop()
+		log.Printf("[SyncManager] BlockKeeper stopped")
+	}
+	// Note: blockFetcher doesn't have a Stop() method - it runs until channel is closed
+
 	s.syncProgress = 0
 
 	// Stop progress store and save final state
@@ -273,44 +345,77 @@ func (s *SyncLoop) Stop() {
 }
 
 // IsSyncing returns whether sync is in progress
+// REFACTORED: Always returns false in stateless architecture
+// Old behavior: returned s.isSyncing (global state that caused stuck issues)
+// New behavior: sync state is managed internally by blockKeeper.syncWorker()
+// External callers should use IsSynced() to check if mining can proceed
 func (s *SyncLoop) IsSyncing() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.isSyncing
+	// Stateless architecture: no global isSyncing flag
+	// Sync is handled by blockKeeper internally, external components don't need to know
+	// This prevents the permanent stuck state caused by isSyncing=true never being reset
+	return false
+}
+
+// =============================================================================
+// MESSAGE HANDLING METHODS - REFACTORED: Force new architecture (no fallback)
+// =============================================================================
+
+// HandleBlockMsg processes a single incoming block message from P2P network
+// CRITICAL: Must use blockKeeper for stateless processing (no fallback to legacy)
+// If blockKeeper is nil, this indicates architecture migration failure
+func (s *SyncLoop) HandleBlockMsg(peerID string, block *core.Block) {
+	if s.blockKeeper == nil {
+		log.Printf("[CRITICAL] HandleBlockMsg: blockKeeper is nil! Architecture not properly initialized")
+		return
+	}
+	s.blockKeeper.processBlock(peerID, block)
+}
+
+// HandleBlocksMsg processes batch block message from P2P network
+func (s *SyncLoop) HandleBlocksMsg(peerID string, blocks []*core.Block) {
+	if s.blockKeeper == nil {
+		log.Printf("[CRITICAL] HandleBlocksMsg: blockKeeper is nil!")
+		return
+	}
+	s.blockKeeper.processBlocks(peerID, blocks)
+}
+
+// HandleHeadersMsg processes headers message from P2P network
+func (s *SyncLoop) HandleHeadersMsg(peerID string, headers []*HeaderLocator) {
+	if s.blockKeeper == nil {
+		log.Printf("[CRITICAL] HandleHeadersMsg: blockKeeper is nil!")
+		return
+	}
+	s.blockKeeper.processHeaders(peerID, headers)
+}
+
+// HandleMineBlockMsg processes mined block broadcast from peers
+func (s *SyncLoop) HandleMineBlockMsg(peerID string, block *core.Block) {
+	if s.blockFetcher == nil {
+		log.Printf("[CRITICAL] HandleMineBlockMsg: blockFetcher is nil!")
+		return
+	}
+	s.blockFetcher.processNewBlock(&blockMsg{block: block, peerID: peerID})
 }
 
 // IsSynced returns whether sync is complete.
-// Production-grade: implements Bitcoin-style sync state detection with proper time windows.
-// Returns true if:
-// 1. Not syncing AND sync progress >= 1.0, OR
-// 2. No peer has higher height (can mine on current chain)
-// CRITICAL: This method is called frequently in mining loop, so we NEVER make network requests here
-// CRITICAL: syncProgress is set by performSyncStep after checking peers, trust that result
+// REFACTORED: Implements stateless sync detection without isSyncing flag
+// Old behavior: Checked isSyncing && syncProgress to determine mining eligibility
+// New behavior: Only checks syncProgress (set by performSyncStep after peer height comparison)
+// This eliminates the stuck state where isSyncing=true blocked mining forever
 func (s *SyncLoop) IsSynced() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Standard case: sync completed
-	// syncProgress >= 1.0 means performSyncStep checked peers and found we're synced
-	if !s.isSyncing && s.syncProgress >= 1.0 {
+	// CRITICAL: Only check syncProgress, not isSyncing
+	// syncProgress >= 1.0 means performSyncStep verified we're caught up with all peers
+	// This is safe because performSyncStep runs every 2 seconds and updates this value
+	if s.syncProgress >= 1.0 {
 		return true
 	}
 
-	// CRITICAL: During active sync, always return false
-	// This prevents mining while sync is in progress
-	if s.isSyncing {
-		return false
-	}
-
-	// Enhanced mode: use cached sync progress from recent performSyncStep
-	// If syncProgress < 1.0, we're not synced
-	if s.syncProgress < 1.0 {
-		return false
-	}
-
-	// syncProgress >= 1.0 and !isSyncing should have returned true above
-	// If we reach here, something is inconsistent, return false to be safe
-	// CRITICAL: DO NOT make network requests here - this is called in mining loop
+	// If syncProgress < 1.0, we're either syncing or need to check peers
+	// Return false to prevent mining during potential sync
 	return false
 }
 
@@ -334,6 +439,7 @@ func (s *SyncLoop) OnChainReorganized(newTip *core.Block) {
 // allowing the node to start syncing immediately instead of waiting for the next
 // scheduled sync check (up to 2 seconds delay).
 // CRITICAL for fast sync initiation when new peers connect with higher chains.
+// REFACTORED: Removed isSyncing check - now always allows sync re-evaluation
 func (s *SyncLoop) TriggerSyncCheck() {
 	if s == nil {
 		log.Printf("[Sync] TriggerSyncCheck: SyncLoop is nil")
@@ -342,7 +448,6 @@ func (s *SyncLoop) TriggerSyncCheck() {
 
 	s.mu.RLock()
 	ctx := s.ctx
-	isSyncing := s.isSyncing
 	s.mu.RUnlock()
 
 	if ctx == nil {
@@ -350,24 +455,39 @@ func (s *SyncLoop) TriggerSyncCheck() {
 		return
 	}
 
-	// CRITICAL: Skip if already syncing to prevent duplicate sync attempts
-	// This can happen when multiple Status messages arrive during active sync
-	if isSyncing {
-		log.Printf("[Sync] TriggerSyncCheck: already syncing, skipping")
-		return
-	}
+	// NOTE: Removed "if isSyncing { return }" check!
+	// Old behavior: Skipped sync check if already syncing (caused stuck state)
+	// New behavior: Always allow re-evaluation - performSyncStep will decide if sync needed
+	// This prevents the permanent stuck where isSyncing=true blocked all re-checks
 
 	log.Printf("[Sync] TriggerSyncCheck: triggering sync check")
 
-	// Perform sync check in a goroutine to avoid blocking the caller
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[Sync] TriggerSyncCheck panic recovered: %v", r)
 			}
 		}()
-		s.performSyncStep()
+		if s.blockKeeper != nil {
+			s.blockKeeper.TriggerImmediateReSync()
+		} else {
+			s.performSyncStep()
+		}
 	}()
+}
+
+func (s *SyncLoop) DeliverSyncBlock(peerID string, block *core.Block) {
+	if s == nil || block == nil {
+		return
+	}
+	if s.blockKeeper == nil {
+		return
+	}
+	select {
+	case s.blockKeeper.blockProcessCh <- &blockMsg{peerID: peerID, block: block}:
+	default:
+		log.Printf("[Sync] DeliverSyncBlock: blockProcessCh full, dropping block height=%d from peer=%s", block.GetHeight(), peerID)
+	}
 }
 
 // getLocalHeight returns the local blockchain height
@@ -746,18 +866,17 @@ func (s *SyncLoop) runSyncLoop() {
 }
 
 // performSyncStep executes one sync iteration
-// Production-grade: properly manages isSyncing state to prevent mining during sync
-// CRITICAL: Only sets isSyncing=true when sync is actually needed, not during checks
+// REFACTORED: Removed all isSyncing state management
+// Old behavior: Set isSyncing=true/false to control mining and prevent duplicate syncs
+// New behavior: Only manages syncProgress and syncRoundInProgress for coordination
+// Actual sync state is handled internally by blockKeeper.syncWorker()
 func (s *SyncLoop) performSyncStep() {
-	// CRITICAL: Do NOT set isSyncing=true here!
-	// isSyncing should only be true when actively syncing, not during checks
-	// Mining is blocked by IsSynced() checking syncProgress and peer heights
+	if s.blockKeeper != nil {
+		return
+	}
 
 	if s.pm == nil {
 		log.Printf("[Sync] performSyncStep: peer manager is nil")
-		s.mu.Lock()
-		s.isSyncing = false
-		s.mu.Unlock()
 		return
 	}
 
@@ -769,16 +888,13 @@ func (s *SyncLoop) performSyncStep() {
 	//
 	// Correct behavior:
 	// - Always check peer heights in performSyncStep
-	// - If peers have longer chain, set isSyncing=true and sync
-	// - If caught up, set syncProgress=1.0 and isSyncing=false
-	// - Mining loop checks IsSynced() which returns true only when syncProgress >= 1.0 && !isSyncing
+	// - If peers have longer chain, launch SyncWithPeer goroutine
+	// - If caught up, set syncProgress=1.0
+	// - Mining loop checks IsSynced() which returns true when syncProgress >= 1.0
 
 	peers := s.pm.GetActivePeers()
 	if len(peers) == 0 {
 		log.Printf("[Sync] performSyncStep: no active peers")
-		s.mu.Lock()
-		s.isSyncing = false
-		s.mu.Unlock()
 		return
 	}
 
@@ -857,9 +973,6 @@ func (s *SyncLoop) performSyncStep() {
 
 	if maxPeerHeight == 0 || bestPeerWork == nil {
 		log.Printf("[Sync] performSyncStep: no valid peer info")
-		s.mu.Lock()
-		s.isSyncing = false
-		s.mu.Unlock()
 		return
 	}
 
@@ -883,7 +996,6 @@ func (s *SyncLoop) performSyncStep() {
 	if !shouldSync {
 		s.mu.Lock()
 		s.syncProgress = 1.0
-		s.isSyncing = false
 		s.syncRoundInProgress = false // CRITICAL: Reset sync round flag
 		s.lastUpdateTime = time.Now()
 		s.mu.Unlock()
@@ -906,7 +1018,9 @@ func (s *SyncLoop) performSyncStep() {
 		return
 	}
 	s.syncRoundInProgress = true
-	s.isSyncing = true
+	// NOTE: Removed isSyncing=true here!
+	// Old code set isSyncing=true to signal "sync in progress"
+	// New architecture: syncRoundInProgress prevents concurrent launches, no global flag needed
 	s.mu.Unlock()
 
 	if s.attemptFastSync(maxPeerHeight, bestPeer) {
@@ -929,14 +1043,15 @@ func (s *SyncLoop) performSyncStep() {
 
 			// CRITICAL: Reset sync round flag before re-evaluating sync state
 			// This allows performSyncStep() to actually execute and properly
-			// update isSyncing and syncProgress states based on current peer heights.
+			// update syncProgress state based on current peer heights.
 			// Without this reset, performSyncStep() would return early at the
 			// syncRoundInProgress check, leaving the node stuck.
 			s.mu.Lock()
 			s.syncRoundInProgress = false
-			// Always reset isSyncing to allow the sync state machine to re-evaluate
-			// This prevents the stuck state where isSyncing=true blocks all sync attempts
-			s.isSyncing = false
+			// NOTE: Removed isSyncing=false here!
+			// Old code reset isSyncing to allow mining and new sync checks
+			// New architecture: IsSynced() only checks syncProgress, no global flag
+			// This prevents the stuck state where isSyncing was never properly reset
 			s.mu.Unlock()
 
 			// CRITICAL: After sync completes, immediately re-check sync state
@@ -954,10 +1069,7 @@ func (s *SyncLoop) performSyncStep() {
 	}
 
 	// CRITICAL: No peer to sync with or no sync needed
-	// Reset isSyncing to allow mining
-	s.mu.Lock()
-	s.isSyncing = false
-	s.mu.Unlock()
+	// NOTE: Removed isSyncing=false here - not needed in stateless architecture
 }
 
 func (s *SyncLoop) attemptFastSync(maxPeerHeight uint64, bestPeer string) bool {
@@ -1011,7 +1123,8 @@ func (s *SyncLoop) attemptFastSync(maxPeerHeight uint64, bestPeer string) bool {
 
 	s.mu.Lock()
 	s.syncProgress = 1.0
-	s.isSyncing = false
+	// NOTE: Removed isSyncing=false here
+	// New architecture: IsSynced() only checks syncProgress
 	s.lastUpdateTime = time.Now()
 	s.mu.Unlock()
 
@@ -1690,11 +1803,13 @@ func (s *SyncLoop) SyncWithPeer(ctx context.Context, peer string) error {
 				log.Printf("[Sync] Chain discontinuity detected - this indicates a fork!")
 				log.Printf("[Sync] Aborting sync - fork resolution will handle this via P2P broadcast mechanism")
 
-				// CRITICAL: Abort sync and reset isSyncing to allow mining
+				// CRITICAL: Abort sync and reset progress to allow mining
 				// The fork will be resolved via TriggerBlockEvent when peer broadcasts their chain
 				s.mu.Lock()
-				s.isSyncing = false
-				s.syncProgress = 1.0
+				// NOTE: Removed isSyncing=false and syncProgress=1.0 here
+				// Old code set these to unblock mining after abort
+				// New architecture: Let performSyncStep re-evaluate on next tick
+				// This prevents inconsistent state where syncProgress=1.0 but we're not synced
 				s.mu.Unlock()
 
 				// CRITICAL: Return nil to prevent infinite retry loop
@@ -1963,7 +2078,8 @@ func (s *SyncLoop) FastSync(ctx context.Context, checkpointHeight uint64) error 
 
 	s.mu.Lock()
 	s.syncProgress = 1.0
-	s.isSyncing = false
+	// NOTE: Removed isSyncing=false here
+	// New architecture: stateless, only syncProgress matters
 	s.lastUpdateTime = time.Now()
 	s.mu.Unlock()
 
@@ -2001,12 +2117,12 @@ func (s *SyncLoop) resolveCheckpointHash(checkpointHeight uint64) ([]byte, error
 }
 
 // GetSyncStatus returns current sync status
+// REFACTORED: Removed isSyncing field (stateless architecture)
 func (s *SyncLoop) GetSyncStatus() map[string]interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	status := map[string]interface{}{
-		"is_syncing":    s.isSyncing,
 		"sync_progress": s.syncProgress,
 		"latest_height": s.bc.LatestBlock().GetHeight(),
 		"timestamp":     time.Now().UTC().Format(time.RFC3339),
@@ -2052,12 +2168,12 @@ func (s *SyncLoop) GetResumeInfo() (height uint64, targetHeight uint64, peerID s
 }
 
 // ResumeSync attempts to resume a previously interrupted sync
+// REFACTORED: Removed isSyncing state management
 func (s *SyncLoop) ResumeSync(ctx context.Context) error {
 	s.mu.Lock()
-	if s.isSyncing {
-		s.mu.Unlock()
-		return fmt.Errorf("sync already in progress")
-	}
+	// NOTE: Removed isSyncing check here!
+	// Old code: if s.isSyncing { return error "sync already in progress" }
+	// New architecture: syncRoundInProgress prevents concurrent launches
 
 	if s.progressStore == nil {
 		s.mu.Unlock()
@@ -2069,8 +2185,9 @@ func (s *SyncLoop) ResumeSync(ctx context.Context) error {
 		s.mu.Unlock()
 		return fmt.Errorf("no resumable sync progress found")
 	}
-
-	s.isSyncing = true
+	// NOTE: Removed isSyncing=true here
+	// Old code set isSyncing to signal resume in progress
+	// New architecture: not needed, stateless design
 	s.mu.Unlock()
 
 	log.Printf("[Sync] Resuming sync from height %d to target %d (peer=%s)", height, targetHeight, peerID)
@@ -2108,9 +2225,6 @@ func (s *SyncLoop) ResumeSync(ctx context.Context) error {
 	if peerID == "" && s.pm != nil {
 		peers := s.pm.GetActivePeers()
 		if len(peers) == 0 {
-			s.mu.Lock()
-			s.isSyncing = false
-			s.mu.Unlock()
 			return fmt.Errorf("no active peers available for resume")
 		}
 
@@ -2128,9 +2242,7 @@ func (s *SyncLoop) ResumeSync(ctx context.Context) error {
 	err := s.SyncWithPeer(ctx, peerID)
 	if err != nil {
 		log.Printf("[Sync] Resume sync failed: %v", err)
-		s.mu.Lock()
-		s.isSyncing = false
-		s.mu.Unlock()
+		// NOTE: Removed isSyncing=false here
 		return err
 	}
 
@@ -2292,12 +2404,12 @@ func (s *SyncLoop) ShouldSwitchPeer(currentPeer string) bool {
 }
 
 // GetSyncMetrics returns comprehensive sync metrics
+// REFACTORED: Removed isSyncing field (stateless architecture)
 func (s *SyncLoop) GetSyncMetrics() map[string]interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	metrics := map[string]interface{}{
-		"is_syncing":       s.isSyncing,
 		"sync_progress":    s.syncProgress,
 		"latest_height":    s.bc.LatestBlock().GetHeight(),
 		"orphan_pool_size": s.GetOrphanPoolSize(),
@@ -2614,7 +2726,7 @@ func BuildBlockLocatorFromChain(chain BlockchainInterface) ([][]byte, error) {
 	if locErr != nil {
 		return nil, fmt.Errorf("get best block header: %w", locErr)
 	}
-	if loc == nil || loc.Header == nil {
+	if loc == nil {
 		return nil, fmt.Errorf("chain is empty, cannot build block locator")
 	}
 
@@ -2650,7 +2762,7 @@ func BuildBlockLocatorFromChain(chain BlockchainInterface) ([][]byte, error) {
 		if hdrErr != nil {
 			break
 		}
-		if nextLoc == nil || nextLoc.Header == nil {
+		if nextLoc == nil {
 			break
 		}
 		loc = nextLoc

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -787,6 +788,17 @@ func (sw *Switch) peerAlreadyDialingOrConnected(addr string) bool {
 			return true
 		}
 	}
+
+	sw.peerAddrMtx.RLock()
+	defer sw.peerAddrMtx.RUnlock()
+	for peerID, dialAddr := range sw.peerAddresses {
+		if dialAddr == addr {
+			if sw.peers.Get(peerID) != nil {
+				return true
+			}
+		}
+	}
+
 	return false
 }
 
@@ -1058,10 +1070,15 @@ func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, 
 	existingPeer := sw.peers.Get(addr)
 	sw.mu.RUnlock()
 
-	// If peer already exists, close this connection and return success
 	if existingPeer != nil {
-		conn.Close()
-		return nil
+		oldMConn := existingPeer.MConnection()
+		if oldMConn != nil && oldMConn.IsRunning() {
+			conn.Close()
+			return nil
+		}
+
+		log.Printf("[Switch] Replacing dead peer %s (MConnection not running) with new connection", addr)
+		sw.RemovePeer(addr, "replacing dead connection")
 	}
 
 	// Check if still dialing - if so, this is a duplicate dial attempt
@@ -1655,15 +1672,16 @@ func (sw *Switch) DialPeerWithAddress(addr string) error {
 	sw.dialingMu.Unlock()
 
 	log.Printf("Switch: attempting to add peer %s (pubkey=%s, moniker=%s)", addr, peerNI.PubKey, peerNI.Moniker)
+	peerRemoteAddr := conn.RemoteAddr().String()
 	if addErr := sw.AddPeerConnectionWithNodeInfo(conn, true, peerNI); addErr != nil {
 		log.Printf("Switch: failed to add peer %s: %v", addr, addErr)
 		conn.Close()
 		return fmt.Errorf("dial peer: add peer %s: %w", addr, addErr)
 	}
-	log.Printf("Switch: successfully added peer %s", addr)
+	log.Printf("Switch: successfully added peer %s (remote=%s)", addr, peerRemoteAddr)
 
 	sw.peerAddrMtx.Lock()
-	if peer := sw.peers.Get(addr); peer != nil {
+	if peer := sw.peers.Get(peerRemoteAddr); peer != nil {
 		sw.peerAddresses[peer.ID()] = addr
 	}
 	sw.peerAddrMtx.Unlock()
@@ -2672,4 +2690,287 @@ func (sw *Switch) reapDeadPeers() {
 	if removedCount > 0 {
 		log.Printf("Switch: peer health check complete (removed=%d, current peers=%d)", removedCount, sw.peers.Size())
 	}
+}
+
+// =============================================================================
+// PeerSetInterface Implementation for BlockKeeper Integration
+// =============================================================================
+
+// CRITICAL: These 4 methods implement PeerSetInterface to allow blockKeeper creation
+// Without these, the new sync architecture cannot activate because Switch (the actual
+// type passed to NewSyncLoop) doesn't satisfy the interface.
+
+type switchPeerAdapter struct {
+	id     string
+	height uint64
+	sw     *Switch
+}
+
+func (p *switchPeerAdapter) ID() string {
+	return p.id
+}
+
+func (p *switchPeerAdapter) Height() uint64 {
+	return p.height
+}
+
+func (p *switchPeerAdapter) getBlockByHeight(height uint64) bool {
+	log.Printf("[switchPeerAdapter] getBlockByHeight: requesting block %d from peer %s", height, p.id)
+
+	reqMsg, err := reactor.BuildGetBlocksMsg([]uint64{height})
+	if err != nil {
+		log.Printf("[switchPeerAdapter] getBlockByHeight: build msg error: %v", err)
+		return false
+	}
+
+	if ok := p.sw.Send(p.id, mconnection.ChannelSync, reqMsg); !ok {
+		log.Printf("[switchPeerAdapter] getBlockByHeight: send failed to peer %s", p.id)
+		return false
+	}
+
+	return true
+}
+
+func (p *switchPeerAdapter) getBlocks(locator [][]byte, stopHash []byte) bool {
+	log.Printf("[switchPeerAdapter] getBlocks: requesting blocks from peer %s", p.id)
+
+	heights := make([]uint64, 0, len(locator))
+	for _, loc := range locator {
+		if len(loc) >= 8 {
+			h := binary.BigEndian.Uint64(loc[len(loc)-8:])
+			heights = append(heights, h)
+		}
+	}
+	if len(heights) == 0 {
+		heights = []uint64{p.height}
+	}
+
+	reqMsg, err := reactor.BuildGetBlocksMsg(heights)
+	if err != nil {
+		log.Printf("[switchPeerAdapter] getBlocks: build msg error: %v", err)
+		return false
+	}
+
+	if ok := p.sw.Send(p.id, mconnection.ChannelSync, reqMsg); !ok {
+		log.Printf("[switchPeerAdapter] getBlocks: send failed to peer %s", p.id)
+		return false
+	}
+
+	return true
+}
+
+func (p *switchPeerAdapter) getHeaders(locator [][]byte, stopHash []byte) bool {
+	log.Printf("[switchPeerAdapter] getHeaders: requesting headers from peer %s", p.id)
+
+	from := uint64(0)
+	count := uint64(128)
+	if p.height > 0 {
+		from = p.height + 1
+	}
+
+	reqMsg, err := reactor.BuildGetHeadersMsg(from, count)
+	if err != nil {
+		log.Printf("[switchPeerAdapter] getHeaders: build msg error: %v", err)
+		return false
+	}
+
+	if ok := p.sw.Send(p.id, mconnection.ChannelSync, reqMsg); !ok {
+		log.Printf("[switchPeerAdapter] getHeaders: send failed to peer %s", p.id)
+		return false
+	}
+
+	return true
+}
+
+// bestPeer selects the best peer for synchronization based on chain height.
+// Uses FetchChainInfo to query each peer's actual chain height.
+// Returns the peer with the highest reported chain height.
+func (sw *Switch) bestPeer(serviceFlag int) PeerInterface {
+	sw.mu.RLock()
+	peerList := sw.peers.List()
+	sw.mu.RUnlock()
+
+	if len(peerList) == 0 {
+		log.Printf("[Switch] bestPeer: no active peers available (total=%d)", sw.peers.Size())
+		return nil
+	}
+
+	var maxHeight uint64
+	var bestPeerID string
+	var fallbackPeerID string
+
+	for _, peer := range peerList {
+		if peer.MConnection() == nil || !peer.MConnection().IsRunning() {
+			continue
+		}
+
+		if fallbackPeerID == "" {
+			fallbackPeerID = peer.ID()
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		chainInfo, err := sw.FetchChainInfo(ctx, peer.ID())
+		cancel()
+
+		if err != nil {
+			continue
+		}
+
+		if chainInfo.Height > maxHeight {
+			maxHeight = chainInfo.Height
+			bestPeerID = peer.ID()
+		}
+	}
+
+	if bestPeerID != "" {
+		log.Printf("[Switch] bestPeer: selected %s (height=%d, total_peers=%d)",
+			bestPeerID, maxHeight, sw.peers.Size())
+		return &switchPeerAdapter{
+			id:     bestPeerID,
+			height: maxHeight,
+			sw:     sw,
+		}
+	}
+
+	if fallbackPeerID != "" {
+		log.Printf("[Switch] bestPeer: using fallback peer %s (FetchChainInfo failed for all, total=%d)",
+			fallbackPeerID, sw.peers.Size())
+		return &switchPeerAdapter{
+			id:     fallbackPeerID,
+			height: 0,
+			sw:     sw,
+		}
+	}
+
+	log.Printf("[Switch] bestPeer: no active peers with running MConnection (total=%d)", sw.peers.Size())
+	return nil
+}
+
+// ProcessIllegal handles a misbehaving peer by removing it from the peer set.
+// Level 1: Warning (keep peer but log)
+// Level 2: Remove peer permanently (ban)
+// Other levels: Remove peer
+func (sw *Switch) ProcessIllegal(peerID string, level byte, reason string) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+
+	log.Printf("[Switch] ProcessIllegal: peer=%s, level=%d, reason=%s", peerID, level, reason)
+
+	switch level {
+	case 1:
+		log.Printf("[Switch] ProcessIllegal: warning for peer %s (level=1, keeping peer)", peerID)
+	case 2:
+		fallthrough
+	default:
+		sw.peers.Remove(peerID)
+		log.Printf("[Switch] ProcessIllegal: removed/banned peer %s (level=%d)", peerID, level)
+	}
+}
+
+// broadcastMinedBlock broadcasts a newly mined block to all connected peers.
+// Delegates to existing Switch.BroadcastBlock method.
+func (sw *Switch) broadcastMinedBlock(block *core.Block) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err := sw.BroadcastBlock(ctx, block)
+	if err != nil {
+		return fmt.Errorf("broadcastMinedBlock failed: %w", err)
+	}
+
+	log.Printf("[Switch] broadcastMinedBlock: broadcasted via BroadcastBlock (height=%d)", block.GetHeight())
+	return nil
+}
+
+// broadcastNewStatus broadcasts updated chain status to all connected peers.
+// Delegates to existing Switch.BroadcastNewStatus method.
+func (sw *Switch) broadcastNewStatus(bestBlock, genesisBlock *core.Block) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	work := big.NewInt(0)
+	bestHash := hex.EncodeToString(bestBlock.GetHash())
+
+	sw.BroadcastNewStatus(ctx, bestBlock.GetHeight(), work, bestHash)
+
+	log.Printf("[Switch] broadcastNewStatus: broadcasted via BroadcastNewStatus (height=%d)", bestBlock.GetHeight())
+	return nil
+}
+
+func (sw *Switch) GetPeerChainInfo(peerID string) (height uint64, work *big.Int, tipHash string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	chainInfo, fetchErr := sw.FetchChainInfo(ctx, peerID)
+	cancel()
+	if fetchErr != nil {
+		return 0, nil, "", fmt.Errorf("GetPeerChainInfo: %w", fetchErr)
+	}
+	return chainInfo.Height, chainInfo.Work, chainInfo.LatestHash, nil
+}
+
+func (sw *Switch) PushBlocksToPeer(peerID string, blocks []*core.Block) (int, error) {
+	if len(blocks) == 0 {
+		return 0, fmt.Errorf("PushBlocksToPeer: empty blocks")
+	}
+
+	blockMsg, err := reactor.BuildBlockMsg(blocks)
+	if err != nil {
+		return 0, fmt.Errorf("PushBlocksToPeer: build message: %w", err)
+	}
+
+	sw.mu.RLock()
+	peer := sw.peers.Get(peerID)
+	sw.mu.RUnlock()
+	if peer == nil {
+		return 0, fmt.Errorf("PushBlocksToPeer: peer %s not found", peerID)
+	}
+
+	mconn := peer.MConnection()
+	if mconn == nil {
+		return 0, fmt.Errorf("PushBlocksToPeer: peer %s has no MConnection", peerID)
+	}
+
+	if !mconn.TrySend(mconnection.ChannelBlock, blockMsg) {
+		return 0, fmt.Errorf("PushBlocksToPeer: send failed to peer %s", peerID)
+	}
+
+	log.Printf("[Switch] PushBlocksToPeer: sent %d blocks [%d..%d] to peer %s",
+		len(blocks), blocks[0].GetHeight(), blocks[len(blocks)-1].GetHeight(), peerID)
+	return len(blocks), nil
+}
+
+func (sw *Switch) GetAllPeerIDs() []string {
+	sw.mu.RLock()
+	defer sw.mu.RUnlock()
+
+	peerList := sw.peers.List()
+	ids := make([]string, 0, len(peerList))
+	for _, p := range peerList {
+		if p != nil {
+			ids = append(ids, p.ID())
+		}
+	}
+	return ids
+}
+
+func (sw *Switch) SendInvToPeer(peerID string, invMsg []byte) bool {
+	sw.mu.RLock()
+	peer := sw.peers.Get(peerID)
+	sw.mu.RUnlock()
+
+	if peer == nil {
+		return false
+	}
+
+	mconn := peer.MConnection()
+	if mconn == nil || !mconn.IsRunning() {
+		return false
+	}
+
+	sent := mconn.TrySend(mconnection.ChannelBlock, invMsg)
+	if sent {
+		log.Printf("[Switch] SendInvToPeer: sent INV to %s (%d bytes)", peerID, len(invMsg))
+	}
+	return sent
 }

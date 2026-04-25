@@ -30,12 +30,9 @@ import (
 	"github.com/nogochain/nogo/blockchain/core"
 )
 
-// HeaderLocator bundles a block header with its height for chain traversal
-// BlockHeader does not store height internally, so this struct carries both
-type HeaderLocator struct {
-	Header *core.BlockHeader
-	Height uint64
-}
+// HeaderLocator is re-exported from core package for network layer convenience
+// Actual definition: core.HeaderLocator (core/types.go)
+type HeaderLocator = core.HeaderLocator
 
 // BlockchainInterface defines the blockchain interface for P2P operations
 // Interface-based design for decoupling and testability

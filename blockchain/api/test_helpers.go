@@ -211,8 +211,7 @@ func (m *mockBlockchain) BestBlockHeader() (*network.HeaderLocator, error) {
 	if latest == nil {
 		return nil, nil
 	}
-	headerCopy := latest.Header
-	return &network.HeaderLocator{Header: &headerCopy, Height: latest.GetHeight()}, nil
+	return &network.HeaderLocator{Header: latest.Header, Height: latest.GetHeight()}, nil
 }
 
 // GetHeaderByHeight returns header at given height for block locator
@@ -221,8 +220,7 @@ func (m *mockBlockchain) GetHeaderByHeight(height uint64) (*network.HeaderLocato
 	if !ok || block == nil {
 		return nil, nil
 	}
-	headerCopy := block.Header
-	return &network.HeaderLocator{Header: &headerCopy, Height: height}, nil
+	return &network.HeaderLocator{Header: block.Header, Height: height}, nil
 }
 
 // GetConsensus returns default consensus params for mock

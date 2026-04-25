@@ -223,17 +223,6 @@ func (sr *SyncReactor) Receive(chID byte, peerID string, msgBytes []byte) {
 		return
 	}
 
-	// CRITICAL: Skip processing response messages that should be handled by sendAndWait
-	// SyncMsgHeaders, SyncMsgBlocks, SyncMsgBlockLocator and SyncMsgNotFound are responses to requests
-	// They should be routed to pending request channels, not processed here
-	// SyncMsgStatus is a broadcast message and should be processed normally
-	if msgType == SyncMsgHeaders || msgType == SyncMsgBlocks || msgType == SyncMsgBlockLocator || msgType == SyncMsgNotFound {
-		// These are response messages, skip processing
-		// They will be handled by the sendAndWait mechanism in switch.go
-		log.Printf("[SyncReactor] Receive: skipping response message type %d from peer %s", msgType, peerID)
-		return
-	}
-
 	sr.dispatch(msgType, peerID, payload, handler)
 }
 

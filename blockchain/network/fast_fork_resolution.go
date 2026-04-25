@@ -85,6 +85,11 @@ type ForkResolutionEngine struct {
 	voteExpiry       time.Duration
 	topologyMonitor  *TopologyMonitor
 	arbitrationMutex sync.Mutex
+
+	// Reorg complete callback - triggers immediate re-sync after successful reorganization
+	// CRITICAL: Enables BlockKeeper to restart sync loop after fork resolution
+	// Thread-safety: callback must be non-blocking (uses select+default pattern)
+	onReorgComplete func(newHeight uint64)
 }
 
 // ChainSyncState tracks chain state for each peer
@@ -658,9 +663,18 @@ func (fre *ForkResolutionEngine) executeReorg(newBlock *core.Block) error {
 
 	fre.lastReorgTime = time.Now()
 
+	newHeight := newBlock.GetHeight()
+
 	log.Printf("fast fork resolution completed: new_tip_height=%d new_tip_hash=%x new_work=%s",
-		newBlock.GetHeight(), newBlock.Hash, newBlock.TotalWork,
+		newHeight, newBlock.Hash, newBlock.TotalWork,
 	)
+
+	// CRITICAL: Trigger immediate re-sync via BlockKeeper after successful reorg
+	// This ensures node can quickly synchronize to the new longest chain
+	if fre.onReorgComplete != nil {
+		log.Printf("[FastForkResolution] Triggering onReorgComplete callback for height %d", newHeight)
+		fre.onReorgComplete(newHeight)
+	}
 
 	return nil
 }
@@ -716,6 +730,18 @@ func (fre *ForkResolutionEngine) SetBroadcastCallback(cb func(*ResolutionMessage
 	fre.mu.Lock()
 	defer fre.mu.Unlock()
 	fre.broadcastCallback = cb
+}
+
+// SetOnReorgComplete sets the callback function to be called after successful reorganization
+// Production-grade: triggers immediate re-sync via BlockKeeper.TriggerImmediateReSync()
+// CRITICAL: This callback must be non-blocking (use channel send with select+default)
+// Dependency injection: called during node initialization after BlockKeeper creation
+// Parameter:
+//   - newHeight: the chain height after reorganization completes
+func (fre *ForkResolutionEngine) SetOnReorgComplete(callback func(newHeight uint64)) {
+	fre.mu.Lock()
+	defer fre.mu.Unlock()
+	fre.onReorgComplete = callback
 }
 
 // GetResolutionStats returns resolution statistics

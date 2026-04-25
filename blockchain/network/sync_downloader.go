@@ -77,19 +77,19 @@ type DownloaderConfig struct {
 }
 
 type BlockDownloader struct {
-	mu                sync.RWMutex
-	pm                PeerAPI
-	bc                BlockchainInterface
-	validator         BlockValidator
-	config            DownloaderConfig
-	currentBatchSize  int32
+	mu                 sync.RWMutex
+	pm                 PeerAPI
+	bc                 BlockchainInterface
+	validator          BlockValidator
+	config             DownloaderConfig
+	currentBatchSize   int32
 	currentConcurrency int32
-	isDownloading     int32
-	downloadedCount   uint64
-	failedCount       uint64
-	startTime         time.Time
-	metrics           *metrics.Metrics
-	downloadCond      *sync.Cond
+	isDownloading      int32
+	downloadedCount    uint64
+	failedCount        uint64
+	startTime          time.Time
+	metrics            *metrics.Metrics
+	downloadCond       *sync.Cond
 }
 
 type BlockValidator interface {
@@ -101,12 +101,12 @@ func NewBlockDownloader(pm PeerAPI, bc BlockchainInterface, validator BlockValid
 	if batchSize <= 0 {
 		batchSize = 500
 	}
-	
+
 	maxConcurrent := syncConfig.MaxConcurrentDownloads
 	if maxConcurrent <= 0 {
 		maxConcurrent = 8
 	}
-	
+
 	memoryThreshold := syncConfig.MemoryThresholdMB
 	if memoryThreshold == 0 {
 		memoryThreshold = 1500
@@ -213,11 +213,11 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 		// Wait with timeout to periodically check context
 		d.downloadCond.Wait()
 	}
-	
+
 	// Now we can start the download
 	atomic.StoreInt32(&d.isDownloading, 1)
 	d.downloadCond.L.Unlock()
-	
+
 	// Ensure we signal completion when done
 	defer func() {
 		atomic.StoreInt32(&d.isDownloading, 0)
@@ -239,7 +239,7 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 
 	// Track which heights we've successfully stored
 	storedHeights := make(map[uint64]bool)
-	
+
 	// Download blocks sequentially with real-time storage
 	for batchStart := startHeight; batchStart < startHeight+count; batchStart += ConnectionReuseBatchSize {
 		select {
@@ -269,10 +269,10 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 			if fetchErr == nil {
 				break
 			}
-			
-			log.Printf("[Downloader] Failed to fetch blocks %d-%d (attempt %d/%d): %v", 
+
+			log.Printf("[Downloader] Failed to fetch blocks %d-%d (attempt %d/%d): %v",
 				batchStart, batchEnd, retry+1, MaxBatchRetries, fetchErr)
-			
+
 			if retry < MaxBatchRetries-1 {
 				time.Sleep(BatchRetryDelay)
 			}
@@ -280,9 +280,9 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 
 		if fetchErr != nil {
 			atomic.AddUint64(&d.failedCount, batchCount)
-			log.Printf("[Downloader] All retry attempts failed for blocks %d-%d, returning error: %v", 
+			log.Printf("[Downloader] All retry attempts failed for blocks %d-%d, returning error: %v",
 				batchStart, batchEnd, fetchErr)
-			return fmt.Errorf("failed to fetch blocks %d-%d after %d retries: %w", 
+			return fmt.Errorf("failed to fetch blocks %d-%d after %d retries: %w",
 				batchStart, batchEnd, MaxBatchRetries, fetchErr)
 		}
 
@@ -310,12 +310,12 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 		// Send progress update
 		if progressChan != nil {
 			progress := DownloadProgress{
-				CurrentHeight:    batchEnd,
-				TargetHeight:     startHeight + count,
-				Downloaded:       uint64(totalStored),
-				Failed:           0, // Not tracking failures in real-time mode
-				StartTime:        d.startTime,
-				BlocksPerSec:     d.calculateBlocksPerSec(),
+				CurrentHeight: batchEnd,
+				TargetHeight:  startHeight + count,
+				Downloaded:    uint64(totalStored),
+				Failed:        0, // Not tracking failures in real-time mode
+				StartTime:     d.startTime,
+				BlocksPerSec:  d.calculateBlocksPerSec(),
 			}
 			select {
 			case progressChan <- progress:
@@ -329,9 +329,9 @@ func (d *BlockDownloader) BatchDownloadBlocks(ctx context.Context, peer string, 
 		}
 	}
 
-	log.Printf("[Downloader] Download and storage complete: %d/%d blocks successfully stored in %v", 
+	log.Printf("[Downloader] Download and storage complete: %d/%d blocks successfully stored in %v",
 		totalStored, count, time.Since(d.startTime))
-	
+
 	if uint64(totalStored) < count {
 		return fmt.Errorf("incomplete sync: %d/%d blocks stored", totalStored, count)
 	}
@@ -499,4 +499,52 @@ func (d *BlockDownloader) calculateBlocksPerSec() float64 {
 		return 0
 	}
 	return float64(atomic.LoadUint64(&d.downloadedCount)) / duration
+}
+
+// processBatchWithContext processes a batch of blocks with semaphore-based concurrency control and graceful shutdown
+// This method provides backpressure control to prevent resource exhaustion during high-load scenarios
+func (d *BlockDownloader) processBatchWithContext(ctx context.Context, batch []*core.Block, processFunc func(block *core.Block) error) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	maxConcurrency := int(atomic.LoadInt32(&d.currentConcurrency))
+	if maxConcurrency <= 0 {
+		maxConcurrency = MinMaxConcurrent
+	}
+
+	sem := make(chan struct{}, maxConcurrency)
+	var wg sync.WaitGroup
+	var firstErr error
+	var errMu sync.Mutex
+
+	for _, block := range batch {
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return ctx.Err()
+		case sem <- struct{}{}:
+			wg.Add(1)
+			go func(b *core.Block) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				if err := processFunc(b); err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					errMu.Unlock()
+					log.Printf("[Downloader] Error processing block height=%d: %v", b.GetHeight(), err)
+				}
+			}(block)
+		}
+	}
+
+	wg.Wait()
+
+	if firstErr != nil {
+		return fmt.Errorf("batch processing completed with errors: %w", firstErr)
+	}
+	return nil
 }
