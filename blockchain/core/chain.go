@@ -2708,70 +2708,64 @@ func (c *Chain) GetBlockByHeight(height uint64) (*Block, bool) {
 // Concurrency safety: uses mutex to protect chain state
 // Fork support: stores alternative blocks and triggers reorg if heavier chain found
 // Orphan support: stores orphan blocks (height > expected) for later processing
+//
+// Return value semantics:
+// - (false, nil): block already exists on canonical chain OR was rejected as duplicate/fork
+// - (true, nil): block was stored in orphan pool for later processing (parent missing)
+// - (false, error): validation failed or storage error
 func (c *Chain) AddBlock(block *Block) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Production-grade validation: ensure all blocks undergo full consensus validation
-	// Must be called after lock acquisition to safely access c.consensus and c.chainID
 	if err := c.validateBlockConsensusLocked(block); err != nil {
 		return false, fmt.Errorf("block consensus validation failed: %w", err)
 	}
 
-	// Check if block already exists
 	hashHex := hex.EncodeToString(block.Hash)
+	expectedHeight := uint64(len(c.blocks))
+
 	if _, exists := c.blocksByHash[hashHex]; exists {
-		// Block already indexed - check if it's on canonical chain
-		expectedHeight := uint64(len(c.blocks))
-		if block.GetHeight() <= expectedHeight {
-			if block.GetHeight() < expectedHeight {
-				canonicalBlock := c.blocks[block.GetHeight()]
-				if canonicalBlock != nil && hex.EncodeToString(canonicalBlock.Hash) == hashHex {
-					log.Printf("[Chain] Block %d already on canonical chain, skipping", block.GetHeight())
-					return false, nil
-				}
-			} else {
-				// Block height equals expected height - check if it's the current tip
-				if expectedHeight > 0 {
-					currentTip := c.blocks[expectedHeight-1]
-					if currentTip != nil && hex.EncodeToString(currentTip.Hash) == hashHex {
-						log.Printf("[Chain] Block %d is current tip, skipping duplicate", block.GetHeight())
-						return false, nil
-					}
-				}
+		if block.GetHeight() < expectedHeight {
+			canonicalBlock := c.blocks[block.GetHeight()]
+			if canonicalBlock != nil && hex.EncodeToString(canonicalBlock.Hash) == hashHex {
+				log.Printf("[Chain] Block %d already on canonical chain, skipping", block.GetHeight())
+				return false, nil
 			}
+			log.Printf("[Chain] Block %d (hash=%s) exists but differs from canonical at same height, treating as fork",
+				block.GetHeight(), hashHex[:16])
+			return c.intelligentForkDetectionLocked(block, hashHex)
 		}
-		// Block exists but not on canonical chain - likely orphan or fork
-		log.Printf("[Chain] Block %d (hash=%s) already in index but not on canonical chain (height=%d, expected=%d)",
-			block.GetHeight(), hashHex[:16], block.GetHeight(), expectedHeight)
-		// Still try to process it through fork/orphan handling
-		// Don't return here - continue to height validation
+
+		if block.GetHeight() == expectedHeight {
+			log.Printf("[Chain] Block %d (hash=%s) exists at expected height, attempting canonical re-add after rollback",
+				block.GetHeight(), hashHex[:16])
+			return c.addCanonicalBlockLocked(block, hashHex)
+		}
+
+		if block.GetHeight() > expectedHeight {
+			log.Printf("[Chain] Block %d (hash=%s) exists with height > expected (%d), storing as orphan",
+				block.GetHeight(), hashHex[:16], expectedHeight)
+			return c.addOrphanBlockLocked(block, hashHex)
+		}
+
+		return false, nil
 	}
 
-	// Store block in blocksByHash for reference (if not already there)
 	if _, exists := c.blocksByHash[hashHex]; !exists {
 		c.blocksByHash[hashHex] = block
 	}
 
-	// Validate block height and handle forks
-	expectedHeight := uint64(len(c.blocks))
-
 	if block.GetHeight() == expectedHeight {
-		// Normal case: block extends canonical chain
-		// Validate that block's PrevHash matches current chain tip
 		if len(c.blocks) > 0 {
 			currentTip := c.blocks[len(c.blocks)-1]
 			if !bytes.Equal(block.Header.PrevHash, currentTip.Hash) {
 				log.Printf("[Chain] Block %d has wrong PrevHash: expected %x, got %x",
 					block.GetHeight(), currentTip.Hash[:8], block.Header.PrevHash[:8])
-				// This block might be from a different fork - handle as fork block
 				return c.addForkBlockLocked(block, hashHex)
 			}
 		}
 		return c.addCanonicalBlockLocked(block, hashHex)
 	} else if block.GetHeight() < expectedHeight {
-		// IMPROVED: Don't immediately mark as fork - use intelligent fork detection
-		// Consider work, timing, and whether this could be a valid late-arriving block
 		log.Printf("[Chain] Block %d < expected %d, using intelligent fork detection", block.GetHeight(), expectedHeight)
 		return c.intelligentForkDetectionLocked(block, hashHex)
 	} else if block.GetHeight() == expectedHeight+1 {
@@ -2794,7 +2788,6 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 			block.GetHeight(), expectedHeight)
 		return c.addCanonicalBlockLocked(block, hashHex)
 	} else {
-		// Orphan case: block height too high (gap > 1)
 		log.Printf("[Chain] Orphan block %d: height gap too large (expected %d), storing for later",
 			block.GetHeight(), expectedHeight)
 		return c.addOrphanBlockLocked(block, hashHex)
@@ -3880,40 +3873,104 @@ func (c *Chain) CanonicalTxCount() uint64 {
 }
 
 // cleanOrphanPoolAboveHeight intelligently cleans orphan pool after rollback
-// Production-grade: only removes orphans above target height, preserving valid blocks
-// CRITICAL FIX: Previous implementation cleared entire orphan pool, causing permanent desync
+// Production-grade: preserves potentially useful orphans, only removes clearly invalid ones
 // Thread-safety: must be called with mutex held (called from RollbackToHeight)
+//
+// Strategy: After rollback to height H, we should preserve:
+// - Orphans at height H+1 (immediate next block needed for sync)
+// - Orphans that form continuous chains starting from H+1
+// - Only remove orphans that are clearly disconnected (gap > 1 from any valid chain)
 func (c *Chain) cleanOrphanPoolAboveHeight(height uint64) {
-	if c.orphanPool == nil {
+	if c.orphanPool == nil || len(c.orphanPool) == 0 {
 		return
 	}
 
-	log.Printf("[Chain] Smart orphan cleanup: retaining blocks <= height %d", height)
+	log.Printf("[Chain] Smart orphan cleanup after rollback to height %d (pool size: %d)", height, len(c.orphanPool))
 
 	removedCount := 0
 	retainedCount := 0
+	nextNeededHeight := height + 1
 
 	for hash, orphan := range c.orphanPool {
-		if orphan.GetHeight() > height {
-			delete(c.orphanPool, hash)
-			removedCount++
-			log.Printf("[Chain] Removed orphan at height %d (hash=%s...)",
-				orphan.GetHeight(), hash[:min(16, len(hash))])
-		} else {
+		orphanHeight := orphan.GetHeight()
+
+		if orphanHeight <= height {
 			retainedCount++
+			continue
 		}
+
+		if orphanHeight == nextNeededHeight {
+			parentHashHex := hex.EncodeToString(orphan.Header.PrevHash)
+			if c.isParentInCanonicalOrForkLocked(parentHashHex) {
+				retainedCount++
+				continue
+			}
+		}
+
+		if orphanHeight > nextNeededHeight && orphanHeight <= height+128 {
+			if c.couldBePartOfValidChainLocked(orphan, height) {
+				retainedCount++
+				continue
+			}
+		}
+
+		delete(c.orphanPool, hash)
+		removedCount++
+		log.Printf("[Chain] Removed disconnected orphan at height %d (hash=%s...)",
+			orphanHeight, hash[:min(16, len(hash))])
 	}
 
-	if c.orphanByParent != nil {
-		c.orphanByParent = make(map[string][]string)
-		for hash, orphan := range c.orphanPool {
-			parentHash := hex.EncodeToString(orphan.Header.PrevHash)
-			c.orphanByParent[parentHash] = append(c.orphanByParent[parentHash], hash)
-		}
+	if removedCount > 0 && c.orphanByParent != nil {
+		c.rebuildOrphanByParentIndexLocked()
 	}
 
 	log.Printf("[Chain] Orphan cleanup complete: retained=%d removed=%d total=%d",
 		retainedCount, removedCount, retainedCount+removedCount)
+}
+
+// isParentInCanonicalOrForkLocked checks if parent exists in canonical chain or fork blocks
+func (c *Chain) isParentInCanonicalOrForkLocked(parentHashHex string) bool {
+	if parentBlock, exists := c.blocksByHash[parentHashHex]; exists {
+		blockHeight := parentBlock.GetHeight()
+		if blockHeight < uint64(len(c.blocks)) && c.blocks[blockHeight] == parentBlock {
+			return true
+		}
+		if forkBlocks, forkExists := c.forkBlocks[blockHeight]; forkExists {
+			for _, fb := range forkBlocks {
+				if fb == parentBlock {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// couldBePartOfValidChainLocked checks if an orphan could be part of a valid chain continuation
+func (c *Chain) couldBePartOfValidChainLocked(orphan *Block, currentHeight uint64) bool {
+	parentHashHex := hex.EncodeToString(orphan.Header.PrevHash)
+	if _, parentExists := c.blocksByHash[parentHashHex]; parentExists {
+		return true
+	}
+	for h := currentHeight + 1; h < orphan.GetHeight(); h++ {
+		if potentialParents, exists := c.orphanByParent[parentHashHex]; exists {
+			for _, pH := range potentialParents {
+				if pOrphan, oExists := c.orphanPool[pH]; oExists && pOrphan.GetHeight() == h-1 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// rebuildOrphanByParentIndexLocked rebuilds the orphan-by-parent index after modifications
+func (c *Chain) rebuildOrphanByParentIndexLocked() {
+	c.orphanByParent = make(map[string][]string)
+	for hash, orphan := range c.orphanPool {
+		parentHash := hex.EncodeToString(orphan.Header.PrevHash)
+		c.orphanByParent[parentHash] = append(c.orphanByParent[parentHash], hash)
+	}
 }
 
 // RollbackToHeight rolls back the chain to a given height
