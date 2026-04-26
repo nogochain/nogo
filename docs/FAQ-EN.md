@@ -1,8 +1,9 @@
 # NogoChain Frequently Asked Questions (FAQ)
 
-> **Version**: 1.0.0  
-> **Last Updated**: 2026-04-09  
-> **Status**: �?Production Ready
+> **Version**: 1.1.0
+> **Last Updated**: 2026-04-26
+> **Status**: ✅ Production Ready
+> **Language**: English (Primary)
 
 This document contains frequently asked questions and answers for using NogoChain.
 
@@ -30,7 +31,7 @@ This document contains frequently asked questions and answers for using NogoChai
 **Features**:
 - Target block time: 17 seconds
 - Annual inflation rate: 10% decreasing
-- Fee distribution: 100% to miners
+- Fee distribution: 100% burned (deflationary mechanism)
 - Supports on-chain governance
 
 ### Q2: How to get started quickly?
@@ -51,7 +52,7 @@ Access API: `http://localhost:8080`
 
 ### Q3: Which operating systems are supported?
 
-**A**: 
+**A**:
 - Linux (Ubuntu 20.04+, CentOS 8+)
 - macOS 11+
 - Windows 10+
@@ -60,7 +61,7 @@ Linux is recommended for production environments.
 
 ### Q4: What are the minimum hardware requirements?
 
-**A**: 
+**A**:
 - CPU: 2 cores
 - Memory: 2 GB
 - Storage: 10 GB
@@ -101,7 +102,7 @@ export ADMIN_TOKEN=$(openssl rand -hex 32)
 
 ### Q7: How to enable TLS?
 
-**A**: 
+**A**:
 
 ```bash
 # Use Let's Encrypt
@@ -115,7 +116,7 @@ export TLS_KEY_FILE=/etc/letsencrypt/live/your-domain.com/privkey.pem
 
 ### Q8: What's the difference between Docker and binary deployment?
 
-**A**: 
+**A**:
 - **Docker**: Fast, isolated, easy to manage, recommended for development and testing
 - **Binary**: Better performance, full control, recommended for production environments
 
@@ -125,7 +126,7 @@ export TLS_KEY_FILE=/etc/letsencrypt/live/your-domain.com/privkey.pem
 
 ### Q9: How to start mining?
 
-**A**: 
+**A**:
 
 ```bash
 # 1. Create wallet to get address
@@ -143,7 +144,7 @@ export MINING_ENABLED=true
 
 ### Q10: How is mining reward calculated?
 
-**A**: 
+**A**:
 
 Block reward formula:
 ```
@@ -186,7 +187,7 @@ export STRATUM_ADDR=:3333
 
 ### Q13: What to do if node synchronization is slow?
 
-**A**: 
+**A**:
 
 1. **Check network connection**:
 ```bash
@@ -207,22 +208,22 @@ export P2P_SEEDS=seed1.nogochain.org:9090,seed2.nogochain.org:9090
 
 ### Q14: How to check synchronization status?
 
-**A**: 
+**A**:
 
 ```bash
 # Check block height
 curl http://localhost:8080/chain/info | jq '.height'
 
 # Check connected node count
-curl http://localhost:8080/peers | jq '.addresses | length'
+curl http://localhost:8080/p2p/getaddr | jq '.addresses | length'
 
-# Check synchronization progress
-curl http://localhost:8080/sync/status
+# Check sync progress (if available)
+curl http://localhost:8080/chain/info | jq '{height, latestHash}'
 ```
 
 ### Q15: What to do if synchronization is stuck?
 
-**A**: 
+**A**:
 
 ```bash
 # 1. Restart node
@@ -231,7 +232,7 @@ sudo systemctl restart nogochain
 # 2. Check logs
 sudo journalctl -u nogochain -f
 
-# 3. Reset synchronization state
+# 3. Reset synchronization state (caution!)
 sudo systemctl stop nogochain
 rm -rf /var/lib/nogochain/data/sync_state
 sudo systemctl start nogochain
@@ -243,10 +244,10 @@ sudo systemctl start nogochain
 
 ### Q16: How to query balance?
 
-**A**: 
+**A**:
 
 ```bash
-curl http://localhost:8080/account/balance/NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048
+curl http://localhost:8080/balance/NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048
 ```
 
 Response:
@@ -254,24 +255,26 @@ Response:
 {
   "address": "NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048",
   "balance": 1000000000,
-  "balanceNOGO": "10.00000000"
+  "nonce": 0
 }
 ```
 
 ### Q17: How to submit transaction?
 
-**A**: 
+**A**:
 
 ```bash
-curl -X POST http://localhost:8080/tx/submit \
+curl -X POST http://localhost:8080/tx \
   -H "Content-Type: application/json" \
   -d '{
-    "from": "NOGO...",
-    "to": "NOGO...",
-    "amount": 100,
-    "fee": 10,
-    "nonce": 0,
-    "signature": "0x..."
+    "type": "transfer",
+    "chainId": 1,
+    "fromPubKey": "base64_encoded_public_key",
+    "toAddress": "NOGO...",
+    "amount": 100000000,
+    "fee": 10000,
+    "nonce": 1,
+    "signature": "base64_encoded_signature"
   }'
 ```
 
@@ -283,29 +286,26 @@ curl -X POST http://localhost:8080/tx/submit \
 const ws = new WebSocket('ws://localhost:8080/ws');
 
 ws.onopen = () => {
-  ws.send(JSON.stringify({
-    "action": "subscribe",
-    "channel": "newHeads"
-  }));
+  console.log('WebSocket connected');
 };
 
 ws.onmessage = (event) => {
-  console.log('New block:', JSON.parse(event.data));
+  console.log('Received message:', JSON.parse(event.data));
 };
 ```
 
 ### Q19: What are the API rate limits?
 
-**A**: 
+**A**:
 
 Default configuration:
-- Requests per second: 100
-- Burst limit: 50
+- Requests per second: 10
+- Burst limit: 20
 
 Can be adjusted via environment variables:
 ```bash
-export RATE_LIMIT_REQUESTS=200
-export RATE_LIMIT_BURST=100
+export RATE_LIMIT_REQUESTS=100
+export RATE_LIMIT_BURST=50
 ```
 
 ---
@@ -314,16 +314,18 @@ export RATE_LIMIT_BURST=100
 
 ### Q20: How are tokens distributed?
 
-**A**: 
+**A**:
 
-- **96%**: Miner rewards (block rewards + fees)
+- **96%**: Miner rewards (block rewards only)
 - **2%**: Community fund
 - **1%**: Genesis address
 - **1%**: Integrity reward pool
 
+Fees: 100% burned (deflationary mechanism)
+
 ### Q21: How is inflation rate calculated?
 
-**A**: 
+**A**:
 
 Annual inflation rate formula:
 ```
@@ -341,15 +343,15 @@ Inflation Rate = (Annual Issuance / Circulating Supply) × 100%
 
 ### Q22: How are fees distributed?
 
-**A**: 100% to miners, incentivizing miners to pack transactions.
+**A**: 100% burned (not given to miners). Miners are incentivized by block rewards only.
 
 ### Q23: How is the community fund used?
 
 **A**: Decided through on-chain governance:
 
-1. Any token holder can propose a proposal (requires deposit)
-2. Voting: 1 token = 1 vote
-3. Passing conditions: �?0% participation rate AND �?0% approval
+1. Any token holder can propose (requires deposit)
+2. Voting weight: 1 token = 1 vote
+3. Passing conditions: ≥10% participation AND ≥50% approval
 4. Automatic execution
 
 ---
@@ -358,7 +360,7 @@ Inflation Rate = (Annual Issuance / Circulating Supply) × 100%
 
 ### Q24: How to ensure private key security?
 
-**A**: 
+**A**:
 
 1. **Use HD wallet**: Derive multiple keys from seed
 2. **Offline storage**: Use cold wallet for large amounts
@@ -367,7 +369,7 @@ Inflation Rate = (Annual Issuance / Circulating Supply) × 100%
 
 ### Q25: How to prevent double-spend attacks?
 
-**A**: 
+**A**:
 
 1. **Wait for confirmations**: Large transactions wait for 6 confirmations
 2. **Check reorganizations**: Monitor blockchain reorganizations
@@ -375,7 +377,7 @@ Inflation Rate = (Annual Issuance / Circulating Supply) × 100%
 
 ### Q26: What to do if TLS certificate expires?
 
-**A**: 
+**A**:
 
 ```bash
 # Set up automatic renewal
@@ -389,9 +391,9 @@ sudo crontab -e
 
 ## Troubleshooting
 
-### Q27: Node fails to start,提示 "address already in use"
+### Q27: Node fails to start, error "address already in use"
 
-**A**: 
+**A**:
 
 ```bash
 # Check port occupancy
@@ -402,22 +404,22 @@ sudo lsof -i :9090
 sudo kill -9 <PID>
 
 # Or change port
-export NODE_PORT=8081
+export HTTP_PORT=8081
 export P2P_PORT=9091
 ```
 
 ### Q28: How to recover from database corruption?
 
-**A**: 
+**A**:
 
 ```bash
 # 1. Stop node
 sudo systemctl stop nogochain
 
 # 2. Backup current data
-cp -r /var/lib/nogochain/data /var/lib/nogochain/data.backup
+cp -r /var/lib/nogochain/data /var/lib/nogochain.data.backup
 
-# 3. Delete corrupted database
+# 3. Delete corrupted database (caution!)
 rm -rf /var/lib/nogochain/data/chain.db
 
 # 4. Restore from backup or resynchronize
@@ -426,13 +428,12 @@ sudo systemctl start nogochain
 
 ### Q29: How to optimize when memory is insufficient?
 
-**A**: 
+**A**:
 
 ```bash
 # 1. Reduce cache
 export CACHE_MAX_BLOCKS=5000
 export CACHE_MAX_BALANCES=50000
-export CACHE_MAX_PROOFS=5000
 
 # 2. Reduce transaction pool
 export MEMPOOL_MAX_SIZE=10000
@@ -450,7 +451,7 @@ sudo swapon /swapfile
 
 ### Q30: What to do if mining cannot produce blocks?
 
-**A**: 
+**A**:
 
 ```bash
 # 1. Check miner address
@@ -461,7 +462,7 @@ timedatectl status
 sudo timedatectl set-ntp true
 
 # 3. Check network connection
-curl http://localhost:8080/peers
+curl http://localhost:8080/p2p/getaddr
 
 # 4. View mining logs
 sudo journalctl -u nogochain | grep -i mining
@@ -476,12 +477,12 @@ sudo journalctl -u nogochain | grep -i mining
 - **Documentation**: https://docs.nogochain.org
 - **GitHub**: https://github.com/nogochain/nogo
 - **Issue Tracking**: https://github.com/nogochain/nogo/issues
-- **Discord**: https://discord.gg/HxEFPqJMEV
+- **Email**: nogo@eiyaro.org
 
 ### Submitting Bugs
 
-Provide the following information:
-1. Node version
+Please provide the following information:
+1. Node version (`./nogo --version`)
 2. Operating system and version
 3. Error logs
 4. Reproduction steps
@@ -489,12 +490,29 @@ Provide the following information:
 
 ### Community Support
 
-- Join Discord community
-- Participate in forum discussions
-- Follow official Twitter
+- View GitHub Discussions
+- Submit issues for help
+- Follow project updates
 
 ---
 
-**Last Updated**: 2026-04-09  
-**Version**: 1.0.0  
+**Last Updated**: 2026-04-26
+**Version**: 1.1.0
 **Maintainer**: NogoChain Development Team
+
+## Changelog
+
+### v1.1.0 (2026-04-26)
+- 🐛 Fixed UTF-8 encoding errors (multiple locations)
+- 🐛 Fixed API endpoint paths to match code implementation:
+  - `/tx/submit` → `/tx`
+  - `/account/balance/{addr}` → `/balance/{addr}`
+  - `/peers` → `/p2p/getaddr`
+  - `/sync/status` → removed (not implemented)
+- ✏️ Corrected fee distribution description (100% burned, not to miners)
+- ✏️ Fixed governance passing conditions (≥10% participation, ≥50% approval)
+- 🌐 Removed mixed Chinese text, document now fully English
+- 🔧 Updated all examples to use actual environment variable names
+
+### v1.0.0 (2026-04-09)
+- Initial version

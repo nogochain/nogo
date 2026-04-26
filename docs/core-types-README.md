@@ -535,10 +535,16 @@ type MonetaryPolicy struct {
     MinimumBlockReward     uint64 `json:"minimumBlockReward"`     // Minimum block reward
     AnnualReductionPercent uint8  `json:"annualReductionPercent"` // Annual reduction percentage
     MinerFeeShare          uint8  `json:"minerFeeShare"`          // Miner fee share percentage
-    UncleRewardEnabled     bool   `json:"uncleRewardEnabled"`     // Enable uncle reward
-    MaxUncleDepth          uint8  `json:"maxUncleDepth"`          // Maximum uncle depth
+    UncleRewardEnabled     bool   `json:"uncleRewardEnabled"`     // ⚠️ 预留接口：Enable uncle reward (未启用)
+    MaxUncleDepth          uint8  `json:"maxUncleDepth"`          // ⚠️ 预留接口：Maximum uncle depth (未使用)
 }
 ```
+
+> **⚠️ 重要说明**: 
+> - `UncleRewardEnabled` 和 `MaxUncleDepth` 字段为**预留接口**（以太坊兼容性）
+> - **当前生产环境未启用**，因为核心数据结构 [`core.Block`](../blockchain/core/types.go#L203-L213) **不包含 Uncles 字段**
+> - 这些字段仅存在于配置定义中，实际运行时不会被使用
+> - 参见 [Economic-Model.md](./Economic-Model.md) 第 2.5 节详细说明
 
 ### 8.2 Block Reward Calculation
 

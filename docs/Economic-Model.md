@@ -104,7 +104,16 @@ func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
 | ... | ... | ... | ... |
 | 高度极大时 | n | 0.10 | 最小奖励下限 |
 
-### 2.5 叔叔区块奖励（动态计算）（已更新）
+### 2.5 叔叔区块奖励（动态计算）（⚠️ 预留接口 - 未在生产环境实现）
+
+> **⚠️ 重要说明**:
+> - **状态**: 预留接口（以太坊兼容性），**未在生产环境实现**
+> - **原因**: 核心数据结构 [`core.Block`](../blockchain/core/types.go#L203-L213) **不包含 Uncles 字段**
+> - **实际影响**: 当前网络中不会产生或处理叔叔区块
+> - **配置存在**: `UncleRewardEnabled` 和 `MaxUncleDepth` 配置项已定义，但未被使用
+> - **代码位置**: 叔块相关函数仅存在于 [`nogopow.Block`](../blockchain/nogopow/types.go#L69-L73)（以太坊兼容类型）和配置模块
+>
+> **建议**: 以下内容仅供参考，实际经济模型中不包含叔叔区块奖励
 
 **重要更新**: 叔叔区块奖励采用动态计算，非固定 7/8。
 
@@ -148,7 +157,11 @@ func (p MonetaryPolicy) GetUncleReward(nephewHeight, uncleHeight uint64, blockRe
 
 ---
 
-## 3. 叔叔区块奖励（已验证）
+## 3. 叔叔区块奖励（⚠️ 预留接口 - 未在生产环境实现）
+
+> **⚠️ 重复警告**: 此章节内容为预留接口文档，**当前生产环境未启用**
+> - 实际运行的区块链使用 [`core.Block`](../blockchain/core/types.go#L203-L213)，该结构**不支持 Uncles 字段**
+> - 参见 [2.5 节说明](#25-叔叔区块奖励动态计算--预留接口---未在生产环境实现)
 
 ### 3.1 奖励公式
 
@@ -178,7 +191,10 @@ func (p MonetaryPolicy) GetUncleReward(height uint64) uint64 {
 
 ---
 
-## 4. 侄子区块奖励（已验证）
+## 4. 侄子区块奖励（⚠️ 预留接口 - 未在生产环境实现）
+
+> **⚠️ 重复警告**: 此章节内容为预留接口文档，**当前生产环境未启用**
+> - 依赖于叔叔区块功能，参见 [2.5 节说明](#25-叔叔区块奖励动态计算--预留接口---未在生产环境实现)
 
 ### 4.1 奖励公式
 
@@ -260,6 +276,8 @@ coinbase := Transaction{
 **文档公式**:
 $$R_{total\_miner} = R(h) + Fee_{miner} + R_{nephew}$$
 
+> **⚠️ 注意**: $R_{nephew}$（侄子奖励）项仅在叔叔区块功能启用时生效，**当前生产环境未启用**
+
 **代码实现** ([`monetary_policy.go`](d:\NogoChain\nogo\blockchain\config\monetary_policy.go#L139-149)):
 ```go
 func (p MonetaryPolicy) GetTotalMinerReward(height uint64, totalFees uint64, uncleCount int) uint64 {
@@ -269,7 +287,7 @@ func (p MonetaryPolicy) GetTotalMinerReward(height uint64, totalFees uint64, unc
     // 矿工费用
     minerFees := p.MinerFeeAmount(totalFees)
     
-    // 侄子奖励（每个叔叔区块）
+    // 侄子奖励（每个叔叔区块）- ⚠️ 当前未启用，uncleCount 始终为 0
     nephewBonus := p.GetNephewBonus(height) * uint64(uncleCount)
     
     // 总奖励
@@ -450,7 +468,9 @@ reward := BlockReward(2000000)
 
 ### 示例 2: 矿工总奖励
 
-**场景**: 高度 1,000,000，包含 2 个叔叔区块，交易费用 500 NOGO
+**场景**: 高度 1,000,000，包含 **0 个叔叔区块**（当前生产环境），交易费用 500 NOGO
+
+> **⚠️ 重要更正**: 当前生产环境中，**uncleCount 始终为 0**（因为 core.Block 不支持 Uncles 字段）
 
 **计算过程**:
 ```

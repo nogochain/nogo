@@ -1,107 +1,108 @@
-# NogoChain 文档标准化指南
+# NogoChain Documentation Standards
 
-> **版本**: 1.0.0  
-> **最后更新**: 2026-04-09  
-> **状态**: ✅ 生产就绪  
-> **适用范围**: 所有 NogoChain 技术文档
+> **Version**: 1.1.0
+> **Last Updated**: 2026-04-26
+> **Status**: ✅ Production Ready
+> **Language**: English (Primary)
+> **Scope**: All NogoChain Technical Documentation
 
-本文档定义 NogoChain 项目文档的标准格式和结构要求，确保文档的一致性、专业性和可维护性。
-
----
-
-## 目录
-
-1. [文档结构标准](#文档结构标准)
-2. [格式规范](#格式规范)
-3. [术语使用规范](#术语使用规范)
-4. [版本管理](#版本管理)
-5. [变更历史](#变更历史)
-6. [代码引用规范](#代码引用规范)
-7. [示例代码规范](#示例代码规范)
-8. [文档模板](#文档模板)
+This document defines the standard format and structure requirements for NogoChain project documentation, ensuring consistency, professionalism, and maintainability.
 
 ---
 
-## 文档结构标准
+## Table of Contents
 
-### 1. 文档头部
+1. [Document Structure Standards](#document-structure-standards)
+2. [Formatting Standards](#formatting-standards)
+3. [Terminology Standards](#terminology-standards)
+4. [Version Management](#version-management)
+5. [Change History](#change-history)
+6. [Code Reference Standards](#code-reference-standards)
+7. [Example Code Standards](#example-code-standards)
+8. [Document Templates](#document-templates)
 
-每个文档必须包含标准头部信息：
+---
 
-```markdown
-# 文档标题
+## Document Structure Standards
 
-> **版本**: 1.0.0  
-> **最后更新**: 2026-04-09  
-> **适用版本**: NogoChain v1.0.0+  
-> **状态**: ✅ 生产就绪 | 🚧 开发中 | ⚠️ 已废弃
-```
+### 1. Document Header
 
-**要求**:
-- 版本号使用语义化版本（Semantic Versioning）
-- 日期格式：YYYY-MM-DD
-- 状态使用 Emoji 标识
-
-### 2. 简介部分
-
-文档开头应包含简要介绍：
+Every document must include standard header information:
 
 ```markdown
-本文档提供...的完整说明，涵盖...。所有内容均基于最新代码实现，确保准确性和可执行性。
+# Document Title
 
-**代码参考:**
-- 模块 1：[`文件路径`](file:///path/to/file)
-- 模块 2：[`文件路径`](file:///path/to/file)
+> **Version**: 1.0.0
+> **Last Updated**: 2026-04-26
+> **Applicable Version**: NogoChain v1.0.0+
+> **Status**: ✅ Production Ready | 🚧 In Development | ⚠️ Deprecated
 ```
 
-### 3. 目录
+**Requirements**:
+- Use Semantic Versioning for version numbers
+- Date format: YYYY-MM-DD
+- Use Emoji to indicate status
 
-超过 5 个章节的文档必须包含目录：
+### 2. Introduction Section
+
+Document should begin with a brief introduction:
 
 ```markdown
-## 目录
+This document provides complete instructions for..., covering... All content is based on the latest code implementation to ensure accuracy and executability.
 
-1. [章节 1](#章节 1)
-2. [章节 2](#章节 2)
-3. [章节 3](#章节 3)
+**Code References**:
+- Module 1: [`File Path`](file:///path/to/file)
+- Module 2: [`File Path`](file:///path/to/file)
 ```
 
-### 4. 主体内容
+### 3. Table of Contents
 
-#### 4.1 章节编号
-
-使用多级编号：
-```markdown
-## 1. 一级标题
-
-### 1.1 二级标题
-
-#### 1.1.1 三级标题
-```
-
-#### 4.2 表格使用
-
-表格必须有表头和对齐：
+Documents with more than 5 sections must include a table of contents:
 
 ```markdown
-| 列 1 | 列 2 | 列 3 |
-|------|------|------|
-| 左对齐 | 居中对齐 | 右对齐 |
-| 内容 | 内容 | 内容 |
+## Table of Contents
+
+1. [Section 1](#section-1)
+2. [Section 2](#section-2)
+3. [Section 3](#section-3)
 ```
 
-#### 4.3 代码块
+### 4. Main Content
 
-所有代码块必须指定语言：
+#### 4.1 Section Numbering
+
+Use multi-level numbering:
+```markdown
+## 1. Level 1 Heading
+
+### 1.1 Level 2 Heading
+
+#### 1.1.1 Level 3 Heading
+```
+
+#### 4.2 Table Usage
+
+Tables must have headers and alignment:
+
+```markdown
+| Column 1 | Column 2 | Column 3 |
+|----------|----------|----------|
+| Left     | Center   | Right    |
+| Content  | Content  | Content  |
+```
+
+#### 4.3 Code Blocks
+
+All code blocks must specify language:
 
 ````markdown
 ```bash
-# Shell 命令
+# Shell command
 echo "Hello"
 ```
 
 ```go
-// Go 代码
+// Go code
 func main() {
     fmt.Println("Hello")
 }
@@ -114,293 +115,293 @@ func main() {
 ```
 ````
 
-### 5. 文档尾部
+### 5. Document Footer
 
-每个文档应包含标准尾部：
-
-```markdown
----
-
-**最后更新**: 2026-04-09  
-**版本**: 1.0.0  
-**维护者**: NogoChain 开发团队  
-**相关文档**:
-- [文档 1](./doc1.md)
-- [文档 2](./doc2.md)
-```
-
----
-
-## 格式规范
-
-### 1. 标题格式
-
-- 一级标题：`# 标题`（文档标题，仅一个）
-- 二级标题：`## 1. 标题`（主要章节）
-- 三级标题：`### 1.1 标题`（子章节）
-- 四级标题：`#### 1.1.1 标题`（细节内容）
-
-### 2. 列表格式
-
-#### 有序列表
-```markdown
-1. 第一步
-2. 第二步
-3. 第三步
-```
-
-#### 无序列表
-```markdown
-- 项目 1
-- 项目 2
-- 项目 3
-```
-
-#### 嵌套列表
-```markdown
-1. 主项目
-   - 子项目 1
-   - 子项目 2
-2. 主项目
-   - 子项目 1
-   - 子项目 2
-```
-
-### 3. 强调格式
-
-```markdown
-**粗体**: 重要内容
-*斜体*: 强调内容
-***粗斜体***: 特别重要
-~~删除线~~: 已废弃内容
-```
-
-### 4. 引用格式
-
-```markdown
-> 这是引用内容
-> 可以有多行
-```
-
-### 5. 链接格式
-
-#### 内部链接
-```markdown
-[章节名称](#章节名称)
-```
-
-#### 外部链接
-```markdown
-[网站名称](https://example.com)
-```
-
-#### 代码引用
-```markdown
-[`文件名`](file:///path/to/file)
-[`函数名`](file:///path/to/file#L10-L20)
-```
-
-### 6. 图片格式
-
-```markdown
-![描述文字](./images/picture.png "悬停标题")
-```
-
----
-
-## 术语使用规范
-
-### 1. 术语一致性
-
-- 首次出现必须解释
-- 全文统一使用
-- 中英文对照准确
-
-**示例**:
-```markdown
-工作量证明（Proof of Work, PoW）是一种共识机制...
-```
-
-### 2. 术语表引用
-
-复杂术语应引用术语表：
-```markdown
-参见 [术语表](./Glossary-CN.md#NogoPow)
-```
-
-### 3. 命名规范
-
-- **代码元素**: 使用 `代码格式`（如 `Config`, `LoadConfig()`）
-- **文件名**: 使用 `代码格式`（如 `config.go`）
-- **API 端点**: 使用 `代码格式`（如 `/chain/info`）
-
----
-
-## 版本管理
-
-### 1. 文档版本号
-
-遵循语义化版本：
-- **主版本**: 重大变更（不兼容）
-- **次版本**: 新增功能（兼容）
-- **修订号**: 小幅修改（兼容）
-
-**格式**: `主版本。次版本。修订号`（如 `1.2.3`）
-
-### 2. 版本记录
-
-每个文档应记录版本历史：
-
-```markdown
-## 版本历史
-
-| 版本 | 日期 | 变更说明 | 作者 |
-|------|------|---------|------|
-| 1.0.0 | 2026-04-09 | 初始版本 | 开发团队 |
-| 1.1.0 | 2026-04-10 | 新增 API 说明 | 开发团队 |
-```
-
-### 3. 兼容性说明
-
-重大变更需说明兼容性：
-
-```markdown
-**兼容性警告**: v2.0.0 版本不兼容 v1.x 配置，需手动迁移。
-```
-
----
-
-## 变更历史
-
-### 1. 变更记录位置
-
-文档末尾应包含变更历史：
+Each document should include a standard footer:
 
 ```markdown
 ---
 
-## 变更历史
-
-### v1.0.0 (2026-04-09)
-- ✅ 初始版本
-- ✅ 完成核心功能文档
-- ✅ 添加代码示例
-```
-
-### 2. 变更类型标识
-
-使用 Emoji 标识变更类型：
-- ✅ 新增
-- 🔧 修改
-- ❌ 删除
-- 📝 文档
-- 🐛 修复
-- ⚡ 性能
-
-### 3. 变更说明
-
-每个变更应详细说明：
-```markdown
-### v1.1.0 (2026-04-10)
-- ✅ 新增 WebSocket API 说明
-  - 添加连接示例
-  - 添加订阅示例
-  - 添加错误处理
-- 🔧 修改配置说明
-  - 更新环境变量列表
-  - 修正默认值
+**Last Updated**: 2026-04-26
+**Version**: 1.0.0
+**Maintainer**: NogoChain Development Team
+**Related Documents**:
+- [Document 1](./doc1.md)
+- [Document 2](./doc2.md)
 ```
 
 ---
 
-## 代码引用规范
+## Formatting Standards
 
-### 1. 引用格式
+### 1. Heading Format
 
-必须使用精确链接：
+- Level 1: `# Title` (document title, only one)
+- Level 2: `## 1. Title` (main sections)
+- Level 3: `### 1.1 Title` (subsections)
+- Level 4: `#### 1.1.1 Title` (details)
+
+### 2. List Format
+
+#### Ordered Lists
 ```markdown
-[`文件名`](file:///绝对路径)
-[`函数名`](file:///绝对路径#L 开始-L 结束)
+1. Step 1
+2. Step 2
+3. Step 3
 ```
 
-**示例**:
+#### Unordered Lists
 ```markdown
-配置加载函数 [`LoadConfig`](file:///d:/NogoChain/nogo/blockchain/config/config.go#L215-L217)
+- Item 1
+- Item 2
+- Item 3
 ```
 
-### 2. 引用准确性
+#### Nested Lists
+```markdown
+1. Main item
+   - Subitem 1
+   - Subitem 2
+2. Main item
+   - Subitem 1
+   - Subitem 2
+```
 
-- 链接必须可点击
-- 路径必须正确
-- 行号必须精确
+### 3. Emphasis Format
 
-### 3. 引用密度
+```markdown
+**Bold**: Important content
+*Italic*: Emphasized content
+***Bold Italic***: Very important
+~~Strikethrough~~: Deprecated content
+```
 
-重要函数和结构体必须有引用：
-- 每个 API 端点
-- 每个配置项
-- 每个算法实现
+### 4. Quote Format
+
+```markdown
+> This is quoted content
+> Can have multiple lines
+```
+
+### 5. Link Format
+
+#### Internal Links
+```markdown
+[Section Name](#section-name)
+```
+
+#### External Links
+```markdown
+[Website Name](https://example.com)
+```
+
+#### Code References
+```markdown
+[`Filename`](file:///path/to/file)
+[`Function Name`](file:///path/to/file#L10-L20)
+```
+
+### 6. Image Format
+
+```markdown
+![Description](./images/picture.png "Hover Title")
+```
 
 ---
 
-## 示例代码规范
+## Terminology Standards
 
-### 1. 可运行性
+### 1. Terminology Consistency
 
-所有示例代码必须可运行：
-- 完整的上下文
-- 正确的语法
-- 实际的参数
+- Must explain on first occurrence
+- Use consistently throughout the document
+- Accurate English-Chinese correspondence
 
-### 2. 注释说明
+**Example**:
+```markdown
+Proof of Work (PoW) is a consensus mechanism...
+```
 
-示例代码应包含注释：
+### 2. Glossary Reference
+
+Complex terms should reference the glossary:
+```markdown
+See [Glossary](./Glossary-EN.md#NogoPow)
+```
+
+### 3. Naming Conventions
+
+- **Code elements**: Use `code format` (e.g., `Config`, `LoadConfig()`)
+- **Filenames**: Use `code format` (e.g., `config.go`)
+- **API endpoints**: Use `code format` (e.g., `/chain/info`)
+
+---
+
+## Version Management
+
+### 1. Document Version Numbers
+
+Follow Semantic Versioning:
+- **Major**: Breaking changes (incompatible)
+- **Minor**: New features (compatible)
+- **Patch**: Small modifications (compatible)
+
+**Format**: `Major.Minor.Patch` (e.g., `1.2.3`)
+
+### 2. Version Records
+
+Each document should record version history:
+
+```markdown
+## Changelog
+
+| Version | Date       | Changes          | Author      |
+|---------|------------|------------------|-------------|
+| 1.0.0   | 2026-04-26 | Initial version  | Dev Team    |
+| 1.1.0   | 2026-04-27 | Added API docs    | Dev Team    |
+```
+
+### 3. Compatibility Notes
+
+Major changes should note compatibility:
+
+```markdown
+**Compatibility Warning**: v2.0.0 is incompatible with v1.x configs, manual migration required.
+```
+
+---
+
+## Change History
+
+### 1. Change Record Location
+
+Documents should include changelog at the end:
+
+```markdown
+---
+
+## Changelog
+
+### v1.0.0 (2026-04-26)
+- ✅ Initial version
+- ✅ Completed core feature documentation
+- ✅ Added code examples
+```
+
+### 2. Change Type Identifiers
+
+Use Emoji to identify change types:
+- ✅ New feature
+- 🔧 Modification
+- ❌ Deletion
+- 📝 Documentation
+- 🐛 Bug fix
+- ⚡ Performance
+
+### 3. Change Descriptions
+
+Each change should be detailed:
+```markdown
+### v1.1.0 (2026-04-27)
+- ✅ Added WebSocket API documentation
+  - Added connection example
+  - Added subscription example
+  - Added error handling
+- 🔧 Modified configuration documentation
+  - Updated environment variable list
+  - Corrected default values
+```
+
+---
+
+## Code Reference Standards
+
+### 1. Reference Format
+
+Must use precise links:
+```markdown
+[`Filename`](file:///absolute/path)
+[`Function Name`](file:///absolute/path#LStart-LEnd)
+```
+
+**Example**:
+```markdown
+Configuration loading function [`LoadConfig`](file:///d:/NogoChain/nogo/blockchain/config/config.go#L215-L217)
+```
+
+### 2. Reference Accuracy
+
+- Links must be clickable
+- Paths must be correct
+- Line numbers must be precise
+
+### 3. Reference Density
+
+Important functions and structures must have references:
+- Each API endpoint
+- Each configuration item
+- Each algorithm implementation
+
+---
+
+## Example Code Standards
+
+### 1. Executability
+
+All example code must be executable:
+- Complete context
+- Correct syntax
+- Actual parameters
+
+### 2. Comments
+
+Example code should include comments:
 ```bash
-# 1. 下载 Go 1.21.5
+# 1. Download Go 1.21.5
 wget https://go.dev/dl/go1.21.5.linux-amd64.tar.gz
 
-# 2. 解压
+# 2. Extract
 sudo tar -C /usr/local -xzf go1.21.5.linux-amd64.tar.gz
 ```
 
-### 3. 安全提示
+### 3. Security Warnings
 
-涉及安全的示例必须标注：
+Security-related examples must be labeled:
 ```bash
-# ⚠️ 警告：这是示例令牌，生产环境请使用强随机令牌
+# ⚠️ WARNING: This is an example token, use strong random token in production
 export ADMIN_TOKEN="example_token"
 ```
 
 ---
 
-## 文档模板
+## Document Templates
 
-### 1. API 文档模板
+### 1. API Documentation Template
 
 ```markdown
-# API 名称
+# API Name
 
-> **版本**: 1.0.0  
-> **最后更新**: 2026-04-09  
-> **状态**: ✅ 稳定 | 🚧 测试 | ⚠️ 已废弃
+> **Version**: 1.0.0
+> **Last Updated**: 2026-04-26
+> **Status**: ✅ Stable | 🚧 Testing | ⚠️ Deprecated
 
-## 端点
+## Endpoint
 
 ```
 HTTP METHOD /path/to/endpoint
 ```
 
-## 描述
+## Description
 
-简要说明 API 功能。
+Brief description of API functionality.
 
-## 请求参数
+## Request Parameters
 
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| param | string | 是 | 参数说明 |
+| Parameter | Type   | Required | Description |
+|-----------|--------|----------|-------------|
+| param     | string | Yes      | Parameter description |
 
-## 响应格式
+## Response Format
 
 ```json
 {
@@ -408,113 +409,159 @@ HTTP METHOD /path/to/endpoint
 }
 ```
 
-## 错误码
+## Error Codes
 
-| 错误码 | 说明 |
-|--------|------|
-| 400 | 请求错误 |
-| 401 | 未授权 |
+| Error Code | Description |
+|------------|-------------|
+| 400        | Bad request  |
+| 401        | Unauthorized |
 
-## 示例
+## Example
 
 ```bash
 curl http://localhost:8080/endpoint
 ```
 
-## 代码参考
+## Code Reference
 
-[`handler 函数`](file:///path/to/file)
+[`handler function`](file:///path/to/file)
 
-## 相关 API
+## Related APIs
 
-- [相关 API 1](./api1.md)
-- [相关 API 2](./api2.md)
+- [Related API 1](./api1.md)
+- [Related API 2](./api2.md)
 ```
 
-### 2. 配置文档模板
+### 2. Configuration Documentation Template
 
 ```markdown
-# 配置项名称
+# Configuration Item Name
 
-> **版本**: 1.0.0  
-> **最后更新**: 2026-04-09
+> **Version**: 1.0.0
+> **Last Updated**: 2026-04-26
 
-## 说明
+## Description
 
-配置项的详细说明。
+Detailed description of configuration item.
 
-## 环境变量
+## Environment Variables
 
-| 变量名 | 默认值 | 必填 | 说明 |
-|--------|--------|------|------|
-| VAR_NAME | default | 是 | 说明 |
+| Variable   | Default | Required | Description |
+|------------|---------|----------|-------------|
+| VAR_NAME   | default | Yes      | Description |
 
-## 配置文件示例
+## Configuration File Example
 
 ```yaml
 key: value
 ```
 
-## 代码参考
+## Code Reference
 
-[`配置结构`](file:///path/to/file)
+[`Configuration struct`](file:///path/to/file)
 ```
 
-### 3. 算法文档模板
+### 3. Algorithm Documentation Template
 
 ```markdown
-# 算法名称
+# Algorithm Name
 
-> **版本**: 1.0.0  
-> **最后更新**: 2026-04-09
+> **Version**: 1.0.0
+> **Last Updated**: 2026-04-26
 
-## 概述
+## Overview
 
-算法的概述说明。
+Algorithm overview description.
 
-## 数学原理
+## Mathematical Principles
 
-$$ 公式 $$
+$$ Formula $$
 
-## 实现步骤
+## Implementation Steps
 
-1. 步骤 1
-2. 步骤 2
-3. 步骤 3
+1. Step 1
+2. Step 2
+3. Step 3
 
-## 复杂度分析
+## Complexity Analysis
 
-- 时间复杂度：O(n)
-- 空间复杂度：O(n)
+- Time complexity: O(n)
+- Space complexity: O(n)
 
-## 代码实现
+## Code Implementation
 
-[`实现文件`](file:///path/to/file)
+[`Implementation file`](file:///path/to/file)
 
-## 测试用例
+## Test Cases
 
-[`测试文件`](file:///path/to/test)
+[`Test file`](file:///path/to/test)
 ```
 
 ---
 
-## 质量检查清单
+## Quality Checklist
 
-发布文档前检查以下项目：
+Check the following items before publishing documents:
 
-- [ ] 文档头部信息完整
-- [ ] 目录结构清晰
-- [ ] 术语使用一致
-- [ ] 代码引用准确
-- [ ] 示例代码可运行
-- [ ] 链接全部有效
-- [ ] 格式符合规范
-- [ ] 版本信息正确
-- [ ] 变更历史记录
-- [ ] 相关文档链接
+- [ ] Document header information complete
+- [ ] Clear table of contents structure
+- [ ] Consistent terminology usage
+- [ ] Accurate code references
+- [ ] Executable example code
+- [ ] All links valid
+- [ ] Format meets standards
+- [ ] Correct version information
+- [ ] Recorded changelog
+- [ ] Related document links
 
 ---
 
-**最后更新**: 2026-04-09  
-**版本**: 1.0.0  
-**维护者**: NogoChain 开发团队
+## Language Requirements
+
+### Primary Language
+
+**All documentation MUST be in English as the primary language**
+
+- Document titles: English
+- Section headings: English
+- Body text: English
+- Code comments: English
+- Error messages: English
+
+### Chinese Translation (Optional)
+
+Chinese translations may be provided as supplementary material:
+
+- Place in separate files with `_cn.md` suffix
+- Translation files should reference the English original
+- Maintain synchronization with English version
+
+**Example File Structure**:
+```
+docs/
+├── README.md                    # English (primary)
+├── Algorithm-Manual.md          # English (primary)
+├── FAQ-EN.md                    # English (primary)
+├── FAQ-CN.md                    # Chinese translation
+└── API/
+    ├── API_Complete_Reference.md # English (primary)
+    └── API 完整参考_cn.md         # Chinese translation
+```
+
+---
+
+**Last Updated**: 2026-04-26
+**Version**: 1.1.0
+**Maintainer**: NogoChain Development Team
+
+## Changelog
+
+### v1.1.0 (2026-04-26)
+- 🌐 Converted to English as primary language (was Chinese)
+- 📝 Added "Language Requirements" section
+- ✏️ Updated all examples to use English
+- 📅 Updated date to 2026-04-26
+- 🔧 Aligned with project requirement: "English primary, Chinese translation follows"
+
+### v1.0.0 (2026-04-09)
+- Initial version (Chinese)

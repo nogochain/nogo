@@ -2,8 +2,9 @@
 
 This document provides complete deployment instructions for the NogoChain blockchain, covering development, testnet, and production environments.
 
-**Last Updated**: 2026-04-10  
-**Audit Status:** âœ?Configuration options verified against code  
+**Last Updated**: 2026-04-26
+**Audit Status**: âœ… Configuration options verified against code
+**Language**: English (Primary)
 **Code References:**
 - Configuration: [`blockchain/config/config.go`](https://github.com/nogochain/nogo/blob/main/nogo/blockchain/config/config.go)
 - Environment Variables: [`blockchain/config/env.go`](https://github.com/nogochain/nogo/blob/main/nogo/blockchain/config/env.go)
@@ -1077,7 +1078,7 @@ mkdir -p "$BACKUP_DIR"
 
 # Check if blockchain data exists
 if [ ! -f "$NOGO_CHAIN_DIR/blockchain/data/chain.db" ]; then
-    echo "$(date): â?No blockchain data found"
+    echo "$(date): ï¿½?No blockchain data found"
     exit 1
 fi
 
@@ -1088,7 +1089,7 @@ cp -r "$NOGO_CHAIN_DIR/blockchain/data/chain.db" "$BACKUP_DIR/chain_$TIMESTAMP.d
 cd "$BACKUP_DIR"
 ls -t chain_*.db | tail -n +11 | xargs -r rm
 
-echo "$(date): âœ?Backup saved: chain_$TIMESTAMP.db"
+echo "$(date): ï¿½?Backup saved: chain_$TIMESTAMP.db"
 
 # Show backup count
 BACKUP_COUNT=$(ls -1 chain_*.db 2>/dev/null | wc -l)

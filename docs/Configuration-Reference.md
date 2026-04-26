@@ -169,8 +169,8 @@ Defines the economic model for block rewards and token distribution.
 | `InitialBlockReward` | `uint64` | `initialBlockReward` | `800000000` | Initial block reward in wei (8 NOGO) |
 | `AnnualReductionPercent` | `uint8` | `annualReductionPercent` | `10` | Yearly reduction percentage (0-100) |
 | `MinimumBlockReward` | `uint64` | `minimumBlockReward` | `10000000` | Floor reward in wei (0.1 NOGO) |
-| `UncleRewardEnabled` | `bool` | `uncleRewardEnabled` | `true` | Enable uncle block rewards |
-| `MaxUncleDepth` | `uint8` | `maxUncleDepth` | `6` | Maximum uncle block depth |
+| `UncleRewardEnabled` | `bool` | `uncleRewardEnabled` | `true` | ⚠️ **预留接口**: Enable uncle block rewards (未启用) |
+| `MaxUncleDepth` | `uint8` | `maxUncleDepth` | `6` | ⚠️ **预留接口**: Maximum uncle block depth (未使用) |
 | `HalvingInterval` | `uint64` | `halvingInterval` | `0` | Legacy field for compatibility |
 | `MaxSupply` | `uint64` | `maxSupply` | `0` | Maximum total supply |
 | `MinerFeeShare` | `uint8` | `minerFeeShare` | `0` | Percentage of fees to miner (0-100) |

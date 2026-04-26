@@ -287,9 +287,22 @@ Whether to trust X-Forwarded-For headers, must be enabled when using reverse pro
 ## U
 
 ### Uncle Block
+
+> **⚠️ Reserved Interface - Not Implemented in Production**
+
 Blocks accepted by the network but not part of the main chain, miners can receive rewards.
 
-**Code Reference**: [`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go#L144-L146)
+**Current Status**:
+- **Core data structure does not support**: [`core.Block`](../blockchain/core/types.go#L203-L213) **does not include Uncles field**
+- **Configuration exists but disabled**: `UncleRewardEnabled`, `MaxUncleDepth`
+- **Code location**: Only defined in [`nogopow.Block`](../blockchain/nogopow/types.go#L69-L73) (Ethereum-compatible type)
+- **Actual impact**: NogoChain network **does not produce or process uncle blocks**
+
+**Code References**:
+- Config: [`blockchain/config/monetary_policy.go`](../blockchain/config/monetary_policy.go#L144-L146)
+- Ethereum-compatible type: [`blockchain/nogopow/types.go`](../blockchain/nogopow/types.go#L69-L73)
+
+**Related Documentation**: [Economic-Model.md](./Economic-Model.md) Section 2.5
 
 ---
 

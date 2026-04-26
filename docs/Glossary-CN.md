@@ -287,9 +287,22 @@ NogoChain 的工作量证明共识算法，基于矩阵乘法。
 ## U
 
 ### Uncle Block（叔块）
+
+> **⚠️ 预留接口 - 未在生产环境实现**
+
 被网络接受但未成为主链的区块，矿工可获得奖励。
 
-**代码参考**: [`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go#L144-L146)
+**当前状态**: 
+- **核心数据结构不支持**: [`core.Block`](../blockchain/core/types.go#L203-L213) **不包含 Uncles 字段**
+- **配置项存在但未启用**: `UncleRewardEnabled`, `MaxUncleDepth`
+- **代码位置**: 仅在 [`nogopow.Block`](../blockchain/nogopow/types.go#L69-L73)（以太坊兼容类型）中定义
+- **实际影响**: 当前 NogoChain 网络中**不会产生或处理叔叔区块**
+
+**代码参考**:
+- 配置: [`blockchain/config/monetary_policy.go`](../blockchain/config/monetary_policy.go#L144-L146)
+- 以太坊兼容类型: [`blockchain/nogopow/types.go`](../blockchain/nogopow/types.go#L69-L73)
+
+**相关文档**: [Economic-Model.md](./Economic-Model.md) 第 2.5 节
 
 ---
 

@@ -1,7 +1,7 @@
 # NogoChain API Documentation
 
-> Version: 1.2.0  
-> Last Updated: 2026-04-07  
+> Version: 1.3.0
+> Last Updated: 2026-04-26
 > Applicable Version: NogoChain Node v1.0.0+
 
 ## Document Overview
@@ -13,9 +13,9 @@ This documentation provides complete usage instructions for the NogoChain blockc
 ```
 API Documentation/
 ├── README.md                  # This document (entry point)
-├── README_EN.md               # English version
-├── openapi.yaml              # OpenAPI 3.0 specification
-├── openapi_en.yaml           # English OpenAPI specification
+├── README_cn.md               # Chinese version (中文版)
+├── openapi.yaml              # OpenAPI 3.0 specification (English)
+├── openapi_cn.yaml           # OpenAPI 3.0 specification (中文版)
 ├── API 完整参考.md            # Complete API reference (Chinese)
 ├── API_Complete_Reference.md  # Complete API reference (English)
 ├── 错误码参考.md              # Error codes reference (Chinese)
@@ -50,7 +50,7 @@ API Documentation/
 
 ### 🔧 Developer Resources
 
-4. **[openapi_en.yaml](./openapi_en.yaml)** - API specification
+4. **[openapi.yaml](./openapi.yaml)** - API specification
    - OpenAPI 3.0 definition
    - Import to Postman/Swagger
    - Generate SDKs
@@ -206,7 +206,7 @@ def submit_transaction(raw_tx):
 - **JavaScript SDK**: In development
 - **Python SDK**: In development
 - **Postman Collection**: Coming soon
-- **Swagger UI**: Import openapi_en.yaml to view
+- **Swagger UI**: Import openapi.yaml to view
 
 ### Third-party Tools
 
@@ -231,6 +231,12 @@ Please provide the following information:
 5. Reproduction steps
 
 ## Changelog
+
+### v1.3.0 (2026-04-26)
+
+- 🐛 Fixed incorrect file references (README_EN.md → README_cn.md, openapi_en.yaml → openapi.yaml)
+- 📝 Updated document structure to match actual files
+- 🔧 Verified all API endpoints against code implementation (56 endpoints)
 
 ### v1.2.0 (2026-04-07)
 

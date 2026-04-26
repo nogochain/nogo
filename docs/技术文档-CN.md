@@ -725,8 +725,8 @@ type MonetaryPolicy struct {
     InitialBlockReward     uint64 `json:"initialBlockReward"`     // 800,000,000 wei (8 NOGO)
     AnnualReductionPercent uint8  `json:"annualReductionPercent"` // 10%
     MinimumBlockReward     uint64 `json:"minimumBlockReward"`     // 10,000,000 wei (0.1 NOGO)
-    UncleRewardEnabled     bool   `json:"uncleRewardEnabled"`
-    MaxUncleDepth          uint8  `json:"maxUncleDepth"`          // 6
+    UncleRewardEnabled     bool   `json:"uncleRewardEnabled"`     // ⚠️ 预留接口（未启用）
+    MaxUncleDepth          uint8  `json:"maxUncleDepth"`          // 6（预留接口，未使用）
     MinerFeeShare          uint8  `json:"minerFeeShare"`          // 0%（销毁）
     MinerRewardShare       uint8  `json:"minerRewardShare"`       // 96%
     CommunityFundShare     uint8  `json:"communityFundShare"`     // 2%
@@ -734,6 +734,8 @@ type MonetaryPolicy struct {
     IntegrityPoolShare     uint8  `json:"integrityPoolShare"`     // 1%
 }
 ```
+
+> **⚠️ 注意**: `UncleRewardEnabled` 和 `MaxUncleDepth` 为预留接口字段，**当前生产环境未启用**。核心数据结构 [`core.Block`](../blockchain/core/types.go#L203-L213) 不包含 Uncles 字段。参见 [Economic-Model.md](./Economic-Model.md) 第 2.5 节。
 
 ### 9.2 区块奖励分配
 
