@@ -555,7 +555,7 @@ A: 不会。限流只影响新请求，已提交的交易不受影响。
 ### Q: 如何申请更高的限制？
 
 A: 联系 NogoChain 团队，说明使用场景和需求：
-- 邮箱：dev@nogochain.org
+- 邮箱：nogo@eiyaro.org
 - 说明：应用类型、预期请求量、用途
 
 ### Q: WebSocket 连接也限流吗？

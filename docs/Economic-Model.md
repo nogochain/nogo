@@ -517,5 +517,5 @@ inflation_rate = 9,743,500 / 60,814,824 = 16.0%
 ---
 
 **文档维护**: NogoChain 开发团队  
-**联系方式**: dev@nogochain.org  
+**联系方式**: nogo@eiyaro.org  
 **GitHub**: https://github.com/nogochain/nogo

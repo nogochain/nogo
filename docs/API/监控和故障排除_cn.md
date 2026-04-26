@@ -629,7 +629,7 @@ curl http://localhost:9100/metrics
 - **官方文档**: https://docs.nogochain.org
 - **GitHub**: https://github.com/nogochain/nogo
 - **问题追踪**: https://github.com/nogochain/nogo/issues
-- **邮箱**: dev@nogochain.org
+- **邮箱**: nogo@eiyaro.org
 
 ### 提交 Bug
 

@@ -555,7 +555,7 @@ A: No. Rate limiting only affects new requests; submitted transactions are not a
 ### Q: How do I apply for higher limits?
 
 A: Contact NogoChain team, explain your use case and requirements:
-- Email: dev@nogochain.org
+- Email: nogo@eiyaro.org
 - Include: Application type, expected request volume, use case
 
 ### Q: Are WebSocket connections also rate limited?

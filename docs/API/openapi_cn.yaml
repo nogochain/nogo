@@ -82,12 +82,12 @@ info:
     
     - **官方网站**: https://nogochain.org
     - **技术文档**: https://docs.nogochain.org
-    - **邮箱**: dev@nogochain.org
+    - **邮箱**: nogo@eiyaro.org
   version: 1.2.0
   contact:
     name: NogoChain Team
     url: https://nogochain.org
-    email: dev@nogochain.org
+    email: nogo@eiyaro.org
   license:
     name: LGPL-3.0
     url: https://www.gnu.org/licenses/lgpl-3.0.html

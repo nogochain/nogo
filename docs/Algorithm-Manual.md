@@ -458,5 +458,5 @@ adjustment := proportional + integral
 ---
 
 **文档维护**: NogoChain 开发团队  
-**联系方式**: dev@nogochain.org  
+**联系方式**: nogo@eiyaro.org  
 **GitHub**: https://github.com/nogochain/nogo

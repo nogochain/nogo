@@ -629,7 +629,7 @@ curl http://localhost:9100/metrics
 - **Official Documentation**: https://docs.nogochain.org
 - **GitHub**: https://github.com/nogochain/nogo
 - **Issue Tracker**: https://github.com/nogochain/nogo/issues
-- **Email**: dev@nogochain.org
+- **Email**: nogo@eiyaro.org
 
 ### Submitting Bugs
 

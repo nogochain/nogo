@@ -219,7 +219,7 @@ def submit_transaction(raw_tx):
 
 - **Official Documentation**: https://docs.nogochain.org
 - **GitHub Issues**: https://github.com/nogochain/nogo/issues
-- **Email**: dev@nogochain.org
+- **Email**: nogo@eiyaro.org
 
 ### Report Issues
 

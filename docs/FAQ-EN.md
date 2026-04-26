@@ -2,7 +2,7 @@
 
 > **Version**: 1.0.0  
 > **Last Updated**: 2026-04-09  
-> **Status**: âœ… Production Ready
+> **Status**: âœ?Production Ready
 
 This document contains frequently asked questions and answers for using NogoChain.
 
@@ -349,7 +349,7 @@ Inflation Rate = (Annual Issuance / Circulating Supply) Ã— 100%
 
 1. Any token holder can propose a proposal (requires deposit)
 2. Voting: 1 token = 1 vote
-3. Passing conditions: â‰¥10% participation rate AND â‰¥60% approval
+3. Passing conditions: â‰?0% participation rate AND â‰?0% approval
 4. Automatic execution
 
 ---
@@ -474,8 +474,8 @@ sudo journalctl -u nogochain | grep -i mining
 ### Official Resources
 
 - **Documentation**: https://docs.nogochain.org
-- **GitHub**: https://github.com/NogoChain/NogoChain
-- **Issue Tracking**: https://github.com/NogoChain/NogoChain/issues
+- **GitHub**: https://github.com/nogochain/nogo
+- **Issue Tracking**: https://github.com/nogochain/nogo/issues
 - **Discord**: https://discord.gg/HxEFPqJMEV
 
 ### Submitting Bugs

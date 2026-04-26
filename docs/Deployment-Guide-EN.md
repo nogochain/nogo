@@ -3,12 +3,12 @@
 This document provides complete deployment instructions for the NogoChain blockchain, covering development, testnet, and production environments.
 
 **Last Updated**: 2026-04-10  
-**Audit Status:** âœ… Configuration options verified against code  
+**Audit Status:** âœ?Configuration options verified against code  
 **Code References:**
-- Configuration: [`blockchain/config/config.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/config.go)
-- Environment Variables: [`blockchain/config/env.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/env.go)
-- Types: [`blockchain/config/types.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/config/types.go)
-- Node Startup: [`blockchain/cmd/node.go`](https://github.com/NogoChain/NogoChain/blob/main/nogo/blockchain/cmd/node.go)
+- Configuration: [`blockchain/config/config.go`](https://github.com/nogochain/nogo/blob/main/nogo/blockchain/config/config.go)
+- Environment Variables: [`blockchain/config/env.go`](https://github.com/nogochain/nogo/blob/main/nogo/blockchain/config/env.go)
+- Types: [`blockchain/config/types.go`](https://github.com/nogochain/nogo/blob/main/nogo/blockchain/config/types.go)
+- Node Startup: [`blockchain/cmd/node.go`](https://github.com/nogochain/nogo/blob/main/nogo/blockchain/cmd/node.go)
 
 ---
 
@@ -72,7 +72,7 @@ export PATH=$PATH:$GOPATH/bin
 
 #### 2. Clone Repository
 ```bash
-git clone https://github.com/NogoChain/NogoChain.git
+git clone https://github.com/nogochain/nogo.git
 cd NogoChain/nogo
 ```
 
@@ -103,7 +103,7 @@ go build -race -o nogo ./blockchain/cmd
 #### Linux
 ```bash
 # Download latest binary
-wget https://github.com/NogoChain/NogoChain/releases/latest/download/nogo-linux-amd64
+wget https://github.com/nogochain/nogo/releases/latest/download/nogo-linux-amd64
 chmod +x nogo-linux-amd64
 sudo mv nogo-linux-amd64 /usr/local/bin/nogo
 ```
@@ -111,7 +111,7 @@ sudo mv nogo-linux-amd64 /usr/local/bin/nogo
 #### Windows
 ```powershell
 # Download latest binary
-Invoke-WebRequest -Uri "https://github.com/NogoChain/NogoChain/releases/latest/download/nogo-windows-amd64.exe" -OutFile "nogo.exe"
+Invoke-WebRequest -Uri "https://github.com/nogochain/nogo/releases/latest/download/nogo-windows-amd64.exe" -OutFile "nogo.exe"
 ```
 
 #### macOS
@@ -120,7 +120,7 @@ Invoke-WebRequest -Uri "https://github.com/NogoChain/NogoChain/releases/latest/d
 brew install nogochain
 
 # Or manual download
-wget https://github.com/NogoChain/NogoChain/releases/latest/download/nogo-darwin-amd64
+wget https://github.com/nogochain/nogo/releases/latest/download/nogo-darwin-amd64
 chmod +x nogo-darwin-amd64
 sudo mv nogo-darwin-amd64 /usr/local/bin/nogo
 ```
@@ -1077,7 +1077,7 @@ mkdir -p "$BACKUP_DIR"
 
 # Check if blockchain data exists
 if [ ! -f "$NOGO_CHAIN_DIR/blockchain/data/chain.db" ]; then
-    echo "$(date): âŒ No blockchain data found"
+    echo "$(date): â?No blockchain data found"
     exit 1
 fi
 
@@ -1088,7 +1088,7 @@ cp -r "$NOGO_CHAIN_DIR/blockchain/data/chain.db" "$BACKUP_DIR/chain_$TIMESTAMP.d
 cd "$BACKUP_DIR"
 ls -t chain_*.db | tail -n +11 | xargs -r rm
 
-echo "$(date): âœ… Backup saved: chain_$TIMESTAMP.db"
+echo "$(date): âœ?Backup saved: chain_$TIMESTAMP.db"
 
 # Show backup count
 BACKUP_COUNT=$(ls -1 chain_*.db 2>/dev/null | wc -l)
@@ -1170,7 +1170,7 @@ curl http://localhost:8080/account/balance/NOGO0094bc928c08baf466e75fc617f10569a
 
 ```bash
 # 1. Install new version
-git clone https://github.com/NogoChain/NogoChain.git
+git clone https://github.com/nogochain/nogo.git
 cd NogoChain/nogo
 go build -o nogo ./blockchain/cmd
 
@@ -1253,8 +1253,8 @@ curl -X POST http://localhost:8080/tx/submit \
 ### D. Related Resources
 
 - **Official Website**: https://nogochain.org
-- **GitHub**: https://github.com/NogoChain/NogoChain
-- **Documentation**: https://github.com/NogoChain/NogoChain/tree/main/nogo/docs
+- **GitHub**: https://github.com/nogochain/nogo
+- **Documentation**: https://github.com/nogochain/nogo/tree/main/nogo/docs
 - **Discord**: https://discord.gg/HxEFPqJMEV
 - **Twitter**: https://twitter.com/nogochain
 

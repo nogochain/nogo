@@ -211,7 +211,7 @@ def submit_transaction(raw_tx):
 
 - **官方文档**: https://docs.nogochain.org
 - **GitHub Issues**: https://github.com/nogochain/nogo/issues
-- **邮箱**: dev@nogochain.org
+- **邮箱**: nogo@eiyaro.org
 
 ### 报告问题
 
