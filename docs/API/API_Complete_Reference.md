@@ -1841,7 +1841,7 @@ A: Use `POST /wallet/verify` with the address to check validity.
 
 ### Q: What is the block time target?
 
-A: NogoChain targets 10-second block times (configurable via consensus parameters).
+A: NogoChain targets 17-second block times (configurable via consensus parameters).
 
 ---
 

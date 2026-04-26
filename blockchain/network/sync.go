@@ -305,18 +305,111 @@ func (s *SyncLoop) Start(ctx context.Context) error {
 
 	if s.blockKeeper != nil {
 		localHeight := s.bc.LatestBlock().GetHeight()
-		if localHeight > 0 {
-			s.syncProgress = 1.0
-			log.Printf("[SyncManager] Architecture: NEW (blockKeeper-based), localHeight=%d, marked as synced for mining", localHeight)
-		} else {
-			log.Printf("[SyncManager] Architecture: NEW (blockKeeper-based), localHeight=0, will sync from peers")
-		}
+		log.Printf("[SyncManager] Architecture: NEW (blockKeeper-based), localHeight=%d", localHeight)
+
+		// Keep sync progress conservative until we have verified peer catch-up.
+		// This prevents premature mining when the node is behind the network.
+		go s.startPeerSyncProgressMonitor()
 	} else {
 		log.Printf("[CRITICAL] WARNING: blockKeeper not initialized! Sync will use degraded mode")
 		log.Printf("[CRITICAL] This means the PeerAPI interface mismatch was not resolved")
 	}
 
 	return nil
+}
+
+// startPeerSyncProgressMonitor periodically evaluates whether the local node is caught up with peers.
+// It does not perform legacy SyncWithPeer logic; blockKeeper remains responsible for syncing.
+// This monitor only maintains an accurate IsSynced() signal for production safety.
+func (s *SyncLoop) startPeerSyncProgressMonitor() {
+	s.mu.RLock()
+	ctx := s.ctx
+	s.mu.RUnlock()
+
+	if ctx == nil {
+		return
+	}
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.updateSyncProgressFromPeers(ctx)
+		}
+	}
+}
+
+// updateSyncProgressFromPeers updates syncProgress based on peer-reported chain height/work.
+// If peer info cannot be fetched, it keeps the previous progress to avoid oscillation.
+func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
+	if s == nil || s.pm == nil || s.bc == nil {
+		return
+	}
+
+	peers := s.pm.GetActivePeers()
+	if len(peers) == 0 {
+		// No peers: standalone mode.
+		s.mu.Lock()
+		s.syncProgress = 1.0
+		s.lastUpdateTime = time.Now()
+		s.mu.Unlock()
+		return
+	}
+
+	localTip := s.bc.LatestBlock()
+	localHeight := uint64(0)
+	localWork := big.NewInt(0)
+	if localTip != nil {
+		localHeight = localTip.GetHeight()
+		if w := s.bc.CanonicalWork(); w != nil {
+			localWork = w
+		}
+	}
+
+	maxPeerHeight := uint64(0)
+	bestPeerWork := big.NewInt(0)
+	gotAny := false
+
+	for _, peer := range peers {
+		info, err := s.pm.FetchChainInfo(ctx, peer)
+		if err != nil || info == nil || info.Work == nil {
+			continue
+		}
+		gotAny = true
+
+		if info.Height > maxPeerHeight {
+			maxPeerHeight = info.Height
+		}
+		if info.Work.Cmp(bestPeerWork) > 0 {
+			bestPeerWork = info.Work
+		}
+	}
+
+	if !gotAny {
+		return
+	}
+
+	synced := false
+	if localHeight > maxPeerHeight {
+		synced = true
+	} else if localHeight == maxPeerHeight && bestPeerWork.Cmp(localWork) <= 0 {
+		synced = true
+	}
+
+	s.mu.Lock()
+	if synced {
+		s.syncProgress = 1.0
+	} else {
+		// Keep a bounded non-1.0 value to indicate "not synced yet".
+		// The exact fraction is not used for consensus decisions; only IsSynced() matters.
+		s.syncProgress = 0.0
+	}
+	s.lastUpdateTime = time.Now()
+	s.mu.Unlock()
 }
 
 // Stop halts the synchronization loop
@@ -2291,7 +2384,16 @@ func (d *delegatingPeerManager) RemovePeer(addr string) {
 	if d.pm == nil {
 		return
 	}
-	d.pm.AddPeer(addr)
+	// PeerAPI does not require a RemovePeer method. Prefer native Switch removal when available.
+	// This keeps behavior correct in production while preserving interface compatibility.
+	if sw, ok := d.pm.(*Switch); ok {
+		sw.RemovePeer(addr, "removed by delegating peer manager")
+		return
+	}
+	if rm, ok := d.pm.(interface{ RemovePeer(peerID string, reason string) }); ok {
+		rm.RemovePeer(addr, "removed by delegating peer manager")
+		return
+	}
 }
 
 func (d *delegatingPeerManager) GetActivePeers() []string {

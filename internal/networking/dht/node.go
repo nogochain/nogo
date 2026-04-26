@@ -140,7 +140,8 @@ func (n *Node) UnmarshalText(text []byte) error {
 func PubkeyID(pub ed25519.PublicKey) NodeID {
 	var id NodeID
 	if len(pub) != ed25519.PublicKeySize {
-		panic(fmt.Errorf("need %d byte pubkey, got %d", ed25519.PublicKeySize, len(pub)))
+		// Do not panic in production. Return zero value on invalid input.
+		return id
 	}
 	// Use first 32 bytes of the 32-byte Ed25519 public key as NodeID.
 	copy(id[:], pub[:NodeIDBytes])
@@ -148,11 +149,11 @@ func PubkeyID(pub ed25519.PublicKey) NodeID {
 }
 
 // MustHexID converts a hex string to a NodeID.
-// It panics if the string is not a valid NodeID.
+// It never panics and returns the zero NodeID on error.
 func MustHexID(in string) NodeID {
 	id, err := HexToNodeID(in)
 	if err != nil {
-		panic("invalid hex node ID: " + err.Error())
+		return NodeID{}
 	}
 	return id
 }

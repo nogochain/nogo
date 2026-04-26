@@ -99,22 +99,66 @@ func newBlockKeeper(chain ChainInterface, peers PeerSetInterface) *blockKeeper {
 }
 
 func (bk *blockKeeper) appendHeaderList(headers []*HeaderLocator) error {
-	for _, header := range headers {
-		if bk.headerList.Len() == 0 {
-			return fmt.Errorf("%w: header list is empty", errAppendHeaders)
-		}
-		prevHeader := bk.headerList.Back().Value.(*HeaderLocator)
-		if !equalBytes(prevHeader.Header.PrevHash, header.Header.PrevHash) && bk.headerList.Len() > 1 {
-			prevElement := bk.headerList.Back().Prev()
-			if prevElement != nil {
-				prevPrevHeader := prevElement.Value.(*HeaderLocator)
-				if !equalBytes(prevPrevHeader.Header.PrevHash, header.Header.PrevHash) {
-					return errAppendHeaders
-				}
-			}
-		}
-		bk.headerList.PushBack(header)
+	if len(headers) == 0 {
+		return nil
 	}
+
+	// Ensure the list has a stable starting point.
+	// The list must represent a contiguous header chain so we can deterministically
+	// validate and extend it using computed header hashes.
+	if bk.headerList.Len() == 0 {
+		best, err := bk.chain.BestBlockHeader()
+		if err != nil {
+			return fmt.Errorf("%w: get best header: %v", errAppendHeaders, err)
+		}
+		if best == nil {
+			return fmt.Errorf("%w: best header is nil", errAppendHeaders)
+		}
+		bk.headerList.PushBack(best)
+	}
+
+	prevLoc, ok := bk.headerList.Back().Value.(*HeaderLocator)
+	if !ok || prevLoc == nil {
+		return fmt.Errorf("%w: invalid header list tail", errAppendHeaders)
+	}
+
+	prevHeight := prevLoc.Height
+	prevHash, err := computeHeaderHash(&prevLoc.Header, prevLoc.Height, prevLoc.Header.MinerAddress)
+	if err != nil {
+		return fmt.Errorf("%w: compute previous header hash: %v", errAppendHeaders, err)
+	}
+
+	// Validate and append headers in order.
+	for i := range headers {
+		h := headers[i]
+		if h == nil {
+			return fmt.Errorf("%w: nil header at index %d", errAppendHeaders, i)
+		}
+
+		if h.Height != prevHeight+1 {
+			return fmt.Errorf("%w: non-contiguous height at index %d: got %d want %d",
+				errAppendHeaders, i, h.Height, prevHeight+1)
+		}
+
+		if len(h.Header.PrevHash) != core.HashLen {
+			return fmt.Errorf("%w: invalid prevHash length at height %d: %d",
+				errAppendHeaders, h.Height, len(h.Header.PrevHash))
+		}
+		if !equalBytes(h.Header.PrevHash, prevHash) {
+			return fmt.Errorf("%w: prevHash mismatch at height %d", errAppendHeaders, h.Height)
+		}
+
+		// Compute this header hash for next-step linkage.
+		curHash, hashErr := computeHeaderHash(&h.Header, h.Height, h.Header.MinerAddress)
+		if hashErr != nil {
+			return fmt.Errorf("%w: compute header hash at height %d: %v", errAppendHeaders, h.Height, hashErr)
+		}
+
+		bk.headerList.PushBack(h)
+		prevHeight = h.Height
+		prevHash = curHash
+	}
+
 	return nil
 }
 
@@ -822,17 +866,12 @@ func (bk *blockKeeper) applyForkTiebreaker(peer PeerInterface, peerTipHash strin
 		}
 	}
 
-	currentTime := time.Now().UnixNano()
-	if currentTime%2 == 0 {
-		return tiebreakerResult{
-			shouldReorg: true,
-			reason:      "random tiebreak (even nanosecond)",
-		}
-	}
-
+	// Deterministic fallback: preserve local chain.
+	// Rationale: randomized tie-breaking can cause long-lived symmetric forks because
+	// different nodes may choose different winners for the same fork.
 	return tiebreakerResult{
 		shouldReorg: false,
-		reason:      "random tiebreak (odd nanosecond)",
+		reason:      "deterministic fallback (preserve local chain)",
 	}
 }
 
@@ -1030,8 +1069,25 @@ func (bk *blockKeeper) findForkLCA(peerTipHash string) (uint64, error) {
 			continue
 		}
 
-		if equalBytes(localHeader.Header.PrevHash, hdr.Header.PrevHash) {
-			log.Printf("[BlockKeeper] findForkLCA: height %d prevHash MATCHES (index=%d/%d)", hdr.Height, i, len(headers))
+		peerHash, peerHashErr := computeHeaderHash(&hdr.Header, hdr.Height, hdr.Header.MinerAddress)
+		if peerHashErr != nil {
+			return 0, fmt.Errorf("compute peer header hash at height %d: %w", hdr.Height, peerHashErr)
+		}
+
+		// Prefer actual block hash when available.
+		localHash := []byte(nil)
+		if b, ok := bk.chain.BlockByHeight(hdr.Height); ok && b != nil && len(b.Hash) == core.HashLen {
+			localHash = b.Hash
+		} else {
+			hh, hhErr := computeHeaderHash(&localHeader.Header, localHeader.Height, localHeader.Header.MinerAddress)
+			if hhErr != nil {
+				return 0, fmt.Errorf("compute local header hash at height %d: %w", localHeader.Height, hhErr)
+			}
+			localHash = hh
+		}
+
+		if equalBytes(localHash, peerHash) {
+			log.Printf("[BlockKeeper] findForkLCA: height %d hash MATCHES (index=%d/%d)", hdr.Height, i, len(headers))
 			continue
 		}
 
@@ -1039,7 +1095,7 @@ func (bk *blockKeeper) findForkLCA(peerTipHash string) (uint64, error) {
 		if hdr.Height > 0 {
 			lcaHeight = hdr.Height - 1
 		}
-		log.Printf("[BlockKeeper] findForkLCA: FOUND FORK at height %d prevHash DIFFERS → LCA=%d",
+		log.Printf("[BlockKeeper] findForkLCA: FOUND FORK at height %d hash DIFFERS → LCA=%d",
 			hdr.Height, lcaHeight)
 		return lcaHeight, nil
 	}

@@ -188,6 +188,14 @@ func (s *Server) processBatchJobs(jobs []txSubmissionJob, ctx context.Context) {
 	jobChan := make(chan *txSubmissionJob, len(jobs))
 	resultChan := make(chan txSubmissionResult, len(jobs))
 
+	// Map request indices to job slots to avoid out-of-range writes.
+	// Each job.index is the original request index and is not guaranteed to be
+	// contiguous within the filtered valid jobs slice.
+	indexToJob := make(map[int]*txSubmissionJob, len(jobs))
+	for i := range jobs {
+		indexToJob[jobs[i].index] = &jobs[i]
+	}
+
 	numWorkers := 4
 	if len(jobs) < numWorkers {
 		numWorkers = len(jobs)
@@ -214,7 +222,9 @@ func (s *Server) processBatchJobs(jobs []txSubmissionJob, ctx context.Context) {
 	close(resultChan)
 
 	for result := range resultChan {
-		jobs[result.index].result = result
+		if job := indexToJob[result.index]; job != nil {
+			job.result = result
+		}
 	}
 }
 

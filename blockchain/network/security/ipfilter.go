@@ -16,12 +16,29 @@ var (
 	ErrEmptyRules     = errors.New("empty rules configuration")
 	ErrInvalidJSON    = errors.New("invalid JSON format")
 
-	loopbackCIDR     = parseCIDRMustSucceed("127.0.0.0/8")
-	linkLocalCIDR    = parseCIDRMustSucceed("169.254.0.0/16")
-	ipv6LoopbackCIDR = parseCIDRMustSucceed("::1/128")
-	ipv6LinkLocalCIDR = parseCIDRMustSucceed("fe80::/10")
-	builtinWhitelist = []*net.IPNet{loopbackCIDR, linkLocalCIDR, ipv6LoopbackCIDR, ipv6LinkLocalCIDR}
+	builtinWhitelist = buildBuiltinWhitelist()
 )
+
+func buildBuiltinWhitelist() []*net.IPNet {
+	// These CIDRs are constant and should always parse successfully.
+	// If parsing fails for any reason, fall back to an empty allowlist instead of panicking.
+	cidrs := []string{
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"::1/128",
+		"fe80::/10",
+	}
+
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, ipNet, err := net.ParseCIDR(c)
+		if err != nil || ipNet == nil {
+			continue
+		}
+		out = append(out, ipNet)
+	}
+	return out
+}
 
 type FilterRule struct {
 	Action string    `json:"action"`
@@ -159,10 +176,12 @@ func (f *IPFilter) Rules() []FilterRule {
 	return result
 }
 
+// parseCIDRMustSucceed is kept for backward compatibility with older code paths.
+// It never panics and returns nil on parse failure.
 func parseCIDRMustSucceed(cidr string) *net.IPNet {
 	_, ipNet, err := net.ParseCIDR(cidr)
 	if err != nil {
-		panic(fmt.Sprintf("builtin CIDR parse failed for %s: %v", cidr, err))
+		return nil
 	}
 	return ipNet
 }

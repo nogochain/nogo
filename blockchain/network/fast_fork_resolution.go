@@ -903,7 +903,7 @@ func (fre *ForkResolutionEngine) UpdatePeerState(peerID string, chainTip *core.B
 	}
 
 	// Calculate vote weight based on connection quality and uptime
-	weight := fre.calculateVoteWeight(quality, time.Now())
+	weight := fre.calculateVoteWeight(peerID, quality, time.Now())
 
 	// Track peer join time for this peer
 	if _, exists := fre.topologyMonitor.peerJoinTimes[peerID]; !exists {
@@ -923,7 +923,7 @@ func (fre *ForkResolutionEngine) UpdatePeerState(peerID string, chainTip *core.B
 }
 
 // calculateVoteWeight calculates vote weight based on quality metrics
-func (fre *ForkResolutionEngine) calculateVoteWeight(quality int, seenTime time.Time) float64 {
+func (fre *ForkResolutionEngine) calculateVoteWeight(peerID string, quality int, seenTime time.Time) float64 {
 	baseWeight := float64(quality) / 10.0
 
 	// Apply time-based decay for inactive peers
@@ -932,9 +932,12 @@ func (fre *ForkResolutionEngine) calculateVoteWeight(quality int, seenTime time.
 	}
 
 	// Additional weight for long-standing peers
-	if joinTime, exists := fre.topologyMonitor.peerJoinTimes[fre.getCurrentPeerID()]; exists {
-		if time.Since(joinTime) > fre.cfg.LongStandingPeerAge {
-			baseWeight *= fre.cfg.LongStandingBonus
+	// Note: "long-standing" is defined per peer, not per local node.
+	if fre.topologyMonitor != nil && peerID != "" {
+		if joinTime, exists := fre.topologyMonitor.peerJoinTimes[peerID]; exists {
+			if time.Since(joinTime) > fre.cfg.LongStandingPeerAge {
+				baseWeight *= fre.cfg.LongStandingBonus
+			}
 		}
 	}
 

@@ -170,10 +170,10 @@ func calculatePIDifficulty(actualTime, expectedTime float64) float64 {
 }
 ```
 
-**参数说明（已修正）**:
-- `Kp` (比例增益): 0.5 - 响应时间偏差
-- `Ki` (积分增益): 0.01 - 消除稳态误差
-- `Kd` (微分增益): **未使用** - 代码中未实现微分项
+**参数说明（已统一）**:
+- `Kp` (比例增益): 1.0 (MaxDifficultyChangePercent/100) - 响应时间偏差，默认值与nogopow-README.md一致
+- `Ki` (积分增益): 0.1 - 消除稳态误差，固定值确保收敛稳定性
+- `Kd` (微分增益): **未使用** - 代码中未实现微分项（纯PI控制器）
 
 ### 2.2 边界条件处理（已补充）
 

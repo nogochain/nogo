@@ -122,7 +122,7 @@ func (m *fastSyncMockBC) BestBlockHeader() (*HeaderLocator, error) {
 	}
 	tip := m.blocks[len(m.blocks)-1]
 	hCopy := tip.header
-	return &HeaderLocator{Header: &hCopy, Height: tip.height}, nil
+	return &HeaderLocator{Header: hCopy, Height: tip.height}, nil
 }
 
 func (m *fastSyncMockBC) GetHeaderByHeight(height uint64) (*HeaderLocator, error) {
@@ -131,7 +131,7 @@ func (m *fastSyncMockBC) GetHeaderByHeight(height uint64) (*HeaderLocator, error
 	}
 	b := m.blocks[height]
 	hCopy := b.header
-	return &HeaderLocator{Header: &hCopy, Height: b.height}, nil
+	return &HeaderLocator{Header: hCopy, Height: b.height}, nil
 }
 
 func (m *fastSyncMockBC) GetChainID() uint64      { return 1 }

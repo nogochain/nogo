@@ -306,7 +306,18 @@ func (be *BroadcastEngine) doBroadcastBlock(block *core.Block, excludePeer strin
 		return fmt.Errorf("no active peers for block broadcast")
 	}
 
-	err := be.pm.BroadcastBlock(ctx, block)
+	// Prefer excluding the original sender when the underlying PeerAPI supports it.
+	// This reduces redundant traffic and prevents echoing blocks back to the source peer.
+	type blockBroadcasterExcluding interface {
+		BroadcastBlockExcluding(ctx context.Context, block *core.Block, excludePeer string) error
+	}
+
+	var err error
+	if ex, ok := be.pm.(blockBroadcasterExcluding); ok && excludePeer != "" {
+		err = ex.BroadcastBlockExcluding(ctx, block, excludePeer)
+	} else {
+		err = be.pm.BroadcastBlock(ctx, block)
+	}
 	if err != nil {
 		log.Printf("[Broadcast] Failed to broadcast block: %v", err)
 		return err
