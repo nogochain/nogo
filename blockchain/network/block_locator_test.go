@@ -128,6 +128,12 @@ func (m *locatorMockBC) Blocks() []*core.Block {
 
 func (m *locatorMockBC) CanonicalWork() *big.Int { return big.NewInt(int64(len(m.blocks))) }
 func (m *locatorMockBC) RulesHashHex() string        { return "abc123" }
+func (m *locatorMockBC) CalculateCumulativeWork(block *core.Block) *big.Int {
+	if block == nil {
+		return big.NewInt(0)
+	}
+	return big.NewInt(int64(block.GetHeight() + 1))
+}
 
 func (m *locatorMockBC) BestBlockHeader() (*HeaderLocator, error) {
 	if len(m.blocks) == 0 {

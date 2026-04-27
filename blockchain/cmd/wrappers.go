@@ -355,6 +355,10 @@ func (w *networkChainWrapper) CanonicalWork() *big.Int {
 	return w.chain.GetCanonicalWork()
 }
 
+func (w *networkChainWrapper) CalculateCumulativeWork(block *core.Block) *big.Int {
+	return w.chain.CalculateCumulativeWork(block)
+}
+
 // RulesHashHex returns the rules hash
 func (w *networkChainWrapper) RulesHashHex() string {
 	return w.chain.GetRulesHashHex()

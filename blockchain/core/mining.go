@@ -68,6 +68,7 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 
 	if c.shouldReorgToHeaviestLocked() {
 		log.Printf("[Mining] Heavier fork detected, triggering reorganization before mining")
+		log.Printf("[DEPRECATED] Mining calling reorganizeToHeaviestLocked() directly. This internal call will be migrated to ForkResolutionEngine in future version")
 		if err := c.reorganizeToHeaviestLocked(); err != nil {
 			log.Printf("[Mining] Reorganization failed: %v", err)
 		} else {
@@ -257,15 +258,30 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 
 	c.mu.Lock()
 
-	// Verify parent block exists in blocks slice
-	// Note: We already hold the lock, so access c.blocks directly
 	if len(c.blocks) == 0 {
 		c.mu.Unlock()
 		return nil, errors.New("no parent block")
 	}
 
-	// CRITICAL: Release lock before calling AddBlock to avoid deadlock
-	// AddBlock will acquire its own lock
+	currentTip := c.blocks[len(c.blocks)-1]
+	if currentTip.GetHeight() != latest.GetHeight() || hex.EncodeToString(currentTip.Hash) != hex.EncodeToString(latest.Hash) {
+		log.Printf("[Mining] Tip changed during mining (expected height=%d, got height=%d), checking for reorganization",
+			latest.GetHeight(), currentTip.GetHeight())
+
+		if c.shouldReorgToHeaviestLocked() {
+			log.Printf("[Mining] Heavier fork detected after mining, reorganizing before adding block")
+			log.Printf("[DEPRECATED] Mining calling reorganizeToHeaviestLocked() directly. This internal call will be migrated to ForkResolutionEngine in future version")
+			if err := c.reorganizeToHeaviestLocked(); err != nil {
+				log.Printf("[Mining] Post-mining reorganization failed: %v", err)
+			} else {
+				log.Printf("[Mining] Post-mining reorganization completed")
+			}
+		}
+
+		newTip := c.blocks[len(c.blocks)-1]
+		log.Printf("[Mining] Current tip after reorg check: height=%d", newTip.GetHeight())
+	}
+
 	c.mu.Unlock()
 
 	// AddBlock will handle fork detection and reorganization

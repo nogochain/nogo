@@ -1514,9 +1514,14 @@ func (c *Chain) validateCoinbaseLocked(block *Block) error {
 }
 
 // handleReorganizationLocked handles chain reorganization for forks
+// DEPRECATED: This method is called internally by Chain.AddBlock()
+// All external reorg requests should go through network.ForkResolutionEngine.RequestReorg()
+// This ensures global mutex prevents concurrent reorganizations
 // Production-grade: implements longest chain rule
 // Concurrency safety: assumes lock is held
 func (c *Chain) handleReorganizationLocked(newBlock *Block) error {
+	log.Printf("[DEPRECATED] handleReorganizationLocked() called. External callers should use ForkResolutionEngine.RequestReorg()")
+
 	// Set reorg flag to prevent template generation during reorg
 	c.reorgMu.Lock()
 	c.reorgInProgress = true
@@ -1643,8 +1648,12 @@ func (c *Chain) calculateChainWorkFromAncestorLocked(ancestor *Block, tip *Block
 }
 
 // reorganizeChainLocked performs chain reorganization
+// DEPRECATED: Internal implementation called by handleReorganizationLocked()
+// External callers must use network.ForkResolutionEngine.RequestReorg() for safe reorganization
 // Production-grade: updates state, indexes, and storage
 func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
+	log.Printf("[DEPRECATED] reorganizeChainLocked() called directly. Use ForkResolutionEngine for external reorg requests")
+
 	log.Printf("Chain reorganization: ancestor height=%d, new tip height=%d", ancestor.GetHeight(), newTip.GetHeight())
 
 	ancestorHeight := ancestor.GetHeight()
@@ -1825,8 +1834,19 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 }
 
 // Reorganize performs chain reorganization (public wrapper)
+// DEPRECATED: This method is kept for backward compatibility but should NOT be called directly
+// All reorg operations must go through network.ForkResolutionEngine.RequestReorg() to ensure:
+// 1. Global mutex prevents concurrent reorganizations
+// 2. Centralized logging and monitoring
+// 3. Frequency limiting to prevent reorg storms
+//
+// If you see this warning in logs, it means legacy code is calling this method directly.
+// Please update the caller to use ForkResolutionEngine instead.
 // Concurrency safety: uses mutex to protect chain state
 func (c *Chain) Reorganize(newTip *Block) error {
+	log.Printf("[DEPRECATED] Chain.Reorganize() called directly. This method is deprecated.")
+	log.Printf("[DEPRECATED] Please use ForkResolutionEngine.RequestReorg() for centralized reorg management.")
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.reorganizeChainLocked(c.blocks[0], newTip)
@@ -3250,8 +3270,6 @@ func (c *Chain) extractTransactionIDs(txs []Transaction) []string {
 func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 	height := block.GetHeight()
 
-	// CRITICAL: Check if we already have a fork block with same hash at this height
-	// This prevents duplicate processing of the same block
 	existingForks := c.forkBlocks[height]
 	for _, existing := range existingForks {
 		if hex.EncodeToString(existing.Hash) == hashHex {
@@ -3260,33 +3278,29 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 		}
 	}
 
-	// Store in fork blocks
 	c.forkBlocks[height] = append(c.forkBlocks[height], block)
 
-	// Fix: Check bounds before accessing c.blocks[height]
 	var canonicalHash string
 	if int(height) < len(c.blocks) && c.blocks[height] != nil {
 		canonicalHash = fmt.Sprintf("%x", c.blocks[height].Hash)
 	} else {
-		// No canonical block at this height yet
 		canonicalHash = "N/A (height not yet in canonical chain)"
 	}
 
 	log.Printf("[Chain] Fork block %d stored (hash: %s, canonical hash: %s)",
 		height, hashHex[:16], canonicalHash)
 
-	// Check if this fork has more work and should become canonical
-	if c.shouldReorgToLocked(block) {
-		log.Printf("[Chain] Heavier fork detected at height %d, triggering reorganization", height)
-		if err := c.reorganizeToLocked(block); err != nil {
+	if c.shouldReorgToHeaviestLocked() {
+		log.Printf("[Chain] Heavier fork chain detected (global check), triggering reorganization")
+		if err := c.reorganizeToHeaviestLocked(); err != nil {
 			log.Printf("[Chain] Reorganization failed: %v", err)
 			return false, fmt.Errorf("reorg failed: %w", err)
 		}
-		log.Printf("[Chain] Reorganization completed successfully to height %d", block.GetHeight())
+		log.Printf("[Chain] Global reorganization completed successfully")
 		return true, nil
 	}
 
-	return false, nil // Fork stored but not reorganized
+	return false, nil
 }
 
 // intelligentForkDetectionLocked implements intelligent fork detection logic.
@@ -3500,29 +3514,30 @@ func (c *Chain) shouldSwitchBasedOnTieBreakerLocked(newBlock, currentTip *Block)
 // Production-grade: follows the parent chain recursively, including fork blocks
 // Caller must hold c.mu lock
 func (c *Chain) calculateCumulativeWorkLocked(block *Block) *big.Int {
-	if block.TotalWork != "" {
-		if work, ok := StringToWork(block.TotalWork); ok {
-			return work
-		}
+	if block == nil {
+		return big.NewInt(0)
 	}
 
 	work := WorkForDifficultyBits(block.Header.DifficultyBits)
 
-	if len(block.Header.PrevHash) > 0 {
-		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+	if len(block.Header.PrevHash) == 0 || block.GetHeight() == 0 {
+		return work
+	}
 
-		if parent, exists := c.blocksByHash[parentHashHex]; exists {
-			parentWork := c.calculateCumulativeWorkLocked(parent)
-			work.Add(work, parentWork)
-		} else {
-			for _, forkBlocks := range c.forkBlocks {
-				for _, forkBlock := range forkBlocks {
-					if hex.EncodeToString(forkBlock.Hash) == parentHashHex {
-						parentWork := c.calculateCumulativeWorkLocked(forkBlock)
-						work.Add(work, parentWork)
-						return work
-					}
-				}
+	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+
+	if parent, exists := c.blocksByHash[parentHashHex]; exists {
+		parentWork := c.calculateCumulativeWorkLocked(parent)
+		work.Add(work, parentWork)
+		return work
+	}
+
+	for _, forkBlocks := range c.forkBlocks {
+		for _, forkBlock := range forkBlocks {
+			if hex.EncodeToString(forkBlock.Hash) == parentHashHex {
+				parentWork := c.calculateCumulativeWorkLocked(forkBlock)
+				work.Add(work, parentWork)
+				return work
 			}
 		}
 	}
@@ -3530,10 +3545,20 @@ func (c *Chain) calculateCumulativeWorkLocked(block *Block) *big.Int {
 	return work
 }
 
+func (c *Chain) CalculateCumulativeWork(block *Block) *big.Int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calculateCumulativeWorkLocked(block)
+}
+
 // reorganizeToLocked performs chain reorganization to the new block
+// DEPRECATED: Internal method that should not be called externally
+// All external reorg requests must use network.ForkResolutionEngine.RequestReorg()
 // Uses existing reorganizeChainLocked for production-grade implementation
 // Caller must hold c.mu lock
 func (c *Chain) reorganizeToLocked(newBlock *Block) error {
+	log.Printf("[DEPRECATED] reorganizeToLocked() called. Use ForkResolutionEngine for external reorg requests")
+
 	// Use the existing reorganization logic
 	ancestor, _, err := c.findCommonAncestorLocked(newBlock)
 	if err != nil {
@@ -3598,30 +3623,28 @@ func (c *Chain) rebuildIndexesLocked() {
 }
 
 // shouldReorgToHeaviestLocked checks if there's a heavier fork chain
+// DEPRECATED: Query function only. To actually perform reorg, use ForkResolutionEngine
 // Caller must hold c.mu lock
 func (c *Chain) shouldReorgToHeaviestLocked() bool {
+	log.Printf("[DEPRECATED] shouldReorgToHeaviestLocked() called. Use ForkResolutionEngine for actual reorg")
+
 	if len(c.forkBlocks) == 0 {
 		return false
 	}
 
-	// Find the heaviest fork chain
 	var heaviestFork *Block
 	heaviestWork := c.canonicalWork
 
 	for height, blocks := range c.forkBlocks {
-		// Skip if this height is already canonical
 		if height < uint64(len(c.blocks)) {
 			continue
 		}
 
 		for _, block := range blocks {
-			blockWork, ok := StringToWork(block.TotalWork)
-			if !ok {
-				continue
-			}
+			forkCumulativeWork := c.calculateCumulativeWorkLocked(block)
 
-			if blockWork.Cmp(heaviestWork) > 0 {
-				heaviestWork = blockWork
+			if forkCumulativeWork.Cmp(heaviestWork) > 0 {
+				heaviestWork = new(big.Int).Set(forkCumulativeWork)
 				heaviestFork = block
 			}
 		}
@@ -3631,13 +3654,17 @@ func (c *Chain) shouldReorgToHeaviestLocked() bool {
 }
 
 // reorganizeToHeaviestLocked reorganizes to the heaviest fork chain
+// DEPRECATED: This method is kept for backward compatibility but should NOT be called directly
+// All reorg operations must go through network.ForkResolutionEngine.RequestReorg()
 // Caller must hold c.mu lock
 func (c *Chain) reorganizeToHeaviestLocked() error {
+	log.Printf("[DEPRECATED] reorganizeToHeaviestLocked() called directly. Use ForkResolutionEngine.RequestReorg()")
+	log.Printf("[DEPRECATED] Please use ForkResolutionEngine for centralized reorg management")
+
 	if len(c.forkBlocks) == 0 {
 		return nil
 	}
 
-	// Find the heaviest fork chain
 	var heaviestFork *Block
 	heaviestWork := c.canonicalWork
 
@@ -3647,20 +3674,17 @@ func (c *Chain) reorganizeToHeaviestLocked() error {
 		}
 
 		for _, block := range blocks {
-			blockWork, ok := StringToWork(block.TotalWork)
-			if !ok {
-				continue
-			}
+			forkCumulativeWork := c.calculateCumulativeWorkLocked(block)
 
-			if blockWork.Cmp(heaviestWork) > 0 {
-				heaviestWork = blockWork
+			if forkCumulativeWork.Cmp(heaviestWork) > 0 {
+				heaviestWork = new(big.Int).Set(forkCumulativeWork)
 				heaviestFork = block
 			}
 		}
 	}
 
 	if heaviestFork == nil {
-		return nil // No heavier chain found
+		return nil
 	}
 
 	log.Printf("[Chain] Reorganizing to heaviest fork: height=%d work=%s",

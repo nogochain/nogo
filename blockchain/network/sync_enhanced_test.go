@@ -115,6 +115,12 @@ func (m *fastSyncMockBC) Blocks() []*core.Block {
 
 func (m *fastSyncMockBC) CanonicalWork() *big.Int { return big.NewInt(int64(len(m.blocks))) }
 func (m *fastSyncMockBC) RulesHashHex() string    { return "abc123" }
+func (m *fastSyncMockBC) CalculateCumulativeWork(block *core.Block) *big.Int {
+	if block == nil {
+		return big.NewInt(0)
+	}
+	return big.NewInt(int64(block.GetHeight() + 1))
+}
 
 func (m *fastSyncMockBC) BestBlockHeader() (*HeaderLocator, error) {
 	if len(m.blocks) == 0 {

@@ -58,6 +58,16 @@ type (
 	AddressTxEntry  = core.AddressTxEntry
 )
 
+// ReorgExecutor interface for decoupling fork resolution from network layer
+// This allows ForkHandler to delegate reorg execution without depending on network package
+// Implementations: network.ForkResolutionEngine (via adapter)
+type ReorgExecutor interface {
+	// RequestReorg submits a reorganization request to the unified engine
+	RequestReorg(block *Block, source string) error
+	// IsReorgInProgress checks if a reorganization is currently executing
+	IsReorgInProgress() bool
+}
+
 type ForkHandler struct {
 	consensus     ConsensusParams
 	chainID       uint64
@@ -72,6 +82,11 @@ type ForkHandler struct {
 	addressIndex  map[string][]AddressTxEntry
 	store         ChainStore
 	events        EventSink
+
+	// UNIFIED FORK RESOLUTION: Optional executor for centralized reorg management
+	// When set, all reorg operations will be delegated to this executor
+	// This ensures global mutex prevents concurrent reorganizations across the system
+	reorgExecutor ReorgExecutor
 }
 
 type ForkChoiceResult struct {
@@ -109,6 +124,17 @@ func (fh *ForkHandler) UpdateConsensus(consensus ConsensusParams) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
 	fh.consensus = consensus
+}
+
+// SetReorgExecutor sets the unified reorg executor for centralized fork resolution
+// This must be called during node initialization after ForkResolutionEngine is created
+// When set, all reorg operations from ForkHandler will go through this executor
+// This ensures global mutex prevents concurrent reorganizations across consensus and network layers
+func (fh *ForkHandler) SetReorgExecutor(executor ReorgExecutor) {
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	fh.reorgExecutor = executor
+	log.Printf("[ForkHandler] ReorgExecutor set for unified reorg management")
 }
 
 func (fh *ForkHandler) SetChainState(
@@ -442,6 +468,32 @@ func (fh *ForkHandler) appendBlockToChainLocked(b *Block) error {
 }
 
 func (fh *ForkHandler) reorganizeChainLocked(newBlock *Block, parent *Block, newWork *big.Int, path []*Block, state map[string]Account) error {
+	// UNIFIED FORK RESOLUTION: Try to use injected executor first (if available)
+	// This ensures all reorg operations go through the centralized engine with global mutex
+	if fh.reorgExecutor != nil {
+		log.Printf("[ForkHandler] Delegating reorg to unified ReorgExecutor (block height=%d)", newBlock.GetHeight())
+
+		err := fh.reorgExecutor.RequestReorg(newBlock, "ForkHandler")
+		if err == nil {
+			log.Printf("[ForkHandler] Reorg successfully delegated to unified executor")
+
+			// Update local state to match the new tip
+			fh.blocks = append(fh.blocks[:parent.GetHeight()+1], newBlock)
+			fh.state = state
+			fh.bestTipHash = hex.EncodeToString(newBlock.Hash)
+			fh.canonicalWork = new(big.Int).Set(newWork)
+			fh.reindexAllTxsLocked()
+			fh.reindexAllAddressTxsLocked()
+
+			return nil
+		}
+
+		log.Printf("[ForkHandler] Unified executor failed (%v), falling back to internal reorg", err)
+	}
+
+	// FALLBACK: Internal reorg logic (kept for backward compatibility when no executor is set)
+	log.Printf("[DEPRECATED] ForkHandler using internal reorganizeChainLocked. Consider setting ReorgExecutor for unified management")
+
 	currentHeight := fh.blocks[len(fh.blocks)-1].GetHeight()
 	targetHeight := parent.GetHeight()
 

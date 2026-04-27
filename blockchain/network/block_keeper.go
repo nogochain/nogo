@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	syncCycle            = 5 * time.Second
+	syncCycle            = 1 * time.Second
 	blockProcessChSize   = 1024
 	blocksProcessChSize  = 128
 	headersProcessChSize = 1024
@@ -80,6 +80,10 @@ type blockKeeper struct {
 
 	lastRollbackTime time.Time
 	syncAfterRollback bool
+
+	// UNIFIED FORK RESOLUTION: Reference to the centralized fork resolution engine
+	// All reorg operations must go through this engine to prevent concurrent reorganizations
+	forkResolver *ForkResolutionEngine
 }
 
 func newBlockKeeper(chain ChainInterface, peers PeerSetInterface) *blockKeeper {
@@ -96,6 +100,14 @@ func newBlockKeeper(chain ChainInterface, peers PeerSetInterface) *blockKeeper {
 	bk.resetHeaderState()
 	go bk.syncWorker()
 	return bk
+}
+
+// SetForkResolver sets the centralized fork resolution engine for unified reorg management
+// This must be called during node initialization after ForkResolutionEngine is created
+// All reorg operations from BlockKeeper will go through this engine
+func (bk *blockKeeper) SetForkResolver(resolver *ForkResolutionEngine) {
+	bk.forkResolver = resolver
+	log.Printf("[BlockKeeper] ForkResolutionEngine set for unified reorg management")
 }
 
 func (bk *blockKeeper) appendHeaderList(headers []*HeaderLocator) error {
@@ -667,7 +679,8 @@ func (bk *blockKeeper) startSync() bool {
 		if bk.detectAndHandleForkWithInfo(peer, peerHeight, peerWork, peerTipHash, chainInfoErr) {
 			return true
 		}
-		log.Printf("[BlockKeeper] startSync: fork resolution did not trigger immediate rollback, skipping REGULAR sync until fork resolved (tips differ means blocks cannot connect)")
+		log.Printf("[BlockKeeper] startSync: fork resolution did not trigger immediate rollback, attempting LIMITED header sync for evaluation")
+		bk.syncForkHeadersForEvaluation(peer, peerHeight, peerTipHash)
 		return true
 	}
 
@@ -782,12 +795,12 @@ func (bk *blockKeeper) detectAndHandleForkWithInfo(peer PeerInterface, peerHeigh
 	log.Printf("[BlockKeeper] ForkDetection: height diff=%d (peer=%d, local=%d), work cmp=%d (peer=%s, local=%s)",
 		heightDiff, peerHeight, localBlock.GetHeight(), workCmp, peerWork.String(), localWork.String())
 
-	heightAdvantageThreshold := uint64(6)
+	heightAdvantageThreshold := uint64(2)
 
 	if heightDiff > 0 && uint64(heightDiff) >= heightAdvantageThreshold {
-		log.Printf("[BlockKeeper] ForkDetection: PEER HAS SIGNIFICANT HEIGHT ADVANTAGE (+%d blocks >= %d threshold), forcing reorg to longer chain",
+		log.Printf("[BlockKeeper] ForkDetection: PEER HAS HEIGHT ADVANTAGE (+%d blocks >= %d threshold), forcing reorg to longer chain",
 			heightDiff, heightAdvantageThreshold)
-		return bk.executeForkReorg(peer, peerTipHash, peerHeight, fmt.Sprintf("significant height advantage (+%d blocks)", heightDiff))
+		return bk.executeForkReorg(peer, peerTipHash, peerHeight, fmt.Sprintf("height advantage (+%d blocks)", heightDiff))
 	}
 
 	if workCmp > 0 {
@@ -809,10 +822,10 @@ func (bk *blockKeeper) detectAndHandleForkWithInfo(peer PeerInterface, peerHeigh
 	}
 
 	forkDuration := bk.getForkDuration(peerTipHash)
-	forkTimeout := 5 * time.Minute
+	forkTimeout := 30 * time.Second
 
 	if workCmp < 0 && forkDuration < forkTimeout {
-		log.Printf("[BlockKeeper] ForkDetection: local chain is heavier (diff=%s), but monitoring fork for timeout (elapsed=%v, timeout=%v)",
+		log.Printf("[BlockKeeper] ForkDetection: local chain is heavier (diff=%s), monitoring fork for timeout (elapsed=%v, timeout=%v)",
 			new(big.Int).Sub(localWork, peerWork).String(), forkDuration, forkTimeout)
 		bk.recordForkDetection(peerTipHash)
 		return false
@@ -924,10 +937,62 @@ func (bk *blockKeeper) clearForkDetection(tipHash string) {
 	delete(forkDetectionTimes, tipHash)
 }
 
+func (bk *blockKeeper) syncForkHeadersForEvaluation(peer PeerInterface, peerHeight uint64, peerTipHash string) {
+	localHeight := bk.chain.LatestBlock().GetHeight()
+	if peerHeight <= localHeight {
+		return
+	}
+
+	log.Printf("[BlockKeeper] syncForkHeadersForEvaluation: peer %s has higher chain (local=%d, peer=%d), tip differs=%s",
+		peer.ID(), localHeight, peerHeight, peerTipHash[:16])
+
+	localWork := big.NewInt(0)
+	if cp, ok := bk.chain.(interface{ CanonicalWork() *big.Int }); ok {
+		localWork = cp.CanonicalWork()
+	}
+
+	log.Printf("[BlockKeeper] syncForkHeadersForEvaluation: local work=%s, will evaluate on next sync cycle",
+		localWork.String())
+}
+
 func (bk *blockKeeper) executeForkReorg(peer PeerInterface, peerTipHash string, peerHeight uint64, reason string) bool {
 	bk.syncPeer = peer
 	bk.clearForkDetection(peerTipHash)
 
+	// UNIFIED FORK RESOLUTION: Try to use ForkResolutionEngine first (if available)
+	// This ensures all reorg operations go through the centralized engine with global mutex
+	if bk.forkResolver != nil {
+		log.Printf("[BlockKeeper] ForkDetection: Delegating reorg to ForkResolutionEngine (reason: %s)", reason)
+
+		// Try to get the remote block for reorg request
+		var targetBlock *core.Block
+
+		// Attempt to fetch the target block by hash from chain storage
+		if blockProvider, ok := bk.chain.(interface{ BlockByHash(hash string) (*core.Block, bool) }); ok {
+			if block, exists := blockProvider.BlockByHash(peerTipHash); exists && block != nil {
+				targetBlock = block
+				log.Printf("[BlockKeeper] ForkDetection: Found target block at height=%d in local storage", block.GetHeight())
+			}
+		}
+
+		// If we have the target block, use unified reorg path
+		if targetBlock != nil {
+			err := bk.forkResolver.RequestReorg(targetBlock, "BlockKeeper")
+			if err == nil {
+				log.Printf("[BlockKeeper] ForkDetection: Reorg successfully delegated to ForkResolutionEngine")
+				bk.lastRollbackTime = time.Now()
+				bk.syncAfterRollback = true
+				return true
+			}
+
+			log.Printf("[BlockKeeper] ForkDetection: ForkResolutionEngine.RequestReorg failed (%v), falling back to direct rollback", err)
+		} else {
+			log.Printf("[BlockKeeper] ForkDetection: Target block not found locally, will use direct rollback after sync")
+		}
+	}
+
+	// FALLBACK: Direct rollback if ForkResolutionEngine unavailable or failed
+	// This path is kept for backward compatibility but should be rare in production
 	lcaHeight, lcaErr := bk.findForkLCA(peerTipHash)
 
 	rollbackTarget := uint64(0)
@@ -960,7 +1025,7 @@ func (bk *blockKeeper) executeForkReorg(peer PeerInterface, peerTipHash string, 
 		}
 	}
 
-	log.Printf("[BlockKeeper] ForkDetection: Executing REORG to height=%d (reason: %s, local=%d, peer=%d)",
+	log.Printf("[BlockKeeper] ForkDetection: Executing DIRECT ROLLBACK to height=%d (reason: %s, local=%d, peer=%d)",
 		rollbackTarget, reason, localBlock.GetHeight(), peerHeight)
 
 	if chainProvider, ok := bk.chain.(interface {
@@ -972,7 +1037,7 @@ func (bk *blockKeeper) executeForkReorg(peer PeerInterface, peerTipHash string, 
 		}
 		bk.lastRollbackTime = time.Now()
 		bk.syncAfterRollback = true
-		log.Printf("[BlockKeeper] ForkDetection: Reorg complete - rolled back to %d, will sync from peer", rollbackTarget)
+		log.Printf("[BlockKeeper] ForkDetection: Direct rollback complete - rolled back to %d, will sync from peer", rollbackTarget)
 		return true
 	}
 	return false

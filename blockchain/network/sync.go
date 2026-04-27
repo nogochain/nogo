@@ -722,124 +722,52 @@ func (s *SyncLoop) updatePeerState(peerID string, block *core.Block) {
 		peerID, info.Height, state.QualityScore)
 }
 
-// resolveForkDirectly handles fork resolution when ForkResolutionEngine is unavailable
-// This is a fallback mechanism for when the full resolution engine cannot be used
+// resolveForkDirectly handles fork resolution
+// DEPRECATED: This method now delegates entirely to ForkResolutionEngine
+// If ForkResolutionEngine is unavailable, it returns an error (no fallback)
+// This ensures all reorg operations go through the centralized engine with global mutex
 func (s *SyncLoop) resolveForkDirectly(currentTip *core.Block, block *core.Block) error {
-	log.Printf("[Sync] Direct fork resolution: tip=%d, incoming=%d",
+	log.Printf("[Sync] Fork resolution requested: tip=%d, incoming=%d",
 		currentTip.GetHeight(), block.GetHeight())
 
-	// Compare total work first (highest work rule)
-	localWork := s.bc.CanonicalWork()
-	remoteWork, ok := core.StringToWork(block.TotalWork)
-
-	if ok && localWork != nil {
-		if remoteWork.Cmp(localWork) > 0 {
-			log.Printf("[Sync] Remote chain has higher work: %s > %s",
-				block.TotalWork, s.bc.CanonicalWork().String())
-
-			// Trigger reorganization to remote chain
-			if s.reorganizeToRemoteChain(block) {
-				return nil
-			}
-		} else {
-			log.Printf("[Sync] Local chain has equal or higher work, keeping local")
-			return fmt.Errorf("local chain has equal or higher work")
-		}
+	// UNIFIED FORK RESOLUTION: Must use ForkResolutionEngine
+	if s.forkResolver == nil {
+		log.Printf("[Sync] ERROR: ForkResolutionEngine is nil, cannot perform fork resolution")
+		return fmt.Errorf("ForkResolutionEngine not initialized. Cannot perform safe reorg")
 	}
 
-	// Fallback to arbitration with other peers
-	s.arbitrateWithOtherPeers(currentTip, block)
+	log.Printf("[Sync] Delegating to ForkResolutionEngine.AutoResolveFork()")
+	err := s.forkResolver.AutoResolveFork(currentTip, block, "sync-loop-direct")
+	if err != nil {
+		log.Printf("[Sync] ForkResolutionEngine.AutoResolveFork failed: %v", err)
+		return fmt.Errorf("fork resolution via ForkResolutionEngine failed: %w", err)
+	}
 
-	return fmt.Errorf("direct fork resolution completed")
+	log.Printf("[Sync] Fork resolution completed successfully via ForkResolutionEngine")
+	return nil
 }
 
 // reorganizeToRemoteChain performs chain reorganization to adopt a remote chain
+// DEPRECATED: This method now delegates entirely to ForkResolutionEngine
+// All reorg logic (common ancestor, validation, rollback, apply) is handled by the engine
 func (s *SyncLoop) reorganizeToRemoteChain(targetBlock *core.Block) bool {
-	log.Printf("[Sync] Starting chain reorganization to block %d with hash %x",
+	log.Printf("[Sync] Reorganization requested to block %d with hash %x",
 		targetBlock.GetHeight(), targetBlock.Hash)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Check if we can access blockchain reorganize functionality
-	if s.bc == nil {
-		log.Printf("[Sync] Cannot reorganize: blockchain interface not available")
+	// UNIFIED FORK RESOLUTION: Must use ForkResolutionEngine
+	if s.forkResolver == nil {
+		log.Printf("[Sync] ERROR: ForkResolutionEngine is nil, cannot perform safe reorganization")
 		return false
 	}
 
-	// Get current tip for comparison
-	currentTip := s.bc.LatestBlock()
-	if currentTip == nil {
-		log.Printf("[Sync] Cannot reorganize: current tip not available")
-		return false
-	}
-
-	// If target block is our current tip, no reorganization needed
-	if bytes.Equal(targetBlock.Hash, currentTip.Hash) {
-		log.Printf("[Sync] Target block is already our current tip, nothing to do")
-		return true
-	}
-
-	// Use ForkResolutionEngine if available for proper reorganization
-	if s.forkResolver != nil {
-		err := s.forkResolver.AutoResolveFork(currentTip, targetBlock, "sync-loop")
-		if err == nil {
-			log.Printf("[Sync] Reorganization completed successfully via ForkResolutionEngine AutoResolveFork")
-			return true
-		}
-		log.Printf("[Sync] ForkResolutionEngine AutoResolveFork failed: %v", err)
-	}
-
-	// Fallback to direct block-by-block reorganization
-	log.Printf("[Sync] Attempting direct reorganization to target block %d", targetBlock.GetHeight())
-
-	// Production-grade chain reorganization implementation
-	// Step 1: Find common ancestor between current chain and new chain
-	ancestor, err := s.findCommonAncestor(currentTip, targetBlock)
+	log.Printf("[Sync] Delegating to ForkResolutionEngine.RequestReorg()")
+	err := s.forkResolver.RequestReorg(targetBlock, "SyncLoop")
 	if err != nil {
-		log.Printf("[Sync] Failed to find common ancestor: %v", err)
+		log.Printf("[Sync] ForkResolutionEngine.RequestReorg failed: %v", err)
 		return false
 	}
 
-	if ancestor == nil {
-		log.Printf("[Sync] No common ancestor found, cannot reorganize")
-		return false
-	}
-
-	log.Printf("[Sync] Found common ancestor at height %d", ancestor.GetHeight())
-
-	// Step 2: Collect new chain blocks from ancestor to target
-	newChain, err := s.collectNewChain(ancestor, targetBlock)
-	if err != nil {
-		log.Printf("[Sync] Failed to collect new chain: %v", err)
-		return false
-	}
-
-	// Step 3: Validate new chain section
-	if !s.validateNewChain(newChain) {
-		log.Printf("[Sync] New chain validation failed")
-		return false
-	}
-
-	// Step 4: Rollback current chain to ancestor height
-	err = s.bc.RollbackToHeight(ancestor.GetHeight())
-	if err != nil {
-		log.Printf("[Sync] Failed to rollback chain: %v", err)
-		return false
-	}
-
-	// Step 5: Add new chain blocks
-	for _, block := range newChain {
-		_, err := s.bc.AddBlock(block)
-		if err != nil {
-			log.Printf("[Sync] Failed to add block %d: %v", block.GetHeight(), err)
-			// Attempt to recover by re-adding old chain
-			s.recoverChain(currentTip, ancestor)
-			return false
-		}
-	}
-
-	log.Printf("[Sync] Chain reorganization completed successfully to height %d", targetBlock.GetHeight())
+	log.Printf("[Sync] Reorganization completed successfully via ForkResolutionEngine")
 	return true
 }
 
@@ -2390,7 +2318,9 @@ func (d *delegatingPeerManager) RemovePeer(addr string) {
 		sw.RemovePeer(addr, "removed by delegating peer manager")
 		return
 	}
-	if rm, ok := d.pm.(interface{ RemovePeer(peerID string, reason string) }); ok {
+	if rm, ok := d.pm.(interface {
+		RemovePeer(peerID string, reason string)
+	}); ok {
 		rm.RemovePeer(addr, "removed by delegating peer manager")
 		return
 	}

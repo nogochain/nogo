@@ -93,6 +93,8 @@ type BlockchainInterface interface {
 
 	// Sync loop coordination
 	SyncLoop() SyncLoopInterface
+
+	CalculateCumulativeWork(block *core.Block) *big.Int
 }
 
 // Miner defines the miner interface for P2P coordination

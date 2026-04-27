@@ -13,6 +13,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,13 +58,14 @@ func DefaultForkResolutionConfig() ForkResolutionConfig {
 		InactivePeerAge:     1 * time.Hour,
 		InactiveDecayFactor: 0.5,
 		MaxReorgDepth:       100,
-		MinReorgInterval:    5 * time.Minute,
+		MinReorgInterval:    10 * time.Second,
 	}
 }
 
 // ForkResolutionEngine provides rapid fork resolution
 // Production-grade: implements Bitcoin-style fast fork resolution with multi-node arbitration
 // Thread-safe: uses mutex for concurrent resolution attempts
+// UNIFIED ENTRY POINT: All reorg operations must go through this engine to prevent concurrent reorganizations
 type ForkResolutionEngine struct {
 	mu                 sync.RWMutex
 	ctx                context.Context
@@ -79,6 +81,11 @@ type ForkResolutionEngine struct {
 	lastReorgTime      time.Time
 	minReorgInterval   time.Duration
 
+	// Global reorg mutex: prevents concurrent reorganizations from multiple sources
+	// This is the SINGLE point of coordination for all reorg operations in the system
+	globalReorgMutex   sync.Mutex
+	reorgInProgress    bool
+
 	// Multi-node arbitration state
 	syncStates       map[string]*ChainSyncState    // peerID -> state
 	arbitrationVotes map[string][]*ArbitrationVote // blockHash -> votes
@@ -86,9 +93,8 @@ type ForkResolutionEngine struct {
 	topologyMonitor  *TopologyMonitor
 	arbitrationMutex sync.Mutex
 
-	// Reorg complete callback - triggers immediate re-sync after successful reorganization
-	// CRITICAL: Enables BlockKeeper to restart sync loop after fork resolution
-	// Thread-safety: callback must be non-blocking (uses select+default pattern)
+	firstSeenTime sync.Map
+
 	onReorgComplete func(newHeight uint64)
 }
 
@@ -282,32 +288,44 @@ func (fre *ForkResolutionEngine) resolveFast(request *ResolutionRequest) *Resolu
 		ReorgNeeded:  false,
 	}
 
-	// Extract work values
-	localWork, ok1 := core.StringToWork(request.LocalTip.TotalWork)
-	remoteWork, ok2 := core.StringToWork(request.RemoteBlock.TotalWork)
+	localWork := big.NewInt(0)
+	remoteWork := big.NewInt(0)
 
-	if !ok1 || !ok2 {
-		result.Error = fmt.Errorf("failed to parse work values")
-		return result
+	if fre.chainSelector != nil {
+		if chain := fre.chainSelector.GetChain(); chain != nil {
+			localWork = chain.CanonicalWork()
+			remoteWork = chain.CalculateCumulativeWork(request.RemoteBlock)
+		}
 	}
 
-	// Fast path: compare work
+	if localWork.Sign() == 0 && request.LocalTip.TotalWork != "" {
+		if w, ok := core.StringToWork(request.LocalTip.TotalWork); ok {
+			localWork = w
+		}
+	}
+
+	if remoteWork.Sign() == 0 && request.RemoteBlock.TotalWork != "" {
+		if w, ok := core.StringToWork(request.RemoteBlock.TotalWork); ok {
+			remoteWork = w
+		}
+	}
+
 	workDiff := remoteWork.Cmp(localWork)
 
 	switch workDiff {
-	case 1: // remote has more work
+	case 1:
 		result.Resolved = true
 		result.WinningBlock = request.RemoteBlock
 		result.LosingBlock = request.LocalTip
 		result.ReorgNeeded = true
 
-	case -1: // local has more work
+	case -1:
 		result.Resolved = true
 		result.WinningBlock = request.LocalTip
 		result.LosingBlock = request.RemoteBlock
 		result.ReorgNeeded = false
 
-	case 0: // equal work - tie breaker needed
+	case 0:
 		result = fre.resolveTieBreaker(request)
 	}
 
@@ -399,9 +417,6 @@ func (fre *ForkResolutionEngine) enhancedTwoNodeResolution(request *ResolutionRe
 	localBlock := request.LocalTip
 	remoteBlock := request.RemoteBlock
 
-	// Enhanced deterministic rules for two-node convergence
-
-	// Rule 1: Block timestamp (older blocks are more stable)
 	if remoteBlock.Header.TimestampUnix < localBlock.Header.TimestampUnix {
 		result.WinningBlock = remoteBlock
 		result.LosingBlock = localBlock
@@ -413,26 +428,44 @@ func (fre *ForkResolutionEngine) enhancedTwoNodeResolution(request *ResolutionRe
 		return result
 	}
 
-	// Rule 2: Lexicographical hash comparison
-	localHash := localBlock.Hash
-	remoteHash := remoteBlock.Hash
+	localHash := hex.EncodeToString(localBlock.Hash)
+	remoteHash := hex.EncodeToString(remoteBlock.Hash)
 
-	for i := 0; i < len(localHash) && i < len(remoteHash); i++ {
-		if localHash[i] < remoteHash[i] {
-			result.WinningBlock = localBlock
-			result.LosingBlock = remoteBlock
-			return result
-		} else if remoteHash[i] < localHash[i] {
-			result.WinningBlock = remoteBlock
-			result.LosingBlock = localBlock
-			result.ReorgNeeded = true
-			return result
-		}
+	if _, exists := fre.firstSeenTime.Load(localHash); !exists {
+		fre.firstSeenTime.Store(localHash, time.Now())
+	}
+	if _, exists := fre.firstSeenTime.Load(remoteHash); !exists {
+		fre.firstSeenTime.Store(remoteHash, time.Now())
 	}
 
-	// Rule 3: Default to local chain (Core-Geth approach)
-	result.WinningBlock = localBlock
-	result.LosingBlock = remoteBlock
+	localFirstSeen, _ := fre.firstSeenTime.Load(localHash)
+	remoteFirstSeen, _ := fre.firstSeenTime.Load(remoteHash)
+
+	if remoteFirstSeen.(time.Time).Before(localFirstSeen.(time.Time)) {
+		log.Printf("[TwoNode] Remote block seen first (local: %v, remote: %v), choosing remote",
+			localFirstSeen.(time.Time).Format(time.RFC3339Nano),
+			remoteFirstSeen.(time.Time).Format(time.RFC3339Nano))
+		result.WinningBlock = remoteBlock
+		result.LosingBlock = localBlock
+		result.ReorgNeeded = true
+		return result
+	} else if localFirstSeen.(time.Time).Before(remoteFirstSeen.(time.Time)) {
+		log.Printf("[TwoNode] Local block seen first (local: %v, remote: %v), keeping local",
+			localFirstSeen.(time.Time).Format(time.RFC3339Nano),
+			remoteFirstSeen.(time.Time).Format(time.RFC3339Nano))
+		result.WinningBlock = localBlock
+		result.LosingBlock = remoteBlock
+		return result
+	}
+
+	if strings.Compare(localHash, remoteHash) < 0 {
+		result.WinningBlock = localBlock
+		result.LosingBlock = remoteBlock
+	} else {
+		result.WinningBlock = remoteBlock
+		result.LosingBlock = localBlock
+		result.ReorgNeeded = true
+	}
 
 	return result
 }
@@ -517,12 +550,20 @@ func (fre *ForkResolutionEngine) performWeightedVoting(candidates map[string]*co
 func (fre *ForkResolutionEngine) selectDeterministicWinner(candidates map[string]*core.Block) *core.Block {
 	var winner *core.Block
 
-	// Rule 1: Highest total work
+	if fre.chainSelector == nil {
+		return nil
+	}
+
+	chain := fre.chainSelector.GetChain()
+	if chain == nil {
+		return nil
+	}
+
 	maxWork := new(big.Int)
 	for _, block := range candidates {
-		work, ok := core.StringToWork(block.TotalWork)
-		if ok && work.Cmp(maxWork) > 0 {
-			maxWork = work
+		work := chain.CalculateCumulativeWork(block)
+		if work != nil && work.Cmp(maxWork) > 0 {
+			maxWork.Set(work)
 			winner = block
 		}
 	}
@@ -629,7 +670,24 @@ func (fre *ForkResolutionEngine) resolveTieBreaker(request *ResolutionRequest) *
 }
 
 // executeReorg executes chain reorganization with depth and frequency limits
+// CRITICAL: This is the ONLY method that should perform reorg operations in the entire system
+// All other components must call this method or SubmitResolution/AutoResolveFork
+// Uses globalReorgMutex to prevent concurrent reorganizations from multiple sources
 func (fre *ForkResolutionEngine) executeReorg(newBlock *core.Block) error {
+	// Acquire global reorg lock to prevent concurrent reorganizations
+	fre.globalReorgMutex.Lock()
+	defer fre.globalReorgMutex.Unlock()
+
+	// Check if another reorg is already in progress
+	if fre.reorgInProgress {
+		return fmt.Errorf("reorganization already in progress (global lock)")
+	}
+
+	fre.reorgInProgress = true
+	defer func() {
+		fre.reorgInProgress = false
+	}()
+
 	fre.mu.Lock()
 	defer fre.mu.Unlock()
 
@@ -637,40 +695,31 @@ func (fre *ForkResolutionEngine) executeReorg(newBlock *core.Block) error {
 		return fmt.Errorf("chain selector not initialized")
 	}
 
-	// Check reorg depth limit
-	currentTip := fre.chainSelector.FindMostWorkChain()
-	if currentTip != nil && newBlock.GetHeight() > currentTip.GetHeight() {
-		reorgDepth := newBlock.GetHeight() - currentTip.GetHeight()
-		if reorgDepth > fre.maxReorgDepth {
-			return fmt.Errorf("reorg depth %d exceeds maximum %d", reorgDepth, fre.maxReorgDepth)
-		}
+	chain := fre.chainSelector.GetChain()
+	if chain == nil {
+		return fmt.Errorf("chain not available from selector")
 	}
 
-	// Check reorg frequency limit
-	if !fre.lastReorgTime.IsZero() && time.Since(fre.lastReorgTime) < fre.minReorgInterval {
-		return fmt.Errorf("reorg too frequent: minimum interval %v not elapsed since last reorg", fre.minReorgInterval)
+	if time.Since(fre.lastReorgTime) < fre.minReorgInterval {
+		return fmt.Errorf("reorg too frequent: minimum interval %v not elapsed", fre.minReorgInterval)
 	}
 
-	// Check if reorg is needed
-	if !fre.chainSelector.ShouldReorg(newBlock) {
-		return nil
+	accepted, err := chain.AddBlock(newBlock)
+	if err != nil {
+		return fmt.Errorf("add block to chain failed: %w", err)
 	}
 
-	// Execute reorganization
-	if err := fre.chainSelector.Reorganize(newBlock); err != nil {
-		return fmt.Errorf("reorganization failed: %w", err)
+	if !accepted {
+		return fmt.Errorf("block not accepted by chain (stored as fork)")
 	}
 
 	fre.lastReorgTime = time.Now()
 
 	newHeight := newBlock.GetHeight()
 
-	log.Printf("fast fork resolution completed: new_tip_height=%d new_tip_hash=%x new_work=%s",
-		newHeight, newBlock.Hash, newBlock.TotalWork,
-	)
+	log.Printf("[FastForkResolution] Reorg completed via Chain.AddBlock: height=%d hash=%x",
+		newHeight, newBlock.Hash)
 
-	// CRITICAL: Trigger immediate re-sync via BlockKeeper after successful reorg
-	// This ensures node can quickly synchronize to the new longest chain
 	if fre.onReorgComplete != nil {
 		log.Printf("[FastForkResolution] Triggering onReorgComplete callback for height %d", newHeight)
 		fre.onReorgComplete(newHeight)
@@ -746,12 +795,63 @@ func (fre *ForkResolutionEngine) SetOnReorgComplete(callback func(newHeight uint
 
 // GetResolutionStats returns resolution statistics
 func (fre *ForkResolutionEngine) GetResolutionStats() map[string]interface{} {
+	fre.mu.RLock()
+	defer fre.mu.RUnlock()
+
 	return map[string]interface{}{
 		"queue_length":       len(fre.resolutionQueue),
 		"workers":            fre.cfg.Workers,
 		"min_resolution_ms":  fre.minResolutionTime.Milliseconds(),
 		"fast_resolution_ms": fre.fastResolutionTime.Milliseconds(),
+		"reorg_in_progress":  fre.reorgInProgress,
+		"last_reorg_time":    fre.lastReorgTime,
 	}
+}
+
+// IsReorgInProgress returns whether a reorganization is currently in progress
+// This should be checked by all components before attempting any reorg operation
+func (fre *ForkResolutionEngine) IsReorgInProgress() bool {
+	fre.globalReorgMutex.Lock()
+	defer fre.globalReorgMutex.Unlock()
+	return fre.reorgInProgress
+}
+
+// RequestReorg is the UNIFIED ENTRY POINT for all reorg requests in the system
+// All components (BlockKeeper, SyncLoop, ChainSelector, ForkHandler) must call this method
+// instead of implementing their own reorg logic
+// This ensures:
+// 1. Global mutex prevents concurrent reorganizations
+// 2. Frequency limiting prevents reorg storms
+// 3. Centralized logging and monitoring
+// Parameters:
+//   - newBlock: the block to reorganize to
+//   - source: caller identifier for logging ("BlockKeeper", "SyncLoop", "ChainSelector", etc.)
+// Returns error if reorg cannot be performed (already in progress, too frequent, etc.)
+func (fre *ForkResolutionEngine) RequestReorg(newBlock *core.Block, source string) error {
+	if newBlock == nil {
+		return fmt.Errorf("RequestReorg: nil block from %s", source)
+	}
+
+	log.Printf("[UnifiedReorg] Reorg requested by %s: height=%d hash=%x",
+		source, newBlock.GetHeight(), newBlock.Hash[:8])
+
+	request := &ResolutionRequest{
+		LocalTip:    fre.getCurrentTip(),
+		RemoteBlock: newBlock,
+		PeerID:      source,
+		ReceivedAt:  time.Now(),
+		Priority:    ResolutionPriorityNormal,
+	}
+
+	return fre.SubmitResolution(request)
+}
+
+// getCurrentTip returns the current chain tip for resolution requests
+func (fre *ForkResolutionEngine) getCurrentTip() *core.Block {
+	if fre.chainSelector == nil || fre.chainSelector.GetChain() == nil {
+		return nil
+	}
+	return fre.chainSelector.GetChain().LatestBlock()
 }
 
 // Stop stops the resolution engine

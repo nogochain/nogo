@@ -1,6 +1,8 @@
 // Copyright 2026 NogoChain Team
-// Production-grade chain selection and reorganization logic
-// Implements Bitcoin's FindMostWorkChain and ActivateBestChainStep
+// Production-grade chain selection and query logic
+// Implements Bitcoin's FindMostWorkChain for chain selection queries
+// DEPRECATED: Reorganization logic has been moved to ForkResolutionEngine (network/fast_fork_resolution.go)
+// This component now only provides chain selection QUERIES, not execution
 
 package core
 
@@ -18,14 +20,18 @@ type BlockProvider interface {
 	GetAllBlocks() ([]*Block, error)
 }
 
-// ChainSelector manages chain selection and reorganization
-// Production-grade: implements heaviest chain rule with automatic reorg
+// ChainSelector manages chain selection queries
+// Production-grade: implements heaviest chain rule for QUERY purposes only
 // Thread-safe: uses mutex for internal state management
+// NOTE: All reorg operations must go through network.ForkResolutionEngine.RequestReorg()
 type ChainSelector struct {
-	mu              sync.RWMutex
-	chain           *Chain
-	blockProvider   BlockProvider
-	workCalculator  *WorkCalculator
+	mu             sync.RWMutex
+	chain          *Chain
+	blockProvider  BlockProvider
+	workCalculator *WorkCalculator
+
+	// Deprecated fields - kept for backward compatibility but no longer used for reorg control
+	// All reorg coordination is now handled by ForkResolutionEngine.globalReorgMutex
 	reorgInProgress bool
 	reorgMutex      sync.Mutex
 }
@@ -37,6 +43,12 @@ func NewChainSelector(chain *Chain, provider BlockProvider) *ChainSelector {
 		blockProvider:  provider,
 		workCalculator: NewWorkCalculator(),
 	}
+}
+
+func (cs *ChainSelector) GetChain() *Chain {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.chain
 }
 
 // FindMostWorkChain finds the block with the most cumulative work
@@ -148,6 +160,8 @@ func (cs *ChainSelector) isBlockFailed(block *Block) bool {
 
 // ShouldReorg checks if we should reorganize to a new block
 // Returns true if the new block has more work than current tip
+// NOTE: This is a QUERY function only. To actually perform reorg, use:
+//   forkResolutionEngine.RequestReorg(newBlock, "ChainSelector")
 func (cs *ChainSelector) ShouldReorg(newBlock *Block) bool {
 	if newBlock == nil {
 		return false
@@ -177,9 +191,18 @@ func (cs *ChainSelector) ShouldReorg(newBlock *Block) bool {
 }
 
 // Reorganize performs chain reorganization to a new block
-// Implementation matches Bitcoin's ActivateBestChainStep
-// Thread-safety: uses reorgMutex to prevent concurrent reorganizations
+// DEPRECATED: This method is kept for backward compatibility but should NOT be called directly
+// All reorg operations must go through network.ForkResolutionEngine.RequestReorg() to ensure:
+// 1. Global mutex prevents concurrent reorganizations
+// 2. Centralized logging and monitoring
+// 3. Frequency limiting to prevent reorg storms
+//
+// If you see this warning in logs, it means legacy code is calling this method directly.
+// Please update the caller to use ForkResolutionEngine instead.
 func (cs *ChainSelector) Reorganize(newBlock *Block) error {
+	log.Printf("[DEPRECATED] ChainSelector.Reorganize() called directly. This method is deprecated.")
+	log.Printf("[DEPRECATED] Please use ForkResolutionEngine.RequestReorg() instead for centralized reorg management.")
+
 	cs.reorgMutex.Lock()
 	defer cs.reorgMutex.Unlock()
 
@@ -383,44 +406,64 @@ func (cs *ChainSelector) getBlockByHash(hash []byte) (*Block, error) {
 }
 
 // IsReorgInProgress returns whether a reorganization is currently in progress
+// DEPRECATED: For accurate status, use ForkResolutionEngine.IsReorgInProgress() instead
+// This method is kept for backward compatibility but may return stale information
 func (cs *ChainSelector) IsReorgInProgress() bool {
 	cs.reorgMutex.Lock()
 	defer cs.reorgMutex.Unlock()
 	return cs.reorgInProgress
 }
 
-// ActivateBestChain implements Bitcoin-style chain activation with periodic triggering
-// This method should be called periodically to ensure optimal chain selection
-func (cs *ChainSelector) ActivateBestChain() error {
+// ActivateBestChain checks if a better chain is available
+// DEPRECATED: This method no longer performs automatic reorg
+// It now only RETURNS whether a reorg would be beneficial
+// To actually perform the reorg, call: ForkResolutionEngine.RequestReorg(bestBlock, "ChainSelector")
+//
+// Returns:
+//   - needsReorg: true if a better chain was found
+//   - bestBlock: the block that would become the new tip
+//   - error: if unable to determine best chain
+func (cs *ChainSelector) ActivateBestChain() (needsReorg bool, bestBlock *Block, err error) {
 	// Bitcoin-style: Find the chain with most work
-	bestBlock := cs.FindMostWorkChain()
+	bestBlock = cs.FindMostWorkChain()
 	if bestBlock == nil {
-		return fmt.Errorf("no valid chain found")
+		return false, nil, fmt.Errorf("no valid chain found")
 	}
 
 	currentTip := cs.chain.LatestBlock()
 	if currentTip == nil || string(currentTip.Hash) == string(bestBlock.Hash) {
-		return nil // Best chain already active
+		return false, bestBlock, nil // Best chain already active
 	}
 
-	// Check if reorg is needed
-	if cs.ShouldReorg(bestBlock) {
-		return cs.Reorganize(bestBlock)
+	// Check if reorg would be beneficial
+	needsReorg = cs.ShouldReorg(bestBlock)
+	if needsReorg {
+		log.Printf("[ChainSelector] ActivateBestChain: Found better chain at height=%d hash=%x (current: height=%d)",
+			bestBlock.GetHeight(), bestBlock.Hash[:8], currentTip.GetHeight())
+		log.Printf("[ChainSelector] ActivateBestChain: To perform reorg, call ForkResolutionEngine.RequestReorg()")
 	}
 
-	return nil
+	return needsReorg, bestBlock, nil
 }
 
 // StartPeriodicActivation starts periodic chain activation checks
-// Bitcoin implements this mechanism to ensure consistent chain selection
+// DEPRECATED: This method now only LOGS when a better chain is found
+// It does NOT automatically trigger reorg anymore
+// Automatic reorg should be handled by ForkResolutionEngine workers
 func (cs *ChainSelector) StartPeriodicActivation(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
-				if !cs.IsReorgInProgress() {
-					cs.ActivateBestChain()
+				needsReorg, bestBlock, err := cs.ActivateBestChain()
+				if err != nil {
+					log.Printf("[ChainSelector] Periodic activation check failed: %v", err)
+					continue
+				}
+				if needsReorg && bestBlock != nil {
+					log.Printf("[ChainSelector] Periodic check: Better chain found but auto-reorg disabled")
+					log.Printf("[ChainSelector] Periodic check: Use ForkResolutionEngine.RequestReorg() for manual trigger")
 				}
 			}
 		}

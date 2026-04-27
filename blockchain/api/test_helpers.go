@@ -230,7 +230,18 @@ func (m *mockBlockchain) GetConsensus() config.ConsensusParams {
 
 // SetOnMissingBlock sets the missing block callback (no-op for mock)
 func (m *mockBlockchain) SetOnMissingBlock(callback func(parentHash []byte, height uint64)) {
-	// Mock implementation - no-op
+}
+
+func (m *mockBlockchain) CalculateCumulativeWork(block *core.Block) *big.Int {
+	if block == nil {
+		return big.NewInt(0)
+	}
+	if block.TotalWork != "" {
+		if w, ok := core.StringToWork(block.TotalWork); ok {
+			return w
+		}
+	}
+	return core.WorkForDifficultyBits(block.Header.DifficultyBits)
 }
 
 // createTestServer creates a test server with mock dependencies
