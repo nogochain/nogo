@@ -764,7 +764,15 @@ func (bk *blockKeeper) detectAndHandleForkWithInfo(peer PeerInterface, peerHeigh
 
 	if chainInfoErr != nil {
 		log.Printf("[BlockKeeper] ForkDetection: using cached height=%d (ChainInfo query failed: %v)", peer.Height(), chainInfoErr)
-		peerHeight = peer.Height()
+		
+		cachedHeight := peer.Height()
+		if cachedHeight == 0 || cachedHeight < localBlock.GetHeight() {
+			log.Printf("[BlockKeeper] ForkDetection: WARNING - cannot get reliable peer info (cached height=%d, err=%v), forcing sync to ensure consistency", cachedHeight, chainInfoErr)
+			bk.syncAfterRollback = true
+			return false
+		}
+		
+		peerHeight = cachedHeight
 		peerWork = big.NewInt(0)
 		peerTipHash = ""
 	}
@@ -776,8 +784,14 @@ func (bk *blockKeeper) detectAndHandleForkWithInfo(peer PeerInterface, peerHeigh
 		return false
 	}
 
-	if peerTipHash == "" {
+	if peerTipHash == "" && chainInfoErr == nil {
 		log.Printf("[BlockKeeper] ForkDetection: no tip hash available (query failed), cannot determine fork state")
+		return false
+	}
+
+	if peerTipHash == "" && chainInfoErr != nil {
+		log.Printf("[BlockKeeper] ForkDetection: no tip hash due to query error, skipping fork detection but marking for forced sync")
+		bk.syncAfterRollback = true
 		return false
 	}
 

@@ -673,6 +673,13 @@ func (fre *ForkResolutionEngine) resolveTieBreaker(request *ResolutionRequest) *
 // CRITICAL: This is the ONLY method that should perform reorg operations in the entire system
 // All other components must call this method or SubmitResolution/AutoResolveFork
 // Uses globalReorgMutex to prevent concurrent reorganizations from multiple sources
+//
+// PRODUCTION FIX: Now supports batch reorg for large height gaps
+// When target block is much higher than current tip, this method will:
+// 1. Detect the height gap
+// 2. Rollback to a safe height (target-1 or earlier)
+// 3. Allow sync loop to fill in missing blocks
+// This prevents the "orphan block" problem that caused D-node oscillation
 func (fre *ForkResolutionEngine) executeReorg(newBlock *core.Block) error {
 	// Acquire global reorg lock to prevent concurrent reorganizations
 	fre.globalReorgMutex.Lock()
@@ -704,13 +711,69 @@ func (fre *ForkResolutionEngine) executeReorg(newBlock *core.Block) error {
 		return fmt.Errorf("reorg too frequent: minimum interval %v not elapsed", fre.minReorgInterval)
 	}
 
+	localTip := chain.LatestBlock()
+	if localTip == nil {
+		return fmt.Errorf("local chain has no tip")
+	}
+
+	localHeight := localTip.GetHeight()
+	targetHeight := newBlock.GetHeight()
+	heightGap := int64(targetHeight) - int64(localHeight)
+
+	log.Printf("[FastForkResolution] executeReorg: localHeight=%d targetHeight=%d gap=%d",
+		localHeight, targetHeight, heightGap)
+
+	// PRODUCTION FIX: Handle large height gaps properly
+	if heightGap > 1 {
+		log.Printf("[FastForkResolution] Large height gap detected (%d blocks), using batch reorg strategy", heightGap)
+		
+		// Strategy: Rollback to target-1, then let sync loop fill the gap
+		rollbackTarget := targetHeight
+		if rollbackTarget > 0 {
+			rollbackTarget = targetHeight - 1
+		}
+		
+		// Don't rollback below genesis or current height
+		if rollbackTarget >= localHeight {
+			rollbackTarget = localHeight
+			if rollbackTarget > 0 {
+				rollbackTarget--
+			}
+		}
+		
+		// Perform rollback if needed
+		if rollbackTarget < localHeight {
+			log.Printf("[FastForkResolution] Rolling back from %d to %d before adding target block",
+				localHeight, rollbackTarget)
+			
+			if rbErr := chain.RollbackToHeight(rollbackTarget); rbErr != nil {
+				log.Printf("[FastForkResolution] RollbackToHeight(%d) failed: %v, attempting direct AddBlock", rollbackTarget, rbErr)
+				// Fallback: try direct add anyway
+			} else {
+				log.Printf("[FastForkResolution] Rollback successful, now at height=%d", rollbackTarget)
+				fre.lastReorgTime = time.Now()
+				
+				// Signal sync loop to fetch missing blocks
+				if fre.onReorgComplete != nil {
+					fre.onReorgComplete(rollbackTarget)
+				}
+				return nil
+			}
+		}
+	}
+
+	// Standard path: Try to add the block directly
 	accepted, err := chain.AddBlock(newBlock)
 	if err != nil {
 		return fmt.Errorf("add block to chain failed: %w", err)
 	}
 
 	if !accepted {
-		return fmt.Errorf("block not accepted by chain (stored as fork)")
+		// Block was stored as fork/orphan - this is OK for large gaps
+		// The sync loop will eventually fetch and connect it
+		log.Printf("[FastForkResolution] Block stored as fork/orphan (height=%d), sync loop will complete reorg", targetHeight)
+		fre.lastReorgTime = time.Now()
+		return nil
 	}
 
 	fre.lastReorgTime = time.Now()
@@ -718,7 +781,7 @@ func (fre *ForkResolutionEngine) executeReorg(newBlock *core.Block) error {
 	newHeight := newBlock.GetHeight()
 
 	log.Printf("[FastForkResolution] Reorg completed via Chain.AddBlock: height=%d hash=%x",
-		newHeight, newBlock.Hash)
+		newHeight, newBlock.Hash[:8])
 
 	if fre.onReorgComplete != nil {
 		log.Printf("[FastForkResolution] Triggering onReorgComplete callback for height %d", newHeight)

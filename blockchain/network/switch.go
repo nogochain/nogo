@@ -2904,7 +2904,8 @@ func (sw *Switch) GetPeerChainInfo(peerID string) (height uint64, work *big.Int,
 	chainInfo, fetchErr := sw.FetchChainInfo(ctx, peerID)
 	cancel()
 	if fetchErr != nil {
-		return 0, nil, "", fmt.Errorf("GetPeerChainInfo: %w", fetchErr)
+		log.Printf("[Switch] GetPeerChainInfo: query failed for %s: %v (returning error to prevent incorrect sync decisions)", peerID, fetchErr)
+		return 0, nil, "", fmt.Errorf("GetPeerChainInfo: %w [CRITICAL: no reliable data, caller must handle this error properly]", fetchErr)
 	}
 	return chainInfo.Height, chainInfo.Work, chainInfo.LatestHash, nil
 }

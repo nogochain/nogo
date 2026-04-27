@@ -57,6 +57,7 @@ func (c *Chain) GetHeaderByHash(hash nogopow.Hash) *nogopow.Header {
 // Production-grade: performs PoW mining to create new block
 // Fork-aware: checks for heavier chain before mining
 // Context-aware: responds to mining interruption for fast chain switching
+// Reorg-safe: checks external reorg state to prevent "mine-rollback-mine" oscillation
 func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Block, error) {
 	c.mu.Lock()
 	
@@ -64,6 +65,20 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 		c.mu.Unlock()
 		return nil, fmt.Errorf("no genesis block")
 	}
+
+	// PRODUCTION FIX: Check external reorg state (ForkResolutionEngine) before mining
+	// This prevents the oscillation loop where Mining and ForkResolutionEngine conflict
+	if c.externalReorgChecker != nil && c.externalReorgChecker() {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("reorganization in progress (external check), cannot mine - preventing oscillation")
+	}
+	
+	// Also check internal reorg state
+	if c.IsReorgInProgress() {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("reorganization in progress (internal), cannot mine")
+	}
+
 	latest := c.blocks[len(c.blocks)-1]
 
 	if c.shouldReorgToHeaviestLocked() {

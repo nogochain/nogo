@@ -322,6 +322,11 @@ type Chain struct {
 	// CRITICAL: Triggers immediate re-sync via BlockKeeper.forkResolvedCh
 	// Thread-safety: callback is invoked under mutex lock, must not block
 	onForkResolved func(newHeight uint64, rolledBack uint64)
+
+	// External reorg state checker - allows coordination with ForkResolutionEngine
+	// When set, Mining will check this before starting to mine
+	// This prevents the "mine-rollback-mine" oscillation loop
+	externalReorgChecker func() bool
 }
 
 // ChainConfig holds chain configuration
@@ -382,6 +387,19 @@ func (c *Chain) SetOnBlockAdded(callback func(*Block)) {
 	c.onBlockMu.Lock()
 	defer c.onBlockMu.Unlock()
 	c.onBlockAdded = callback
+}
+
+// SetExternalReorgChecker sets an external reorg state checker function
+// Production-grade: allows coordination with ForkResolutionEngine to prevent mining during reorg
+// This prevents the "mine-rollback-mine" oscillation loop that caused D-node to waste 1 hour
+// Dependency injection: called during node initialization after ForkResolutionEngine creation
+// Parameters:
+//   - checker: function that returns true if a reorganization is in progress (e.g., ForkResolutionEngine.IsReorgInProgress)
+func (c *Chain) SetExternalReorgChecker(checker func() bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.externalReorgChecker = checker
+	log.Printf("[Chain] External reorg checker set for Mining coordination")
 }
 
 // GetOnBlockAdded returns the current callback function
