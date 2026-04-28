@@ -43,11 +43,16 @@ var (
 	maxBlockPerMsg        = uint64(128)
 	maxBlockHeadersPerMsg = uint64(2048)
 	syncTimeout           = 30 * time.Second
+	fastSyncTimeout       = 5 * time.Second
+	rollbackCooldown      = 3 * time.Second
+	stuckEscapeThreshold  = 60 * time.Second
+	maxConsecutiveOrphan  = 2
 
 	errAppendHeaders  = errors.New("fail to append list due to order dismatch")
 	errRequestTimeout = errors.New("request timeout")
 	errPeerDropped    = errors.New("Peer dropped")
 	errPeerMisbehave  = errors.New("peer is misbehave")
+	errChainMismatch  = errors.New("chain mismatch detected")
 )
 
 type blockMsg struct {
@@ -66,23 +71,27 @@ type headersMsg struct {
 }
 
 type blockKeeper struct {
-	chain            ChainInterface
-	peers            PeerSetInterface
-	syncPeer         PeerInterface
+	chain    ChainInterface
+	peers    PeerSetInterface
+	syncPeer PeerInterface
 
 	blockProcessCh   chan *blockMsg
 	blocksProcessCh  chan *blocksMsg
 	headersProcessCh chan *headersMsg
 
-	headerList       *list.List
-	forkResolvedCh   chan struct{}
-	quit             chan struct{}
+	headerList     *list.List
+	forkResolvedCh chan struct{}
+	quit           chan struct{}
 
-	lastRollbackTime time.Time
+	lastRollbackTime  time.Time
 	syncAfterRollback bool
 
-	// UNIFIED FORK RESOLUTION: Reference to the centralized fork resolution engine
-	// All reorg operations must go through this engine to prevent concurrent reorganizations
+	lastSuccessfulSyncHeight uint64
+	lastSuccessfulSyncTime   time.Time
+	consecutiveStuckCycles   int
+
+	syncSessionActive bool
+
 	forkResolver *ForkResolutionEngine
 }
 
@@ -451,13 +460,15 @@ func (bk *blockKeeper) processHeaders(peerID string, headers []*HeaderLocator) {
 
 func (bk *blockKeeper) regularBlockSync(targetHeight uint64) error {
 	i := bk.chain.LatestBlock().GetHeight() + 1
+	startHeight := i
+	consecutiveOrphan := 0
 	consecutiveNonAdvancing := 0
 	maxConsecutiveNonAdvancing := 3
 
 	for i <= targetHeight {
-		block, err := bk.requireBlock(i)
-		if err != nil {
-			return fmt.Errorf("regularBlockSync requireBlock at height %d: %w", i, err)
+		block, reqErr := bk.requireBlockFast(i)
+		if reqErr != nil {
+			return fmt.Errorf("regularBlockSync requireBlock at height %d: %w", i, reqErr)
 		}
 
 		heightBeforeAdd := bk.chain.LatestBlock().GetHeight()
@@ -469,6 +480,8 @@ func (bk *blockKeeper) regularBlockSync(targetHeight uint64) error {
 		heightAfterAdd := bk.chain.LatestBlock().GetHeight()
 
 		if heightAfterAdd > heightBeforeAdd {
+			bk.recordSyncProgress(heightAfterAdd)
+			consecutiveOrphan = 0
 			consecutiveNonAdvancing = 0
 			i = heightAfterAdd + 1
 			continue
@@ -480,13 +493,19 @@ func (bk *blockKeeper) regularBlockSync(targetHeight uint64) error {
 				log.Printf("[BlockKeeper] regularBlockSync: height %d already exists (local=%d), skipping to next",
 					i, currentLocalHeight)
 				i = currentLocalHeight + 1
-				consecutiveNonAdvancing = 0
 				continue
 			}
 
+			consecutiveOrphan++
+			if consecutiveOrphan >= maxConsecutiveOrphan && i == startHeight {
+				log.Printf("[BlockKeeper] regularBlockSync: CHAIN MISMATCH detected at height %d - first %d blocks are all orphans (local=%d), peer is on different fork",
+					i, consecutiveOrphan, currentLocalHeight)
+				return fmt.Errorf("%w: first block at height %d is orphan, local tip=%d, peer chain does not connect", errChainMismatch, i, currentLocalHeight)
+			}
+
 			if i > 1 {
-				log.Printf("[BlockKeeper] regularBlockSync: orphan at %d (local=%d), retrying parent %d",
-					i, currentLocalHeight, i-1)
+				log.Printf("[BlockKeeper] regularBlockSync: orphan at %d (local=%d, consecutive=%d), retrying parent %d",
+					i, currentLocalHeight, consecutiveOrphan, i-1)
 				i--
 			}
 			continue
@@ -539,6 +558,39 @@ func (bk *blockKeeper) requireBlock(height uint64) (*core.Block, error) {
 			return msg.block, nil
 		case <-timeout.C:
 			return nil, fmt.Errorf("%w: requireBlock height=%d", errRequestTimeout, height)
+		case <-bk.quit:
+			return nil, errors.New("blockKeeper shutdown")
+		}
+	}
+}
+
+func (bk *blockKeeper) requireBlockFast(height uint64) (*core.Block, error) {
+	if bk.syncPeer == nil {
+		return nil, fmt.Errorf("%w: syncPeer is nil", errPeerDropped)
+	}
+
+	if ok := bk.syncPeer.getBlockByHeight(height); !ok {
+		return nil, errPeerDropped
+	}
+
+	timeout := time.NewTimer(fastSyncTimeout)
+	defer timeout.Stop()
+
+	for {
+		select {
+		case msg := <-bk.blockProcessCh:
+			if msg.peerID != bk.syncPeer.ID() {
+				continue
+			}
+			if msg.block == nil {
+				continue
+			}
+			if msg.block.GetHeight() != height {
+				continue
+			}
+			return msg.block, nil
+		case <-timeout.C:
+			return nil, fmt.Errorf("%w: requireBlockFast height=%d", errRequestTimeout, height)
 		case <-bk.quit:
 			return nil, errors.New("blockKeeper shutdown")
 		}
@@ -614,31 +666,51 @@ func (bk *blockKeeper) resetHeaderState() {
 }
 
 func (bk *blockKeeper) startSync() bool {
-	checkpoint := bk.nextCheckpoint()
-	peer := bk.peers.bestPeer(SFFullNode)
-
-	if peer != nil && checkpoint != nil && peer.Height() >= checkpoint.Height {
-		bk.syncPeer = peer
-		log.Printf("[BlockKeeper] startSync: Selected peer=%s for FAST sync to checkpoint height=%d (peerHeight=%d)",
-			peer.ID(), checkpoint.Height, peer.Height())
-		log.Printf("[BlockKeeper] Peer locked for entire sync duration - will not switch peers")
-
-		if err := bk.fastBlockSync(checkpoint); err != nil {
-			log.Printf("[BlockKeeper] fastBlockSync failed: %v", err)
-			bk.peers.ProcessIllegal(peer.ID(), LevelMsgIllegal, err.Error())
-			log.Printf("[BlockKeeper] Peer %s penalized for fastBlockSync failure, releasing lock", peer.ID())
-			return false
-		}
-		log.Printf("[BlockKeeper] Fast sync completed successfully with peer=%s", peer.ID())
+	if bk.checkStuckEscape() {
 		return true
 	}
 
 	blockHeight := bk.chain.LatestBlock().GetHeight()
-	peer = bk.peers.bestPeer(SFFullNode)
+
+	checkpoint := bk.nextCheckpoint()
+	var peer PeerInterface
+
+	if bk.syncSessionActive && bk.syncPeer != nil {
+		peer = bk.syncPeer
+		log.Printf("[BlockKeeper] startSync: REUSING sticky syncPeer=%s (session active, localHeight=%d)",
+			bk.syncPeer.ID(), blockHeight)
+	} else {
+		peer = bk.peers.bestPeer(SFFullNode)
+		if peer == nil {
+			log.Printf("[BlockKeeper] startSync: no peer available (localHeight=%d)", blockHeight)
+			return false
+		}
+		log.Printf("[BlockKeeper] startSync: selected NEW peer=%s via bestPeer (localHeight=%d)", peer.ID(), blockHeight)
+	}
+
+	if peer != nil && checkpoint != nil && peer.Height() >= checkpoint.Height {
+		bk.syncPeer = peer
+		bk.syncSessionActive = true
+		log.Printf("[BlockKeeper] startSync: Selected peer=%s for FAST sync to checkpoint height=%d (peerHeight=%d)",
+			peer.ID(), checkpoint.Height, peer.Height())
+
+		if err := bk.fastBlockSync(checkpoint); err != nil {
+			log.Printf("[BlockKeeper] fastBlockSync failed: %v", err)
+			bk.peers.ProcessIllegal(peer.ID(), LevelMsgIllegal, err.Error())
+			bk.releaseSyncSession()
+			return false
+		}
+		log.Printf("[BlockKeeper] Fast sync completed successfully with peer=%s", peer.ID())
+		bk.recordSyncProgress(bk.chain.LatestBlock().GetHeight())
+		return true
+	}
 
 	if peer == nil {
-		log.Printf("[BlockKeeper] startSync: no peer available (localHeight=%d)", blockHeight)
-		return false
+		peer = bk.peers.bestPeer(SFFullNode)
+		if peer == nil {
+			log.Printf("[BlockKeeper] startSync: no peer available (localHeight=%d)", blockHeight)
+			return false
+		}
 	}
 
 	peerHeight, peerWork, peerTipHash, chainInfoErr := bk.peers.GetPeerChainInfo(peer.ID())
@@ -653,105 +725,314 @@ func (bk *blockKeeper) startSync() bool {
 	}
 
 	tipsDiffer := peerTipHash != "" && localTipHash != "" && peerTipHash != localTipHash
-	rollbackCooldown := 10 * time.Second
 	recentlyRolledBack := !bk.lastRollbackTime.IsZero() && time.Since(bk.lastRollbackTime) < rollbackCooldown
-	consecutiveRollbacks := 0
-	maxConsecutiveRollbacks := 3
 
 	if bk.syncAfterRollback || recentlyRolledBack {
+		bk.syncAfterRollback = false
 		if tipsDiffer && !recentlyRolledBack {
-			log.Printf("[BlockKeeper] startSync: post-rollback sync mode, tips differ but forcing REGULAR sync to recover first")
-		} else if tipsDiffer && recentlyRolledBack {
-			timeSinceRollback := time.Since(bk.lastRollbackTime).Seconds()
-			log.Printf("[BlockKeeper] startSync: recent rollback (%.0fs ago < %v cooldown), skipping fork detection, trying REGULAR sync",
-				timeSinceRollback, rollbackCooldown)
-			if timeSinceRollback < float64(rollbackCooldown)/2 && consecutiveRollbacks < maxConsecutiveRollbacks {
-				log.Printf("[BlockKeeper] Allowing immediate re-rollup (consecutive=%d/%d, cooldown halfway elapsed)",
-					consecutiveRollbacks, maxConsecutiveRollbacks)
-				recentlyRolledBack = false
+			log.Printf("[BlockKeeper] startSync: post-rollback sync mode, tips differ - forcing fork resolution before sync")
+			if bk.detectAndHandleForkWithInfo(peer, peerHeight, peerWork, peerTipHash, chainInfoErr) {
+				return true
 			}
 		}
-		bk.syncAfterRollback = false
-	} else if peer.Height() > blockHeight && tipsDiffer {
-		log.Printf("[BlockKeeper] startSync: peer %s height(%d) > localHeight(%d) BUT TIPS DIFFER! local=%s vs peer=%s",
-			peer.ID(), peer.Height(), blockHeight, localTipHash[:16], peerTipHash[:16])
-		log.Printf("[BlockKeeper] startSync: in fork state, triggering fork resolution before sync")
-		if bk.detectAndHandleForkWithInfo(peer, peerHeight, peerWork, peerTipHash, chainInfoErr) {
-			return true
+		if peer.Height() > blockHeight {
+			log.Printf("[BlockKeeper] startSync: post-rollback recovery, attempting REGULAR sync (local=%d, peer=%d)",
+				blockHeight, peer.Height())
+			return bk.attemptRegularSync(peer, peerHeight, peerTipHash, blockHeight)
 		}
-		log.Printf("[BlockKeeper] startSync: fork resolution did not trigger immediate rollback, attempting LIMITED header sync for evaluation")
-		bk.syncForkHeadersForEvaluation(peer, peerHeight, peerTipHash)
+		log.Printf("[BlockKeeper] startSync: post-rollback cooldown, waiting (local=%d, peer=%d)", blockHeight, peer.Height())
 		return true
 	}
 
 	if peer.Height() > blockHeight {
-		bk.syncPeer = peer
-		targetHeight := blockHeight + maxBlockPerMsg
-		if targetHeight > peer.Height() {
-			targetHeight = peer.Height()
-		}
-
-		log.Printf("[BlockKeeper] startSync: Selected peer=%s for REGULAR sync from height=%d to target=%d (peerHeight=%d)",
-			peer.ID(), blockHeight, targetHeight, peer.Height())
-		log.Printf("[BlockKeeper] Peer locked for entire sync duration - will not switch peers")
-
-		if err := bk.regularBlockSync(targetHeight); err != nil {
-			errMsg := err.Error()
-			if strings.Contains(errMsg, "stuck") || strings.Contains(errMsg, "fork block") {
-				log.Printf("[BlockKeeper] regularBlockSync stuck on fork blocks: %v", err)
-				if time.Since(bk.lastRollbackTime) < rollbackCooldown {
-					log.Printf("[BlockKeeper] Recent rollback detected (%.0fs ago), not rolling back again - will retry sync next cycle",
-						time.Since(bk.lastRollbackTime).Seconds())
-					return true
-				}
-				log.Printf("[BlockKeeper] Fork detected during sync, using LCA-based rollback")
-				stuckHeight := bk.chain.LatestBlock().GetHeight()
-				rollbackTarget := stuckHeight
-				if peerTipHash != "" {
-					bk.syncPeer = peer
-					if lcaH, lcaErr := bk.findForkLCA(peerTipHash); lcaErr == nil && lcaH < rollbackTarget {
-						rollbackTarget = lcaH
-						log.Printf("[BlockKeeper] LCA-based rollback: found LCA=%d (stuck at %d)", lcaH, stuckHeight)
-					} else if lcaErr != nil {
-						log.Printf("[BlockKeeper] LCA lookup failed during sync stuck (%v), falling back to height-1", lcaErr)
-					}
-				}
-				if rollbackTarget >= stuckHeight && stuckHeight > 0 {
-					rollbackTarget = stuckHeight - 1
-				}
-				if chainProvider, ok := bk.chain.(interface {
-					RollbackToHeight(height uint64) error
-				}); ok {
-					if rbErr := chainProvider.RollbackToHeight(rollbackTarget); rbErr != nil {
-						log.Printf("[BlockKeeper] RollbackToHeight(%d) failed: %v", rollbackTarget, rbErr)
-					} else {
-						bk.lastRollbackTime = time.Now()
-						bk.syncAfterRollback = true
-						log.Printf("[BlockKeeper] Rolled back to %d (LCA-based) for next sync attempt", rollbackTarget)
-					}
-				}
-				return true
-			}
-			log.Printf("[BlockKeeper] regularBlockSync failed: %v", err)
-			bk.peers.ProcessIllegal(peer.ID(), LevelMsgIllegal, errMsg)
-			log.Printf("[BlockKeeper] Peer %s penalized for regularBlockSync failure, releasing lock", peer.ID())
-			return false
-		}
-		log.Printf("[BlockKeeper] Regular sync completed successfully with peer=%s", peer.ID())
-		bk.syncAfterRollback = false
-		return true
+		log.Printf("[BlockKeeper] startSync: peer %s is ahead (local=%d < peer=%d), attempting FORWARD sync first (tipsDiffer=%v)",
+			peer.ID(), blockHeight, peer.Height(), tipsDiffer)
+		return bk.attemptRegularSync(peer, peerHeight, peerTipHash, blockHeight)
 	}
 
-	if peer.Height() <= blockHeight {
-		log.Printf("[BlockKeeper] startSync: peer %s height(%d) <= localHeight(%d), checking for fork...",
+	if tipsDiffer {
+		log.Printf("[BlockKeeper] startSync: TIPS DIFFER detected! local=%s(h=%d) vs peer=%s(h=%d) - peer not ahead, checking for reorg",
+			localTipHash[:16], blockHeight, peerTipHash[:16], peerHeight)
+		if bk.detectAndHandleForkWithInfo(peer, peerHeight, peerWork, peerTipHash, chainInfoErr) {
+			return true
+		}
+		log.Printf("[BlockKeeper] startSync: fork resolution returned no immediate action")
+	}
+
+	if !tipsDiffer && peerTipHash == "" && chainInfoErr != nil && peerHeight > blockHeight {
+		log.Printf("[BlockKeeper] startSync: GetPeerChainInfo FAILED but peer(%s) is higher(h=%d>h=%d), forcing locator-based fork detection",
+			peer.ID(), peerHeight, blockHeight)
+		if bk.forceDetectForkByLocator(peer, peerHeight) {
+			return true
+		}
+	}
+
+	if peer.Height() <= blockHeight && tipsDiffer {
+		log.Printf("[BlockKeeper] startSync: peer %s height(%d) <= localHeight(%d) but tips differ, re-checking fork",
 			peer.ID(), peer.Height(), blockHeight)
 		if bk.detectAndHandleForkWithInfo(peer, peerHeight, peerWork, peerTipHash, chainInfoErr) {
 			return true
 		}
 	}
 
+	if bk.syncSessionActive && peer.Height() <= blockHeight {
+		log.Printf("[BlockKeeper] startSync: SYNC SESSION COMPLETE - caught up to peer %s (local=%d >= peer=%d), releasing session",
+			peer.ID(), blockHeight, peer.Height())
+		bk.releaseSyncSession()
+	}
+
 	log.Printf("[BlockKeeper] startSync: No sync needed (localHeight=%d, peer=%s, peerHeight=%d)",
 		blockHeight, peer.ID(), peer.Height())
+	return false
+}
+
+func (bk *blockKeeper) releaseSyncSession() {
+	bk.syncSessionActive = false
+	bk.syncPeer = nil
+	log.Printf("[BlockKeeper] Sync session released - will select fresh peer on next cycle")
+}
+
+func (bk *blockKeeper) attemptRegularSync(peer PeerInterface, peerHeight uint64, peerTipHash string, blockHeight uint64) bool {
+	bk.syncPeer = peer
+	bk.syncSessionActive = true
+	targetHeight := blockHeight + maxBlockPerMsg
+	if targetHeight > peerHeight {
+		targetHeight = peerHeight
+	}
+
+	log.Printf("[BlockKeeper] attemptRegularSync: peer=%s from h=%d to target=%d (peerH=%d) [SESSION LOCKED]",
+		peer.ID(), blockHeight, targetHeight, peerHeight)
+
+	if err := bk.regularBlockSync(targetHeight); err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "chain mismatch") {
+			log.Printf("[BlockKeeper] CHAIN MISMATCH during regularSync: %v (keeping session with peer=%s)", err, peer.ID())
+			return bk.handleChainMismatch(peer, peerTipHash)
+		}
+		if strings.Contains(errMsg, "stuck") || strings.Contains(errMsg, "fork block") {
+			log.Printf("[BlockKeeper] regularBlockSync stuck: %v (keeping session with peer=%s)", err, peer.ID())
+			return bk.handleSyncStuck(peer, peerTipHash)
+		}
+		log.Printf("[BlockKeeper] regularBlockSync failed: %v - releasing session", err)
+		bk.peers.ProcessIllegal(peer.ID(), LevelMsgIllegal, errMsg)
+		bk.releaseSyncSession()
+		return false
+	}
+	log.Printf("[BlockKeeper] Regular sync completed successfully with peer=%s", peer.ID())
+	bk.recordSyncProgress(bk.chain.LatestBlock().GetHeight())
+	return true
+}
+
+func (bk *blockKeeper) handleChainMismatch(peer PeerInterface, peerTipHash string) bool {
+	stuckHeight := bk.chain.LatestBlock().GetHeight()
+	log.Printf("[BlockKeeper] handleChainMismatch: local=%d, performing full LCA rollback via locator", stuckHeight)
+
+	rollbackTarget := bk.forceFindLCAByLocator(peer, stuckHeight)
+	if rollbackTarget >= stuckHeight && stuckHeight > 0 {
+		rollbackTarget = stuckHeight - 1
+	}
+
+	if rollbackTarget < stuckHeight {
+		if chainProvider, ok := bk.chain.(interface {
+			RollbackToHeight(height uint64) error
+		}); ok {
+			if rbErr := chainProvider.RollbackToHeight(rollbackTarget); rbErr != nil {
+				log.Printf("[BlockKeeper] handleChainMismatch: RollbackToHeight(%d) failed: %v", rollbackTarget, rbErr)
+				return false
+			}
+			bk.lastRollbackTime = time.Now()
+			bk.syncAfterRollback = true
+			bk.consecutiveStuckCycles++
+			log.Printf("[BlockKeeper] handleChainMismatch: rolled back %d->%d (%d blocks), will resync next cycle",
+				stuckHeight, rollbackTarget, stuckHeight-rollbackTarget)
+			return true
+		}
+	}
+	return false
+}
+
+func (bk *blockKeeper) handleSyncStuck(peer PeerInterface, peerTipHash string) bool {
+	if time.Since(bk.lastRollbackTime) < rollbackCooldown {
+		log.Printf("[BlockKeeper] handleSyncStuck: in cooldown (%.0fs ago), retry next cycle",
+			time.Since(bk.lastRollbackTime).Seconds())
+		return true
+	}
+
+	stuckHeight := bk.chain.LatestBlock().GetHeight()
+	rollbackTarget := stuckHeight
+
+	if peerTipHash != "" {
+		bk.syncPeer = peer
+		if lcaH, lcaErr := bk.findForkLCA(peerTipHash); lcaErr == nil && lcaH < rollbackTarget {
+			rollbackTarget = lcaH
+			log.Printf("[BlockKeeper] handleSyncStuck: LCA-based rollback LCA=%d (stuck at %d)", lcaH, stuckHeight)
+		} else if lcaErr != nil {
+			log.Printf("[BlockKeeper] handleSyncStuck: findForkLCA failed (%v), using locator fallback", lcaErr)
+			rollbackTarget = bk.forceFindLCAByLocator(peer, stuckHeight)
+		}
+	} else {
+		log.Printf("[BlockKeeper] handleSyncStuck: no peerTipHash, using force locator-based LCA detection")
+		rollbackTarget = bk.forceFindLCAByLocator(peer, stuckHeight)
+	}
+
+	if rollbackTarget >= stuckHeight && stuckHeight > 0 {
+		rollbackTarget = stuckHeight - 1
+	}
+
+	if chainProvider, ok := bk.chain.(interface {
+		RollbackToHeight(height uint64) error
+	}); ok {
+		if rbErr := chainProvider.RollbackToHeight(rollbackTarget); rbErr != nil {
+			log.Printf("[BlockKeeper] handleSyncStuck: RollbackToHeight(%d) failed: %v", rollbackTarget, rbErr)
+			return false
+		}
+		bk.lastRollbackTime = time.Now()
+		bk.syncAfterRollback = true
+		bk.consecutiveStuckCycles++
+		log.Printf("[BlockKeeper] handleSyncStuck: rolled back %d->%d (cycle #%d)", stuckHeight, rollbackTarget, bk.consecutiveStuckCycles)
+		return true
+	}
+	return false
+}
+
+func (bk *blockKeeper) forceDetectForkByLocator(peer PeerInterface, peerHeight uint64) bool {
+	localHeight := bk.chain.LatestBlock().GetHeight()
+	if peerHeight <= localHeight {
+		return false
+	}
+
+	lcaHeight := bk.forceFindLCAByLocator(peer, localHeight)
+	if lcaHeight < localHeight {
+		log.Printf("[BlockKeeper] forceDetectForkByLocator: found fork at height %d (local=%d, need rollback of %d blocks)",
+			lcaHeight+1, localHeight, localHeight-lcaHeight)
+
+		if chainProvider, ok := bk.chain.(interface {
+			RollbackToHeight(height uint64) error
+		}); ok {
+			if rbErr := chainProvider.RollbackToHeight(lcaHeight); rbErr != nil {
+				log.Printf("[BlockKeeper] forceDetectForkByLocator: RollbackToHeight(%d) failed: %v", lcaHeight, rbErr)
+				return false
+			}
+			bk.lastRollbackTime = time.Now()
+			bk.syncAfterRollback = true
+			log.Printf("[BlockKeeper] forceDetectForkByLocator: force-rolled back to %d, will sync from peer next cycle", lcaHeight)
+			return true
+		}
+	}
+	return false
+}
+
+func (bk *blockKeeper) forceFindLCAByLocator(peer PeerInterface, localHeight uint64) uint64 {
+	bk.syncPeer = peer
+	bk.syncSessionActive = true
+	locator := bk.blockLocator()
+	if len(locator) == 0 {
+		log.Printf("[BlockKeeper] forceFindLCAByLocator: block locator is empty, returning safe default")
+		if localHeight > 0 {
+			return localHeight - 1
+		}
+		return 0
+	}
+
+	dummyTipHash := hex.EncodeToString(make([]byte, 32))
+	headers, reqErr := bk.requireHeaders(locator, []byte(dummyTipHash))
+	if reqErr != nil {
+		log.Printf("[BlockKeeper] forceFindLCAByLocator: requireHeaders failed: %v, using binary search", reqErr)
+		return bk.binarySearchForkPoint(peer, localHeight, dummyTipHash)
+	}
+
+	if len(headers) == 0 {
+		log.Printf("[BlockKeeper] forceFindLCAByLocator: no headers returned, using binary search")
+		return bk.binarySearchForkPoint(peer, localHeight, dummyTipHash)
+	}
+
+	log.Printf("[BlockKeeper] forceFindLCAByLocator: got %d headers (range %d..%d)",
+		len(headers), headers[0].Height, headers[len(headers)-1].Height)
+
+	for _, hdr := range headers {
+		localHeader, hdrErr := bk.chain.GetHeaderByHeight(hdr.Height)
+		if hdrErr != nil || localHeader == nil {
+			continue
+		}
+
+		peerHash, hashErr := computeHeaderHash(&hdr.Header, hdr.Height, hdr.Header.MinerAddress)
+		if hashErr != nil {
+			continue
+		}
+
+		var localHash []byte
+		if b, ok := bk.chain.BlockByHeight(hdr.Height); ok && b != nil && len(b.Hash) == core.HashLen {
+			localHash = b.Hash
+		} else if lh, lhErr := computeHeaderHash(&localHeader.Header, localHeader.Height, localHeader.Header.MinerAddress); lhErr == nil {
+			localHash = lh
+		} else {
+			continue
+		}
+
+		if !equalBytes(localHash, peerHash) {
+			lcaHeight := uint64(0)
+			if hdr.Height > 0 {
+				lcaHeight = hdr.Height - 1
+			}
+			log.Printf("[BlockKeeper] forceFindLCAByLocator: FORK at height %d -> LCA=%d", hdr.Height, lcaHeight)
+			return lcaHeight
+		}
+	}
+
+	lastHdr := headers[len(headers)-1]
+	log.Printf("[BlockKeeper] forceFindLCAByLocator: all %d headers match, LCA >= %d", len(headers), lastHdr.Height)
+	return lastHdr.Height
+}
+
+func (bk *blockKeeper) recordSyncProgress(height uint64) {
+	if height > bk.lastSuccessfulSyncHeight {
+		bk.lastSuccessfulSyncHeight = height
+		bk.lastSuccessfulSyncTime = time.Now()
+		bk.consecutiveStuckCycles = 0
+	}
+}
+
+func (bk *blockKeeper) checkStuckEscape() bool {
+	if bk.lastSuccessfulSyncTime.IsZero() {
+		return false
+	}
+
+	currentHeight := bk.chain.LatestBlock().GetHeight()
+	timeSinceProgress := time.Since(bk.lastSuccessfulSyncTime)
+
+	if currentHeight <= bk.lastSuccessfulSyncHeight && timeSinceProgress > stuckEscapeThreshold {
+		bk.consecutiveStuckCycles++
+		log.Printf("[BlockKeeper] STUCK ESCAPE CHECK: no progress for %v (height stuck at %d, last progress at %d, consecutive_stuck=%d)",
+			timeSinceProgress, currentHeight, bk.lastSuccessfulSyncHeight, bk.consecutiveStuckCycles)
+
+		if bk.consecutiveStuckCycles >= 2 {
+			log.Printf("[BlockKeeper] STUCK ESCAPE TRIGGERED: %d consecutive stuck cycles over %v threshold, forcing emergency reorg",
+				bk.consecutiveStuckCycles, stuckEscapeThreshold)
+			peer := bk.peers.bestPeer(SFFullNode)
+			if peer != nil && peer.Height() > currentHeight {
+				log.Printf("[BlockKeeper] STUCK ESCAPE: emergency rollback via forceFindLCAByLocator to peer %s (h=%d)",
+					peer.ID(), peer.Height())
+				rollbackTarget := bk.forceFindLCAByLocator(peer, currentHeight)
+				if rollbackTarget < currentHeight {
+					if chainProvider, ok := bk.chain.(interface {
+						RollbackToHeight(height uint64) error
+					}); ok {
+						if rbErr := chainProvider.RollbackToHeight(rollbackTarget); rbErr != nil {
+							log.Printf("[BlockKeeper] STUCK ESCAPE: emergency rollback failed: %v", rbErr)
+						} else {
+							bk.lastRollbackTime = time.Now()
+							bk.syncAfterRollback = true
+							bk.consecutiveStuckCycles = 0
+							bk.lastSuccessfulSyncTime = time.Now()
+							bk.lastSuccessfulSyncHeight = rollbackTarget
+							log.Printf("[BlockKeeper] STUCK ESCAPE: emergency rollback %d->%d succeeded", currentHeight, rollbackTarget)
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
 	return false
 }
 
@@ -764,14 +1045,14 @@ func (bk *blockKeeper) detectAndHandleForkWithInfo(peer PeerInterface, peerHeigh
 
 	if chainInfoErr != nil {
 		log.Printf("[BlockKeeper] ForkDetection: using cached height=%d (ChainInfo query failed: %v)", peer.Height(), chainInfoErr)
-		
+
 		cachedHeight := peer.Height()
 		if cachedHeight == 0 || cachedHeight < localBlock.GetHeight() {
 			log.Printf("[BlockKeeper] ForkDetection: WARNING - cannot get reliable peer info (cached height=%d, err=%v), forcing sync to ensure consistency", cachedHeight, chainInfoErr)
 			bk.syncAfterRollback = true
 			return false
 		}
-		
+
 		peerHeight = cachedHeight
 		peerWork = big.NewInt(0)
 		peerTipHash = ""
@@ -809,7 +1090,7 @@ func (bk *blockKeeper) detectAndHandleForkWithInfo(peer PeerInterface, peerHeigh
 	log.Printf("[BlockKeeper] ForkDetection: height diff=%d (peer=%d, local=%d), work cmp=%d (peer=%s, local=%s)",
 		heightDiff, peerHeight, localBlock.GetHeight(), workCmp, peerWork.String(), localWork.String())
 
-	heightAdvantageThreshold := uint64(2)
+	heightAdvantageThreshold := uint64(1)
 
 	if heightDiff > 0 && uint64(heightDiff) >= heightAdvantageThreshold {
 		log.Printf("[BlockKeeper] ForkDetection: PEER HAS HEIGHT ADVANTAGE (+%d blocks >= %d threshold), forcing reorg to longer chain",
@@ -836,19 +1117,20 @@ func (bk *blockKeeper) detectAndHandleForkWithInfo(peer PeerInterface, peerHeigh
 	}
 
 	forkDuration := bk.getForkDuration(peerTipHash)
-	forkTimeout := 30 * time.Second
+	syncNodeForkTimeout := 3 * time.Second
 
-	if workCmp < 0 && forkDuration < forkTimeout {
-		log.Printf("[BlockKeeper] ForkDetection: local chain is heavier (diff=%s), monitoring fork for timeout (elapsed=%v, timeout=%v)",
-			new(big.Int).Sub(localWork, peerWork).String(), forkDuration, forkTimeout)
+	if workCmp < 0 && forkDuration < syncNodeForkTimeout {
+		workDiff := new(big.Int).Sub(localWork, peerWork)
+		log.Printf("[BlockKeeper] ForkDetection: local chain appears heavier (diff=%s) but sync node should not trust local work exclusively, monitoring briefly (elapsed=%v, timeout=%v)",
+			workDiff.String(), forkDuration, syncNodeForkTimeout)
 		bk.recordForkDetection(peerTipHash)
 		return false
 	}
 
-	if workCmp < 0 && forkDuration >= forkTimeout {
-		log.Printf("[BlockKeeper] ForkDetection: FORK TIMEOUT! Local was heavier but fork persisted %v >= %v, forcing reorg to converge network",
-			forkDuration, forkTimeout)
-		return bk.executeForkReorg(peer, peerTipHash, peerHeight, fmt.Sprintf("fork timeout after %v", forkDuration))
+	if workCmp < 0 && forkDuration >= syncNodeForkTimeout {
+		log.Printf("[BlockKeeper] ForkDetection: SYNC NODE FORK RESOLVE! Local appeared heavier but fork persisted %v >= %v, converging to peer chain",
+			forkDuration, syncNodeForkTimeout)
+		return bk.executeForkReorg(peer, peerTipHash, peerHeight, fmt.Sprintf("sync node fork resolve after %v (local was heavier but untrusted)", forkDuration))
 	}
 
 	log.Printf("[BlockKeeper] ForkDetection: tips differ but local chain is heavier or equal, no reorg needed (workCmp=%d, forkDuration=%v)",
@@ -879,7 +1161,7 @@ func (bk *blockKeeper) applyForkTiebreaker(peer PeerInterface, peerTipHash strin
 		majority := float64(peerCountVotingForPeer) / float64(totalPeers) * 100
 		return tiebreakerResult{
 			shouldReorg: true,
-			reason:      fmt.Sprintf("peer majority (%.1f%%, %d/%d peers voting for peer tip)",
+			reason: fmt.Sprintf("peer majority (%.1f%%, %d/%d peers voting for peer tip)",
 				majority, peerCountVotingForPeer, totalPeers),
 		}
 	}
@@ -888,24 +1170,30 @@ func (bk *blockKeeper) applyForkTiebreaker(peer PeerInterface, peerTipHash strin
 		majority := float64(peerCountVotingForLocal) / float64(totalPeers) * 100
 		return tiebreakerResult{
 			shouldReorg: false,
-			reason:      fmt.Sprintf("local majority (%.1f%%, %d/%d peers voting for local tip)",
+			reason: fmt.Sprintf("local majority (%.1f%%, %d/%d peers voting for local tip)",
 				majority, peerCountVotingForLocal, totalPeers),
 		}
 	}
 
 	// Deterministic fallback: preserve local chain.
-	// Rationale: randomized tie-breaking can cause long-lived symmetric forks because
-	// different nodes may choose different winners for the same fork.
+	// Rationale: in symmetric fork (equal height, equal work, no majority vote),
+	// preserving local prevents erroneous rollback on mining nodes that can validate their own chain.
+	// Convergence is guaranteed by the syncNodeForkTimeout (3s) path above:
+	// if local was truly wrong, the fork will persist and force reorg after timeout.
 	return tiebreakerResult{
 		shouldReorg: false,
-		reason:      "deterministic fallback (preserve local chain)",
+		reason:      "deterministic fallback (preserve local - convergence via fork timeout if needed)",
 	}
 }
 
 func (bk *blockKeeper) countPeersWithTip(tipHash string) int {
 	count := 0
+	syncPeerID := ""
+	if bk.syncPeer != nil {
+		syncPeerID = bk.syncPeer.ID()
+	}
 	for _, peerID := range bk.peers.GetAllPeerIDs() {
-		if peerID == bk.syncPeer.ID() {
+		if peerID == syncPeerID {
 			continue
 		}
 		_, _, peerTip, err := bk.peers.GetPeerChainInfo(peerID)
@@ -971,6 +1259,7 @@ func (bk *blockKeeper) syncForkHeadersForEvaluation(peer PeerInterface, peerHeig
 
 func (bk *blockKeeper) executeForkReorg(peer PeerInterface, peerTipHash string, peerHeight uint64, reason string) bool {
 	bk.syncPeer = peer
+	bk.syncSessionActive = true
 	bk.clearForkDetection(peerTipHash)
 
 	// UNIFIED FORK RESOLUTION: Try to use ForkResolutionEngine first (if available)
@@ -982,7 +1271,9 @@ func (bk *blockKeeper) executeForkReorg(peer PeerInterface, peerTipHash string, 
 		var targetBlock *core.Block
 
 		// Attempt to fetch the target block by hash from chain storage
-		if blockProvider, ok := bk.chain.(interface{ BlockByHash(hash string) (*core.Block, bool) }); ok {
+		if blockProvider, ok := bk.chain.(interface {
+			BlockByHash(hash string) (*core.Block, bool)
+		}); ok {
 			if block, exists := blockProvider.BlockByHash(peerTipHash); exists && block != nil {
 				targetBlock = block
 				log.Printf("[BlockKeeper] ForkDetection: Found target block at height=%d in local storage", block.GetHeight())
