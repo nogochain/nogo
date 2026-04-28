@@ -2832,6 +2832,236 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 	}
 }
 
+// processOrphanDescendantsLocked reconnects orphan blocks whose parent has just been added.
+// Equivalent to core-main's saveSubBlock: after saving a block, recursively processes
+// all orphans that have this block as their parent, forming complete fork chains.
+// Caller must hold c.mu lock.
+// Returns the number of orphan blocks successfully reconnected.
+func (c *Chain) processOrphanDescendantsLocked(parentHash string) int {
+	if c.orphanByParent == nil || c.orphanPool == nil {
+		return 0
+	}
+
+	children, exists := c.orphanByParent[parentHash]
+	if !exists || len(children) == 0 {
+		return 0
+	}
+
+	totalConnected := 0
+	maxCascadeDepth := 500
+
+	var cascade func(orphanHashes []string) int
+	cascade = func(orphanHashes []string) int {
+		connected := 0
+		for _, childHash := range orphanHashes {
+			if totalConnected+connected >= maxCascadeDepth {
+				log.Printf("[Chain] processOrphanDescendants: reached max cascade depth %d", maxCascadeDepth)
+				return connected
+			}
+
+			orphanBlock, ok := c.orphanPool[childHash]
+			if !ok {
+				continue
+			}
+
+			childHex := childHash
+			childHeight := orphanBlock.GetHeight()
+
+			c.removeOrphanLocked(childHex)
+
+			accepted, addErr := c.addBlockReconnectLocked(orphanBlock, childHex)
+			if addErr != nil {
+				log.Printf("[Chain] processOrphanDescendants: failed to reconnect orphan h=%d (%s): %v",
+					childHeight, childHex[:16], addErr)
+				continue
+			}
+			if accepted {
+				connected++
+				totalConnected++
+
+				grandchildren, gcExists := c.orphanByParent[childHex]
+				if gcExists && len(grandchildren) > 0 {
+					connected += cascade(grandchildren)
+				}
+			} else {
+				log.Printf("[Chain] processOrphanDescendants: orphan h=%d (%s) not accepted, re-queuing as orphan",
+					childHeight, childHex[:16])
+				c.orphanPool[childHex] = orphanBlock
+				c.orphanTimestamps[childHex] = time.Now()
+				parentHashOfChild := hex.EncodeToString(orphanBlock.Header.PrevHash)
+				c.orphanByParent[parentHashOfChild] = append(c.orphanByParent[parentHashOfChild], childHex)
+			}
+		}
+		return connected
+	}
+
+	connected := cascade(children)
+	if connected > 0 {
+		log.Printf("[Chain] processOrphanDescendants: reconnected %d orphan blocks (parent=%s)", connected, parentHash[:16])
+	}
+	return connected
+}
+
+// addBlockReconnectLocked adds a previously-orphan block back to the chain.
+// Used by processOrphanDescendantsLocked during orphan cascading.
+// Skips existence check since the block was already in the orphan pool.
+// Caller must hold c.mu lock.
+func (c *Chain) addBlockReconnectLocked(block *Block, hashHex string) (bool, error) {
+	height := block.GetHeight()
+	expectedHeight := uint64(len(c.blocks))
+
+	if height == expectedHeight {
+		if len(c.blocks) > 0 {
+			currentTip := c.blocks[len(c.blocks)-1]
+			if bytes.Equal(block.Header.PrevHash, currentTip.Hash) {
+				return c.addCanonicalBlockLocked(block, hashHex)
+			}
+		}
+		return c.addForkBlockLocked(block, hashHex)
+	}
+
+	if height < expectedHeight {
+		return c.addForkBlockLocked(block, hashHex)
+	}
+
+	if height == expectedHeight+1 {
+		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+		if _, parentExists := c.blocksByHash[parentHashHex]; parentExists {
+			return c.addCanonicalBlockLocked(block, hashHex)
+		}
+		if c.isParentInForkBlocksLocked(parentHashHex) {
+			return c.addForkBlockLocked(block, hashHex)
+		}
+	}
+
+	return c.addForkBlockLocked(block, hashHex)
+}
+
+func (c *Chain) autoReorgIfNeededLocked() {
+	if c.externalReorgChecker != nil && c.externalReorgChecker() {
+		return
+	}
+
+	bestTip := c.findBestChainTipLocked()
+	if bestTip == nil {
+		return
+	}
+
+	currentTipHash := ""
+	if len(c.blocks) > 0 {
+		currentTipHash = hex.EncodeToString(c.blocks[len(c.blocks)-1].Hash)
+	}
+	bestTipHash := hex.EncodeToString(bestTip.Hash)
+
+	if bestTipHash == currentTipHash {
+		return
+	}
+
+	ancestor, _, err := c.findCommonAncestorLocked(bestTip)
+	if err != nil || ancestor == nil {
+		return
+	}
+
+	log.Printf("[Chain] AUTO REORG: switching to better chain (tip=%s h=%d work=%s) from current (tip=%s h=%d)",
+		bestTipHash[:16], bestTip.GetHeight(), c.calculateCumulativeWorkLocked(bestTip).String(),
+		currentTipHash[:16], uint64(len(c.blocks)-1))
+
+	if err := c.reorganizeChainLocked(ancestor, bestTip); err != nil {
+		log.Printf("[Chain] AUTO REORG failed: %v", err)
+	}
+}
+
+func (c *Chain) findBestChainTipLocked() *Block {
+	if len(c.blocks) == 0 {
+		return nil
+	}
+
+	currentCanonicalHeight := uint64(len(c.blocks) - 1)
+	canonicalWork := c.canonicalWork
+	if canonicalWork == nil {
+		canonicalWork = big.NewInt(0)
+	}
+
+	var bestTip *Block = c.blocks[currentCanonicalHeight]
+	bestHeight := currentCanonicalHeight
+	bestWork := new(big.Int).Set(canonicalWork)
+	bestChainComplete := true
+
+	for _, blocks := range c.forkBlocks {
+		for _, block := range blocks {
+			forkWork := c.calculateCumulativeWorkLocked(block)
+			forkHeight := block.GetHeight()
+			forkChainComplete := c.isForkChainCompleteLocked(block)
+
+			isBetter := false
+			if forkHeight > bestHeight {
+				isBetter = true
+			} else if forkHeight == bestHeight {
+				if forkChainComplete != bestChainComplete {
+					isBetter = forkChainComplete
+				} else if forkWork.Cmp(bestWork) > 0 {
+					isBetter = true
+				}
+			}
+
+			if isBetter {
+				bestTip = block
+				bestHeight = forkHeight
+				bestWork = forkWork
+				bestChainComplete = forkChainComplete
+			}
+		}
+	}
+
+	return bestTip
+}
+
+// isForkChainCompleteLocked checks if a fork block's entire ancestry back to genesis/fork-point exists.
+// An incomplete chain means some ancestor blocks haven't been received yet, making work estimation unreliable.
+// Caller must hold c.mu lock.
+func (c *Chain) isForkChainCompleteLocked(tip *Block) bool {
+	current := tip
+	visited := make(map[string]bool)
+	maxSteps := uint64(10000)
+
+	for steps := uint64(0); steps < maxSteps; steps++ {
+		hashHex := hex.EncodeToString(current.Hash)
+		if visited[hashHex] {
+			return true
+		}
+		visited[hashHex] = true
+
+		if current.GetHeight() == 0 {
+			return true
+		}
+
+		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
+		if _, exists := c.blocksByHash[parentHashHex]; exists {
+			return true
+		}
+
+		foundInFork := false
+		for _, fbList := range c.forkBlocks {
+			for _, fb := range fbList {
+				if hex.EncodeToString(fb.Hash) == parentHashHex {
+					current = fb
+					foundInFork = true
+					break
+				}
+			}
+			if foundInFork {
+				break
+			}
+		}
+
+		if !foundInFork {
+			return false
+		}
+	}
+
+	return true
+}
+
 // addOrphanBlockLocked stores an orphan block for later processing
 // Caller must hold c.mu lock
 func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error) {
@@ -3213,9 +3443,6 @@ func (c *Chain) addCanonicalBlockLocked(block *Block, hashHex string) (bool, err
 	c.canonicalWork.Add(c.canonicalWork, WorkForDifficultyBits(block.Header.DifficultyBits))
 	block.TotalWork = c.canonicalWork.String()
 
-	// Add to fork blocks list
-	c.forkBlocks[height] = append(c.forkBlocks[height], block)
-
 	// Persist to storage
 	if c.store != nil {
 		if err := c.store.AppendCanonical(block); err != nil {
@@ -3265,6 +3492,9 @@ func (c *Chain) addCanonicalBlockLocked(block *Block, hashHex string) (bool, err
 	if callback := c.GetOnBlockAdded(); callback != nil {
 		go callback(block)
 	}
+
+	c.processOrphanDescendantsLocked(hashHex)
+	c.autoReorgIfNeededLocked()
 
 	return true, nil
 }
@@ -3317,6 +3547,9 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 		log.Printf("[Chain] Global reorganization completed successfully")
 		return true, nil
 	}
+
+	c.processOrphanDescendantsLocked(hashHex)
+	c.autoReorgIfNeededLocked()
 
 	return false, nil
 }

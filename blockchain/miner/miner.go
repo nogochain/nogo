@@ -443,7 +443,8 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 	}
 
 	if !m.isMiningActive() {
-		logf(colorBrightYellow, "⏸️ ", "Mining tick: mining not active, waiting...")
+		logf(colorBrightYellow, "⏸️ ", "Mining tick: mining not active, auto-resuming...")
+		m.ResumeMining()
 		return
 	}
 
@@ -462,29 +463,27 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 }
 
 // handleMinedBlock handles a successfully mined block
-// Fixed: Broadcast block before checking network work
+// CRITICAL FIX: Always broadcast mined blocks regardless of peer height
+// In multi-miner setups, dropping a valid block because a peer is "ahead" causes
+// permanent miner starvation. All mined blocks must be broadcast so the network's
+// reorg mechanism can select the best chain.
 func (m *Miner) handleMinedBlock(ctx context.Context, block *core.Block) {
 	logf(colorBrightGreen, "✅ ", fmt.Sprintf("Block #%d mined successfully, hash=%x", block.GetHeight(), block.Hash))
 
-	// CRITICAL: Before broadcasting, check if peer has grown during mining
-	// This prevents adding our block to a fork when we're already behind
 	if m.pm != nil {
 		localHeight := m.bc.LatestBlock().GetHeight()
 		peerHeight := getPeerHeight(m.pm)
 
 		if peerHeight > localHeight {
-			logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Peer has higher height (%d > %d) after mining - triggering sync instead of broadcast", peerHeight, localHeight))
+			logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Peer has higher height (%d > %d) after mining - broadcasting anyway, sync will reconcile", peerHeight, localHeight))
 			if m.syncLoop != nil {
 				m.syncLoop.TriggerSyncCheck()
 			}
-			return // Don't broadcast or add our block - we're behind
 		}
 	}
 
-	// Broadcast block to network (non-blocking)
 	if m.syncLoop != nil && m.pm != nil {
 		m.broadcastBlockAsync(ctx, block)
-		// Check network work after broadcast
 		m.checkNetworkWork(ctx, block)
 	}
 }
@@ -529,8 +528,9 @@ func (m *Miner) broadcastBlockAsync(ctx context.Context, block *core.Block) {
 }
 
 // checkNetworkWork checks if network has more work and triggers sync if needed
-// Production-grade: actively triggers sync loop when network has more work
-// CRITICAL: Called after broadcasting our mined block to detect forks early
+// Production-grade: always resumes mining after check to prevent permanent stall
+// CRITICAL FIX: Previously, InterruptMining on line 538 had no matching ResumeMining,
+// causing permanent miner starvation when network consistently had more work.
 func (m *Miner) checkNetworkWork(ctx context.Context, block *core.Block) {
 	networkMaxWork := m.getNetworkMaxWork(ctx)
 	localWork := m.bc.CanonicalWork()
@@ -539,22 +539,19 @@ func (m *Miner) checkNetworkWork(ctx context.Context, block *core.Block) {
 		logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Network has more work (local=%v, network=%v) - triggering sync", localWork, networkMaxWork))
 		m.InterruptMining()
 
-		// CRITICAL: Actively trigger sync loop to fetch heavier chain
-		// This prevents the node from getting stuck after fork rollback
 		if m.syncLoop != nil {
 			m.syncLoop.TriggerSyncCheck()
 		}
-		return
+	} else {
+		logf(colorBrightGreen, "✅ ", "Local chain has most work, continuing mining")
 	}
 
-	logf(colorBrightGreen, "✅ ", "Local chain has most work, continuing mining")
-	// Resume mining to ensure continuous block production
 	m.ResumeMining()
 }
 
 // OnPeerBlockBroadcast is called when P2P receives a block broadcast from peers
 // Production-grade: enables real-time fork detection and mining coordination
-// CRITICAL: This is the key integration point between P2P and mining
+// CRITICAL FIX: Always resume mining after interruption to prevent permanent stall
 func (m *Miner) OnPeerBlockBroadcast(block *core.Block) {
 	if block == nil || m.syncLoop == nil {
 		return
@@ -568,33 +565,33 @@ func (m *Miner) OnPeerBlockBroadcast(block *core.Block) {
 	localHeight := localTip.GetHeight()
 	blockHeight := block.GetHeight()
 
-	// Case 1: Peer broadcast block at same height - FORK DETECTED
 	if blockHeight == localHeight {
 		if !bytes.Equal(block.Hash, localTip.Hash) {
 			logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Fork detected via P2P at height %d! Pausing mining for verification", blockHeight))
 
-			// CRITICAL: Pause mining immediately to prevent extending wrong chain
 			m.InterruptMining()
-
-			// Trigger sync check to compare work and resolve fork
 			m.syncLoop.TriggerSyncCheck()
 
-			// Note: Mining will be resumed by checkNetworkWork after fork resolution
+			go func() {
+				time.Sleep(10 * time.Second)
+				m.ResumeMining()
+			}()
 			return
 		}
-		// Same hash - this is our own block being echoed back, ignore
 		return
 	}
 
-	// Case 2: Peer has higher block - we're behind
 	if blockHeight > localHeight {
 		logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Peer has higher block %d (local=%d) - pausing mining", blockHeight, localHeight))
 		m.InterruptMining()
 		m.syncLoop.TriggerSyncCheck()
+
+		go func() {
+			time.Sleep(10 * time.Second)
+			m.ResumeMining()
+		}()
 		return
 	}
-
-	// Case 3: Lower height block - ignore, normal during sync
 }
 
 // getNetworkMaxWork gets the maximum work from all peers
@@ -648,8 +645,12 @@ func (m *Miner) hasHigherPeer(ctx context.Context) bool {
 }
 
 // MineOnce attempts to mine a single block
-// Production-grade: implements complete mining logic with validation
-// Fork-aware: checks for higher peers and triggers sync if needed
+// Production-grade: always mines on local tip regardless of peer height
+// CRITICAL FIX: Removed "peer ahead → don't mine" logic that caused miner starvation
+// In multi-miner setups, slower miners were permanently starved because faster
+// miners always appeared "ahead", causing the slower miner to sync instead of mine.
+// Correct behavior (matching Bitcoin/core-main): all miners always mine on local tip.
+// If a better chain exists, autoReorgIfNeededLocked in AddBlock handles reorganization.
 func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 	if m.mp == nil {
 		return nil, nil
@@ -660,34 +661,6 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 	m.miningMu.Unlock()
 
 	pm := m.pm
-	if isPeerAPIValid(pm) {
-		localHeight := m.bc.LatestBlock().GetHeight()
-		peerHeight := getPeerHeight(pm)
-
-		if peerHeight > localHeight {
-			// CRITICAL: Peer has higher height, should sync instead of mining
-			// Trigger sync check to fetch missing blocks
-			if m.syncLoop != nil {
-				m.syncLoop.TriggerSyncCheck()
-			}
-			return nil, nil
-		}
-
-		if peerHeight == localHeight || peerHeight == 0 {
-			if config.DefaultBlockPropagationDelayMs > 0 {
-				time.Sleep(time.Duration(config.DefaultBlockPropagationDelayMs) * time.Millisecond)
-
-				newPeerHeight := getPeerHeight(pm)
-				if newPeerHeight > localHeight {
-					// CRITICAL: Peer advanced during delay, trigger sync
-					if m.syncLoop != nil {
-						m.syncLoop.TriggerSyncCheck()
-					}
-					return nil, nil
-				}
-			}
-		}
-	}
 
 	selected, selectedIDs, err := m.bc.SelectMempoolTxs(m.mp, m.maxTxPerBlock)
 	if err != nil {
@@ -712,10 +685,6 @@ func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
 		return nil, err
 	}
 
-	// Redundant POW validation removed for the following reasons:
-	// 1. POW already validated by NogoPow engine during Seal
-	// 2. validateBlockLocked performs additional POW validation in MineTransfers
-	// 3. This validation is redundant and incomplete
 	latest := m.bc.LatestBlock()
 	if latest == nil || latest.Hash == nil || string(latest.Hash) != string(b.Hash) {
 		return nil, nil

@@ -381,14 +381,17 @@ func (n *Node) startComponents() error {
 			}
 
 			// CRITICAL: Wait for initial sync before starting mining
-			// This prevents mining on stale chain when starting from height 0
+			// Uses a reasonable height gap threshold instead of perfect sync.
+			// In multi-miner networks, nodes are never perfectly synced (someone is always 1 block ahead).
+			// Mining should start once we're within acceptable range of the network.
 			if n.syncLoop != nil {
 				log.Info("Waiting for initial sync before starting mining...")
-				syncWaitTimeout := 5 * time.Minute
+				syncWaitTimeout := 2 * time.Minute
 				syncWaitStart := time.Now()
 				syncCheckInterval := 2 * time.Second
 				syncCheckTicker := time.NewTicker(syncCheckInterval)
 				defer syncCheckTicker.Stop()
+				const syncHeightTolerance uint64 = 5
 
 			syncWaitLoop:
 				for {
@@ -397,24 +400,30 @@ func (n *Node) startComponents() error {
 						log.Info("Context cancelled during sync wait, aborting mining startup")
 						return
 					case <-syncCheckTicker.C:
-						if n.syncLoop.IsSynced() {
-							log.Info("Initial sync completed, starting mining (localHeight=%d)",
-								n.chain.GetHeight())
+						localHeight := n.chain.GetHeight()
+
+						maxPeerHeight, peerCount := n.syncLoop.GetMaxPeerHeight(n.ctx)
+
+						if peerCount == 0 {
+							log.Info("No peers available, starting mining in standalone mode")
 							break syncWaitLoop
 						}
 
-						// Check for timeout
+						heightGap := int64(maxPeerHeight) - int64(localHeight)
+						if heightGap < 0 {
+							heightGap = 0
+						}
+
+						if heightGap <= int64(syncHeightTolerance) {
+							log.Info("Initial sync completed (local=%d, bestPeer=%d, gap=%d <= tolerance=%d), starting mining",
+								localHeight, maxPeerHeight, heightGap, syncHeightTolerance)
+							break syncWaitLoop
+						}
+
 						if time.Since(syncWaitStart) > syncWaitTimeout {
-							log.Info("Sync wait timeout reached, checking if we can mine anyway...")
-							// If no peers available, we can start mining (standalone mode)
-							activePeers := n.p2pSwitch.GetActivePeers()
-							if len(activePeers) == 0 {
-								log.Info("No peers available, starting mining in standalone mode")
-								break syncWaitLoop
-							}
-							// Continue waiting if peers are available but sync not complete
-							log.Info("Still waiting for sync... (elapsed=%v, peers=%d)",
-								time.Since(syncWaitStart), len(activePeers))
+							log.Info("Sync wait timeout (%v), localHeight=%d, bestPeer=%d, gap=%d — starting mining anyway (sync will continue in background)",
+								syncWaitTimeout, localHeight, maxPeerHeight, heightGap)
+							break syncWaitLoop
 						}
 					}
 				}
