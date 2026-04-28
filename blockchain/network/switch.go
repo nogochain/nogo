@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/nogochain/nogo/blockchain/network/mconnection"
 	"github.com/nogochain/nogo/blockchain/network/reactor"
 	"github.com/nogochain/nogo/internal/networking"
+	"github.com/nogochain/nogo/internal/networking/dht"
 	"github.com/nogochain/nogo/internal/networking/mdns"
 )
 
@@ -72,6 +74,10 @@ type SwitchConfig struct {
 	EnablemDNS bool   // Enable mDNS for LAN peer discovery
 	EnableDHT  bool   // Enable DHT for WAN peer discovery
 	NetworkID  string // Network identifier for mDNS/DHT (e.g., "nogochain-mainnet")
+
+	// Persistent peers that must stay connected (like core-main KeepDial)
+	// These peers are dialed on every RecheckInterval to ensure stable connectivity
+	PersistentPeers []string // Persistent peer addresses (e.g., ["node1.nogochain.org:9090"])
 }
 
 // NodeInfo holds metadata about a node for handshake and identification.
@@ -128,7 +134,7 @@ func DefaultSwitchConfig() SwitchConfig {
 		HandshakeTimeout: 20 * time.Second,
 		ListenAddr:       "tcp://0.0.0.0:9090",
 		ExternalAddr:     "",
-		Seeds:            []string{},
+		Seeds:            DefaultSeedNodes, // Use official seed nodes by default
 		SeedMode:         false,
 		UPNP:             false,
 		Peers:            []PeerInfo{},
@@ -138,6 +144,14 @@ func DefaultSwitchConfig() SwitchConfig {
 		EnablemDNS: true,        // Enable mDNS by default for LAN discovery
 		EnableDHT:  true,        // Enable DHT by default for WAN discovery
 		NetworkID:  "nogochain", // Default network identifier
+
+		// Persistent peers: official seed nodes that must stay connected (like core-main KeepDial)
+		// These ensure network stability - dialed every 10s to maintain connectivity
+		PersistentPeers: []string{
+			"main.nogochain.org:9090",   // Primary seed node
+			"node.nogochain.org:9090",   // Secondary seed node
+			"wallet.nogochain.org:9090", // Tertiary seed node
+		},
 	}
 }
 
@@ -165,6 +179,9 @@ type Switch struct {
 	// Peer discovery
 	mdnsService   *mdns.Service
 	mdnsDiscovery *mdns.Discovery
+
+	// DHT discovery for WAN peer finding (Kademlia-based)
+	dhtDiscovery *dht.Discovery
 
 	nodePrivKey    ed25519.PrivateKey
 	encryptionMode encryptionMode
@@ -261,11 +278,37 @@ func (sw *Switch) initPeerDiscovery() {
 		}
 	}
 
-	// Initialize DHT for WAN discovery (if enabled)
-	// TODO: DHT integration pending proper Conn interface implementation
-	if sw.config.EnableDHT {
-		log.Printf("Switch: DHT discovery enabled (pending implementation)")
-		// DHT initialization will be added after Conn interface is properly defined
+	// Initialize DHT for WAN discovery (Kademlia-based, like core-main)
+	if sw.config.EnableDHT && len(sw.nodePrivKey) > 0 {
+		dhtCfg := dht.DefaultConfig()
+
+		port := uint16(30303)
+		if sw.config.ListenAddr != "" {
+			if _, portStr, err := net.SplitHostPort(sw.config.ListenAddr); err == nil {
+				if p, err2 := strconv.ParseUint(portStr, 10, 16); err2 == nil {
+					port = uint16(p)
+				}
+			}
+		}
+
+		dhtCfg.ListenAddr = &net.UDPAddr{
+			IP:   net.IPv4zero,
+			Port: int(port),
+		}
+
+		dhtCfg.PrivateKey = sw.nodePrivKey
+
+		var err error
+		sw.dhtDiscovery, err = dht.NewDiscovery(sw.nodePrivKey, dhtCfg)
+		if err != nil {
+			log.Printf("Switch: failed to initialize DHT discovery: %v", err)
+		} else {
+			log.Printf("Switch: DHT discovery initialized on UDP port %d", port)
+		}
+	} else if !sw.config.EnableDHT {
+		log.Printf("Switch: DHT discovery disabled (EnableDHT=false)")
+	} else {
+		log.Printf("Switch: DHT discovery skipped (no private key)")
 	}
 }
 
@@ -381,9 +424,13 @@ func (sw *Switch) startPeerDiscovery() {
 		log.Printf("Switch: mDNS peer discovery started")
 	}
 
-	// DHT discovery is pending implementation
-	if sw.config.EnableDHT {
-		log.Printf("Switch: DHT peer discovery enabled (will be implemented in future version)")
+	// Start DHT discovery for WAN peer finding (like core-main)
+	if sw.dhtDiscovery != nil {
+		if err := sw.dhtDiscovery.Start(); err != nil {
+			log.Printf("Switch: failed to start DHT discovery: %v", err)
+		} else {
+			log.Printf("Switch: DHT peer discovery started successfully")
+		}
 	}
 }
 
@@ -409,6 +456,11 @@ func (sw *Switch) OnStop() error {
 		}
 	}
 	sw.listeners = nil
+
+	if sw.dhtDiscovery != nil {
+		sw.dhtDiscovery.Stop()
+		log.Printf("Switch: DHT discovery stopped")
+	}
 
 	sw.stopAllPeers()
 
@@ -564,9 +616,7 @@ func (sw *Switch) acceptInboundPeer(conn net.Conn) {
 		return
 	}
 
-	if sw.config.SeedMode {
-		sw.seedOutboundPeers(sw.peers.Get(addr))
-	}
+	sw.seedOutboundPeers(sw.peers.Get(addr))
 }
 
 // normalizeSeedAddr ensures the seed address has a protocol prefix.
@@ -697,12 +747,48 @@ func (sw *Switch) handleMDNSPeers(events <-chan mdns.LANPeerEvent) {
 	}
 }
 
+// ensureKeepConnectPeers maintains connections to configured persistent peers.
+// This is critical for network stability - ensures seed nodes and important
+// peers stay connected. Reference: core-main switch.go Lines 447-460.
+func (sw *Switch) ensureKeepConnectPeers() {
+	if len(sw.config.PersistentPeers) == 0 {
+		return
+	}
+
+	for _, addr := range sw.config.PersistentPeers {
+		select {
+		case <-sw.quit:
+			return
+		case <-sw.ctx.Done():
+			return
+		default:
+		}
+
+		normalizedAddr := normalizeSeedAddr(addr)
+		_, dialAddr, parseErr := sw.parseListenAddr(normalizedAddr)
+		if parseErr != nil {
+			log.Printf("Switch: invalid persistent peer address %s: %v", addr, parseErr)
+			continue
+		}
+
+		if sw.peerAlreadyDialingOrConnected(dialAddr) {
+			continue
+		}
+
+		if dialErr := sw.DialPeerWithAddress(dialAddr); dialErr != nil {
+			log.Printf("Switch: failed to dial persistent peer %s: %v", dialAddr, dialErr)
+		}
+	}
+}
+
 func (sw *Switch) ensureOutboundPeersLoop() {
 	defer sw.wg.Done()
 
 	ticker := time.NewTicker(sw.config.RecheckInterval)
 	defer ticker.Stop()
 
+	// Initial call: ensure persistent connections first, then discover new peers (like core-main Line 481-482)
+	sw.ensureKeepConnectPeers()
 	sw.ensureOutboundPeers()
 
 	for {
@@ -712,6 +798,8 @@ func (sw *Switch) ensureOutboundPeersLoop() {
 		case <-sw.ctx.Done():
 			return
 		case <-ticker.C:
+			// Every tick: maintain persistent connections + discover new peers (like core-main Lines 490-491)
+			sw.ensureKeepConnectPeers()
 			sw.ensureOutboundPeers()
 		}
 	}
@@ -731,7 +819,36 @@ func (sw *Switch) ensureOutboundPeers() {
 		return
 	}
 
-	if len(sw.config.Seeds) > 0 {
+	numToDial := sw.config.MinOutboundPeers - outboundCount
+	log.Printf("Switch: ensureOutboundPeers need %d more peers (current=%d, min=%d)",
+		numToDial, outboundCount, sw.config.MinOutboundPeers)
+
+	// PRIORITY 1: Use DHT discovery to find random nodes (like core-main Line 471)
+	if sw.dhtDiscovery != nil && numToDial > 0 {
+		nodes := make([]*dht.Node, numToDial)
+		n := sw.dhtDiscovery.ReadRandomNodes(nodes)
+
+		if n > 0 {
+			log.Printf("Switch: DHT found %d candidate nodes", n)
+			for i := 0; i < n && outboundCount < sw.config.MinOutboundPeers; i++ {
+				addr := fmt.Sprintf("%s:%d", nodes[i].IP.String(), nodes[i].TCP)
+
+				if sw.peerAlreadyDialingOrConnected(addr) {
+					continue
+				}
+
+				if dialErr := sw.DialPeerWithAddress(addr); dialErr != nil {
+					log.Printf("Switch: failed to dial DHT node %s: %v", addr, dialErr)
+					continue
+				}
+				outboundCount++
+				numToDial--
+			}
+		}
+	}
+
+	// PRIORITY 2: Fallback to configured Seeds (if still need peers)
+	if numToDial > 0 && len(sw.config.Seeds) > 0 {
 		for _, seed := range sw.config.Seeds {
 			if outboundCount >= sw.config.MinOutboundPeers {
 				break
@@ -754,7 +871,8 @@ func (sw *Switch) ensureOutboundPeers() {
 		}
 	}
 
-	if len(sw.config.Peers) > 0 {
+	// PRIORITY 3: Fallback to static Peers config (if still need peers)
+	if outboundCount < sw.config.MinOutboundPeers && len(sw.config.Peers) > 0 {
 		for _, pi := range sw.config.Peers {
 			if outboundCount >= sw.config.MinOutboundPeers {
 				break

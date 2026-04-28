@@ -1697,9 +1697,10 @@ func (c *Chain) calculateChainWorkFromAncestorLocked(ancestor *Block, tip *Block
 // reorganizeChainLocked performs chain reorganization
 // DEPRECATED: Internal implementation called by handleReorganizationLocked()
 // External callers must use network.ForkResolutionEngine.RequestReorg() for safe reorganization
+// Internal fallback: called when ReorgExecutor is not set or declines delegation
 // Production-grade: updates state, indexes, and storage
 func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
-	log.Printf("[DEPRECATED] reorganizeChainLocked() called directly. Use ForkResolutionEngine for external reorg requests")
+	log.Printf("[Chain] reorganizeChainLocked() executing (internal fallback path)")
 
 	log.Printf("Chain reorganization: ancestor height=%d, new tip height=%d", ancestor.GetHeight(), newTip.GetHeight())
 
@@ -3770,10 +3771,10 @@ func (c *Chain) CalculateCumulativeWork(block *Block) *big.Int {
 // reorganizeToLocked performs chain reorganization to the new block
 // DEPRECATED: Internal method that should not be called externally
 // All external reorg requests must use network.ForkResolutionEngine.RequestReorg()
-// Uses existing reorganizeChainLocked for production-grade implementation
+// Internal fallback: uses existing reorganizeChainLocked for production-grade implementation
 // Caller must hold c.mu lock
 func (c *Chain) reorganizeToLocked(newBlock *Block) error {
-	log.Printf("[DEPRECATED] reorganizeToLocked() called. Use ForkResolutionEngine for external reorg requests")
+	log.Printf("[Chain] reorganizeToLocked() executing (internal fallback path)")
 
 	// Use the existing reorganization logic
 	ancestor, _, err := c.findCommonAncestorLocked(newBlock)
@@ -3839,10 +3840,11 @@ func (c *Chain) rebuildIndexesLocked() {
 }
 
 // shouldReorgToHeaviestLocked checks if there's a heavier fork chain
-// DEPRECATED: Query function only. To actually perform reorg, use ForkResolutionEngine
+// Query function used by Mining module to decide if reorg is needed
+// Actual reorg delegation happens in reorganizeToHeaviestLocked() via ReorgExecutor
 // Caller must hold c.mu lock
 func (c *Chain) shouldReorgToHeaviestLocked() bool {
-	log.Printf("[DEPRECATED] shouldReorgToHeaviestLocked() called. Use ForkResolutionEngine for actual reorg")
+	log.Printf("[Chain] shouldReorgToHeaviestLocked() checking for heavier fork")
 
 	if len(c.forkBlocks) == 0 {
 		return false
