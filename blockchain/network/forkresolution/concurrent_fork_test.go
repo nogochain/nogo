@@ -852,9 +852,10 @@ func setupTestNodes(ctx context.Context, count int) []*testNode {
 	nodes := make([]*testNode, count)
 
 	for i := 0; i < count; i++ {
+		chain := NewMockChainProvider()
 		nodes[i] = &testNode{
-			chain:    NewMockChainProvider(),
-			resolver: NewForkResolver(ctx, NewMockChainProvider()),
+			chain:    chain,
+			resolver: NewForkResolver(ctx, chain),
 		}
 
 		genesis := generateTestBlock(0, nil, 100)

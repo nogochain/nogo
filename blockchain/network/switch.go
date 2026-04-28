@@ -519,7 +519,7 @@ func (sw *Switch) listenerRoutine(listener net.Listener) {
 		if sw.shouldWrapSecretConnection() {
 			wrappedConn, wrapErr := sw.wrapConnectionWithSecret(conn, false)
 			if wrapErr != nil {
-				_ = fmt.Errorf("switch: SecretConnection wrap for inbound: %w", wrapErr)
+				log.Printf("switch: SecretConnection wrap for inbound failed: %v", wrapErr)
 				conn.Close()
 				continue
 			}
@@ -556,7 +556,7 @@ func (sw *Switch) acceptInboundPeer(conn net.Conn) {
 		return
 	}
 
-	log.Printf("Switch: inbound peer connected %s (pubkey=%s)", addr, peerNI.PubKey)
+	log.Printf("Switch: inbound peer connected %s (moniker=%s)", addr, peerNI.Moniker)
 
 	if addErr := sw.AddPeerConnectionWithNodeInfo(conn, false, peerNI); addErr != nil {
 		log.Printf("Switch: failed to add inbound peer %s: %v", addr, addErr)
@@ -645,7 +645,7 @@ func (sw *Switch) seedOutboundPeers(peer *Peer) {
 
 	seedMsg, err := json.Marshal(seedAddrs)
 	if err != nil {
-		_ = fmt.Errorf("switch: marshal seed peers: %w", err)
+		log.Printf("switch: marshal seed peers failed: %v", err)
 		return
 	}
 
@@ -654,7 +654,7 @@ func (sw *Switch) seedOutboundPeers(peer *Peer) {
 		return
 	}
 	if !mconn.TrySend(mconnection.ChannelGossip, seedMsg) {
-		_ = fmt.Errorf("switch: send seed peers to %s failed", peer.ID())
+		log.Printf("switch: send seed peers to %s failed", peer.ID())
 	}
 }
 
@@ -811,12 +811,12 @@ func (sw *Switch) stopAllPeers() {
 	for _, p := range peers {
 		if mconn := p.MConnection(); mconn != nil {
 			if stopErr := mconn.Stop(); stopErr != nil {
-				_ = fmt.Errorf("switch: stop mconnection for peer %s: %w", p.ID(), stopErr)
+				log.Printf("switch: stop mconnection for peer %s failed: %v", p.ID(), stopErr)
 			}
 		}
 		if p.conn != nil {
 			if closeErr := p.conn.Close(); closeErr != nil {
-				_ = fmt.Errorf("switch: close connection for peer %s: %w", p.ID(), closeErr)
+				log.Printf("switch: close connection for peer %s failed: %v", p.ID(), closeErr)
 			}
 		}
 	}
@@ -1103,7 +1103,7 @@ func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, 
 		sw.mu.Unlock()
 		if mconn := peer.MConnection(); mconn != nil {
 			if stopErr := mconn.Stop(); stopErr != nil {
-				_ = fmt.Errorf("switch: stop mconnection after peer limit: %w", stopErr)
+				log.Printf("switch: stop mconnection after peer limit failed: %v", stopErr)
 			}
 		}
 		return fmt.Errorf("switch: peer limit reached during add (%d/%d)", sw.peers.Size(), sw.config.MaxPeers)
@@ -1112,7 +1112,7 @@ func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, 
 		sw.mu.Unlock()
 		if mconn := peer.MConnection(); mconn != nil {
 			if stopErr := mconn.Stop(); stopErr != nil {
-				_ = fmt.Errorf("switch: stop mconnection for duplicate peer %s: %w", addr, stopErr)
+				log.Printf("switch: stop mconnection for duplicate peer %s failed: %v", addr, stopErr)
 			}
 		}
 		return fmt.Errorf("switch: peer %s already in set", addr)
@@ -1122,7 +1122,7 @@ func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, 
 	sw.mu.RLock()
 	for name, r := range sw.reactors {
 		if addErr := r.AddPeer(peer.id, peer.nodeInfo); addErr != nil {
-			_ = fmt.Errorf("switch: reactor %s AddPeer failed for %s: %w", name, addr, addErr)
+			log.Printf("switch: reactor %s AddPeer failed for %s: %v", name, addr, addErr)
 			sw.RemovePeer(peer.id, "reactor add failed")
 			sw.mu.RUnlock()
 			return fmt.Errorf("switch: reactor %s failed to add peer %s: %w", name, addr, addErr)
@@ -1162,7 +1162,7 @@ func (sw *Switch) AddPeerConnection(conn net.Conn, isOutbound bool) error {
 		sw.mu.Unlock()
 		if mconn := peer.MConnection(); mconn != nil {
 			if stopErr := mconn.Stop(); stopErr != nil {
-				_ = fmt.Errorf("switch: stop mconnection after peer limit: %w", stopErr)
+				log.Printf("switch: stop mconnection after peer limit failed: %v", stopErr)
 			}
 		}
 		return fmt.Errorf("switch: peer limit reached during add (%d/%d)", sw.peers.Size(), sw.config.MaxPeers)
@@ -1181,7 +1181,7 @@ func (sw *Switch) AddPeerConnection(conn net.Conn, isOutbound bool) error {
 	sw.mu.RLock()
 	for name, r := range sw.reactors {
 		if addErr := r.AddPeer(peer.id, peer.nodeInfo); addErr != nil {
-			_ = fmt.Errorf("switch: reactor %s AddPeer failed for %s: %w", name, addr, addErr)
+			log.Printf("switch: reactor %s AddPeer failed for %s: %v", name, addr, addErr)
 			sw.RemovePeer(peer.id, "reactor add failed")
 			sw.mu.RUnlock()
 			return fmt.Errorf("switch: reactor %s failed to add peer %s: %w", name, addr, addErr)
@@ -1534,7 +1534,7 @@ func (sw *Switch) Broadcast(chID byte, msg []byte) {
 			continue
 		}
 		if !mconn.TrySend(chID, msg) {
-			_ = fmt.Errorf("switch: broadcast send failed to peer %s on channel 0x%02x", p.ID(), chID)
+			log.Printf("switch: broadcast send failed to peer %s on channel 0x%02x", p.ID(), chID)
 		}
 	}
 }
@@ -1671,7 +1671,7 @@ func (sw *Switch) DialPeerWithAddress(addr string) error {
 	delete(sw.dialing, addr)
 	sw.dialingMu.Unlock()
 
-	log.Printf("Switch: attempting to add peer %s (pubkey=%s, moniker=%s)", addr, peerNI.PubKey, peerNI.Moniker)
+	log.Printf("Switch: attempting to add peer %s (moniker=%s)", addr, peerNI.Moniker)
 	peerRemoteAddr := conn.RemoteAddr().String()
 	if addErr := sw.AddPeerConnectionWithNodeInfo(conn, true, peerNI); addErr != nil {
 		log.Printf("Switch: failed to add peer %s: %v", addr, addErr)

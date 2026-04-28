@@ -24,8 +24,31 @@ const (
 	// MaxReorgDepth is maximum allowed reorganization depth
 	MaxReorgDepth = 100
 
-	// MinReorgInterval minimum time between reorganizations
-	MinReorgInterval = 10 * time.Second
+	// === PREVENTIVE FORK HANDLING STRATEGY ===
+	// The key insight: resolve forks EARLY before they accumulate into deep forks
+
+	// LightForkInterval for shallow forks (depth 1-3) - IMMEDIATE handling to prevent accumulation
+	LightForkInterval = 500 * time.Millisecond
+
+	// NormalForkInterval for medium forks (depth 4-6) - FAST handling
+	NormalForkInterval = 2 * time.Second
+
+	// EmergencyForkInterval for deep forks (depth >= 7) - URGENT handling (fallback)
+	EmergencyForkInterval = 1 * time.Second
+
+	// Depth thresholds for classification
+	LightForkMaxDepth   = 3 // Shallow forks: handle immediately
+	NormalForkMaxDepth  = 6 // Medium forks: handle quickly
+	// DeepForkDepthThreshold = 7+ (implicit: > NormalForkMaxDepth)
+)
+
+// ForkSeverity represents the urgency level of a fork
+type ForkSeverity int
+
+const (
+	ForkSeverityLight    ForkSeverity = iota // depth 1-3: immediate (< 500ms)
+	ForkSeverityNormal                      // depth 4-6: fast (2s)
+	ForkSeverityEmergency                   // depth 7+: urgent (1s)
 )
 
 // ForkType represents the type of fork detected
@@ -227,15 +250,24 @@ func (fr *ForkResolver) ShouldReorg(remoteBlock *core.Block) bool {
 	return false
 }
 
-// RequestReorg submits a reorganization request with full validation
-// This is the UNIFIED ENTRY POINT for all reorg operations in the system
+// RequestReorg is the UNIFIED ENTRY POINT for all reorganization requests
+// It automatically classifies fork severity and applies appropriate timing:
+//   - Light forks (depth 1-3):    500ms interval (preventive - stop accumulation!)
+//   - Normal forks (depth 4-6):   2s interval (fast response)
+//   - Emergency forks (depth 7+):  1s interval (urgent fallback)
+//
+// This SINGLE METHOD replaces all previous reorg entry points.
+// Call this for EVERY fork scenario - it will handle severity classification automatically.
 func (fr *ForkResolver) RequestReorg(newBlock *core.Block, source string) error {
+	return fr.RequestReorgWithDepth(newBlock, source, 0)
+}
+
+// RequestReorgWithDepth is the unified reorganization with explicit depth information
+// If depth=0, it will be calculated automatically from chain state
+func (fr *ForkResolver) RequestReorgWithDepth(newBlock *core.Block, source string, explicitDepth uint64) error {
 	if newBlock == nil {
 		return fmt.Errorf("RequestReorg: nil block from %s", source)
 	}
-
-	log.Printf("[ForkResolver] Reorg requested by %s: height=%d hash=%x",
-		source, newBlock.GetHeight(), newBlock.Hash[:8])
 
 	acquired := fr.reorgMu.TryLock()
 	if !acquired {
@@ -247,16 +279,61 @@ func (fr *ForkResolver) RequestReorg(newBlock *core.Block, source string) error 
 		return fmt.Errorf("reorganization already in progress")
 	}
 
-	if time.Since(fr.lastReorgTime) < MinReorgInterval {
-		return fmt.Errorf("reorg too frequent: minimum interval %v not elapsed", MinReorgInterval)
+	// Classify fork severity and get appropriate interval
+	forkDepth := explicitDepth
+	if forkDepth == 0 {
+		localTip := fr.chain.LatestBlock()
+		if localTip != nil {
+			if newBlock.GetHeight() > localTip.GetHeight() {
+				forkDepth = newBlock.GetHeight() - localTip.GetHeight()
+			} else if localTip.GetHeight() > newBlock.GetHeight() {
+				forkDepth = localTip.GetHeight() - newBlock.GetHeight()
+			}
+		}
 	}
 
-	result := fr.executeReorg(newBlock, source)
+	severity := fr.classifyForkSeverity(forkDepth)
+	interval := fr.getIntervalForSeverity(severity)
+
+	log.Printf("[ForkResolver] Reorg requested by %s: height=%d hash=%x depth=%d severity=%v interval=%v",
+		source, newBlock.GetHeight(), newBlock.Hash[:8], forkDepth, severity, interval)
+
+	if time.Since(fr.lastReorgTime) < interval {
+		return fmt.Errorf("reorg too frequent for severity=%v: minimum interval %v not elapsed", severity, interval)
+	}
+
+	result := fr.executeReorg(newBlock, source+fmt.Sprintf("-[%v]", severity))
 	if !result.Success {
 		return result.Error
 	}
 
 	return nil
+}
+
+// classifyForkSeverity determines the urgency level based on fork depth
+func (fr *ForkResolver) classifyForkSeverity(depth uint64) ForkSeverity {
+	switch {
+	case depth <= LightForkMaxDepth:
+		return ForkSeverityLight
+	case depth <= NormalForkMaxDepth:
+		return ForkSeverityNormal
+	default:
+		return ForkSeverityEmergency
+	}
+}
+
+// getIntervalForSeverity returns the appropriate interval for each severity level
+func (fr *ForkResolver) getIntervalForSeverity(severity ForkSeverity) time.Duration {
+	switch severity {
+	case ForkSeverityLight:
+		return LightForkInterval // 500ms - PREVENTIVE!
+	case ForkSeverityNormal:
+		return NormalForkInterval // 2s - FAST
+	case ForkSeverityEmergency:
+		return EmergencyForkInterval // 1s - URGENT
+	default:
+		return NormalForkInterval
+	}
 }
 
 // executeReorg performs the actual reorganization

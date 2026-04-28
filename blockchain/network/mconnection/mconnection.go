@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"net"
 	"runtime/debug"
@@ -668,8 +669,7 @@ func (m *MConnection) stopForError(err error) {
 	// Attempt to stop the connection.
 	if m.IsRunning() {
 		if stopErr := m.Stop(); stopErr != nil {
-			// Log but don't override the original error.
-			_ = fmt.Errorf("stop on error: %w, original: %w", stopErr, err)
+			log.Printf("mconnection: stop on error: %v (original: %v)", stopErr, err)
 		}
 	}
 

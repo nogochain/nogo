@@ -327,6 +327,19 @@ type Chain struct {
 	// When set, Mining will check this before starting to mine
 	// This prevents the "mine-rollback-mine" oscillation loop
 	externalReorgChecker func() bool
+
+	// UNIFIED FORK RESOLUTION: ReorgExecutor for centralized reorg management
+	// When set, all reorg operations from Chain will delegate to this executor
+	// This ensures global mutex (TryLock) and preventive timing (500ms/2s/1s) are applied
+	// CRITICAL: Must be set during node initialization via SetReorgExecutor()
+	reorgExecutor ReorgExecutor
+}
+
+// ReorgExecutor interface for unified fork resolution
+// Implementations: network/forkresolution.ForkResolver (via adapter)
+type ReorgExecutor interface {
+	RequestReorg(block *Block, source string) error
+	IsReorgInProgress() bool
 }
 
 // ChainConfig holds chain configuration
@@ -379,6 +392,20 @@ func (c *Chain) SetOnForkResolved(callback func(newHeight uint64, rolledBack uin
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onForkResolved = callback
+}
+
+// SetReorgExecutor sets the unified reorg executor for centralized fork resolution
+// CRITICAL: Must be called during node initialization after ForkResolver is created
+// When set, all reorg operations from Chain.AddBlock() will delegate to this executor
+// This ensures:
+//   - Global TryLock mutex prevents concurrent reorganizations
+//   - Preventive timing (500ms for light forks) stops deep fork accumulation
+//   - Single entry point for all reorg paths (network + consensus + chain)
+func (c *Chain) SetReorgExecutor(executor ReorgExecutor) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reorgExecutor = executor
+	log.Printf("[Chain] ReorgExecutor set for unified fork resolution - all reorgs will go through centralized engine")
 }
 
 // SetOnBlockAdded sets the callback function to be called when a block is added
@@ -1535,53 +1562,55 @@ func (c *Chain) validateCoinbaseLocked(block *Block) error {
 // DEPRECATED: This method is called internally by Chain.AddBlock()
 // All external reorg requests should go through network.ForkResolutionEngine.RequestReorg()
 // This ensures global mutex prevents concurrent reorganizations
-// Production-grade: implements longest chain rule
+// handleReorganizationLocked handles chain reorganization when a non-canonical block arrives
+// UNIFIED ENTRY POINT: Delegates to ReorgExecutor when available for centralized management
+// Called from AddBlock() when block doesn't extend current canonical chain
+// Production-grade: implements longest chain rule with work comparison
 // Concurrency safety: assumes lock is held
 func (c *Chain) handleReorganizationLocked(newBlock *Block) error {
-	log.Printf("[DEPRECATED] handleReorganizationLocked() called. External callers should use ForkResolutionEngine.RequestReorg()")
 
-	// Set reorg flag to prevent template generation during reorg
-	c.reorgMu.Lock()
-	c.reorgInProgress = true
-	c.reorgMu.Unlock()
-
-	// Ensure flag is cleared on exit
-	defer func() {
-		c.reorgMu.Lock()
-		c.reorgInProgress = false
-		c.reorgMu.Unlock()
-	}()
-
-	// Find common ancestor
+	// Find common ancestor first (needed for all paths)
 	ancestor, forkBlocks, err := c.findCommonAncestorLocked(newBlock)
 	if err != nil {
-		// No common ancestor - this is an orphan block
-		// DO NOT request parent here - let sync loop handle batch download
 		return ErrOrphanBlock
 	}
 
 	if ancestor == nil {
-		// No common ancestor, treat as orphan
-		// DO NOT request parent here - let sync loop handle batch download
 		return ErrOrphanBlock
 	}
 
-	// Calculate work on both chains
 	forkWork := c.calculateChainWorkLocked(forkBlocks)
 	newChainWork := c.calculateChainWorkFromAncestorLocked(ancestor, newBlock)
 
-	// Apply longest chain rule
 	if newChainWork.Cmp(forkWork) <= 0 {
-		// Current chain is longer, keep it
 		return nil
 	}
 
-	// New chain is longer, perform reorganization
-	if err := c.reorganizeChainLocked(ancestor, newBlock); err != nil {
-		return fmt.Errorf("reorganize chain: %w", err)
+	log.Printf("[Chain] HandleReorg: switching to heavier chain (height=%d work=%s)",
+		newBlock.GetHeight(), newChainWork.String())
+
+	// UNIFIED ENTRY POINT: Delegate to ReorgExecutor when available
+	// This ensures preventive timing (500ms/2s/1s) and global TryLock mutex
+	if c.reorgExecutor != nil {
+		c.reorgMu.Lock()
+		c.reorgInProgress = true
+		c.reorgMu.Unlock()
+
+		defer func() {
+			c.reorgMu.Lock()
+			c.reorgInProgress = false
+			c.reorgMu.Unlock()
+		}()
+
+		err := c.reorgExecutor.RequestReorg(newBlock, "Chain-handleReorganization")
+		if err == nil {
+			log.Printf("[Chain] ✅ HandleReorg delegated to unified executor successfully")
+			return nil
+		}
+		log.Printf("[Chain] Unified executor declined (%v), using internal logic", err)
 	}
 
-	return nil
+	return c.reorganizeChainLocked(ancestor, newBlock)
 }
 
 // IsReorgInProgress returns whether a reorganization is currently in progress
@@ -1858,18 +1887,6 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 // 2. Centralized logging and monitoring
 // 3. Frequency limiting to prevent reorg storms
 //
-// If you see this warning in logs, it means legacy code is calling this method directly.
-// Please update the caller to use ForkResolutionEngine instead.
-// Concurrency safety: uses mutex to protect chain state
-func (c *Chain) Reorganize(newTip *Block) error {
-	log.Printf("[DEPRECATED] Chain.Reorganize() called directly. This method is deprecated.")
-	log.Printf("[DEPRECATED] Please use ForkResolutionEngine.RequestReorg() for centralized reorg management.")
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.reorganizeChainLocked(c.blocks[0], newTip)
-}
-
 // GetBlock retrieves a block by height
 // Concurrency safety: read-only operation, safe for concurrent access
 func (c *Chain) GetBlock(height uint64) (*Block, bool) {
@@ -2952,19 +2969,29 @@ func (c *Chain) autoReorgIfNeededLocked() {
 		currentTipHash = hex.EncodeToString(c.blocks[len(c.blocks)-1].Hash)
 	}
 	bestTipHash := hex.EncodeToString(bestTip.Hash)
-
 	if bestTipHash == currentTipHash {
-		return
-	}
-
-	ancestor, _, err := c.findCommonAncestorLocked(bestTip)
-	if err != nil || ancestor == nil {
 		return
 	}
 
 	log.Printf("[Chain] AUTO REORG: switching to better chain (tip=%s h=%d work=%s) from current (tip=%s h=%d)",
 		bestTipHash[:16], bestTip.GetHeight(), c.calculateCumulativeWorkLocked(bestTip).String(),
 		currentTipHash[:16], uint64(len(c.blocks)-1))
+
+	// UNIFIED ENTRY POINT: Delegate to ReorgExecutor when available
+	// This ensures preventive timing and global mutex are applied
+	if c.reorgExecutor != nil {
+		err := c.reorgExecutor.RequestReorg(bestTip, "Chain-autoReorgIfNeeded")
+		if err == nil {
+			log.Printf("[Chain] ✅ Auto reorg delegated to unified executor successfully")
+			return
+		}
+		log.Printf("[Chain] Unified executor declined auto reorg (%v), using internal logic", err)
+	}
+
+	ancestor, _, err := c.findCommonAncestorLocked(bestTip)
+	if err != nil || ancestor == nil {
+		return
+	}
 
 	if err := c.reorganizeChainLocked(ancestor, bestTip); err != nil {
 		log.Printf("[Chain] AUTO REORG failed: %v", err)
@@ -3640,68 +3667,6 @@ func (c *Chain) getBlockTime() time.Duration {
 	return 17 * time.Second
 }
 
-// shouldReorgToLocked checks if we should reorganize to the given block
-// Production-grade: implements heaviest chain rule with proper work comparison
-// CRITICAL FIX: Height alone is NOT sufficient - must compare cumulative work
-// This prevents reorg to a longer chain with less total work
-// Caller must hold c.mu lock
-func (c *Chain) shouldReorgToLocked(newBlock *Block) bool {
-	if len(c.blocks) == 0 {
-		return true
-	}
-
-	currentTip := c.blocks[len(c.blocks)-1]
-	currentWork := c.canonicalWork
-	newWork := c.calculateCumulativeWorkLocked(newBlock)
-
-	if currentTip.GetHeight() < newBlock.GetHeight() {
-		workCmp := newWork.Cmp(currentWork)
-		if workCmp >= 0 {
-			log.Printf("[Chain] Reorg decision: higher height %d > %d, newWork=%s >= currentWork=%s, will reorg",
-				newBlock.GetHeight(), currentTip.GetHeight(), newWork.String(), currentWork.String())
-			return true
-		}
-		log.Printf("[Chain] Reorg decision: higher height but LESS work, newWork=%s < currentWork=%s, staying",
-			newWork.String(), currentWork.String())
-		return false
-	}
-
-	if currentTip.GetHeight() == newBlock.GetHeight() {
-		workCmp := newWork.Cmp(currentWork)
-		if workCmp > 0 {
-			log.Printf("[Chain] Reorg decision: same height, newWork=%s > currentWork=%s, will reorg",
-				newWork.String(), currentWork.String())
-			return true
-		} else if workCmp == 0 {
-			if c.shouldSwitchBasedOnTieBreakerLocked(newBlock, currentTip) {
-				log.Printf("[Chain] Reorg decision: same height, equal work, tie-breaker chose new block")
-				return true
-			}
-			log.Printf("[Chain] Reorg decision: same height, equal work, tie-breaker chose current chain")
-			return false
-		}
-		log.Printf("[Chain] Reorg decision: same height, newWork=%s < currentWork=%s, staying on current chain",
-			newWork.String(), currentWork.String())
-		return false
-	}
-
-	workCmp := newWork.Cmp(currentWork)
-	if workCmp > 0 {
-		log.Printf("[Chain] Reorg decision: lower height but more work, newWork=%s > currentWork=%s, will reorg",
-			newWork.String(), currentWork.String())
-		return true
-	} else if workCmp == 0 {
-		if c.shouldSwitchBasedOnTieBreakerLocked(newBlock, currentTip) {
-			log.Printf("[Chain] Reorg decision: lower height, equal work, tie-breaker chose new block")
-			return true
-		}
-	}
-
-	log.Printf("[Chain] Reorg decision: lower height and less/equal work, newWork=%s <= currentWork=%s, staying",
-		newWork.String(), currentWork.String())
-	return false
-}
-
 // shouldSwitchBasedOnTieBreakerLocked determines if we should switch chains when work is equal
 // CRITICAL: Uses deterministic rules that produce the same result on all nodes
 // Rules (in order of priority):
@@ -3905,13 +3870,10 @@ func (c *Chain) shouldReorgToHeaviestLocked() bool {
 }
 
 // reorganizeToHeaviestLocked reorganizes to the heaviest fork chain
-// DEPRECATED: This method is kept for backward compatibility but should NOT be called directly
-// All reorg operations must go through network.ForkResolutionEngine.RequestReorg()
+// UNIFIED FORK RESOLUTION: Delegates to ReorgExecutor when available
+// This ensures all reorgs go through single entry point with preventive timing
 // Caller must hold c.mu lock
 func (c *Chain) reorganizeToHeaviestLocked() error {
-	log.Printf("[DEPRECATED] reorganizeToHeaviestLocked() called directly. Use ForkResolutionEngine.RequestReorg()")
-	log.Printf("[DEPRECATED] Please use ForkResolutionEngine for centralized reorg management")
-
 	if len(c.forkBlocks) == 0 {
 		return nil
 	}
@@ -3941,6 +3903,20 @@ func (c *Chain) reorganizeToHeaviestLocked() error {
 	log.Printf("[Chain] Reorganizing to heaviest fork: height=%d work=%s",
 		heaviestFork.GetHeight(), heaviestWork.String())
 
+	// UNIFIED ENTRY POINT: Delegate to ReorgExecutor if set (prevents dual-track)
+	if c.reorgExecutor != nil {
+		log.Printf("[Chain] 🔄 Delegating reorg to unified ReorgExecutor (height=%d)", heaviestFork.GetHeight())
+
+		err := c.reorgExecutor.RequestReorg(heaviestFork, "Chain-reorganizeToHeaviest")
+		if err == nil {
+			log.Printf("[Chain] ✅ Reorg successfully delegated to unified executor")
+			return nil
+		}
+
+		log.Printf("[Chain] Unified executor returned: %v, falling back to internal logic", err)
+	}
+
+	// FALLBACK: Internal reorg (only when no executor or executor declined)
 	return c.reorganizeToLocked(heaviestFork)
 }
 

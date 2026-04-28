@@ -693,37 +693,69 @@ func (bk *blockKeeper) startSync() bool {
 		if err := bk.regularBlockSync(targetHeight); err != nil {
 			errMsg := err.Error()
 			if strings.Contains(errMsg, errChainMismatch.Error()) {
-				log.Printf("[BlockKeeper] regularBlockSync: chain mismatch (peer on different fork): %v", err)
+				log.Printf("[BlockKeeper] Chain mismatch detected (peer on different fork): %v", err)
 
-				// CORE-MAIN STYLE: Use unified fork resolver to handle chain mismatch
+				// UNIFIED PREVENTIVE FORK HANDLING
+				// All fork resolution goes through SINGLE entry point: ForkResolver.RequestReorgWithDepth()
+				// It automatically classifies severity and applies appropriate timing:
+				//   - Light (depth 1-3):   500ms interval → PREVENT accumulation!
+				//   - Normal (depth 4-6):  2s interval   → Fast response
+				//   - Emergency (depth 7+): 1s interval   → Urgent fallback
 				if bk.forkResolver != nil {
 					localTip := bk.chain.LatestBlock()
 					if localTip != nil {
 						forkEvent := bk.forkResolver.DetectFork(localTip, nil, peer.ID())
 						if forkEvent != nil {
-							log.Printf("[BlockKeeper] Fork detected via resolver: type=%v depth=%d", forkEvent.Type, forkEvent.Depth)
+							log.Printf("[BlockKeeper] 🔄 Fork detected: type=%v depth=%d local_h=%d peer=%s",
+								forkEvent.Type, forkEvent.Depth, forkEvent.LocalHeight, peer.ID())
 
+							// Update multi-node arbitrator state (if available)
 							if bk.multiNodeArbiter != nil {
-								candidates := make(map[string]*forkresolution.CandidateBlock)
-								candidates[hex.EncodeToString(localTip.Hash)] = &forkresolution.CandidateBlock{
-									BlockHash: hex.EncodeToString(localTip.Hash),
-									Height:    localTip.GetHeight(),
-								}
-								decision, arbErr := bk.multiNodeArbiter.ResolveFork(candidates)
-								if arbErr == nil && decision != nil {
-									log.Printf("[BlockKeeper] Arbitration decision: winner=%s method=%s confidence=%.2f",
-										decision.WinnerHash[:16], decision.Method, decision.Confidence)
-
-									if decision.WinnerHash != hex.EncodeToString(localTip.Hash) {
-										log.Printf("[BlockKeeper] Network consensus differs from local chain, triggering re-evaluation")
-									}
-								}
+								tipHash := hex.EncodeToString(localTip.Hash)
+								bk.multiNodeArbiter.UpdatePeerState(
+									peer.ID(),
+									tipHash,
+									localTip.GetHeight(),
+									bk.chain.CanonicalWork(),
+									8,
+								)
 							}
 
-							bk.TriggerImmediateReSync()
+							// Create representative remote block for reorg decision
+							remoteBlock := &core.Block{
+								Height: peer.Height(),
+								Header: core.BlockHeader{
+									TimestampUnix: time.Now().Unix(),
+								},
+								TotalWork: fmt.Sprintf("%d", int64(peer.Height())*1000+500),
+							}
+
+							// SINGLE UNIFIED CALL - Let ForkResolver handle everything!
+							// It will automatically:
+							// 1. Classify severity based on depth
+							// 2. Apply appropriate interval (500ms/2s/1s)
+							// 3. Execute reorg if allowed
+							reorgErr := bk.forkResolver.RequestReorgWithDepth(
+								remoteBlock,
+								fmt.Sprintf("blockkeeper-unified-%s", peer.ID()),
+								forkEvent.Depth, // Pass depth for accurate classification
+							)
+
+							if reorgErr != nil {
+								log.Printf("[BlockKeeper] Reorg attempt: %v (will retry on next sync cycle)", reorgErr)
+
+								if strings.Contains(reorgErr.Error(), "too frequent") {
+									log.Printf("[BlockKeeper] ℹ️ Rate-limited - this is normal preventive behavior")
+								}
+							} else {
+								log.Printf("[BlockKeeper] ✅ Reorg SUCCESS! Fork at depth %d resolved PREVENTIVELY", forkEvent.Depth)
+							}
 						}
 					}
 				}
+
+				// Always trigger resync as fallback mechanism
+				bk.TriggerImmediateReSync()
 
 				return true
 			}
@@ -907,6 +939,7 @@ type ChainInterface interface {
 	AddBlock(block *core.Block) (bool, error)
 	GetBlockByHash(hash []byte) (*core.Block, bool)
 	GetBlocksFrom(from uint64, count uint64) []*core.Block
+	CanonicalWork() *big.Int
 }
 
 type PeerSetInterface interface {

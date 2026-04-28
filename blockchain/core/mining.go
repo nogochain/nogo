@@ -83,7 +83,6 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 
 	if c.shouldReorgToHeaviestLocked() {
 		log.Printf("[Mining] Heavier fork detected, triggering reorganization before mining")
-		log.Printf("[DEPRECATED] Mining calling reorganizeToHeaviestLocked() directly. This internal call will be migrated to ForkResolutionEngine in future version")
 		if err := c.reorganizeToHeaviestLocked(); err != nil {
 			log.Printf("[Mining] Reorganization failed: %v", err)
 		} else {
@@ -285,7 +284,6 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 
 		if c.shouldReorgToHeaviestLocked() {
 			log.Printf("[Mining] Heavier fork detected after mining, reorganizing before adding block")
-			log.Printf("[DEPRECATED] Mining calling reorganizeToHeaviestLocked() directly. This internal call will be migrated to ForkResolutionEngine in future version")
 			if err := c.reorganizeToHeaviestLocked(); err != nil {
 				log.Printf("[Mining] Post-mining reorganization failed: %v", err)
 			} else {

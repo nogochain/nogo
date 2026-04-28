@@ -244,6 +244,18 @@ func (n *Node) initializeComponents() error {
 	n.syncReactorHandler.SetSyncLoop(n.syncLoop)
 	n.blockReactorHandler.SetSyncLoop(n.syncLoop)
 
+	// CRITICAL: UNIFIED FORK RESOLUTION - Inject ForkResolver into Chain
+	// This ensures ALL reorg paths (Chain.AddBlock + Network.Sync) go through single entry point:
+	//   - Preventive timing (500ms for light forks, 2s normal, 1s emergency)
+	//   - Global TryLock mutex prevents concurrent reorganizations
+	//   - Single entry point eliminates dual-track fork handling bug
+	if n.syncLoop != nil {
+		if forkResolver := n.syncLoop.GetForkResolver(); forkResolver != nil {
+			n.chain.SetReorgExecutor(forkResolver)
+			log.Printf("[Node] ✅ ForkResolver injected into Chain - unified fork resolution active")
+		}
+	}
+
 	if strings.TrimSpace(n.minerAddr) != "" {
 		chainWrapper := newChainWrapper(n.chain)
 		minerImpl := miner.NewMiner(
