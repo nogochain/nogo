@@ -373,9 +373,6 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 		progress = 1.0
 	} else {
 		progress = float64(localHeight) / float64(maxPeerHeight)
-		if progress > 0.95 {
-			progress = 0.95
-		}
 	}
 
 	s.mu.Lock()

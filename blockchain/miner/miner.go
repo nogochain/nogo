@@ -167,7 +167,9 @@ type ChainInfo = network.ChainInfo
 type SyncLoop interface {
 	IsSyncing() bool
 	IsSynced() bool
+	SyncProgress() float64
 	TriggerSyncCheck()
+	GetMaxPeerHeight(ctx context.Context) (uint64, int)
 }
 
 // EventSink defines the event sink interface
@@ -433,8 +435,9 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 	}
 
 	if m.syncLoop != nil && !m.syncLoop.IsSynced() {
-		force = true
-		logf(colorBrightYellow, "⛏️ ", "Mining tick: syncing, mining empty block to maintain network...")
+		logf(colorBrightYellow, "⏸️ ", "Mining tick: node not fully synced (progress=%.2f%%), skipping mining to prevent orphan blocks",
+			m.syncLoop.SyncProgress()*100)
+		return
 	}
 
 	if m.isVerificationActive() {

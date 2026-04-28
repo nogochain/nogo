@@ -392,56 +392,11 @@ func (n *Node) startComponents() error {
 				interval = 17 * time.Second
 			}
 
-			// CRITICAL: Wait for initial sync before starting mining
-			// Uses a reasonable height gap threshold instead of perfect sync.
-			// In multi-miner networks, nodes are never perfectly synced (someone is always 1 block ahead).
-			// Mining should start once we're within acceptable range of the network.
-			if n.syncLoop != nil {
-				log.Info("Waiting for initial sync before starting mining...")
-				syncWaitTimeout := 2 * time.Minute
-				syncWaitStart := time.Now()
-				syncCheckInterval := 2 * time.Second
-				syncCheckTicker := time.NewTicker(syncCheckInterval)
-				defer syncCheckTicker.Stop()
-				const syncHeightTolerance uint64 = 5
-
-			syncWaitLoop:
-				for {
-					select {
-					case <-n.ctx.Done():
-						log.Info("Context cancelled during sync wait, aborting mining startup")
-						return
-					case <-syncCheckTicker.C:
-						localHeight := n.chain.GetHeight()
-
-						maxPeerHeight, peerCount := n.syncLoop.GetMaxPeerHeight(n.ctx)
-
-						if peerCount == 0 {
-							log.Info("No peers available, starting mining in standalone mode")
-							break syncWaitLoop
-						}
-
-						heightGap := int64(maxPeerHeight) - int64(localHeight)
-						if heightGap < 0 {
-							heightGap = 0
-						}
-
-						if heightGap <= int64(syncHeightTolerance) {
-							log.Info("Initial sync completed (local=%d, bestPeer=%d, gap=%d <= tolerance=%d), starting mining",
-								localHeight, maxPeerHeight, heightGap, syncHeightTolerance)
-							break syncWaitLoop
-						}
-
-						if time.Since(syncWaitStart) > syncWaitTimeout {
-							log.Info("Sync wait timeout (%v), localHeight=%d, bestPeer=%d, gap=%d — starting mining anyway (sync will continue in background)",
-								syncWaitTimeout, localHeight, maxPeerHeight, heightGap)
-							break syncWaitLoop
-						}
-					}
-				}
-			}
-
-			log.Info("Starting mining (sync loop handles fork resolution)")
+			// REFACTORED: Parallel startup (like core-main node.go Line 210-218)
+			// No timeout, no waiting - syncLoop and miner run concurrently
+			// Miner internally checks IsSynced() before each mining attempt
+			// This scales to ANY chain height (1M, 10M, 100M+ blocks)
+			log.Info("Starting mining (parallel with sync, miner self-governs via IsSynced() checks)")
 			go n.miner.Run(n.ctx, interval)
 		}()
 	}
