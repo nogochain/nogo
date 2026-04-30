@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/nogochain/nogo/blockchain/config"
 	"github.com/nogochain/nogo/blockchain/core"
@@ -300,6 +301,10 @@ func (m *fastSyncMockPM) FetchBlocksByHeightRange(ctx context.Context, peer stri
 func (m *fastSyncMockPM) BroadcastTransaction(ctx context.Context, tx core.Transaction, hops int) {}
 
 func (m *fastSyncMockPM) BroadcastBlock(ctx context.Context, block *core.Block) error { return nil }
+
+func (m *fastSyncMockPM) BroadcastCandidate(block *core.Block, sourceID string, minedAt time.Time) error { return nil }
+
+func (m *fastSyncMockPM) BroadcastCandidateWithDeadline(block *core.Block, sourceID string, minedAt time.Time, deadline time.Time) error { return nil }
 
 func (m *fastSyncMockPM) BroadcastNewStatus(ctx context.Context, height uint64, work *big.Int, latestHash string) {
 }

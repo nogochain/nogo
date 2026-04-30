@@ -219,6 +219,13 @@ func LoadConfigFromEnv() *Config {
 	cfg.Features.EnablePriceOracle = LoadBool("ENABLE_PRICE_ORACLE", cfg.Features.EnablePriceOracle)
 	cfg.Features.EnableSocialRecovery = LoadBool("ENABLE_SOCIAL_RECOVERY", cfg.Features.EnableSocialRecovery)
 
+	cfg.P2P.Port = LoadInt("P2P_PORT", cfg.P2P.Port)
+	cfg.P2P.MaxPeers = LoadInt("P2P_MAX_PEERS", cfg.P2P.MaxPeers)
+	cfg.P2P.Peers = LoadStringSlice("P2P_PEERS", cfg.P2P.Peers)
+	cfg.P2P.KeepDial = LoadStringSlice("P2P_KEEP_DIAL", cfg.P2P.KeepDial)
+	cfg.P2P.EnableNAT = LoadBool("P2P_ENABLE_NAT", cfg.P2P.EnableNAT)
+	cfg.P2P.LANDiscover = LoadBool("P2P_LAN_DISCOVER", cfg.P2P.LANDiscover)
+
 	cfg.DataDir = LoadString("DATA_DIR", cfg.DataDir)
 	cfg.LogDir = LoadString("LOG_DIR", cfg.LogDir)
 	cfg.HTTPAddr = LoadString("HTTP_ADDR", cfg.HTTPAddr)

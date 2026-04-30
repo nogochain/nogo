@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/nogochain/nogo/blockchain/network/mconnection"
@@ -27,10 +28,10 @@ import (
 
 // mockSwitch implements SwitchInterface for testing.
 type mockSwitch struct {
-	mu          sync.Mutex
-	reactors    map[string]Reactor
-	broadcasts  []broadcastRecord
-	sends       []sendRecord
+	mu         sync.Mutex
+	reactors   map[string]Reactor
+	broadcasts []broadcastRecord
+	sends      []sendRecord
 }
 
 type broadcastRecord struct {
@@ -77,15 +78,20 @@ func (ms *mockSwitch) Send(peerID string, chID byte, msg []byte) bool {
 
 // mockSyncHandler implements SyncHandler for testing.
 type mockSyncHandler struct {
-	mu            sync.Mutex
-	getHeaders    []getHeadersCall
-	headers       []headersCall
-	getBlocks     []getBlocksCall
-	blocks        []blocksCall
-	getLocators   []getLocatorCall
-	locators      []locatorCall
-	notFounds     []notFoundCall
-	statuses      []statusCall
+	mu             sync.Mutex
+	getHeaders     []getHeadersCall
+	headers        []headersCall
+	getBlocks      []getBlocksCall
+	blocks         []blocksCall
+	getLocators    []getLocatorCall
+	locators       []locatorCall
+	notFounds      []notFoundCall
+	statuses       []statusCall
+	statusRequests []statusRequestCall
+}
+
+type statusRequestCall struct {
+	PeerID string
 }
 
 type getHeadersCall struct {
@@ -189,9 +195,16 @@ func (m *mockSyncHandler) OnStatus(peerID string, height uint64, work string, la
 	return nil
 }
 
+func (m *mockSyncHandler) OnStatusRequest(peerID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.statusRequests = append(m.statusRequests, statusRequestCall{PeerID: peerID})
+	return nil
+}
+
 // mockTxHandler implements TxHandler for testing.
 type mockTxHandler struct {
-	mu    sync.Mutex
+	mu     sync.Mutex
 	invTxs []invTxCall
 	getTxs []getTxCall
 	txs    []txCall
@@ -409,14 +422,35 @@ func TestPeerLifecycleHooks(t *testing.T) {
 		t.Fatalf("NewSyncReactor failed: %v", err)
 	}
 
+	mockSw := newMockSwitch()
+	syncR.SetSwitch(mockSw)
+
 	peerID := "peer-1"
 	nodeInfo := map[string]string{
 		"version": "1.0.0",
 		"chainID": "1",
 	}
 
-	if err := syncR.AddPeer(peerID, nodeInfo); err != nil {
-		t.Fatalf("AddPeer failed: %v", err)
+	handshakeDone := make(chan error, 1)
+	go func() {
+		handshakeDone <- syncR.AddPeer(peerID, nodeInfo)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+
+	statusPayload, _ := json.Marshal(map[string]uint64{"height": 100})
+	statusMsg := make([]byte, 1+len(statusPayload))
+	statusMsg[0] = 0x07
+	copy(statusMsg[1:], statusPayload)
+	syncR.Receive(mconnection.ChannelSync, peerID, statusMsg)
+
+	select {
+	case err := <-handshakeDone:
+		if err != nil {
+			t.Fatalf("AddPeer failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("AddPeer timed out")
 	}
 
 	reason := "connection closed"

@@ -11,8 +11,13 @@ import (
 // Peer represents a connected P2P peer in the network.
 // It holds the connection, metadata, and multiplexed connection instance.
 type Peer struct {
-	// id is the unique identifier for this peer.
+	// id is the unique identifier for this peer (wallet address / public key).
+	// Stable across reconnections even when IP:Port changes (NAT traversal).
 	id string
+
+	// addr is the connection address (IP:Port) for logging and diagnostics.
+	// NOT used as identity — may change on reconnect in home networks.
+	addr string
 
 	// conn is the underlying network connection.
 	conn net.Conn
@@ -30,9 +35,14 @@ type Peer struct {
 	isLAN bool
 }
 
-// ID returns the peer's unique identifier.
+// ID returns the peer's unique identifier (wallet address or public key).
 func (p *Peer) ID() string {
 	return p.id
+}
+
+// Addr returns the peer's connection address (IP:Port) for diagnostics.
+func (p *Peer) Addr() string {
+	return p.addr
 }
 
 // Conn returns the underlying network connection.

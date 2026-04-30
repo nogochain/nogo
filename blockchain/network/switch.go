@@ -127,9 +127,9 @@ func DecodeNodeInfo(data []byte) (NodeInfo, error) {
 func DefaultSwitchConfig() SwitchConfig {
 	return SwitchConfig{
 		MaxPeers:         50,
-		MaxLANPeers:      20,
-		MinOutboundPeers: 10,
-		RecheckInterval:  10 * time.Second,
+		MaxLANPeers:      maxNumLANPeers,
+		MinOutboundPeers: minNumOutboundPeers, // Aligned with core-main minimum outbound peers
+		RecheckInterval:  peerReplenishInterval,
 		DialTimeout:      30 * time.Second,
 		HandshakeTimeout: 20 * time.Second,
 		ListenAddr:       "tcp://0.0.0.0:9090",
@@ -197,6 +197,11 @@ type Switch struct {
 	peerErrorsMtx  sync.RWMutex
 	maxPeerErrors  int
 	peerRetryDelay time.Duration
+
+	// Load-balanced peer selection for sync distribution
+	syncLoadMu    sync.Mutex
+	syncLoadMap   map[string]int
+	syncRoundRobin int
 }
 
 // peerErrorState tracks consecutive errors for a peer
@@ -229,6 +234,7 @@ func NewSwitch(cfg SwitchConfig) *Switch {
 		peerErrors:      make(map[string]*peerErrorState),
 		maxPeerErrors:   3,               // Allow 3 consecutive errors before removing peer
 		peerRetryDelay:  5 * time.Second, // Wait 5 seconds before retry after error
+		syncLoadMap:     make(map[string]int),
 	}
 
 	privKey, err := sw.loadOrGenerateNodeKey()
@@ -317,13 +323,13 @@ func (cfg *SwitchConfig) applyDefaults() {
 		cfg.MaxPeers = 50
 	}
 	if cfg.MaxLANPeers == 0 {
-		cfg.MaxLANPeers = 20
+		cfg.MaxLANPeers = maxNumLANPeers
 	}
 	if cfg.MinOutboundPeers == 0 {
-		cfg.MinOutboundPeers = 10
+		cfg.MinOutboundPeers = minNumOutboundPeers
 	}
 	if cfg.RecheckInterval == 0 {
-		cfg.RecheckInterval = 10 * time.Second
+		cfg.RecheckInterval = peerReplenishInterval
 	}
 	if cfg.DialTimeout == 0 {
 		cfg.DialTimeout = 30 * time.Second
@@ -519,6 +525,9 @@ func (sw *Switch) Start(ctx context.Context) error {
 	sw.mu.RUnlock()
 
 	sw.wg.Add(1)
+	go sw.runReactorRoutine() // Dead peer health check (was missing - caused stale connections)
+
+	sw.wg.Add(1)
 	go sw.ensureOutboundPeersLoop()
 
 	log.Printf("Switch: started with maxPeers=%d", sw.config.MaxPeers)
@@ -599,8 +608,6 @@ func (sw *Switch) acceptInboundPeer(conn net.Conn) {
 		return
 	}
 
-	// Perform application-level handshake with 10-second timeout for inbound connections
-	// Responder (inbound): read first, then write
 	peerNI, handshakeErr := sw.handshakePeerWithTimeout(conn, false, 10*time.Second)
 	if handshakeErr != nil {
 		log.Printf("Switch: inbound handshake with %s failed: %v", addr, handshakeErr)
@@ -608,15 +615,16 @@ func (sw *Switch) acceptInboundPeer(conn net.Conn) {
 		return
 	}
 
-	log.Printf("Switch: inbound peer connected %s (moniker=%s)", addr, peerNI.Moniker)
+	stableID := sw.stablePeerID(peerNI, addr)
+	log.Printf("Switch: inbound peer connected %s -> %s (moniker=%s)", addr, stableID, peerNI.Moniker)
 
 	if addErr := sw.AddPeerConnectionWithNodeInfo(conn, false, peerNI); addErr != nil {
-		log.Printf("Switch: failed to add inbound peer %s: %v", addr, addErr)
+		log.Printf("Switch: failed to add inbound peer %s (%s): %v", stableID, addr, addErr)
 		conn.Close()
 		return
 	}
 
-	sw.seedOutboundPeers(sw.peers.Get(addr))
+	sw.seedOutboundPeers(sw.peers.Get(stableID))
 }
 
 // normalizeSeedAddr ensures the seed address has a protocol prefix.
@@ -902,7 +910,7 @@ func (sw *Switch) peerAlreadyDialingOrConnected(addr string) bool {
 	defer sw.mu.RUnlock()
 
 	for _, p := range sw.peers.List() {
-		if p.ID() == addr {
+		if p.Addr() == addr {
 			return true
 		}
 	}
@@ -918,6 +926,17 @@ func (sw *Switch) peerAlreadyDialingOrConnected(addr string) bool {
 	}
 
 	return false
+}
+
+// peerWithWalletConnected checks if a peer with the given wallet address is already connected.
+// Used after handshake when stable PeerID (wallet address) is available.
+func (sw *Switch) peerWithWalletConnected(walletAddr string) bool {
+	if walletAddr == "" {
+		return false
+	}
+	sw.mu.RLock()
+	defer sw.mu.RUnlock()
+	return sw.peers.Get(walletAddr) != nil
 }
 
 func (sw *Switch) stopAllPeers() {
@@ -1037,14 +1056,13 @@ func (sw *Switch) handshakePeerWithTimeout(conn net.Conn, isInitiator bool, time
 }
 
 // createPeerWithNodeInfo creates a peer from an established connection with NodeInfo from handshake.
-// Uses the peer's pubkey hex as the unique ID (matching core-main protocol).
+// Uses peer's wallet address (Moniker) as stable PeerID, matching core-main's public-key-based identity.
+// This ensures PeerID remains constant across NAT port reassignments in home networks.
 func (sw *Switch) createPeerWithNodeInfo(conn net.Conn, peerNI NodeInfo) *Peer {
 	addr := conn.RemoteAddr().String()
 
-	// Use address as peer ID for consistency across the codebase
-	peerID := addr
+	peerID := sw.stablePeerID(peerNI, addr)
 
-	// Read channel descriptors under read lock to prevent race with AddReactor
 	sw.mu.RLock()
 	chDescs := sw.chDescs
 	chDescCount := len(chDescs)
@@ -1093,6 +1111,7 @@ func (sw *Switch) createPeerWithNodeInfo(conn net.Conn, peerNI NodeInfo) *Peer {
 
 	peer := &Peer{
 		id:       peerID,
+		addr:     addr,
 		conn:     conn,
 		nodeInfo: nodeInfoMap,
 		mconn:    mconn,
@@ -1166,6 +1185,7 @@ func (sw *Switch) createPeer(conn net.Conn, isOutbound bool) *Peer {
 
 	peer := &Peer{
 		id:       peerID,
+		addr:     addr,
 		conn:     conn,
 		nodeInfo: map[string]string{"address": addr},
 		mconn:    mconn,
@@ -1176,32 +1196,33 @@ func (sw *Switch) createPeer(conn net.Conn, isOutbound bool) *Peer {
 }
 
 // AddPeerConnectionWithNodeInfo processes a new connection with peer NodeInfo from handshake.
-// Uses the peer's pubkey as the unique identifier (matching core-main protocol).
+// Uses peer's wallet address (Moniker) as stable identifier for NAT-traversal-safe deduplication.
 func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, peerNI NodeInfo) error {
 	if conn == nil {
 		return errors.New("switch: nil connection")
 	}
 
 	addr := conn.RemoteAddr().String()
+	stableID := sw.stablePeerID(peerNI, addr)
 
 	sw.mu.RLock()
-	existingPeer := sw.peers.Get(addr)
+	existingPeer := sw.peers.Get(stableID)
 	sw.mu.RUnlock()
 
 	if existingPeer != nil {
 		oldMConn := existingPeer.MConnection()
 		if oldMConn != nil && oldMConn.IsRunning() {
+			oldAddr := existingPeer.Addr()
+			log.Printf("[Switch] peer %s already connected (existing addr=%s, new addr=%s), closing duplicate",
+				stableID, oldAddr, addr)
 			conn.Close()
 			return nil
 		}
 
-		log.Printf("[Switch] Replacing dead peer %s (MConnection not running) with new connection", addr)
-		sw.RemovePeer(addr, "replacing dead connection")
+		log.Printf("[Switch] Replacing dead peer %s (addr=%s) with new connection (addr=%s)", stableID, existingPeer.Addr(), addr)
+		sw.stopAndRemovePeer(existingPeer, "replacing dead connection")
 	}
 
-	// Check if still dialing - if so, this is a duplicate dial attempt
-	// We should close this duplicate connection and return success
-	// because the original dial will add the peer
 	sw.dialingMu.Lock()
 	_, dialing := sw.dialing[addr]
 	sw.dialingMu.Unlock()
@@ -1230,23 +1251,35 @@ func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, 
 		sw.mu.Unlock()
 		if mconn := peer.MConnection(); mconn != nil {
 			if stopErr := mconn.Stop(); stopErr != nil {
-				log.Printf("switch: stop mconnection for duplicate peer %s failed: %v", addr, stopErr)
+				log.Printf("switch: stop mconnection for duplicate peer %s failed: %v", stableID, stopErr)
 			}
 		}
-		return fmt.Errorf("switch: peer %s already in set", addr)
+		return fmt.Errorf("switch: peer %s (%s) already in set", stableID, addr)
 	}
 	sw.mu.Unlock()
+
+	sw.peerAddrMtx.Lock()
+	sw.peerAddresses[peer.id] = addr
+	sw.peerAddrMtx.Unlock()
+
+	var reactorAddErr error
+	var failedReactor string
 
 	sw.mu.RLock()
 	for name, r := range sw.reactors {
 		if addErr := r.AddPeer(peer.id, peer.nodeInfo); addErr != nil {
-			log.Printf("switch: reactor %s AddPeer failed for %s: %v", name, addr, addErr)
-			sw.RemovePeer(peer.id, "reactor add failed")
-			sw.mu.RUnlock()
-			return fmt.Errorf("switch: reactor %s failed to add peer %s: %w", name, addr, addErr)
+			log.Printf("switch: reactor %s AddPeer failed for %s (%s): %v", name, stableID, addr, addErr)
+			reactorAddErr = addErr
+			failedReactor = name
+			break
 		}
 	}
 	sw.mu.RUnlock()
+
+	if reactorAddErr != nil {
+		sw.stopAndRemovePeer(peer, fmt.Sprintf("reactor %s add failed", failedReactor))
+		return fmt.Errorf("switch: reactor %s failed to add peer %s: %w", failedReactor, stableID, reactorAddErr)
+	}
 
 	return nil
 }
@@ -1339,17 +1372,13 @@ func (sw *Switch) tryHandlePendingResponse(peerID string, msg []byte) bool {
 	sw.syncPendingReqMtx.Lock()
 	defer sw.syncPendingReqMtx.Unlock()
 
-	log.Printf("[Switch] tryHandlePendingResponse: peerID=%s, msgType=%d, pendingReqs=%d", peerID, msgType, len(sw.syncPendingReqs))
-
 	for reqID, req := range sw.syncPendingReqs {
-		log.Printf("[Switch] checking reqID=%s, req.msgType=%d, deadline=%v", reqID, req.msgType, req.deadline)
 		if req.msgType == msgType && time.Now().Before(req.deadline) {
 			lastSep := strings.LastIndex(reqID, "|")
 			if lastSep > 0 {
 				secondLastSep := strings.LastIndex(reqID[:lastSep], "|")
 				if secondLastSep > 0 {
 					reqPeerID := reqID[:secondLastSep]
-					log.Printf("[Switch] comparing peerIDs: reqPeerID=%s, responsePeerID=%s", reqPeerID, peerID)
 					if reqPeerID == peerID {
 						msgCopy := make([]byte, len(msg))
 						copy(msgCopy, msg)
@@ -1409,7 +1438,9 @@ func (sw *Switch) handlePeerError(peerID, addr string, err error) {
 	// Immediately remove peer for fatal errors
 	if isFatal {
 		log.Printf("Switch: removing peer %s due to fatal error: %s", peerID, errorType)
-		sw.RemovePeer(peerID, "fatal error: "+errorType)
+		if targetPeer := sw.peers.Get(peerID); targetPeer != nil {
+			sw.stopAndRemovePeer(targetPeer, "fatal error: "+errorType)
+		}
 		sw.clearPeerErrorState(peerID)
 		return
 	}
@@ -1418,7 +1449,9 @@ func (sw *Switch) handlePeerError(peerID, addr string, err error) {
 	if state.consecutiveErrors >= sw.maxPeerErrors {
 		log.Printf("Switch: removing peer %s after %d consecutive errors (last: %s)",
 			peerID, state.consecutiveErrors, errorType)
-		sw.RemovePeer(peerID, "consecutive errors: "+errorType)
+		if targetPeer := sw.peers.Get(peerID); targetPeer != nil {
+			sw.stopAndRemovePeer(targetPeer, fmt.Sprintf("consecutive errors (%d): %s", state.consecutiveErrors, errorType))
+		}
 		sw.clearPeerErrorState(peerID)
 		return
 	}
@@ -1557,6 +1590,53 @@ func (sw *Switch) RemovePeer(peerID string, reason string) {
 	sw.clearPeerErrorState(peerID)
 
 	log.Printf("Switch: peer %s removed successfully, remaining peers: %d", peerID, sw.PeerCount())
+}
+
+// stopAndRemovePeer performs complete peer shutdown and cleanup.
+// Removes from PeerSet, notifies all reactors, stops MConnection, closes conn.
+// Reference: core-main/p2p/switch.go StopPeerForError
+func (sw *Switch) stopAndRemovePeer(peer *Peer, reason interface{}) {
+	if peer == nil {
+		return
+	}
+	peerID := peer.ID()
+
+	reasonStr := fmt.Sprintf("%v", reason)
+	log.Printf("Switch: stopAndRemovePeer %s, reason: %s", peerID, reasonStr)
+
+	sw.mu.Lock()
+	removed := sw.peers.Remove(peerID)
+	sw.mu.Unlock()
+
+	if removed == nil {
+		return
+	}
+
+	sw.mu.RLock()
+	for _, r := range sw.reactors {
+		r.RemovePeer(peerID, reason)
+	}
+	sw.mu.RUnlock()
+
+	if mconn := peer.MConnection(); mconn != nil {
+		if err := mconn.Stop(); err != nil {
+			log.Printf("Switch: stop mconnection for peer %s failed: %v", peerID, err)
+		}
+	}
+
+	if conn := peer.conn; conn != nil {
+		if err := conn.Close(); err != nil {
+			log.Printf("Switch: close connection for peer %s failed: %v", peerID, err)
+		}
+	}
+
+	sw.peerAddrMtx.Lock()
+	delete(sw.peerAddresses, peerID)
+	sw.peerAddrMtx.Unlock()
+
+	sw.clearPeerErrorState(peerID)
+
+	log.Printf("Switch: peer %s stopped and removed (%s), remaining: %d", peerID, reasonStr, sw.PeerCount())
 }
 
 // PeerCount returns the current number of connected peers.
@@ -1712,12 +1792,27 @@ func (sw *Switch) filterPeer(addr string) bool {
 	return true
 }
 
-// generatePeerID creates a stable identifier for a peer connection.
+// generatePeerID creates a fallback identifier for a peer connection before handshake.
+// After handshake completes, stablePeerID should be used instead (wallet address / public key).
 func (sw *Switch) generatePeerID(conn net.Conn) string {
 	if conn == nil {
 		return "unknown"
 	}
 	return conn.RemoteAddr().String()
+}
+
+// stablePeerID generates a cryptographically stable peer identifier from NodeInfo.
+// Priority: Moniker (wallet address) > PubKey (public key hex) > addr (IP:Port fallback).
+// Reference: core-main/p2p/peer.go uses nodeInfo.PubKey.KeyString() as Peer.Key
+func (sw *Switch) stablePeerID(peerNI NodeInfo, fallbackAddr string) string {
+	if peerNI.Moniker != "" {
+		return peerNI.Moniker
+	}
+	if peerNI.PubKey != "" {
+		return peerNI.PubKey
+	}
+	log.Printf("Switch: WARNING: peer has no Moniker or PubKey, using address as fallback ID: %s", fallbackAddr)
+	return fallbackAddr
 }
 
 // DialPeerWithAddress dials an outbound peer at the given address.
@@ -2014,6 +2109,121 @@ func (sw *Switch) BroadcastBlockExcluding(ctx context.Context, block *core.Block
 	return nil
 }
 
+// BroadcastCandidate serializes a mining candidate and broadcasts it to all connected peers on the sync channel.
+// Used by miners to share newly mined candidates for validation and potential chain extension.
+func (sw *Switch) BroadcastCandidate(block *core.Block, sourceID string, minedAt time.Time) error {
+	if sw.ctx == nil {
+		return errors.New("switch: not started")
+	}
+	if block == nil {
+		return errors.New("switch: nil block in mining candidate")
+	}
+
+	blockJSON, marshalErr := json.Marshal(block)
+	if marshalErr != nil {
+		return fmt.Errorf("switch: marshal mining candidate block: %w", marshalErr)
+	}
+
+	payload := &reactor.MiningCandidatePayload{
+		Block:    json.RawMessage(blockJSON),
+		SourceID: sourceID,
+		MinedAt:  minedAt.Unix(),
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("switch: marshal mining candidate payload: %w", err)
+	}
+
+	msg := make([]byte, 1+len(data))
+	msg[0] = reactor.SyncMsgMiningCandidate
+	copy(msg[1:], data)
+
+	sw.mu.RLock()
+	peers := sw.peers.List()
+	sw.mu.RUnlock()
+
+	if len(peers) == 0 {
+		log.Printf("switch: BroadcastCandidate: no peers available")
+		return nil
+	}
+
+	successCount := 0
+	for _, peer := range peers {
+		mconn := peer.MConnection()
+		if mconn == nil || !mconn.IsRunning() {
+			continue
+		}
+
+		if mconn.TrySend(mconnection.ChannelSync, msg) {
+			successCount++
+		} else {
+			log.Printf("switch: BroadcastCandidate: failed to send to peer %s", peer.ID())
+		}
+	}
+
+	log.Printf("switch: BroadcastCandidate: sent mining candidate (height=%d, source=%s) to %d/%d peers",
+		block.GetHeight(), sourceID[:min(12, len(sourceID))], successCount, len(peers))
+	return nil
+}
+
+// BroadcastCandidateWithDeadline serializes a mining candidate with synchronized window deadline
+// and broadcasts it to all connected peers on the sync channel.
+// The deadline ensures all nodes share the same window closing time for fair competition.
+func (sw *Switch) BroadcastCandidateWithDeadline(block *core.Block, sourceID string, minedAt time.Time, deadline time.Time) error {
+	if sw.ctx == nil {
+		return errors.New("switch: not started")
+	}
+	if block == nil {
+		return errors.New("switch: nil block in mining candidate with deadline")
+	}
+
+	blockJSON, marshalErr := json.Marshal(block)
+	if marshalErr != nil {
+		return fmt.Errorf("switch: marshal mining candidate block with deadline: %w", marshalErr)
+	}
+
+	payload := &reactor.MiningCandidatePayload{
+		Block:          json.RawMessage(blockJSON),
+		SourceID:       sourceID,
+		MinedAt:        minedAt.Unix(),
+		WindowDeadline: deadline.Unix(),
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("switch: marshal mining candidate payload with deadline: %w", err)
+	}
+
+	msg := make([]byte, 1+len(data))
+	msg[0] = reactor.SyncMsgMiningCandidate
+	copy(msg[1:], data)
+
+	sw.mu.RLock()
+	peers := sw.peers.List()
+	sw.mu.RUnlock()
+
+	if len(peers) == 0 {
+		log.Printf("switch: BroadcastCandidateWithDeadline: no peers available")
+		return nil
+	}
+
+	successCount := 0
+	for _, peer := range peers {
+		mconn := peer.MConnection()
+		if mconn == nil || !mconn.IsRunning() {
+			continue
+		}
+
+		if mconn.TrySend(mconnection.ChannelSync, msg) {
+			successCount++
+		} else {
+			log.Printf("switch: failed to send candidate to peer %s", peer.ID())
+		}
+	}
+	return nil
+}
+
 // FetchChainInfo sends a sync channel request for chain info, waits for response.
 // Uses a 10-second timeout for faster failure detection and retry.
 func (sw *Switch) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, error) {
@@ -2261,8 +2471,6 @@ func (sw *Switch) sendAndWait(ctx context.Context, peerID string, chID byte, exp
 		return nil, fmt.Errorf("switch: request to %s has invalid timeout (deadline in past)", peerID)
 	}
 
-	log.Printf("[Switch] sendAndWait: peer=%s, chID=%d, msgType=%d, timeout=%v", peerID, chID, expectedMsgType, timeUntilTimeout)
-
 	sw.syncPendingReqMtx.Lock()
 	sw.syncPendingReqs[reqID] = &syncPendingRequest{
 		msgType:  expectedMsgType,
@@ -2280,7 +2488,6 @@ func (sw *Switch) sendAndWait(ctx context.Context, peerID string, chID byte, exp
 
 	select {
 	case resp := <-respCh:
-		log.Printf("[Switch] sendAndWait: received response from %s, len=%d", peerID, len(resp))
 		return resp, nil
 	case <-ctx.Done():
 		sw.syncPendingReqMtx.Lock()
@@ -2771,11 +2978,15 @@ func (sw *Switch) GetPeerLatency(peerID string) time.Duration {
 // runReactorRoutine starts a background loop that periodically checks peer health and cleans up stale connections.
 // Reference: core-main/p2p/switch.go peer management
 func (sw *Switch) runReactorRoutine() {
-	ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
+	defer sw.wg.Done()
+
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
+		case <-sw.quit:
+			return
 		case <-sw.ctx.Done():
 			return
 		case <-ticker.C:
@@ -2798,7 +3009,7 @@ func (sw *Switch) reapDeadPeers() {
 			// Check if connection is still running
 			if !mconn.IsRunning() {
 				log.Printf("Switch: removing stopped peer %s", p.ID())
-				sw.RemovePeer(p.ID(), "connection stopped")
+				sw.stopAndRemovePeer(p, "connection stopped")
 				removedCount++
 				continue
 			}
@@ -2843,6 +3054,25 @@ func (p *switchPeerAdapter) getBlockByHeight(height uint64) bool {
 
 	if ok := p.sw.Send(p.id, mconnection.ChannelSync, reqMsg); !ok {
 		log.Printf("[switchPeerAdapter] getBlockByHeight: send failed to peer %s", p.id)
+		return false
+	}
+
+	return true
+}
+
+func (p *switchPeerAdapter) getBlocksByHeights(heights []uint64) bool {
+	if len(heights) == 0 {
+		return false
+	}
+
+	reqMsg, err := reactor.BuildGetBlocksMsg(heights)
+	if err != nil {
+		log.Printf("[switchPeerAdapter] getBlocksByHeights: build msg error for %d blocks: %v", len(heights), err)
+		return false
+	}
+
+	if ok := p.sw.Send(p.id, mconnection.ChannelSync, reqMsg); !ok {
+		log.Printf("[switchPeerAdapter] getBlocksByHeights: send failed to peer %s (%d blocks)", p.id, len(heights))
 		return false
 	}
 
@@ -2900,9 +3130,10 @@ func (p *switchPeerAdapter) getHeaders(locator [][]byte, stopHash []byte) bool {
 	return true
 }
 
-// bestPeer selects the best peer for synchronization based on chain height.
-// Uses FetchChainInfo to query each peer's actual chain height.
-// Returns the peer with the highest reported chain height.
+// bestPeer selects the best peer for synchronization using load-balanced algorithm.
+// Collects all eligible peers within height tolerance (±5 blocks of max height),
+// then selects the one with lowest current sync load to distribute requests across nodes.
+// This prevents overloading the mining node and improves overall network throughput.
 func (sw *Switch) bestPeer(serviceFlag int) PeerInterface {
 	sw.mu.RLock()
 	peerList := sw.peers.List()
@@ -2913,8 +3144,13 @@ func (sw *Switch) bestPeer(serviceFlag int) PeerInterface {
 		return nil
 	}
 
-	var maxHeight uint64
-	var bestPeerID string
+	type candidate struct {
+		addr  string
+		height uint64
+		load  int
+	}
+
+	var candidates []candidate
 	var fallbackPeerID string
 
 	for _, peer := range peerList {
@@ -2934,34 +3170,69 @@ func (sw *Switch) bestPeer(serviceFlag int) PeerInterface {
 			continue
 		}
 
-		if chainInfo.Height > maxHeight {
-			maxHeight = chainInfo.Height
-			bestPeerID = peer.ID()
+		sw.syncLoadMu.Lock()
+		load := sw.syncLoadMap[peer.ID()]
+		sw.syncLoadMu.Unlock()
+
+		candidates = append(candidates, candidate{
+			addr:   peer.ID(),
+			height: chainInfo.Height,
+			load:   load,
+		})
+	}
+
+	if len(candidates) == 0 {
+		if fallbackPeerID != "" {
+			log.Printf("[Switch] bestPeer: no eligible candidates, using fallback %s", fallbackPeerID)
+			return &switchPeerAdapter{
+				id:     fallbackPeerID,
+				height: 0,
+				sw:     sw,
+			}
+		}
+		log.Printf("[Switch] bestPeer: no peers available (total=%d)", sw.peers.Size())
+		return nil
+	}
+
+	var maxHeight uint64
+	for _, c := range candidates {
+		if c.height > maxHeight {
+			maxHeight = c.height
 		}
 	}
 
-	if bestPeerID != "" {
-		log.Printf("[Switch] bestPeer: selected %s (height=%d, total_peers=%d)",
-			bestPeerID, maxHeight, sw.peers.Size())
-		return &switchPeerAdapter{
-			id:     bestPeerID,
-			height: maxHeight,
-			sw:     sw,
+	const heightTolerance uint64 = 5
+	var eligible []candidate
+	for _, c := range candidates {
+		if c.height >= maxHeight-heightTolerance || maxHeight == 0 {
+			eligible = append(eligible, c)
 		}
 	}
 
-	if fallbackPeerID != "" {
-		log.Printf("[Switch] bestPeer: using fallback peer %s (FetchChainInfo failed for all, total=%d)",
-			fallbackPeerID, sw.peers.Size())
-		return &switchPeerAdapter{
-			id:     fallbackPeerID,
-			height: 0,
-			sw:     sw,
+	best := eligible[0]
+	for _, c := range eligible[1:] {
+		if c.load < best.load || (c.load == best.load && c.height > best.height) {
+			best = c
+		} else if c.load == best.load && c.height == best.height {
+			sw.syncRoundRobin++
+			if sw.syncRoundRobin%2 == 0 {
+				best = c
+			}
 		}
 	}
 
-	log.Printf("[Switch] bestPeer: no active peers with running MConnection (total=%d)", sw.peers.Size())
-	return nil
+	sw.syncLoadMu.Lock()
+	sw.syncLoadMap[best.addr]++
+	sw.syncLoadMu.Unlock()
+
+	log.Printf("[Switch] bestPeer: load-balanced selection -> %s (height=%d, load=%d, eligible=%d/%d)",
+		best.addr, best.height, best.load+1, len(eligible), len(candidates))
+
+	return &switchPeerAdapter{
+		id:     best.addr,
+		height: best.height,
+		sw:     sw,
+	}
 }
 
 // ProcessIllegal handles a misbehaving peer by removing it from the peer set.
@@ -3016,7 +3287,7 @@ func (sw *Switch) broadcastNewStatus(bestBlock, genesisBlock *core.Block) error 
 }
 
 func (sw *Switch) GetPeerChainInfo(peerID string) (height uint64, work *big.Int, tipHash string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	chainInfo, fetchErr := sw.FetchChainInfo(ctx, peerID)
@@ -3092,4 +3363,18 @@ func (sw *Switch) SendInvToPeer(peerID string, invMsg []byte) bool {
 		log.Printf("[Switch] SendInvToPeer: sent INV to %s (%d bytes)", peerID, len(invMsg))
 	}
 	return sent
+}
+
+func (sw *Switch) IncSyncLoad(peerAddr string) {
+	sw.syncLoadMu.Lock()
+	defer sw.syncLoadMu.Unlock()
+	sw.syncLoadMap[peerAddr]++
+}
+
+func (sw *Switch) DecSyncLoad(peerAddr string) {
+	sw.syncLoadMu.Lock()
+	defer sw.syncLoadMu.Unlock()
+	if sw.syncLoadMap[peerAddr] > 0 {
+		sw.syncLoadMap[peerAddr]--
+	}
 }

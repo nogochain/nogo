@@ -29,6 +29,28 @@ import (
 	"github.com/nogochain/nogo/blockchain/nogopow"
 )
 
+// powModeCache stores the validated POW_MODE value at startup
+// Production-grade: prevents runtime environment variable changes from affecting security
+var powModeCache struct {
+	mode    string // "fake" or "production"
+	checked bool   // Flag to ensure single validation at startup
+}
+
+func init() {
+	powMode := os.Getenv("POW_MODE")
+	if powMode == "" {
+		powMode = "production" // Default to production mode
+	}
+
+	if powMode == "fake" {
+		log.Printf("[Mining] WARNING: POW_MODE=fake detected - PoW verification DISABLED")
+		log.Printf("[Mining] This mode should ONLY be used for testing, NEVER in production!")
+	}
+
+	powModeCache.mode = powMode
+	powModeCache.checked = true
+}
+
 // GetHeaderByHash returns the header by hash (for nogopow.ChainHeaderReader interface)
 func (c *Chain) GetHeaderByHash(hash nogopow.Hash) *nogopow.Header {
 	c.mu.RLock()
@@ -60,7 +82,7 @@ func (c *Chain) GetHeaderByHash(hash nogopow.Hash) *nogopow.Header {
 // Reorg-safe: checks external reorg state to prevent "mine-rollback-mine" oscillation
 func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Block, error) {
 	c.mu.Lock()
-	
+
 	if len(c.blocks) == 0 {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("no genesis block")
@@ -72,7 +94,7 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 		c.mu.Unlock()
 		return nil, fmt.Errorf("reorganization in progress (external check), cannot mine - preventing oscillation")
 	}
-	
+
 	// Also check internal reorg state
 	if c.IsReorgInProgress() {
 		c.mu.Unlock()
@@ -169,8 +191,7 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 	txs = append(txs, transfers...)
 
 	var engine *nogopow.NogopowEngine
-	powMode := os.Getenv("POW_MODE")
-	if powMode == "fake" {
+	if powModeCache.mode == "fake" {
 		engine = nogopow.NewFaker()
 	} else {
 		powConfig := nogopow.DefaultConfig()
@@ -195,6 +216,7 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 			PrevHash:       prevHash,
 			TimestampUnix:  ts,
 			DifficultyBits: uint32(nextDifficulty.Uint64()),
+			Height:         height,
 		},
 	}
 
@@ -297,43 +319,9 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 
 	c.mu.Unlock()
 
-	// AddBlock will handle fork detection and reorganization
-	accepted, err := c.AddBlock(newBlock)
-	if err != nil {
-		return nil, fmt.Errorf("add mined block: %w", err)
-	}
-
-	if !accepted {
-		// Block was stored as fork but not added to canonical chain
-		// This means a heavier chain exists, we should mine on that chain instead
-		return nil, fmt.Errorf("mined block on fork chain, reorg needed")
-	}
-
-	// Re-acquire lock for subsequent operations
-	c.mu.Lock()
-
-	// Process integrity rewards after block is added to chain
-	// Note: called within locked section, so processIntegrityRewardsLocked doesn't acquire lock
-	c.processIntegrityRewardsLocked(newBlock)
-
-	// Publish event
-	if c.events != nil {
-		event := &WSEvent{
-			Type: "new_block",
-			Data: map[string]any{
-				"height":         newBlock.GetHeight(),
-				"hash":           hex.EncodeToString(newBlock.Hash),
-				"prevHash":       hex.EncodeToString(newBlock.Header.PrevHash),
-				"difficultyBits": newBlock.Header.DifficultyBits,
-				"txCount":        len(newBlock.Transactions),
-				"addresses":      addressesForBlock(newBlock),
-			},
-		}
-		c.events.Publish(*event)
-	}
-
-	// Release lock before returning
-	c.mu.Unlock()
+	// Return the mined block without adding to chain
+	// The caller (Miner) is responsible for submitting to candidate pool
+	// This ensures fair competition: all blocks must go through candidate pool selection
 	return newBlock, nil
 }
 

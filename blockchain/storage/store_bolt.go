@@ -10,6 +10,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/core"
@@ -17,7 +19,9 @@ import (
 )
 
 const (
-	boltOpenTimeout   = 1 * time.Second
+	boltOpenTimeout   = 30 * time.Second
+	boltMaxRetries    = 3
+	boltRetryInterval = 2 * time.Second
 	uint64EncodedLen  = 8
 	checkpointHashLen = 32
 	stateRootLenMax   = 65535
@@ -26,6 +30,91 @@ const (
 type BoltStore struct {
 	path string
 	db   *bolt.DB
+}
+
+func isDatabaseCorruptionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := strings.ToLower(err.Error())
+	corruptionIndicators := []string{
+		"invalid magic",
+		"invalid version",
+		"invalid page size",
+		"checksum mismatch",
+		"page allocation out of bounds",
+		"freelist empty",
+		"database file is not a bolt database",
+		"corrupted",
+		"invalid database",
+	}
+	for _, indicator := range corruptionIndicators {
+		if strings.Contains(errMsg, indicator) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRecoverableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := strings.ToLower(err.Error())
+	recoverableIndicators := []string{
+		"database is locked",
+		"permission denied",
+		"timeout",
+		"mmap",
+		"no space left",
+		"input/output error",
+		"resource temporarily unavailable",
+	}
+	for _, indicator := range recoverableIndicators {
+		if strings.Contains(errMsg, indicator) {
+			return true
+		}
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return true
+	}
+	var sysErr *syscall.Errno
+	if errors.As(err, &sysErr) {
+		return true
+	}
+	return false
+}
+
+func fixFilePermissions(path string) error {
+	stat, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat file: %w", err)
+	}
+
+	currentPerm := stat.Mode().Perm()
+	if currentPerm != filePerm {
+		log.Printf("bolt store: fixing file permissions from %o to %o for %s", currentPerm, filePerm, path)
+		if chmodErr := os.Chmod(path, filePerm); chmodErr != nil {
+			return fmt.Errorf("chmod failed: %w", chmodErr)
+		}
+	}
+
+	dirPath := filepath.Dir(path)
+	dirStat, dirErr := os.Stat(dirPath)
+	if dirErr != nil {
+		return fmt.Errorf("stat directory: %w", dirErr)
+	}
+
+	currentDirPerm := dirStat.Mode().Perm()
+	if currentDirPerm&0o777 != dirPerm {
+		log.Printf("bolt store: fixing directory permissions from %o to %o for %s", currentDirPerm, dirPerm, dirPath)
+		if chmodErr := os.Chmod(dirPath, dirPerm); chmodErr != nil {
+			return fmt.Errorf("chmod directory failed: %w", chmodErr)
+		}
+	}
+
+	return nil
 }
 
 // NewBoltStore creates a new BoltDB store instance
@@ -38,10 +127,95 @@ func OpenBoltStore(path string) (*BoltStore, error) {
 	if err := os.MkdirAll(filepath.Dir(path), dirPerm); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
-	db, err := bolt.Open(path, filePerm, &bolt.Options{Timeout: boltOpenTimeout})
-	if err != nil {
-		return nil, fmt.Errorf("open bolt database: %w", err)
+
+	var db *bolt.DB
+	var openErr error
+
+	openFunc := func() error {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					openErr = fmt.Errorf("bolt database panic during open: %v (path=%s)", r, path)
+				}
+			}()
+			db, openErr = bolt.Open(path, filePerm, &bolt.Options{
+				Timeout:      boltOpenTimeout,
+				NoGrowSync:   false,
+				FreelistType: bolt.FreelistArrayType,
+			})
+		}()
+		return openErr
 	}
+
+	openErr = openFunc()
+	if openErr == nil {
+		return initBoltStore(path, db)
+	}
+
+	fileExists := false
+	if stat, statErr := os.Stat(path); statErr == nil && stat.Size() > 0 {
+		fileExists = true
+	}
+
+	if !fileExists {
+		return nil, fmt.Errorf("open bolt database (new file): %w", openErr)
+	}
+
+	log.Printf("bolt store: database open failed on existing file: path=%s, err=%v", path, openErr)
+
+	if isRecoverableError(openErr) {
+		log.Printf("bolt store: detected recoverable error (not corruption), attempting fixes...")
+
+		if strings.Contains(strings.ToLower(openErr.Error()), "permission") {
+			if permErr := fixFilePermissions(path); permErr != nil {
+				log.Printf("bolt store: permission fix failed: %v", permErr)
+			} else {
+				log.Printf("bolt store: permissions fixed, retrying open...")
+				openErr = openFunc()
+				if openErr == nil {
+					log.Printf("bolt store: successfully opened after permission fix")
+					return initBoltStore(path, db)
+				}
+			}
+		}
+
+		for retry := 1; retry <= boltMaxRetries; retry++ {
+			log.Printf("bolt store: retry %d/%d after %v...", retry, boltMaxRetries, boltRetryInterval)
+			time.Sleep(boltRetryInterval)
+			openErr = openFunc()
+			if openErr == nil {
+				log.Printf("bolt store: successfully opened on retry %d", retry)
+				return initBoltStore(path, db)
+			}
+			log.Printf("bolt store: retry %d failed: %v", retry, openErr)
+		}
+
+		return nil, fmt.Errorf("open bolt database failed after %d retries (recoverable error): %w",
+			boltMaxRetries, openErr)
+	}
+
+	if !isDatabaseCorruptionError(openErr) {
+		log.Printf("bolt store: unknown error type, treating as corruption for safety: %v", openErr)
+	}
+
+	log.Printf("bolt store: confirmed or suspected database corruption, starting recovery: path=%s", path)
+
+	backupPath := path + ".corrupted." + fmt.Sprintf("%d", time.Now().Unix())
+	if renameErr := os.Rename(path, backupPath); renameErr != nil {
+		return nil, fmt.Errorf("open bolt database failed (corrupted), backup rename also failed: original=%v, rename=%v", openErr, renameErr)
+	}
+	log.Printf("bolt store: corrupted database backed up to %s, creating new database", backupPath)
+
+	openErr = openFunc()
+	if openErr != nil {
+		return nil, fmt.Errorf("open bolt database failed even after corruption recovery: %w", openErr)
+	}
+	log.Printf("bolt store: successfully recovered with new database at %s", backupPath)
+
+	return initBoltStore(path, db)
+}
+
+func initBoltStore(path string, db *bolt.DB) (*BoltStore, error) {
 	s := &BoltStore{path: path, db: db}
 	if err := s.db.Update(func(tx *bolt.Tx) error {
 		if _, err := tx.CreateBucketIfNotExists([]byte(blocksBucket)); err != nil {
@@ -462,4 +636,73 @@ func (s *BoltStore) LoadCanonicalChain() ([]*core.Block, error) {
 // SaveCanonicalChain saves the canonical chain (alias for RewriteCanonical for compatibility)
 func (s *BoltStore) SaveCanonicalChain(blocks []*core.Block) error {
 	return s.RewriteCanonical(blocks)
+}
+
+// RestoreFromBackup migrates all blocks from a corrupted backup database into this store.
+// Called after automatic corruption recovery to preserve existing chain data.
+func (s *BoltStore) RestoreFromBackup(backupPath string) (int, error) {
+	backupDB, err := bolt.Open(backupPath, filePerm, &bolt.Options{Timeout: boltOpenTimeout, ReadOnly: true})
+	if err != nil {
+		return 0, fmt.Errorf("open backup database for restore: %w", err)
+	}
+	defer backupDB.Close()
+
+	var restoredCount int
+	err = backupDB.View(func(tx *bolt.Tx) error {
+		blocksB := tx.Bucket([]byte(blocksBucket))
+		if blocksB == nil {
+			return nil
+		}
+
+		return blocksB.ForEach(func(k, v []byte) error {
+			var blk core.Block
+			if err := gob.NewDecoder(bytes.NewReader(v)).Decode(&blk); err != nil {
+				return nil
+			}
+
+			if putErr := s.PutBlock(&blk); putErr != nil {
+				return fmt.Errorf("restore block at height %d: %w", blk.GetHeight(), putErr)
+			}
+			restoredCount++
+			return nil
+		})
+	})
+
+	if err != nil {
+		return restoredCount, fmt.Errorf("restore from backup: %w", err)
+	}
+
+	canonBlocks, readErr := func() ([]*core.Block, error) {
+		var blocks []*core.Block
+		readErr := backupDB.View(func(tx *bolt.Tx) error {
+			canonB := tx.Bucket([]byte(canonBucket))
+			blocksB := tx.Bucket([]byte(blocksBucket))
+			if canonB == nil || blocksB == nil {
+				return nil
+			}
+			c := canonB.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				raw := blocksB.Get(v)
+				if raw == nil {
+					continue
+				}
+				var blk core.Block
+				if err := gob.NewDecoder(bytes.NewReader(raw)).Decode(&blk); err != nil {
+					continue
+				}
+				blocks = append(blocks, &blk)
+			}
+			return nil
+		})
+		return blocks, readErr
+	}()
+
+	if readErr == nil && len(canonBlocks) > 0 {
+		if rewriteErr := s.RewriteCanonical(canonBlocks); rewriteErr != nil {
+			log.Printf("bolt store: warning - failed to restore canonical chain: %v", rewriteErr)
+		}
+	}
+
+	log.Printf("bolt store: restored %d blocks from backup %s", restoredCount, backupPath)
+	return restoredCount, nil
 }

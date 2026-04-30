@@ -1,7 +1,6 @@
 package reactor
 
 import (
-	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -9,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/nogochain/nogo/blockchain/network/mconnection"
 )
 
@@ -43,6 +43,15 @@ const (
 	// SyncMsgStatus broadcasts node status (height, work, latest hash) to all peers.
 	// Payload: JSON-encoded statusPayload {height: uint64, work: string, latestHash: string}.
 	SyncMsgStatus byte = 0x07
+
+	// SyncMsgStatusRequest requests peer status (height, work, latest hash) for handshake.
+	// Payload: empty (no additional data needed).
+	// Response: SyncMsgStatus from the peer.
+	SyncMsgStatusRequest byte = 0x08
+
+	// SyncMsgMiningCandidate broadcasts a mining candidate block to peers for validation.
+	// Payload: JSON-encoded MiningCandidatePayload {block: json.RawMessage, source_id: string, mined_at: int64}.
+	SyncMsgMiningCandidate byte = 0x09
 
 	// SyncMsgNotFound indicates requested data is unavailable.
 	// Payload: JSON-encoded notFoundPayload {msgType: byte, ids: []string}.
@@ -79,6 +88,10 @@ type SyncHandler interface {
 
 	// OnStatus handles received node status broadcast from a peer.
 	OnStatus(peerID string, height uint64, work string, latestHash string) error
+
+	// OnStatusRequest handles an incoming status request during peer handshake.
+	// The handler should respond with its current chain status (height, work, latestHash).
+	OnStatusRequest(peerID string) error
 }
 
 // SyncReactor handles blockchain synchronization protocol messages.
@@ -95,6 +108,11 @@ type SyncReactor struct {
 	peerHandshakeTimeout time.Duration
 	// handshakeCheckInterval defines the interval for checking handshake status.
 	handshakeCheckInterval time.Duration
+	// handshakePending tracks peers waiting for handshake StatusResponse
+	handshakePending   map[string]chan struct{}
+	handshakePendingMu sync.RWMutex
+	// candidatePool stores mining candidates received from peers for validation
+	candidatePool *core.CandidatePool
 }
 
 // NewSyncReactor creates a new SyncReactor with the given handler.
@@ -118,6 +136,7 @@ func NewSyncReactor(handler SyncHandler) (*SyncReactor, error) {
 		handler:                handler,
 		peerHandshakeTimeout:   10 * time.Second,
 		handshakeCheckInterval: 500 * time.Millisecond,
+		handshakePending:       make(map[string]chan struct{}),
 	}
 	r.SetChannels(chs)
 
@@ -136,6 +155,18 @@ func (sr *SyncReactor) SetHandler(handler SyncHandler) error {
 	return nil
 }
 
+// SetCandidatePool sets the candidate pool for mining candidate processing.
+// Must be called before the reactor starts receiving mining candidate messages.
+func (sr *SyncReactor) SetCandidatePool(pool *core.CandidatePool) error {
+	if pool == nil {
+		return fmt.Errorf("sync reactor: candidate pool must not be nil")
+	}
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	sr.candidatePool = pool
+	return nil
+}
+
 // AddPeer is called when a new peer connects on the sync channel.
 // It performs a handshake with a 10-second timeout and 500ms check interval.
 // Returns an error if handshake times out or fails.
@@ -144,47 +175,56 @@ func (sr *SyncReactor) AddPeer(peerID string, metadata map[string]string) error 
 		return fmt.Errorf("sync reactor: peerID must not be empty")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), sr.peerHandshakeTimeout)
-	defer cancel()
-
-	ticker := time.NewTicker(sr.handshakeCheckInterval)
-	defer ticker.Stop()
-
-	handshakeComplete := make(chan struct{})
-	handshakeErr := make(chan error, 1)
-
 	go func() {
-		defer close(handshakeComplete)
 		if err := sr.performHandshake(peerID, metadata); err != nil {
-			select {
-			case handshakeErr <- err:
-			default:
-			}
-			return
+			log.Printf("[SyncReactor] background handshake failed for peer %s: %v (connection kept alive)", peerID, err)
 		}
 	}()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("sync reactor: peer handshake timeout after %v", sr.peerHandshakeTimeout)
-		case <-ticker.C:
-			select {
-			case <-handshakeComplete:
-				return nil
-			default:
-			}
-		case err := <-handshakeErr:
-			return fmt.Errorf("sync reactor: handshake failed: %w", err)
-		}
-	}
+	return nil
 }
 
 // performHandshake executes the actual handshake logic for a peer.
-// This is a placeholder for the actual handshake implementation.
+// Sends StatusRequest and waits for StatusResponse, confirming the peer is responsive.
+// Reference: core-main/netsync/protocol_reactor.go AddPeer
 func (sr *SyncReactor) performHandshake(peerID string, metadata map[string]string) error {
-	time.Sleep(100 * time.Millisecond)
-	return nil
+	sw := sr.GetSwitch()
+	if sw == nil {
+		return fmt.Errorf("syncReactor: switch is nil, cannot perform handshake")
+	}
+
+	reqMsg, err := BuildStatusRequestMsg()
+	if err != nil {
+		return fmt.Errorf("syncReactor: build status request: %w", err)
+	}
+
+	doneCh := make(chan struct{}, 1)
+
+	sr.handshakePendingMu.Lock()
+	sr.handshakePending[peerID] = doneCh
+	sr.handshakePendingMu.Unlock()
+
+	defer func() {
+		sr.handshakePendingMu.Lock()
+		delete(sr.handshakePending, peerID)
+		sr.handshakePendingMu.Unlock()
+	}()
+
+	if !sw.Send(peerID, mconnection.ChannelSync, reqMsg) {
+		return fmt.Errorf("syncReactor: send status request to %s failed", peerID)
+	}
+
+	log.Printf("[SyncReactor] performHandshake: sent StatusRequest to %s, waiting for StatusResponse (timeout=%v)",
+		peerID, sr.peerHandshakeTimeout)
+
+	select {
+	case <-doneCh:
+		log.Printf("[SyncReactor] performHandshake: handshake completed with %s", peerID)
+		return nil
+	case <-time.After(sr.peerHandshakeTimeout):
+		return fmt.Errorf("syncReactor: handshake timeout waiting for StatusResponse from %s (after %v)",
+			peerID, sr.peerHandshakeTimeout)
+	}
 }
 
 // RemovePeer is called when a peer disconnects.
@@ -229,6 +269,8 @@ func (sr *SyncReactor) Receive(chID byte, peerID string, msgBytes []byte) {
 // dispatch routes the parsed message to the appropriate handler method.
 func (sr *SyncReactor) dispatch(msgType byte, peerID string, payload []byte, handler SyncHandler) {
 	switch msgType {
+	case SyncMsgStatusRequest:
+		sr.handleStatusRequest(peerID, handler)
 	case SyncMsgGetHeaders:
 		sr.handleGetHeaders(peerID, payload, handler)
 	case SyncMsgHeaders:
@@ -243,6 +285,8 @@ func (sr *SyncReactor) dispatch(msgType byte, peerID string, payload []byte, han
 		sr.handleBlockLocator(peerID, payload, handler)
 	case SyncMsgStatus:
 		sr.handleStatus(peerID, payload, handler)
+	case SyncMsgMiningCandidate:
+		sr.handleMiningCandidate(peerID, payload)
 	case SyncMsgNotFound:
 		sr.handleNotFound(peerID, payload, handler)
 	default:
@@ -380,7 +424,82 @@ func (sr *SyncReactor) handleStatus(peerID string, payload []byte, handler SyncH
 		return
 	}
 
+	sr.handshakePendingMu.RLock()
+	if doneCh, exists := sr.handshakePending[peerID]; exists {
+		sr.handshakePendingMu.RUnlock()
+		select {
+		case doneCh <- struct{}{}:
+			log.Printf("[SyncReactor] handleStatus: signaling handshake completion for peer %s (height=%d)", peerID, status.Height)
+		default:
+		}
+	} else {
+		sr.handshakePendingMu.RUnlock()
+	}
+
 	handler.OnStatus(peerID, status.Height, status.Work, status.LatestHash)
+}
+
+// handleStatusRequest handles an incoming StatusRequest during peer handshake.
+// Delegates to handler which responds with current chain status.
+func (sr *SyncReactor) handleStatusRequest(peerID string, handler SyncHandler) {
+	if err := handler.OnStatusRequest(peerID); err != nil {
+		log.Printf("[SyncReactor] handleStatusRequest: failed for peer %s: %v", peerID, err)
+	}
+}
+
+// handleMiningCandidate processes an incoming mining candidate from a peer.
+// Validates the payload and submits the candidate to the candidate pool for evaluation.
+func (sr *SyncReactor) handleMiningCandidate(from string, data []byte) {
+	if len(data) == 0 {
+		log.Printf("[SyncReactor] handleMiningCandidate: empty payload from peer %s", from)
+		return
+	}
+
+	var payload MiningCandidatePayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		log.Printf("[SyncReactor] handleMiningCandidate: failed to unmarshal mining candidate from %s: %v", from, err)
+		return
+	}
+
+	if payload.Block == nil || len(payload.Block) == 0 {
+		log.Printf("[SyncReactor] handleMiningCandidate: received empty mining candidate block from %s", from)
+		return
+	}
+
+	var block core.Block
+	if err := json.Unmarshal(payload.Block, &block); err != nil {
+		log.Printf("[SyncReactor] handleMiningCandidate: failed to decode mining candidate block from %s: %v", from, err)
+		return
+	}
+
+	if block.Header.Height == 0 {
+		log.Printf("[SyncReactor] handleMiningCandidate: received mining candidate with invalid height=0 from %s", from)
+		return
+	}
+
+	sr.mu.RLock()
+	pool := sr.candidatePool
+	sr.mu.RUnlock()
+
+	if pool == nil {
+		log.Printf("[SyncReactor] handleMiningCandidate: candidate pool is nil, cannot process mining candidate from %s", from)
+		return
+	}
+
+	minedAt := time.Unix(payload.MinedAt, 0)
+
+	var submitErr error
+	if payload.WindowDeadline > 0 {
+		deadline := time.Unix(payload.WindowDeadline, 0)
+		submitErr = pool.SubmitCandidateWithDeadline(&block, payload.SourceID, minedAt, deadline)
+	} else {
+		submitErr = pool.SubmitCandidate(&block, payload.SourceID, minedAt)
+	}
+
+	if submitErr != nil {
+		log.Printf("[SyncReactor] ✗ height %d from %s: %v", block.Header.Height, from, submitErr)
+		return
+	}
 }
 
 // BuildGetHeadersMsg serializes a GetHeaders request message.
@@ -501,6 +620,13 @@ func BuildStatusMsg(height uint64, work string, latestHash string) ([]byte, erro
 	return msg, nil
 }
 
+// BuildStatusRequestMsg serializes a StatusRequest handshake message.
+// Used by SyncReactor.AddPeer to initiate protocol handshake with new peers.
+func BuildStatusRequestMsg() ([]byte, error) {
+	msg := []byte{SyncMsgStatusRequest}
+	return msg, nil
+}
+
 // Internal payload structures for JSON serialization.
 
 type getHeadersPayload struct {
@@ -528,6 +654,46 @@ type blockLocatorPayload struct {
 type notFoundPayload struct {
 	MsgType byte     `json:"msgType"`
 	IDs     []string `json:"ids"`
+}
+
+// MiningCandidatePayload represents a mining candidate block broadcast to peers.
+// Contains the serialized block, source miner ID, mining timestamp, and window deadline for synchronization.
+type MiningCandidatePayload struct {
+	Block          json.RawMessage `json:"block"`
+	SourceID       string          `json:"source_id"`
+	MinedAt        int64           `json:"mined_at"`
+	WindowDeadline int64           `json:"window_deadline"`
+}
+
+// MarshalJSON customizes JSON serialization to include the message type byte.
+func (p *MiningCandidatePayload) MarshalJSON() ([]byte, error) {
+	type Alias MiningCandidatePayload
+	raw, err := json.Marshal(&struct {
+		Type byte `json:"type"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+		Type:  SyncMsgMiningCandidate,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal mining candidate payload: %w", err)
+	}
+	return raw, nil
+}
+
+// UnmarshalJSON customizes JSON deserialization to extract the message type byte.
+func (p *MiningCandidatePayload) UnmarshalJSON(data []byte) error {
+	type Alias MiningCandidatePayload
+	aux := &struct {
+		Type byte `json:"type"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+	}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return fmt.Errorf("unmarshal mining candidate payload: %w", err)
+	}
+	return nil
 }
 
 // ParseSyncMessageType extracts the message type from a raw sync message.

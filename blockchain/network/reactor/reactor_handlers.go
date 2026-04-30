@@ -2,6 +2,7 @@ package reactor
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,10 +20,18 @@ import (
 // corresponding business operation, and (when responding) serializes and
 // sends wire messages back through the Switch.
 type ReactorHandlers struct {
-	chain   Chain
-	mempool Mempool
-	sw      Switch
-	miner   Miner
+	chain         Chain
+	mempool       Mempool
+	sw            Switch
+	miner         Miner
+	candidatePool CandidatePoolRouter
+}
+
+// CandidatePoolRouter defines the minimal interface for routing blocks through the candidate pool
+// This avoids importing core package directly in reactor handlers
+type CandidatePoolRouter interface {
+	ShouldPool(height uint64) bool
+	SubmitCandidate(block *core.Block, sourceID string, minedAt time.Time) error
 }
 
 // Chain defines the subset of blockchain methods required by the reactor
@@ -86,6 +95,10 @@ func (h *ReactorHandlers) SetMiner(miner Miner) {
 	h.miner = miner
 }
 
+func (h *ReactorHandlers) SetCandidatePool(pool CandidatePoolRouter) {
+	h.candidatePool = pool
+}
+
 // =============================================================================
 // SyncReactorHandler - implements SyncHandler interface
 // =============================================================================
@@ -118,46 +131,45 @@ func NewSyncReactorHandler(handlers *ReactorHandlers) *SyncReactorHandler {
 // OnGetHeaders responds to a peer request for block headers starting at
 // the given height. Headers are serialized as JSON bytes and sent on the
 // sync channel.
+//
+// Runs asynchronously to prevent blocking recvRoutine and competing with mining.
 func (h *SyncReactorHandler) OnGetHeaders(peerID string, from uint64, count uint64) error {
-	log.Printf("[SyncHandler] OnGetHeaders: peerID=%s, from=%d, count=%d", peerID, from, count)
 	if h.handlers == nil || h.handlers.chain == nil {
-		log.Printf("[SyncHandler] OnGetHeaders ERROR: chain not available for peer %s", peerID)
 		return fmt.Errorf("sync handler: chain not available")
 	}
 	if count == 0 {
-		log.Printf("[SyncHandler] OnGetHeaders ERROR: count must be > 0 for peer %s", peerID)
 		return fmt.Errorf("sync handler: OnGetHeaders count must be > 0")
 	}
 
-	headers := h.handlers.chain.HeadersFrom(from, count)
-	if headers == nil {
-		headers = []*core.BlockHeader{}
-	}
-	log.Printf("[SyncHandler] OnGetHeaders: found %d headers for peer %s", len(headers), peerID)
+	go func() {
+		headers := h.handlers.chain.HeadersFrom(from, count)
+		if headers == nil {
+			headers = []*core.BlockHeader{}
+		}
 
-	hasMore := uint64(len(headers)) == count
-	if tip := h.handlers.chain.LatestBlock(); tip != nil {
-		hasMore = hasMore && from+count <= tip.GetHeight()
-	}
+		hasMore := uint64(len(headers)) == count
+		if tip := h.handlers.chain.LatestBlock(); tip != nil {
+			hasMore = hasMore && from+count <= tip.GetHeight()
+		}
 
-	headersJSON, err := json.Marshal(headers)
-	if err != nil {
-		log.Printf("[SyncHandler] OnGetHeaders ERROR: marshal headers failed for peer %s: %v", peerID, err)
-		return fmt.Errorf("sync handler: marshal headers for peer %s: %w", peerID, err)
-	}
+		headersJSON, err := json.Marshal(headers)
+		if err != nil {
+			log.Printf("[SyncHandler] marshal headers for peer %s: %v", peerID, err)
+			return
+		}
 
-	msg, buildErr := BuildHeadersMsg(headersJSON, hasMore)
-	if buildErr != nil {
-		log.Printf("[SyncHandler] OnGetHeaders ERROR: build headers message failed for peer %s: %v", peerID, buildErr)
-		return fmt.Errorf("sync handler: build headers message for peer %s: %w", peerID, buildErr)
-	}
+		msg, buildErr := BuildHeadersMsg(headersJSON, hasMore)
+		if buildErr != nil {
+			log.Printf("[SyncHandler] build headers msg for peer %s: %v", peerID, buildErr)
+			return
+		}
 
-	if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, msg) {
-		log.Printf("[SyncHandler] OnGetHeaders ERROR: failed to send headers to peer %s", peerID)
-		return fmt.Errorf("sync handler: failed to send headers to peer %s", peerID)
-	}
+		if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, msg) {
+			log.Printf("[SyncHandler] failed to send %d headers to peer %s", len(headers), peerID)
+			return
+		}
+	}()
 
-	log.Printf("[SyncHandler] OnGetHeaders: sent %d headers to peer %s, hasMore=%v", len(headers), peerID, hasMore)
 	return nil
 }
 
@@ -193,6 +205,13 @@ func (h *SyncReactorHandler) OnHeaders(peerID string, headers []byte, hasMore bo
 // OnGetBlocks responds to a peer request for full block bodies at the
 // specified heights. Each requested height is looked up on the local chain.
 // Missing blocks trigger a NotFound response for those specific heights.
+//
+// CRITICAL: This function runs asynchronously to prevent blocking the recvRoutine.
+// Blocking recvRoutine would stall all P2P message processing and compete with
+// mining for Chain.RWMutex and CPU resources. The async pattern ensures:
+// 1. Mining can continue uninterrupted during block serving
+// 2. Other P2P messages can be processed concurrently
+// 3. Large block responses don't stall the connection's message pump
 func (h *SyncReactorHandler) OnGetBlocks(peerID string, heights []uint64) error {
 	if h.handlers == nil || h.handlers.chain == nil {
 		return fmt.Errorf("sync handler: chain not available")
@@ -201,48 +220,56 @@ func (h *SyncReactorHandler) OnGetBlocks(peerID string, heights []uint64) error 
 		return fmt.Errorf("sync handler: OnGetBlocks heights must not be empty")
 	}
 
-	blocks := make([]*core.Block, 0, len(heights))
-	missing := make([]string, 0)
+	go func() {
+		blocks := make([]*core.Block, 0, len(heights))
+		missing := make([]string, 0)
 
-	for _, height := range heights {
-		block, found := h.handlers.chain.BlockByHeight(height)
-		if !found || block == nil {
-			missing = append(missing, fmt.Sprintf("height-%d", height))
-			continue
+		for _, height := range heights {
+			block, found := h.handlers.chain.BlockByHeight(height)
+			if !found || block == nil {
+				missing = append(missing, fmt.Sprintf("height-%d", height))
+				continue
+			}
+			blocks = append(blocks, block)
 		}
-		blocks = append(blocks, block)
-	}
 
-	if len(blocks) == 0 {
-		msg, err := buildNotFoundMsgForSync(SyncMsgBlocks, missing)
+		if len(blocks) == 0 {
+			msg, err := buildNotFoundMsgForSync(SyncMsgBlocks, missing)
+			if err != nil {
+				log.Printf("[SyncHandler] build notFound for peer %s: %v", peerID, err)
+				return
+			}
+			if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, msg) {
+				log.Printf("[SyncHandler] failed to send notFound to peer %s", peerID)
+			}
+			return
+		}
+
+		blocksJSON := marshalBlocksToJSONRaw(blocks)
+		msg, err := BuildBlocksMsg(blocksJSON)
 		if err != nil {
-			return fmt.Errorf("sync handler: build notFound message for peer %s: %w", peerID, err)
+			log.Printf("[SyncHandler] build blocks msg for peer %s: %v", peerID, err)
+			return
 		}
+
 		if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, msg) {
-			return fmt.Errorf("sync handler: failed to send notFound to peer %s", peerID)
+			log.Printf("[SyncHandler] failed to send %d blocks to peer %s", len(blocks), peerID)
+			return
 		}
-		return nil
-	}
 
-	blocksJSON := marshalBlocksToJSONRaw(blocks)
-	msg, err := BuildBlocksMsg(blocksJSON)
-	if err != nil {
-		return fmt.Errorf("sync handler: build blocks message for peer %s: %w", peerID, err)
-	}
-
-	if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, msg) {
-		return fmt.Errorf("sync handler: failed to send blocks to peer %s", peerID)
-	}
-
-	if len(missing) > 0 {
-		notFoundMsg, nfErr := buildNotFoundMsgForSync(SyncMsgBlocks, missing)
-		if nfErr != nil {
-			return fmt.Errorf("sync handler: build notFound for missing blocks: %w", nfErr)
+		if len(missing) > 0 {
+			notFoundMsg, nfErr := buildNotFoundMsgForSync(SyncMsgBlocks, missing)
+			if nfErr != nil {
+				log.Printf("[SyncHandler] build notFound for missing blocks (peer %s): %v", peerID, nfErr)
+				return
+			}
+			if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, notFoundMsg) {
+				log.Printf("[SyncHandler] failed to send notFound for missing to peer %s", peerID)
+			}
 		}
-		if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, notFoundMsg) {
-			return fmt.Errorf("sync handler: failed to send notFound for missing blocks to peer %s", peerID)
-		}
-	}
+
+		log.Printf("[SyncHandler] Served %d blocks (+%d missing) to peer %s [async]", len(blocks), len(missing), peerID[:min(12, len(peerID))])
+	}()
 
 	return nil
 }
@@ -280,14 +307,23 @@ func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
 			h.syncLoop.DeliverSyncBlock(peerID, &block)
 			deliveredCount++
 		} else if h.handlers != nil && h.handlers.chain != nil {
-			accepted, addErr := h.handlers.chain.AddBlock(&block)
-			if addErr != nil {
-				log.Printf("[SyncHandler] Failed to add block %d from peer %s: %v",
-					block.GetHeight(), peerID, addErr)
-				continue
-			}
-			if accepted {
-				deliveredCount++
+			if h.handlers.candidatePool != nil && h.handlers.candidatePool.ShouldPool(block.GetHeight()) {
+				if submitErr := h.handlers.candidatePool.SubmitCandidate(&block, "peer-"+peerID, time.Now()); submitErr != nil {
+					log.Printf("[SyncHandler] candidate pool rejected block %d from peer %s: %v",
+						block.GetHeight(), peerID, submitErr)
+				} else {
+					deliveredCount++
+				}
+			} else {
+				accepted, addErr := h.handlers.chain.AddBlock(&block)
+				if addErr != nil {
+					log.Printf("[SyncHandler] Failed to add block %d from peer %s: %v",
+						block.GetHeight(), peerID, addErr)
+					continue
+				}
+				if accepted {
+					deliveredCount++
+				}
 			}
 		}
 	}
@@ -432,6 +468,45 @@ func (h *SyncReactorHandler) OnStatus(peerID string, height uint64, work string,
 		log.Printf("[SyncHandler] skipping sync trigger: isSyncing=%v, isSynced=%v", isSyncing, isSynced)
 	}
 
+	return nil
+}
+
+// OnStatusRequest handles an incoming status request during peer handshake.
+// Responds with current chain status (height, work, latestHash) to complete handshake.
+// Reference: core-main/netsync/protocol_reactor.go handleStatusRequest
+func (h *SyncReactorHandler) OnStatusRequest(peerID string) error {
+	if h.handlers == nil || h.handlers.chain == nil {
+		return fmt.Errorf("sync handler: chain not available for status request")
+	}
+
+	tip := h.handlers.chain.LatestBlock()
+	if tip == nil {
+		return fmt.Errorf("sync handler: no tip block available")
+	}
+
+	height := tip.GetHeight()
+	work := "0"
+	if tip.TotalWork != "" {
+		work = tip.TotalWork
+	}
+	latestHash := hex.EncodeToString(tip.GetHash())
+
+	msg, err := BuildStatusMsg(height, work, latestHash)
+	if err != nil {
+		return fmt.Errorf("sync handler: build status response for %s: %w", peerID, err)
+	}
+
+	sw := h.handlers.sw
+	if sw == nil {
+		return fmt.Errorf("sync handler: switch not available for status response")
+	}
+
+	if !sw.Send(peerID, mconnection.ChannelSync, msg) {
+		return fmt.Errorf("sync handler: send status response to %s failed", peerID)
+	}
+
+	log.Printf("[SyncHandler] OnStatusRequest: sent StatusResponse to %s (height=%d, hash=%s)",
+		peerID, height, latestHash[:16])
 	return nil
 }
 
@@ -728,15 +803,29 @@ func (h *BlockReactorHandler) OnBlock(peerID string, blocks []*core.Block) error
 		return fmt.Errorf("block handler: OnBlock blocks must not be empty")
 	}
 
-	// CRITICAL: Signal verification start to pause mining while processing blocks
-	if h.handlers.miner != nil {
-		h.handlers.miner.StartVerification()
-	}
-
 	addedCount := 0
 	for _, block := range blocks {
 		if block == nil {
 			log.Printf("[BlockHandler] Nil block from peer %s, skipping", peerID)
+			continue
+		}
+
+		if h.handlers.candidatePool != nil && h.handlers.candidatePool.ShouldPool(block.GetHeight()) {
+			if submitErr := h.handlers.candidatePool.SubmitCandidate(block, "peer-"+peerID, time.Now()); submitErr != nil {
+				log.Printf("[BlockHandler] candidate pool rejected block %d from peer %s: %v",
+					block.GetHeight(), peerID, submitErr)
+			} else {
+				addedCount++
+				if h.handlers.sw != nil {
+					go func(b *core.Block, sender string) {
+						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+						defer cancel()
+						if err := h.handlers.sw.BroadcastBlockExcluding(ctx, b, sender); err != nil {
+							log.Printf("[BlockHandler] flood broadcast failed: %v", err)
+						}
+					}(block, peerID)
+				}
+			}
 			continue
 		}
 
@@ -767,11 +856,6 @@ func (h *BlockReactorHandler) OnBlock(peerID string, blocks []*core.Block) error
 
 	log.Printf("[BlockHandler] Processed %d blocks from peer %s, accepted %d (flood broadcast enabled)",
 		len(blocks), peerID, addedCount)
-
-	// CRITICAL: Signal verification end to resume mining after all blocks processed
-	if h.handlers.miner != nil {
-		h.handlers.miner.EndVerification()
-	}
 
 	return nil
 }

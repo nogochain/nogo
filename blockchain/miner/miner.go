@@ -132,6 +132,8 @@ type Miner struct {
 
 	syncLoop SyncLoop
 
+	candidatePool *core.CandidatePool
+
 	minerAddress string
 	chainID      uint64
 }
@@ -158,6 +160,7 @@ type PeerAPI interface {
 	Peers() []string
 	FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, error)
 	BroadcastBlock(ctx context.Context, block *core.Block) error
+	BroadcastCandidate(block *core.Block, sourceID string, minedAt time.Time) error
 }
 
 // ChainInfo represents peer chain information (alias to network.ChainInfo)
@@ -250,6 +253,13 @@ func (m *Miner) SetEventSink(sink EventSink) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.events = sink
+}
+
+// SetCandidatePool sets the candidate pool for fair mining selection
+func (m *Miner) SetCandidatePool(pool *core.CandidatePool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.candidatePool = pool
 }
 
 // OnBlockAdded is called when a block is added to the chain
@@ -452,7 +462,7 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 	}
 
 	logf(colorBrightGreen, "⛏️ ", "Mining tick: attempting to mine...")
-	block, err := m.MineOnce(ctx, force)
+	block, err := m.MineOnce(ctx)
 	if err != nil {
 		logf(colorRed, "❌ ", fmt.Sprintf("Mine once failed: %v", err))
 		return
@@ -654,49 +664,60 @@ func (m *Miner) hasHigherPeer(ctx context.Context) bool {
 // miners always appeared "ahead", causing the slower miner to sync instead of mine.
 // Correct behavior (matching Bitcoin/core-main): all miners always mine on local tip.
 // If a better chain exists, autoReorgIfNeededLocked in AddBlock handles reorganization.
-func (m *Miner) MineOnce(ctx context.Context, force bool) (*core.Block, error) {
-	if m.mp == nil {
-		return nil, nil
+func (m *Miner) MineOnce(ctx context.Context) (*core.Block, error) {
+	if !m.isMiningActive() {
+		return nil, fmt.Errorf("miner: mining is not active")
 	}
 
 	m.miningMu.Lock()
 	m.isMining = true
 	m.miningMu.Unlock()
 
-	pm := m.pm
-
 	selected, selectedIDs, err := m.bc.SelectMempoolTxs(m.mp, m.maxTxPerBlock)
 	if err != nil {
-		logf(colorRed, "❌ ", fmt.Sprintf("Select txs failed: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("select mempool txs: %w", err)
 	}
 
-	mineEmpty := force || m.forceEmptyBlocks
-	if len(selected) == 0 && !mineEmpty {
-		return nil, nil
-	}
-
-	parentAtMineTime := m.bc.LatestBlock()
-	if parentAtMineTime == nil {
-		logf(colorRed, "❌ ", "No parent block at mining time")
-		return nil, errors.New("no parent block")
-	}
-
+	minedAt := time.Now()
 	b, err := m.bc.MineTransfers(ctx, selected)
 	if err != nil {
-		logf(colorRed, "❌ ", fmt.Sprintf("Mine failed: %v", err))
+		if b != nil {
+			logf(colorBrightYellow, "⚠️ ", "Mined block stored as fork/error: %v (broadcasting anyway for reorg)", err)
+			go m.broadcastBlock(ctx, b)
+			go m.broadcastCandidate(ctx, b, minedAt)
+			// Even on error, try to submit for potential recovery
+			if m.candidatePool != nil {
+				_ = m.candidatePool.SubmitCandidate(b, m.minerAddress, minedAt)
+			}
+			return b, err
+		}
+		logf(colorRed, "❌ ", "Mine failed: %v", err)
 		return nil, err
 	}
 
-	latest := m.bc.LatestBlock()
-	if latest == nil || latest.Hash == nil || string(latest.Hash) != string(b.Hash) {
+	if b == nil {
 		return nil, nil
 	}
 
-	propagationDelay := calculateAdaptivePropagationDelay(pm)
-	time.Sleep(time.Duration(propagationDelay) * time.Millisecond)
+	// 🎯 CRITICAL: Submit to candidate pool FIRST (before any broadcast)
+	// This ensures local blocks compete fairly with remote blocks through the same selection process
+	var windowDeadline time.Time
+	var submitErr error
+	if m.candidatePool != nil {
+		if submitErr = m.candidatePool.SubmitCandidate(b, m.minerAddress, minedAt); submitErr != nil {
+			logf(colorBrightYellow, "⚠️ ", "Pool submit failed height %d: %v", b.Header.Height, submitErr)
+		} else if wd, exists := m.candidatePool.GetWindowDeadline(b.Header.Height); exists {
+			windowDeadline = wd
+		}
+	}
 
 	go m.broadcastBlock(ctx, b)
+
+	if !windowDeadline.IsZero() {
+		go m.broadcastCandidateWithDeadline(ctx, b, minedAt, windowDeadline)
+	} else if submitErr != nil {
+		logf(colorYellow, "⚠️ ", "Skipping deadline broadcast: %v", submitErr)
+	}
 
 	if len(selectedIDs) > 0 {
 		m.mp.RemoveMany(selectedIDs)
@@ -729,10 +750,44 @@ func (m *Miner) broadcastBlock(ctx context.Context, block *core.Block) {
 		return
 	}
 
-	// Broadcast block to peers via P2P manager
+	if err := m.pm.BroadcastBlock(ctx, block); err != nil {
+		log.Printf("[Miner] failed to broadcast block: %v", err)
+	}
+}
+
+// broadcastCandidate broadcasts a mining candidate to all peers via SyncMsgMiningCandidate
+// This enables cross-node candidate pool participation for fair mining competition
+func (m *Miner) broadcastCandidate(_ context.Context, block *core.Block, minedAt time.Time) {
+	if !isPeerAPIValid(m.pm) {
+		return
+	}
+
 	if m.pm != nil {
-		if err := m.pm.BroadcastBlock(ctx, block); err != nil {
-			log.Printf("[Miner] failed to broadcast block: %v", err)
+		if err := m.pm.BroadcastCandidate(block, m.minerAddress, minedAt); err != nil {
+			log.Printf("[Miner] failed to broadcast mining candidate: %v", err)
+		}
+	}
+}
+
+// broadcastCandidateWithDeadline broadcasts a mining candidate with synchronized window deadline
+// This ensures all nodes share the same window closing time for fair competition
+func (m *Miner) broadcastCandidateWithDeadline(_ context.Context, block *core.Block, minedAt time.Time, deadline time.Time) {
+	if !isPeerAPIValid(m.pm) {
+		return
+	}
+
+	if m.pm != nil {
+		if broadcaster, ok := m.pm.(interface {
+			BroadcastCandidateWithDeadline(block *core.Block, sourceID string, minedAt time.Time, deadline time.Time) error
+		}); ok {
+			if err := broadcaster.BroadcastCandidateWithDeadline(block, m.minerAddress, minedAt, deadline); err != nil {
+				log.Printf("[Miner] broadcast failed height %d: %v", block.Header.Height, err)
+			}
+		} else {
+			log.Printf("[Miner] fallback: no deadline sync support")
+			if err := m.pm.BroadcastCandidate(block, m.minerAddress, minedAt); err != nil {
+				log.Printf("[Miner] broadcast failed: %v", err)
+			}
 		}
 	}
 }

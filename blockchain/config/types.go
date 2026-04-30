@@ -349,8 +349,16 @@ type P2PConfig struct {
 	// Peers is the list of initial peer addresses
 	Peers []string `json:"peers"`
 
+	// KeepDial is the list of addresses that must remain persistently connected
+	// These are seed/trusted nodes that will be re-dialed every replenish interval
+	// Aligned with core-main's P2P.KeepDial configuration
+	KeepDial []string `json:"keepDial"`
+
 	// EnableNAT indicates if NAT traversal is enabled
 	EnableNAT bool `json:"enableNAT"`
+
+	// LANDiscover enables mDNS-based LAN peer discovery
+	LANDiscover bool `json:"lanDiscover"`
 }
 
 // APIConfig defines API server configuration

@@ -381,19 +381,19 @@ func (b *Block) GetTransactions() []Transaction {
 // blockLegacyJSON represents the legacy JSON format with top-level fields
 // Used for backward compatibility when deserializing from older nodes
 type blockLegacyJSON struct {
-	Hash          []byte        `json:"hash"`
-	Height        uint64        `json:"height"`
-	Header        BlockHeader   `json:"header"`
-	Transactions  []Transaction `json:"transactions"`
-	CoinbaseTx    *Transaction  `json:"coinbaseTx"`
-	MinerAddress  string        `json:"minerAddress"`
-	TotalWork     string        `json:"totalWork"`
-	Version       uint32        `json:"version"`
-	TimestampUnix int64         `json:"timestampUnix"`
-	DifficultyBits uint32       `json:"difficultyBits"`
-	Difficulty    uint32        `json:"difficulty"`
-	Nonce         uint64        `json:"nonce"`
-	PrevHash      []byte        `json:"prevHash"`
+	Hash           []byte        `json:"hash"`
+	Height         uint64        `json:"height"`
+	Header         BlockHeader   `json:"header"`
+	Transactions   []Transaction `json:"transactions"`
+	CoinbaseTx     *Transaction  `json:"coinbaseTx"`
+	MinerAddress   string        `json:"minerAddress"`
+	TotalWork      string        `json:"totalWork"`
+	Version        uint32        `json:"version"`
+	TimestampUnix  int64         `json:"timestampUnix"`
+	DifficultyBits uint32        `json:"difficultyBits"`
+	Difficulty     uint32        `json:"difficulty"`
+	Nonce          uint64        `json:"nonce"`
+	PrevHash       []byte        `json:"prevHash"`
 }
 
 // UnmarshalJSON implements custom JSON unmarshaling for backward compatibility
@@ -549,9 +549,14 @@ type Transaction struct {
 }
 
 // GetID returns the transaction ID
-// Error handling: ignores error for compatibility, use GetIDWithError for production
+// Deprecated: Use GetIDWithError for production code to handle errors properly
+// This method ignores errors for backward compatibility only
 func (t Transaction) GetID() string {
-	txid, _ := TxIDHex(t)
+	txid, err := TxIDHex(t)
+	if err != nil {
+		// Return empty string on error - callers should use GetIDWithError instead
+		return ""
+	}
 	return txid
 }
 
@@ -934,23 +939,23 @@ func validateAddress(addr string) error {
 func StringToAddress(addr string) ([20]byte, error) {
 	var result [20]byte
 	encoded := addr
-	
+
 	// Strip NOGO prefix if present
 	if len(addr) >= 4 && addr[:4] == "NOGO" {
 		encoded = addr[4:]
 	}
-	
+
 	// Decode hex string to bytes
 	decoded, err := hex.DecodeString(encoded)
 	if err != nil {
 		return result, fmt.Errorf("invalid address hex encoding: %w", err)
 	}
-	
+
 	// Validate address length (must be at least 20 bytes)
 	if len(decoded) < 20 {
 		return result, fmt.Errorf("address too short: expected at least 20 bytes, got %d", len(decoded))
 	}
-	
+
 	// Copy first 20 bytes
 	copy(result[:], decoded[:20])
 	return result, nil

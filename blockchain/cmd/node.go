@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -70,6 +71,8 @@ type Node struct {
 	orphanPool  *utils.OrphanPool
 	validator   *consensus.BlockValidator
 	securityMgr *security.SecurityManager
+
+	pool *core.CandidatePool
 
 	networkChainWrapper *networkChainWrapper
 	syncReactorHandler  *reactor.SyncReactorHandler
@@ -137,6 +140,28 @@ func (n *Node) initializeComponents() error {
 	}
 	n.store = store
 
+	dbPath := n.config.DataDir
+	if dbPath == "" {
+		dbPath = "./nogodata"
+	}
+	chainDBPath := dbPath + string(os.PathSeparator) + "chain.db"
+
+	pattern := chainDBPath + ".corrupted.*"
+	matches, _ := filepath.Glob(pattern)
+	for _, backupPath := range matches {
+		log.Printf("Node: found backup database %s, attempting auto-restore...", backupPath)
+		if count, restoreErr := store.RestoreFromBackup(backupPath); restoreErr != nil {
+			log.Printf("Node: warning - failed to restore from %s: %v", backupPath, restoreErr)
+		} else if count > 0 {
+			log.Printf("Node: successfully restored %d blocks from backup %s", count, backupPath)
+			if rmErr := os.Remove(backupPath); rmErr != nil {
+				log.Printf("Node: warning - could not remove backup file after restore: %v", rmErr)
+			}
+		} else {
+			log.Printf("Node: backup %s contains no blocks, keeping for reference", backupPath)
+		}
+	}
+
 	chainCfg := core.ChainConfig{
 		ChainID:      n.config.ChainID,
 		MinerAddress: strings.TrimSpace(n.minerAddr),
@@ -152,6 +177,10 @@ func (n *Node) initializeComponents() error {
 
 	n.orphanPool = utils.NewOrphanPool(100, 1*time.Hour)
 	n.validator = consensus.NewBlockValidator(chain.GetConsensus(), n.config.ChainID, nil)
+
+	candidatePool := core.NewCandidatePool()
+	candidatePool.SetChainReference(chain, core.NewWorkCalculator())
+	n.pool = candidatePool
 
 	mpSize := config.DefaultMempoolMax
 	n.mempool = mempool.NewMempool(
@@ -169,13 +198,13 @@ func (n *Node) initializeComponents() error {
 	n.networkChainWrapper = newNetworkChainWrapper(n.chain)
 
 	seeds := network.ParseSeedNodes(n.config.P2PPeers)
-	
+
 	// Use default seed nodes if no seeds are configured
 	if len(seeds) == 0 {
 		seeds = network.DefaultSeedNodes
 		log.Printf("Node: using default seed nodes: %v", network.DefaultSeedNodes)
 	}
-	
+
 	switchCfg := network.DefaultSwitchConfig()
 	switchCfg.ListenAddr = n.config.P2PListenAddr
 	switchCfg.Seeds = seeds
@@ -183,7 +212,16 @@ func (n *Node) initializeComponents() error {
 	if switchCfg.MaxPeers <= 0 {
 		switchCfg.MaxPeers = 50
 	}
-	
+
+	keepDialEnv := os.Getenv("P2P_KEEP_DIAL")
+	if keepDialEnv != "" {
+		switchCfg.PersistentPeers = network.ParseSeedNodes(keepDialEnv)
+		log.Printf("Node: KeepDial loaded from P2P_KEEP_DIAL env: %v", switchCfg.PersistentPeers)
+	} else if len(seeds) > 0 {
+		switchCfg.PersistentPeers = seeds
+		log.Printf("Node: KeepDial using seed nodes as persistent peers: %v", switchCfg.PersistentPeers)
+	}
+
 	// Load Seed Mode from environment variable
 	if seedMode := os.Getenv("NOGO_SEED_MODE"); seedMode == "true" || seedMode == "1" {
 		switchCfg.SeedMode = true
@@ -198,6 +236,10 @@ func (n *Node) initializeComponents() error {
 		return fmt.Errorf("failed to create reactor handlers: %w", err)
 	}
 
+	if n.pool != nil {
+		handlers.SetCandidatePool(n.pool)
+	}
+
 	n.syncReactorHandler = reactor.NewSyncReactorHandler(handlers)
 	n.txReactorHandler = reactor.NewTxReactorHandler(handlers)
 	n.blockReactorHandler = reactor.NewBlockReactorHandler(handlers)
@@ -205,6 +247,12 @@ func (n *Node) initializeComponents() error {
 	n.syncReactor, err = reactor.NewSyncReactor(n.syncReactorHandler)
 	if err != nil {
 		return fmt.Errorf("create sync reactor: %w", err)
+	}
+
+	if n.pool != nil {
+		if setErr := n.syncReactor.SetCandidatePool(n.pool); setErr != nil {
+			log.Printf("Node: warning - failed to set candidate pool on sync reactor: %v", setErr)
+		}
 	}
 
 	n.txReactor, err = reactor.NewTxReactor(n.txReactorHandler)
@@ -239,6 +287,10 @@ func (n *Node) initializeComponents() error {
 		n.securityMgr,
 	)
 
+	if n.pool != nil {
+		n.syncLoop.SetCandidatePool(n.pool)
+	}
+
 	n.networkChainWrapper.SetSyncLoop(n.syncLoop)
 
 	n.syncReactorHandler.SetSyncLoop(n.syncLoop)
@@ -268,7 +320,11 @@ func (n *Node) initializeComponents() error {
 			n.config.ChainID,
 		)
 		n.miner = minerImpl
-		
+
+		if n.pool != nil {
+			minerImpl.SetCandidatePool(n.pool)
+		}
+
 		// CRITICAL: Set miner to reactor handlers after creation
 		// This enables verification coordination for P2P block processing
 		if n.blockReactorHandler != nil {
@@ -279,7 +335,7 @@ func (n *Node) initializeComponents() error {
 	n.chain.SetEventSink(api.NewWSHub(100))
 
 	n.chain.SetMempool(n.mempool)
-	
+
 	// CRITICAL: Set sync notifier to trigger sync check after chain reorganization
 	// This prevents node from getting stuck on outdated chain after fork rollback
 	if n.syncLoop != nil {
@@ -366,6 +422,10 @@ func (n *Node) createHandler(switchAPI network.PeerAPI) http.Handler {
 		wsEnable,
 		wsHub,
 	)
+
+	if n.pool != nil {
+		srv.SetCandidatePool(n.pool)
+	}
 	return srv.Routes()
 }
 
@@ -466,6 +526,10 @@ func (n *Node) Shutdown() {
 		if err := n.miner.Stop(); err != nil {
 			log.Error("Miner shutdown error: %v", err)
 		}
+	}
+
+	if n.pool != nil {
+		n.pool.Stop()
 	}
 
 	if n.syncLoop != nil {

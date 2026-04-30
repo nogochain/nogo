@@ -55,8 +55,9 @@ type Server struct {
 	requireAI   bool
 	httpTimeout time.Duration
 
-	mp    *MempoolImpl
-	miner *MinerImpl
+	mp            *MempoolImpl
+	miner         *MinerImpl
+	candidatePool *core.CandidatePool
 
 	peers    network.PeerAPI
 	txGossip bool
@@ -131,6 +132,10 @@ func NewServer(bc Blockchain, aiAuditorURL string, mp *MempoolImpl, miner *Miner
 	}
 
 	return s
+}
+
+func (s *Server) SetCandidatePool(pool *core.CandidatePool) {
+	s.candidatePool = pool
 }
 
 // Routes returns the HTTP handler with all routes configured
@@ -246,7 +251,17 @@ func (s *Server) handleChainInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	latest := s.bc.LatestBlock()
-	genesis, _ := s.bc.BlockByHeight(0)
+	if latest == nil {
+		http.Error(w, "chain not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	genesis, found := s.bc.BlockByHeight(0)
+	if !found || genesis == nil {
+		http.Error(w, "genesis block not found", http.StatusInternalServerError)
+		return
+	}
+
 	peersCount := 0
 	if s.peers != nil {
 		peersCount = len(s.peers.Peers())
@@ -1189,6 +1204,43 @@ func (s *Server) handleAddBlock(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
+
+	if s.candidatePool != nil {
+		if s.candidatePool.ShouldPool(b.GetHeight()) {
+			if submitErr := s.candidatePool.SubmitCandidate(&b, "api-submission", time.Now()); submitErr != nil {
+				log.Printf("[API] candidate pool rejected block: %v", submitErr)
+				_ = writeJSON(w, http.StatusBadRequest, map[string]any{"accepted": false, "message": submitErr.Error()})
+				return
+			}
+			_ = writeJSON(w, http.StatusOK, map[string]any{
+				"accepted": true,
+				"message":  "block submitted to candidate pool for fair competition",
+				"height":   b.GetHeight(),
+			})
+			return
+		}
+
+		tipBlock := s.bc.LatestBlock()
+		tipHeight := uint64(0)
+		if tipBlock != nil {
+			tipHeight = tipBlock.GetHeight()
+		}
+
+		if b.GetHeight() >= tipHeight {
+			log.Printf("[API] REJECTED: block at height %d is at or above tip (%d) but ShouldPool returned false, rejecting to prevent bypass",
+				b.GetHeight(), tipHeight)
+			_ = writeJSON(w, http.StatusForbidden, map[string]any{
+				"accepted": false,
+				"message":  "blocks at competition height must go through candidate pool",
+				"height":   b.GetHeight(),
+				"tipHeight": tipHeight,
+			})
+			return
+		}
+
+		log.Printf("[API] allowing direct AddBlock for historical block at height %d (tip=%d)", b.GetHeight(), tipHeight)
+	}
+
 	reorged, err := s.bc.AddBlock(&b)
 	if err != nil && errors.Is(err, consensus.ErrUnknownParent) && s.peers != nil {
 		parentHex := fmt.Sprintf("%x", b.Header.PrevHash)
@@ -1623,7 +1675,7 @@ func (s *Server) handleMineOnce(w http.ResponseWriter, r *http.Request) {
 		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"mined": false, "message": "miner not configured"})
 		return
 	}
-	b, err := s.miner.MineOnce(r.Context(), true)
+	b, err := s.miner.MineOnce(r.Context())
 	if err != nil {
 		_ = writeJSON(w, http.StatusBadRequest, map[string]any{"mined": false, "message": err.Error()})
 		return

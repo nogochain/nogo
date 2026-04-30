@@ -37,7 +37,10 @@ import (
 )
 
 const (
-	BlockTimeMaxDrift          = 7200
+	// BlockTimeMaxDrift defines maximum allowed future timestamp (15 minutes)
+	// Security rationale: Reduces attack surface for time-based attacks
+	// Previous value of 2 hours was too permissive and vulnerable to time manipulation
+	BlockTimeMaxDrift          = 900 // 15 minutes - hardened from previous 2 hours
 	DifficultyTolerancePercent = 50
 	maxDifficultyBits          = uint32(math.MaxUint32)
 )
@@ -356,6 +359,10 @@ func (v *BlockValidator) validateCoinbaseEconomics(block *Block) error {
 	var totalFees uint64
 	for _, tx := range block.Transactions[1:] {
 		if tx.Type == TxTransfer {
+			// Overflow check: prevent malicious blocks from bypassing economic validation
+			if totalFees > math.MaxUint64-tx.Fee {
+				return fmt.Errorf("total fee overflow: accumulated %d + new %d exceeds max uint64", totalFees, tx.Fee)
+			}
 			totalFees += tx.Fee
 		}
 	}

@@ -766,6 +766,7 @@ func TestSwitch_PeerAlreadyDialingOrConnected(t *testing.T) {
 	testAddr := "192.168.1.100:9090"
 	peer := &Peer{
 		id:       testAddr,
+		addr:     testAddr,
 		conn:     conn1,
 		nodeInfo: map[string]string{"address": testAddr},
 		isLAN:    false,

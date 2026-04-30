@@ -96,6 +96,7 @@ type SecurityConfig struct {
 	MaxRequestBodyBytes int64
 	SecurityHeaders     bool
 	CORSAllowOrigins    []string
+	TrustProxy          bool // Only trust X-Forwarded-For when behind known reverse proxy
 
 	loaded   bool
 	loadTime time.Time
@@ -124,6 +125,7 @@ func loadSecurityConfigFromEnv() *SecurityConfig {
 	config.RateLimitEnabled = getBoolEnv(envRateLimitEnabled, true)
 	config.MaxRequestBodyBytes = getInt64Env(envMaxRequestBodyMB, defaultMaxRequestBodyBytes>>20) << 20
 	config.SecurityHeaders = getBoolEnv(envSecurityHeadersEnabled, true)
+	config.TrustProxy = getBoolEnv("TRUST_PROXY", false) // Default: don't trust proxy headers (secure by default)
 
 	if origins := os.Getenv(envCORSAllowOrigins); origins != "" {
 		config.CORSAllowOrigins = strings.Split(origins, ",")
@@ -395,23 +397,32 @@ func identifyClient(r *http.Request) string {
 		return "key:" + hashIdentifier(apiKey)
 	}
 
-	ip := extractClientIP(r)
+	ip := extractClientIP(r, GetSecurityConfig().TrustProxy)
 	return "ip:" + ip
 }
 
 // extractClientIP gets the real client IP, accounting for reverse proxies
-func extractClientIP(r *http.Request) string {
-	xff := r.Header.Get("X-Forwarded-For")
-	if xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			return strings.TrimSpace(parts[0])
+// extractClientIP extracts client IP address from request
+// Security: only trusts X-Forwarded-For/X-Real-IP when TrustProxy is enabled
+// Default behavior: uses RemoteAddr to prevent IP spoofing attacks
+func extractClientIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		// Only trust proxy headers when explicitly configured (behind known reverse proxy)
+		xff := r.Header.Get("X-Forwarded-For")
+		if xff != "" {
+			parts := strings.Split(xff, ",")
+			if len(parts) > 0 {
+				return strings.TrimSpace(parts[0])
+			}
+		}
+
+		xri := r.Header.Get("X-Real-IP")
+		if xri != "" {
+			return xri
 		}
 	}
-	xri := r.Header.Get("X-Real-IP")
-	if xri != "" {
-		return xri
-	}
+
+	// Default: use direct connection IP (secure against spoofing)
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return host

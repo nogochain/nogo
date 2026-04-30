@@ -45,10 +45,11 @@ const (
 // heartbeat detection, and rate monitoring.
 //
 // Usage:
-//   mconn := NewMConnection(conn, descs, onReceive, onError, config)
-//   mconn.Start()
-//   mconn.Send(chID, data)
-//   mconn.Stop()
+//
+//	mconn := NewMConnection(conn, descs, onReceive, onError, config)
+//	mconn.Start()
+//	mconn.Send(chID, data)
+//	mconn.Stop()
 type MConnection struct {
 	// conn is the underlying network connection.
 	conn net.Conn
@@ -177,10 +178,9 @@ func (m *MConnection) Start() error {
 	m.pingTicker = time.NewTicker(m.config.PingTimeout)
 	m.statsTicker = time.NewTicker(channelStatsInterval)
 
-	m.wg.Add(3)
+	m.wg.Add(2)
 	go m.sendRoutine()
 	go m.recvRoutine()
-	go m.pingRoutine()
 
 	return nil
 }

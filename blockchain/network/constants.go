@@ -23,6 +23,23 @@ import (
 )
 
 // =============================================================================
+// PERSISTENT CONNECTION CONSTANTS (core-main aligned)
+// =============================================================================
+
+const (
+	// minNumOutboundPeers is the minimum number of outbound peers to maintain
+	// Aligned with core-main: ensures network connectivity even under churn
+	minNumOutboundPeers = 4
+
+	// maxNumLANPeers is the maximum number of LAN-discovered peers
+	maxNumLANPeers = 5
+
+	// peerReplenishInterval is the interval between outbound peer replenishment checks
+	// core-main uses 10s; this balances responsiveness against overhead
+	peerReplenishInterval = 10 * time.Second
+)
+
+// =============================================================================
 // P2P NETWORK CONSTANTS
 // =============================================================================
 

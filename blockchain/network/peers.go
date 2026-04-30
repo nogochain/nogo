@@ -31,9 +31,9 @@ type PeerEntry struct {
 }
 
 type PeerManager struct {
-	peers   []string
-	peerMap map[string]*PeerEntry
-	peersMu sync.RWMutex
+	peers        []string
+	peerMap      map[string]*PeerEntry
+	peersMu      sync.RWMutex
 
 	client *http.Client
 
@@ -58,15 +58,14 @@ func ParsePeersEnv(peersEnv string) []string {
 
 func NewPeerManager(peers []string) *PeerManager {
 	pm := &PeerManager{
-		peers:   make([]string, 0, len(peers)),
-		peerMap: make(map[string]*PeerEntry),
+		peers:        make([]string, 0, len(peers)),
+		peerMap:      make(map[string]*PeerEntry),
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 		maxAncestorDepth: 256,
 	}
 
-	// Initialize peer entries
 	for _, addr := range peers {
 		pm.addPeerInternal(addr)
 	}
@@ -469,6 +468,11 @@ func (p *peerAdapter) getBlockByHeight(height uint64) bool {
 	return false
 }
 
+func (p *peerAdapter) getBlocksByHeights(heights []uint64) bool {
+	log.Printf("[peerAdapter] getBlocksByHeights called (not implemented for HTTP peers)")
+	return false
+}
+
 func (p *peerAdapter) getBlocks(locator [][]byte, stopHash []byte) bool {
 	log.Printf("[peerAdapter] getBlocks called (not implemented for HTTP peers)")
 	return false
@@ -477,44 +481,6 @@ func (p *peerAdapter) getBlocks(locator [][]byte, stopHash []byte) bool {
 func (p *peerAdapter) getHeaders(locator [][]byte, stopHash []byte) bool {
 	log.Printf("[peerAdapter] getHeaders called (not implemented for HTTP peers)")
 	return false
-}
-
-func (pm *PeerManager) bestPeer(serviceFlag int) PeerInterface {
-	pm.peersMu.RLock()
-	defer pm.peersMu.RUnlock()
-
-	var maxHeight uint64
-	var bestAddr string
-
-	for _, addr := range pm.peers {
-		entry, exists := pm.peerMap[addr]
-		if !exists || !entry.IsActive {
-			continue
-		}
-
-		info, err := pm.FetchChainInfo(context.Background(), addr)
-		if err != nil {
-			continue
-		}
-
-		if info.Height > maxHeight {
-			maxHeight = info.Height
-			bestAddr = addr
-		}
-	}
-
-	if bestAddr == "" {
-		return nil
-	}
-
-	log.Printf("[PeerManager] bestPeer selected: %s (height=%d, total peers=%d)",
-		bestAddr, maxHeight, len(pm.peers))
-
-	return &peerAdapter{
-		id:     bestAddr,
-		height: maxHeight,
-		pm:     pm,
-	}
 }
 
 func (pm *PeerManager) ProcessIllegal(peerID string, level byte, reason string) {

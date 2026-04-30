@@ -109,8 +109,9 @@ type SyncLoop struct {
 	multiNodeArbiter *forkresolution.MultiNodeArbitrator
 
 	// NEW: Stateless sync components (replace old isSyncing state machine)
-	blockKeeper  *blockKeeper  // Core sync coordinator (handles startSync, require*)
-	blockFetcher *blockFetcher // Block scheduler (handles mined block broadcasts)
+	blockKeeper   *blockKeeper  // Core sync coordinator (handles startSync, require*)
+	blockFetcher  *blockFetcher // Block scheduler (handles mined block broadcasts)
+	candidatePool *core.CandidatePool
 
 	ctx                 context.Context
 	cancel              context.CancelFunc
@@ -166,7 +167,7 @@ func NewSyncLoop(pm PeerAPI, bc BlockchainInterface, miner Miner,
 	// It automatically starts syncWorker goroutine on creation
 	if chainImpl, ok := bc.(ChainInterface); ok {
 		if peerSetImpl, ok := pm.(PeerSetInterface); ok {
-			sm.blockKeeper = newBlockKeeper(chainImpl, peerSetImpl)
+			sm.blockKeeper = newBlockKeeper(chainImpl, peerSetImpl, nil)
 			log.Printf("[SyncManager] BlockKeeper created and syncWorker started (chainType=%T, peerType=%T)", bc, pm)
 		} else {
 			log.Printf("[SyncManager] WARNING: PeerAPI(%T) does not implement PeerSetInterface, blockKeeper not created", pm)
@@ -215,6 +216,15 @@ func (s *SyncLoop) SetProgressStore(store *SyncProgressStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.progressStore = store
+}
+
+func (s *SyncLoop) SetCandidatePool(pool *core.CandidatePool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.candidatePool = pool
+	if s.blockKeeper != nil {
+		s.blockKeeper.candidatePool = pool
+	}
 }
 
 // GetProgressStore returns the current progress store
@@ -1064,12 +1074,6 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 	log.Printf("[Sync] Received block %d hash=%s",
 		block.GetHeight(), hex.EncodeToString(block.Hash))
 
-	// CRITICAL: Signal verification start to pause mining while processing block
-	if s.miner != nil {
-		s.miner.StartVerification()
-		defer s.miner.EndVerification() // Ensure mining resumes after processing
-	}
-
 	// Fast validation first (basic structure check)
 	err := s.validator.ValidateBlockFast(block)
 	if err != nil {
@@ -1114,6 +1118,16 @@ func (s *SyncLoop) handleNewBlock(ctx context.Context, block *core.Block) error 
 	}
 
 	log.Printf("[Sync] Block %d validated", block.GetHeight())
+
+	if s.candidatePool != nil && s.candidatePool.ShouldPool(block.GetHeight()) {
+		if submitErr := s.candidatePool.SubmitCandidate(block, "sync-peer", time.Now()); submitErr != nil {
+			log.Printf("[Sync] candidate pool rejected validated block %d: %v (falling back to direct AddBlock)",
+				block.GetHeight(), submitErr)
+		} else {
+			log.Printf("[Sync] block %d routed to candidate pool for fair competition", block.GetHeight())
+			return nil
+		}
+	}
 
 	accepted, err := s.bc.AddBlock(block)
 	if err != nil {
@@ -1200,6 +1214,17 @@ func (s *SyncLoop) processOrphans(ctx context.Context) {
 				log.Printf("[Sync] Orphan block %d validation failed: %v, removing from pool", orphan.GetHeight(), err)
 				s.orphanPool.RemoveOrphan(hex.EncodeToString(orphan.Hash))
 				continue
+			}
+
+			if s.candidatePool != nil && s.candidatePool.ShouldPool(orphan.GetHeight()) {
+				if submitErr := s.candidatePool.SubmitCandidate(orphan, "sync-orphan", time.Now()); submitErr != nil {
+					log.Printf("[Sync] orphan %d candidate pool rejected: %v (direct AddBlock fallback)", orphan.GetHeight(), submitErr)
+				} else {
+					log.Printf("[Sync] orphan block %d routed to candidate pool", orphan.GetHeight())
+					s.orphanPool.RemoveOrphan(hex.EncodeToString(orphan.Hash))
+					addedAny = true
+					continue
+				}
 			}
 
 			accepted, addErr := s.bc.AddBlock(orphan)

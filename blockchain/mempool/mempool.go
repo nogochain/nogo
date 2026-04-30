@@ -17,6 +17,7 @@
 package mempool
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -30,6 +31,7 @@ import (
 
 // Mempool represents the transaction memory pool
 // Production-grade: implements thread-safe operations with proper concurrency control
+// Lifecycle: supports graceful shutdown via context cancellation
 type Mempool struct {
 	mu sync.RWMutex
 
@@ -46,6 +48,10 @@ type Mempool struct {
 	byFee         feeHeap                      // transactions ordered by fee
 	totalSize     uint64                       // total size in bytes
 	maxTotalSize  uint64                       // maximum total size in bytes
+
+	ctx    context.Context    // Context for lifecycle management
+	cancel context.CancelFunc // Cancel function for cleanup goroutine
+	closed bool               // Flag to prevent double close
 }
 
 // mempoolEntry represents a single transaction entry in the mempool
@@ -90,6 +96,7 @@ type MetricsCollector interface {
 
 // NewMempool creates a new mempool instance
 // Production-grade: initializes with proper defaults and validation
+// Lifecycle: starts background cleanup goroutine with context support
 func NewMempool(
 	maxSize int,
 	minFeeRate uint64,
@@ -113,6 +120,8 @@ func NewMempool(
 		maxTotalSize = mempoolConfig.MaxMemoryMB * 1024 * 1024
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	mp := &Mempool{
 		maxSize:       maxSize,
 		minFeeRate:    minFeeRate,
@@ -125,6 +134,9 @@ func NewMempool(
 		bySenderNonce: make(map[string]map[uint64]string),
 		byFee:         make(feeHeap, 0),
 		maxTotalSize:  maxTotalSize,
+		ctx:           ctx,
+		cancel:        cancel,
+		closed:        false,
 	}
 
 	go mp.cleanupLoop()
@@ -718,13 +730,41 @@ func (m *Mempool) removeLocked(txid string) {
 }
 
 // cleanupLoop periodically removes expired transactions
+// Production-grade: supports graceful shutdown via context cancellation
+// Prevents goroutine leak when mempool is no longer needed
 func (m *Mempool) cleanupLoop() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		m.cleanupExpired()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return // Graceful shutdown on context cancellation
+		case <-ticker.C:
+			m.cleanupExpired()
+		}
 	}
+}
+
+// Close gracefully shuts down the mempool and stops background goroutines
+// Production-grade: prevents resource leaks and ensures clean shutdown
+// Thread-safe: can be called multiple times safely (idempotent)
+func (m *Mempool) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.closed {
+		return nil // Idempotent: already closed
+	}
+
+	m.cancel() // Signal cleanupLoop to exit
+	m.closed = true
+
+	if m.metrics != nil {
+		go m.metrics.UpdateMempoolMetrics()
+	}
+
+	return nil
 }
 
 // cleanupExpired removes transactions older than TTL

@@ -36,18 +36,18 @@ import (
 // Configuration Constants
 // =============================================================================
 const (
-	DefaultRPS               = 10
-	DefaultBurst             = 20
-	DefaultAPIKeyMultiplier  = 5.0
-	DefaultTTL               = 10 * time.Minute
-	DefaultCleanupInterval   = 1 * time.Minute
-	MaxTokensPerRequest      = 1000
-	MinRPS                   = 1
-	MaxRPS                   = 10000
-	MinBurst                 = 1
-	MaxBurst                 = 100000
-	MinAPIKeyMultiplier      = 1.0
-	MaxAPIKeyMultiplier      = 100.0
+	DefaultRPS              = 10
+	DefaultBurst            = 20
+	DefaultAPIKeyMultiplier = 5.0
+	DefaultTTL              = 10 * time.Minute
+	DefaultCleanupInterval  = 1 * time.Minute
+	MaxTokensPerRequest     = 1000
+	MinRPS                  = 1
+	MaxRPS                  = 10000
+	MinBurst                = 1
+	MaxBurst                = 100000
+	MinAPIKeyMultiplier     = 1.0
+	MaxAPIKeyMultiplier     = 100.0
 )
 
 // =============================================================================
@@ -125,18 +125,18 @@ type EndpointRateLimitConfig struct {
 
 // RateLimitConfig represents the complete rate limit configuration
 type RateLimitConfig struct {
-	Default           *EndpointRateLimitConfig            `json:"default"`
-	Endpoints         map[string]*EndpointRateLimitConfig `json:"endpoints"`
-	APIKeyMultiplier  float64                             `json:"api_key_multiplier"`
-	Enabled           bool                                `json:"enabled"`
-	ByIP              bool                                `json:"by_ip"`
-	ByUser            bool                                `json:"by_user"`
-	TrustProxy        bool                                `json:"trust_proxy"`
-	CleanupInterval   time.Duration                       `json:"cleanup_interval"`
-	StorageType       string                              `json:"storage_type"` // "memory" or "redis"
-	RedisAddr         string                              `json:"redis_addr"`
-	RedisPassword     string                              `json:"redis_password"`
-	RedisDB           int                                 `json:"redis_db"`
+	Default          *EndpointRateLimitConfig            `json:"default"`
+	Endpoints        map[string]*EndpointRateLimitConfig `json:"endpoints"`
+	APIKeyMultiplier float64                             `json:"api_key_multiplier"`
+	Enabled          bool                                `json:"enabled"`
+	ByIP             bool                                `json:"by_ip"`
+	ByUser           bool                                `json:"by_user"`
+	TrustProxy       bool                                `json:"trust_proxy"`
+	CleanupInterval  time.Duration                       `json:"cleanup_interval"`
+	StorageType      string                              `json:"storage_type"` // "memory" or "redis"
+	RedisAddr        string                              `json:"redis_addr"`
+	RedisPassword    string                              `json:"redis_password"`
+	RedisDB          int                                 `json:"redis_db"`
 }
 
 // DefaultRateLimitConfig returns default rate limit configuration
@@ -334,13 +334,14 @@ type RateLimitBucket struct {
 
 // EnhancedRateLimiter provides per-endpoint, per-identifier rate limiting
 type EnhancedRateLimiter struct {
-	mu              sync.RWMutex
-	config          *RateLimitConfig
-	buckets         map[string]map[string]*RateLimitBucket // map[endpoint][identifier]
-	apiKeys         map[string]*APIKeyInfo                 // map[apiKey]APIKeyInfo
-	lastCleanup     time.Time
-	cleanupInterval time.Duration
-	stopCleanup     chan struct{}
+	mu                 sync.RWMutex
+	config             *RateLimitConfig
+	buckets            map[string]map[string]*RateLimitBucket // map[endpoint][identifier]
+	apiKeys            map[string]*APIKeyInfo                 // map[apiKey]APIKeyInfo
+	lastCleanup        time.Time
+	cleanupInterval    time.Duration
+	stopCleanup        chan struct{}
+	apiKeyGlobalBucket *TokenBucket // Global rate limit for all API keys combined
 }
 
 // APIKeyInfo contains information about an API key
@@ -365,12 +366,13 @@ func NewEnhancedRateLimiter(cfg *RateLimitConfig) (*EnhancedRateLimiter, error) 
 	}
 
 	rl := &EnhancedRateLimiter{
-		config:          cfg,
-		buckets:         make(map[string]map[string]*RateLimitBucket),
-		apiKeys:         make(map[string]*APIKeyInfo),
-		cleanupInterval: cfg.CleanupInterval,
-		stopCleanup:     make(chan struct{}),
-		lastCleanup:     time.Now(),
+		config:             cfg,
+		buckets:            make(map[string]map[string]*RateLimitBucket),
+		apiKeys:            make(map[string]*APIKeyInfo),
+		cleanupInterval:    cfg.CleanupInterval,
+		stopCleanup:        make(chan struct{}),
+		lastCleanup:        time.Now(),
+		apiKeyGlobalBucket: NewTokenBucket(10000, 10000), // Global limit: 10K RPS for all API keys
 	}
 
 	// Start background cleanup goroutine
@@ -464,6 +466,13 @@ func (rl *EnhancedRateLimiter) Allow(endpoint, identifier string, apiKey string)
 				isAPIKey = true
 				rateLimitBypassesTotal.Inc()
 				rateLimitRequestsTotal.WithLabelValues(endpoint, "bypassed").Inc()
+
+				// Global API key rate limit: prevent DoS even with valid API key
+				// Security rationale: leaked or compromised API keys should not allow unlimited requests
+				if !rl.apiKeyGlobalBucket.Allow() {
+					return false, 0, info.Multiplier, 0
+				}
+
 				return true, 0, info.Multiplier, 0
 			}
 		}
@@ -569,12 +578,12 @@ func (rl *EnhancedRateLimiter) GetStats() map[string]interface{} {
 	defer rl.mu.RUnlock()
 
 	stats := map[string]interface{}{
-		"enabled":           rl.config.Enabled,
-		"active_endpoints":  len(rl.buckets),
-		"api_keys_count":    len(rl.apiKeys),
-		"cleanup_interval":  rl.cleanupInterval.String(),
-		"default_rps":       rl.config.Default.RequestsPerSecond,
-		"default_burst":     rl.config.Default.Burst,
+		"enabled":            rl.config.Enabled,
+		"active_endpoints":   len(rl.buckets),
+		"api_keys_count":     len(rl.apiKeys),
+		"cleanup_interval":   rl.cleanupInterval.String(),
+		"default_rps":        rl.config.Default.RequestsPerSecond,
+		"default_burst":      rl.config.Default.Burst,
 		"api_key_multiplier": rl.config.APIKeyMultiplier,
 	}
 
@@ -726,8 +735,6 @@ func ExtractUserID(r *http.Request, headerName string) string {
 	}
 	return ""
 }
-
-
 
 // =============================================================================
 // Context Helpers

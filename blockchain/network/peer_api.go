@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"math/big"
+	"time"
 
 	"github.com/nogochain/nogo/blockchain/core"
 )
@@ -24,6 +25,8 @@ type PeerAPI interface {
 
 	BroadcastTransaction(ctx context.Context, tx core.Transaction, hops int)
 	BroadcastBlock(ctx context.Context, block *core.Block) error
+	BroadcastCandidate(block *core.Block, sourceID string, minedAt time.Time) error
+	BroadcastCandidateWithDeadline(block *core.Block, sourceID string, minedAt time.Time, deadline time.Time) error
 	BroadcastNewStatus(ctx context.Context, height uint64, work *big.Int, latestHash string)
 	EnsureAncestors(ctx context.Context, bc BlockchainInterface, missingHashHex string) error
 }
