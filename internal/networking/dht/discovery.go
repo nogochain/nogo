@@ -12,10 +12,10 @@ import (
 
 // Errors for discovery.
 var (
-	ErrNotRunning       = errors.New("discovery not running")
-	ErrAlreadyRunning   = errors.New("discovery already running")
-	ErrNoFallbackNodes  = errors.New("no fallback nodes configured")
-	ErrLookupFailed     = errors.New("lookup failed")
+	ErrNotRunning      = errors.New("discovery not running")
+	ErrAlreadyRunning  = errors.New("discovery already running")
+	ErrNoFallbackNodes = errors.New("no fallback nodes configured")
+	ErrLookupFailed    = errors.New("lookup failed")
 )
 
 // Discovery configuration constants.
@@ -30,13 +30,13 @@ const (
 
 // Discovery manages the Kademlia DHT and all protocol interaction.
 type Discovery struct {
-	mu          sync.RWMutex
-	transport   *UDPTransport
-	table       *Table
-	config      Config
-	closed      chan struct{}
-	closeOnce   sync.Once
-	wg          sync.WaitGroup
+	mu        sync.RWMutex
+	transport *UDPTransport
+	table     *Table
+	config    Config
+	closed    chan struct{}
+	closeOnce sync.Once
+	wg        sync.WaitGroup
 
 	// Channel for inbound packets.
 	packetIn chan *IngressPacket
@@ -45,8 +45,8 @@ type Discovery struct {
 	timeouts *TimeoutInfo
 
 	// State.
-	nursery []*Node            // fallback/bootstrap nodes
-	nodes   map[NodeID]*Node   // tracked active nodes
+	nursery []*Node          // fallback/bootstrap nodes
+	nodes   map[NodeID]*Node // tracked active nodes
 	nodeMu  sync.RWMutex
 }
 
@@ -475,22 +475,24 @@ func (d *Discovery) ping(n *Node) {
 
 // internNode tracks a node from an inbound packet.
 // Returns the tracked node (creates if new).
+// The TCP port is set from the UDP source port as a temporary fallback;
+// call UpdateNodeTCP when the real TCP port is known from a handshake.
 func (d *Discovery) internNode(pkt *IngressPacket) *Node {
 	d.nodeMu.Lock()
 	defer d.nodeMu.Unlock()
 
 	if n, ok := d.nodes[pkt.RemoteID]; ok {
-		// Update address.
 		n.IP = pkt.RemoteAddr.IP
 		if ipv4 := pkt.RemoteAddr.IP.To4(); ipv4 != nil {
 			n.IP = ipv4
 		}
 		n.UDP = uint16(pkt.RemoteAddr.Port)
-		n.TCP = uint16(pkt.RemoteAddr.Port)
+		if n.TCP == 0 {
+			n.TCP = uint16(pkt.RemoteAddr.Port)
+		}
 		return n
 	}
 
-	// Create new node.
 	n := NewNode(
 		pkt.RemoteID,
 		pkt.RemoteAddr.IP,
@@ -499,6 +501,16 @@ func (d *Discovery) internNode(pkt *IngressPacket) *Node {
 	)
 	d.nodes[pkt.RemoteID] = n
 	return n
+}
+
+// UpdateNodeTCP sets the correct TCP port for a known DHT node.
+// Called after a TCP handshake reveals the peer's actual listening port.
+func (d *Discovery) UpdateNodeTCP(id NodeID, tcpPort uint16) {
+	d.nodeMu.Lock()
+	defer d.nodeMu.Unlock()
+	if n, ok := d.nodes[id]; ok && tcpPort > 0 {
+		n.TCP = tcpPort
+	}
 }
 
 // NewWithConn creates a discovery instance using an existing UDP connection.

@@ -5,15 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"strings"
 	"time"
 )
 
 // DNS seed configuration.
 const (
-	DefaultDNSSeed       = "seed.nogochain.com"
-	DefaultDNSPort       = "30303"
-	DNSTimeout           = 5 * time.Second
-	DNSTXTRecordPrefix   = "enode://"
+	DefaultDNSSeed     = "seed.nogochain.com"
+	DefaultDNSPort     = "30303"
+	DNSTimeout         = 5 * time.Second
+	DNSTXTRecordPrefix = "enode://"
 )
 
 // Errors for DNS seed operations.
@@ -29,9 +31,14 @@ type DNSSeedConfig struct {
 }
 
 // DefaultDNSSeeds returns the default DNS seed configuration for NogoChain.
+// The port is read from NOGO_DNS_SEED_PORT env var; defaults to 30303 (DHT UDP discovery).
 func DefaultDNSSeeds() []DNSSeedConfig {
+	port := DefaultDNSPort
+	if envPort := strings.TrimSpace(os.Getenv("NOGO_DNS_SEED_PORT")); envPort != "" {
+		port = envPort
+	}
 	return []DNSSeedConfig{
-		{Hostname: DefaultDNSSeed, Port: DefaultDNSPort},
+		{Hostname: DefaultDNSSeed, Port: port},
 	}
 }
 

@@ -17,43 +17,43 @@ import (
 
 // PCP constants (RFC 6887)
 const (
-	PCPVersion              = 2
-	PCPPort               = 5351
-	PCPMinPacketSize      = 24  // Minimum PCP packet size
-	PCPMaxPacketSize      = 1100 // Maximum PCP packet size
-	PCPDefaultLifetime    = 120 * 60 // 120 minutes in seconds
+	PCPVersion         = 2
+	PCPPort            = 5351
+	PCPMinPacketSize   = 24       // Minimum PCP packet size
+	PCPMaxPacketSize   = 1100     // Maximum PCP packet size
+	PCPDefaultLifetime = 120 * 60 // 120 minutes in seconds
 
 	// PCP OpCodes
-	PCPOpcodeAnnounce    = 0
-	PCPOpcodeMap         = 1
-	PCPOpcodePeer      = 2
+	PCPOpcodeAnnounce = 0
+	PCPOpcodeMap      = 1
+	PCPOpcodePeer     = 2
 
 	// PCP Options
-	PCPOptionThirdParty          = 1
-	PCPOptionPrefrence         = 2
-	PCPOptionFilterPrefix       = 3
+	PCPOptionThirdParty   = 1
+	PCPOptionPrefrence    = 2
+	PCPOptionFilterPrefix = 3
 	// Option 4-6 are reserved
-	PCPOptionFQDN          = 8
-	PCPOptionFQDNv6        = 9
+	PCPOptionFQDN   = 8
+	PCPOptionFQDNv6 = 9
 )
 
 // MappingError codes (RFC 6887)
 type MappingError uint8
 
 const (
-	Success                 MappingError = 0
-	UnsuppVersion           MappingError = 1
-	NotAuthorized           MappingError = 2
-	MalformedRequest       MappingError = 3
+	Success               MappingError = 0
+	UnsuppVersion         MappingError = 1
+	NotAuthorized         MappingError = 2
+	MalformedRequest      MappingError = 3
 	UnsuppOpcode          MappingError = 4
 	UnsuppOption          MappingError = 5
-	MalformedOption        MappingError = 6
-	NetworkFailure         MappingError = 7
+	MalformedOption       MappingError = 6
+	NetworkFailure        MappingError = 7
 	NoResources           MappingError = 8
 	UnsuppProtocol        MappingError = 9
-	UserExQuota            MappingError = 10
-	CannotProvideExternal   MappingError = 11
-	AddressMismatch        MappingError = 12
+	UserExQuota           MappingError = 10
+	CannotProvideExternal MappingError = 11
+	AddressMismatch       MappingError = 12
 	ExcessiveRemotePeers  MappingError = 13
 )
 
@@ -110,11 +110,11 @@ type PCPOption struct {
 
 // PCPMapOption represents the MAP option
 type PCPMapOption struct {
-	Nonce      [12]byte  // Random nonce
-	Protocol   uint8      // 6=TCP, 17=UDP
-	IntPort    uint16     // Internal port
-	ExtPort    uint16     // External port (suggested)
-	ExtIP      net.IP     // External IP address
+	Nonce    [12]byte // Random nonce
+	Protocol uint8    // 6=TCP, 17=UDP
+	IntPort  uint16   // Internal port
+	ExtPort  uint16   // External port (suggested)
+	ExtIP    net.IP   // External IP address
 }
 
 // ParsePCPPacket parses a PCP packet from bytes
@@ -172,8 +172,8 @@ func (p *PCPPacket) Serialize() ([]byte, error) {
 		buf.WriteByte(opt.Length)
 		buf.Write(opt.Payload)
 
-		// Pad to 32-bit boundary
-		for (opt.Length+4)%4 != 0 {
+		padding := (4 - (int(opt.Length)+4)%4) % 4
+		for i := 0; i < padding; i++ {
 			buf.WriteByte(0)
 		}
 	}
@@ -192,17 +192,17 @@ func GenerateRandomNonce() ([]byte, error) {
 
 // PCPClient implements a PCP client
 type PCPClient struct {
-	Gateway   net.IP
-	Protocol  uint8 // 6=TCP, 17=UDP
-	LocalIP   net.IP
+	Gateway  net.IP
+	Protocol uint8 // 6=TCP, 17=UDP
+	LocalIP  net.IP
 }
 
 // NewPCPClient creates a new PCP client
 func NewPCPClient(gateway, localIP net.IP, protocol uint8) *PCPClient {
 	return &PCPClient{
 		Gateway:  gateway,
-		LocalIP:   localIP,
-		Protocol:  protocol,
+		LocalIP:  localIP,
+		Protocol: protocol,
 	}
 }
 
@@ -218,21 +218,21 @@ func (c *PCPClient) RequestPortMapping(internalPort int, lifetime int) (uint16, 
 
 	// Build MAP option payload
 	mapPayload := new(bytes.Buffer)
-	mapPayload.Write(nonce[:12])                // Nonce
-	mapPayload.WriteByte(c.Protocol)              // Protocol
+	mapPayload.Write(nonce[:12])     // Nonce
+	mapPayload.WriteByte(c.Protocol) // Protocol
 	tmp := make([]byte, 2)
 	binary.BigEndian.PutUint16(tmp, uint16(internalPort))
-	mapPayload.Write(tmp)                      // Internal port
+	mapPayload.Write(tmp) // Internal port
 	tmp = make([]byte, 2)
 	binary.BigEndian.PutUint16(tmp, uint16(0))
-	mapPayload.Write(tmp)                         // External port (0 = any)
+	mapPayload.Write(tmp) // External port (0 = any)
 	tmp = make([]byte, 4)
 	binary.BigEndian.PutUint32(tmp, uint32(0))
-	mapPayload.Write(tmp)                           // Internal IP (0 = auto)
+	mapPayload.Write(tmp) // Internal IP (0 = auto)
 
 	mapOption := PCPOption{
 		Code:    PCPOpcodeMap,
-		Length:   uint8(mapPayload.Len()),
+		Length:  uint8(mapPayload.Len()),
 		Payload: mapPayload.Bytes(),
 	}
 
@@ -264,10 +264,12 @@ func (c *PCPClient) RequestPortMapping(internalPort int, lifetime int) (uint16, 
 		return 0, fmt.Errorf("failed to send PCP request: %w", err)
 	}
 
-	// Read response
+	log.Printf("[PCP] Waiting for response (timeout: 10s)...")
+
 	response := make([]byte, PCPMaxPacketSize)
 	n, err := conn.Read(response)
 	if err != nil {
+		log.Printf("[PCP] No response from gateway %s within timeout: %v", c.Gateway.String(), err)
 		return 0, fmt.Errorf("failed to read PCP response: %w", err)
 	}
 

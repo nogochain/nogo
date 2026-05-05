@@ -44,6 +44,12 @@ type PeerInfo struct {
 	Address string `json:"address"`
 }
 
+// PeerSeedAddr is sent during peer exchange to share routable peer addresses.
+type PeerSeedAddr struct {
+	ID   string `json:"id"`
+	Addr string `json:"addr"`
+}
+
 // encryptionMode defines the encryption mode for P2P connections.
 type encryptionMode string
 
@@ -68,6 +74,8 @@ type SwitchConfig struct {
 	SeedMode         bool
 	UPNP             bool
 	Peers            []PeerInfo
+	DHTSeedPort      int // DHT discovery port for seed nodes (default 30303)
+	AdvertisedPort   int // TCP port advertised via DHT for NAT traversal
 	MaxMsgSize       int
 
 	// Peer discovery
@@ -136,8 +144,10 @@ func DefaultSwitchConfig() SwitchConfig {
 		ExternalAddr:     "",
 		Seeds:            DefaultSeedNodes, // Use official seed nodes by default
 		SeedMode:         false,
-		UPNP:             false,
+		UPNP:             envBool("NOGO_UPNP", true),
 		Peers:            []PeerInfo{},
+		DHTSeedPort:      envInt("NOGO_DHT_SEED_PORT", 30303),
+		AdvertisedPort:   0,
 		MaxMsgSize:       1048576,
 
 		// Peer discovery defaults
@@ -183,6 +193,8 @@ type Switch struct {
 	// DHT discovery for WAN peer finding (Kademlia-based)
 	dhtDiscovery *dht.Discovery
 
+	natManager *NATManager // NAT traversal manager (UPnP/NAT-PMP/PCP)
+
 	nodePrivKey    ed25519.PrivateKey
 	encryptionMode encryptionMode
 
@@ -199,8 +211,8 @@ type Switch struct {
 	peerRetryDelay time.Duration
 
 	// Load-balanced peer selection for sync distribution
-	syncLoadMu    sync.Mutex
-	syncLoadMap   map[string]int
+	syncLoadMu     sync.Mutex
+	syncLoadMap    map[string]int
 	syncRoundRobin int
 }
 
@@ -288,13 +300,9 @@ func (sw *Switch) initPeerDiscovery() {
 	if sw.config.EnableDHT && len(sw.nodePrivKey) > 0 {
 		dhtCfg := dht.DefaultConfig()
 
-		port := uint16(30303)
-		if sw.config.ListenAddr != "" {
-			if _, portStr, err := net.SplitHostPort(sw.config.ListenAddr); err == nil {
-				if p, err2 := strconv.ParseUint(portStr, 10, 16); err2 == nil {
-					port = uint16(p)
-				}
-			}
+		port := uint16(sw.config.DHTSeedPort)
+		if port == 0 {
+			port = uint16(DefaultDHTDiscoveryPort)
 		}
 
 		dhtCfg.ListenAddr = &net.UDPAddr{
@@ -303,6 +311,8 @@ func (sw *Switch) initPeerDiscovery() {
 		}
 
 		dhtCfg.PrivateKey = sw.nodePrivKey
+
+		dhtCfg.SeedNodes = sw.buildDHTSeedNodes(port)
 
 		var err error
 		sw.dhtDiscovery, err = dht.NewDiscovery(sw.nodePrivKey, dhtCfg)
@@ -318,6 +328,42 @@ func (sw *Switch) initPeerDiscovery() {
 	}
 }
 
+// buildDHTSeedNodes converts P2P TCP seed addresses into DHT bootstrap nodes.
+// Each seed domain is resolved via DNS and a DHT Node is created with the
+// configured DHT UDP discovery port.
+func (sw *Switch) buildDHTSeedNodes(dhtPort uint16) []*dht.Node {
+	seeds := sw.config.Seeds
+	if len(seeds) == 0 {
+		return nil
+	}
+
+	dhtSeeds := make([]*dht.Node, 0, len(seeds))
+	for _, seed := range seeds {
+		host, _, err := net.SplitHostPort(seed)
+		if err != nil {
+			host = seed
+		}
+
+		ips, lookupErr := net.LookupIP(host)
+		if lookupErr != nil {
+			log.Printf("Switch: DNS lookup for DHT seed %s failed: %v", host, lookupErr)
+			continue
+		}
+
+		for _, ip := range ips {
+			ipv4 := ip.To4()
+			if ipv4 == nil {
+				continue
+			}
+			dhtNode := dht.NewNode(dht.NodeID{}, ipv4, dhtPort, dhtPort)
+			dhtSeeds = append(dhtSeeds, dhtNode)
+		}
+	}
+
+	log.Printf("Switch: resolved %d DHT seed nodes from %d P2P seeds", len(dhtSeeds), len(seeds))
+	return dhtSeeds
+}
+
 func (cfg *SwitchConfig) applyDefaults() {
 	if cfg.MaxPeers == 0 {
 		cfg.MaxPeers = 50
@@ -327,6 +373,9 @@ func (cfg *SwitchConfig) applyDefaults() {
 	}
 	if cfg.MinOutboundPeers == 0 {
 		cfg.MinOutboundPeers = minNumOutboundPeers
+	}
+	if len(cfg.Seeds) > 0 && cfg.MinOutboundPeers > len(cfg.Seeds) {
+		cfg.MinOutboundPeers = len(cfg.Seeds)
 	}
 	if cfg.RecheckInterval == 0 {
 		cfg.RecheckInterval = peerReplenishInterval
@@ -468,6 +517,14 @@ func (sw *Switch) OnStop() error {
 		log.Printf("Switch: DHT discovery stopped")
 	}
 
+	if sw.natManager != nil {
+		if cleanupErr := sw.natManager.DeletePortMapping(); cleanupErr != nil {
+			log.Printf("Switch: NAT port mapping cleanup error: %v", cleanupErr)
+		} else {
+			log.Printf("Switch: NAT port mapping removed")
+		}
+	}
+
 	sw.stopAllPeers()
 
 	sw.wg.Wait()
@@ -512,6 +569,12 @@ func (sw *Switch) Start(ctx context.Context) error {
 	}
 
 	sw.wg.Add(1)
+	go func() {
+		defer sw.wg.Done()
+		sw.initNatTraversal()
+	}()
+
+	sw.wg.Add(1)
 	go sw.dialSeedsRoutine()
 
 	sw.mu.RLock()
@@ -552,6 +615,69 @@ func (sw *Switch) parseListenAddr(addr string) (string, string, error) {
 		return "", "", fmt.Errorf("unsupported protocol: %s", protocol)
 	}
 	return protocol, address, nil
+}
+
+// initNatTraversal initializes NAT port mapping for home network nodes.
+// Uses multi-protocol approach: PCP → NAT-PMP → UPnP.
+// Failure is non-blocking — node continues in outbound-only mode.
+func (sw *Switch) initNatTraversal() {
+	if !sw.config.UPNP {
+		log.Printf("Switch: NAT traversal disabled (NOGO_UPNP=%v)", sw.config.UPNP)
+		return
+	}
+
+	tcpPort := sw.extractTCPPort()
+	if tcpPort <= 0 {
+		log.Printf("Switch: cannot determine TCP port for NAT traversal")
+		return
+	}
+
+	sw.natManager = NewNATManager(tcpPort)
+	if sw.natManager == nil {
+		log.Printf("Switch: failed to create NAT manager")
+		return
+	}
+
+	log.Printf("Switch: starting NAT traversal for TCP port %d", tcpPort)
+
+	if err := sw.natManager.ForwardPortMultiProtocol(); err != nil {
+		log.Printf("Switch: WARNING — NAT traversal failed: %v", err)
+		log.Printf("Switch: node will operate in outbound-only mode (not externally reachable)")
+		return
+	}
+
+	extIP, extPort := sw.natManager.GetExternalAddress()
+	if extIP != "" && extPort > 0 {
+		sw.config.ExternalAddr = fmt.Sprintf("%s:%d", extIP, extPort)
+		sw.config.AdvertisedPort = extPort
+		log.Printf("Switch: NAT traversal successful — ExternalAddr=%s", sw.config.ExternalAddr)
+	} else {
+		log.Printf("Switch: WARNING — NAT mapping created but external address unknown")
+	}
+}
+
+// extractTCPPort parses the TCP listen port from ListenAddr configuration.
+func (sw *Switch) extractTCPPort() int {
+	if sw.config.ListenAddr == "" {
+		return 0
+	}
+	addr := sw.config.ListenAddr
+	if !strings.Contains(addr, "://") {
+		addr = "tcp://" + addr
+	}
+	_, addrPart, parseErr := sw.parseListenAddr(addr)
+	if parseErr != nil {
+		return 0
+	}
+	_, portStr, err := net.SplitHostPort(addrPart)
+	if err != nil {
+		return 0
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0
+	}
+	return port
 }
 
 func (sw *Switch) listenerRoutine(listener net.Listener) {
@@ -696,12 +822,16 @@ func (sw *Switch) seedOutboundPeers(peer *Peer) {
 	peerList := sw.peers.List()
 	sw.mu.RUnlock()
 
-	seedAddrs := make([]string, 0, len(peerList))
+	seedItems := make([]PeerSeedAddr, 0, len(peerList))
 	for _, p := range peerList {
-		seedAddrs = append(seedAddrs, p.ID())
+		peerAddr := sw.resolvePeerRoutableAddr(p)
+		seedItems = append(seedItems, PeerSeedAddr{
+			ID:   p.ID(),
+			Addr: peerAddr,
+		})
 	}
 
-	seedMsg, err := json.Marshal(seedAddrs)
+	seedMsg, err := json.Marshal(seedItems)
 	if err != nil {
 		log.Printf("switch: marshal seed peers failed: %v", err)
 		return
@@ -714,6 +844,18 @@ func (sw *Switch) seedOutboundPeers(peer *Peer) {
 	if !mconn.TrySend(mconnection.ChannelGossip, seedMsg) {
 		log.Printf("switch: send seed peers to %s failed", peer.ID())
 	}
+}
+
+// resolvePeerRoutableAddr returns the best routable address for a peer.
+// Prefers ExternalAddr when available, falls back to the connection RemoteAddr.
+func (sw *Switch) resolvePeerRoutableAddr(p *Peer) string {
+	ni := p.NodeInfo()
+	if ni != nil {
+		if listenAddr := ni["ListenAddr"]; listenAddr != "" {
+			return listenAddr
+		}
+	}
+	return p.Addr()
 }
 
 // handleMDNSPeers processes mDNS discovered peers and adds them to the peer set
@@ -1735,6 +1877,15 @@ func (sw *Switch) Broadcast(chID byte, msg []byte) {
 			log.Printf("switch: broadcast send failed to peer %s on channel 0x%02x", p.ID(), chID)
 		}
 	}
+}
+
+// ExternalAddr returns the node's externally reachable address after NAT traversal.
+// Returns empty string if NAT traversal failed or was not attempted.
+func (sw *Switch) ExternalAddr() string {
+	if sw.config.ExternalAddr != "" {
+		return sw.config.ExternalAddr
+	}
+	return ""
 }
 
 // SetNodeInfo sets the local node's identifying information.
@@ -3145,9 +3296,9 @@ func (sw *Switch) bestPeer(serviceFlag int) PeerInterface {
 	}
 
 	type candidate struct {
-		addr  string
+		addr   string
 		height uint64
-		load  int
+		load   int
 	}
 
 	var candidates []candidate
@@ -3202,10 +3353,26 @@ func (sw *Switch) bestPeer(serviceFlag int) PeerInterface {
 	}
 
 	const heightTolerance uint64 = 5
+	threshold := maxHeight
+	if maxHeight > heightTolerance {
+		threshold = maxHeight - heightTolerance
+	} else {
+		threshold = 0
+	}
+
 	var eligible []candidate
 	for _, c := range candidates {
-		if c.height >= maxHeight-heightTolerance || maxHeight == 0 {
+		if c.height >= threshold || maxHeight == 0 {
 			eligible = append(eligible, c)
+		}
+	}
+
+	if len(eligible) == 0 {
+		if len(candidates) > 0 {
+			eligible = candidates
+		} else {
+			log.Printf("[Switch] bestPeer: no peers available (total=%d)", sw.peers.Size())
+			return nil
 		}
 	}
 

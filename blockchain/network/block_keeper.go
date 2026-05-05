@@ -837,6 +837,11 @@ func (bk *blockKeeper) startSync() bool {
 		return true
 	}
 
+	if peer.Height() == 0 {
+		log.Printf("[BlockKeeper] startSync: no peer with chain info available (localH=%d, fallback=%s)", blockHeight, peer.ID())
+		return false
+	}
+
 	log.Printf("[BlockKeeper] Synced (localH=%d >= peerH=%d, peer=%s)",
 		blockHeight, peer.Height(), peer.ID())
 	return false

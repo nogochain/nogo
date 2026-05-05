@@ -31,6 +31,9 @@ const (
 	// Aligned with core-main: ensures network connectivity even under churn
 	minNumOutboundPeers = 4
 
+	// DefaultDHTDiscoveryPort is the default UDP port for DHT (Kademlia) discovery
+	DefaultDHTDiscoveryPort = 30303
+
 	// maxNumLANPeers is the maximum number of LAN-discovered peers
 	maxNumLANPeers = 5
 

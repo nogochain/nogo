@@ -15,20 +15,20 @@ import (
 
 // NAT-PMP constants (RFC 6886)
 const (
-	NATPMPVersion      = 0
-	NATPMPClientPort   = 5351
-	NATPMPServerPort  = 5350
+	NATPMPVersion    = 0
+	NATPMPClientPort = 5351
+	NATPMPServerPort = 5350
 
 	// NAT-PMP Opcodes
 	NATPMPOpcodeExternalAddr = 0
-	NATPMPOpcodeMapUDP      = 1
-	NATPMPOpcodeMapTCP      = 2
+	NATPMPOpcodeMapUDP       = 1
+	NATPMPOpcodeMapTCP       = 2
 
 	// NAT-PMP Result Codes
 	NATPMPResultSuccess            = 128
 	NATPMPResultUnsupportedVersion = 129
 	NATPMPResultRefused            = 130
-	NATPMPResultFailure           = 131
+	NATPMPResultFailure            = 131
 
 	// NAT-PMP Default TTL
 	NATPMPDefaultTTL = 7200 // 2 hours in seconds
@@ -37,26 +37,26 @@ const (
 // NATPMPRequest represents a NAT-PMP request
 type NATPMPRequest struct {
 	Version  uint8 // Must be 0
-	OpCode  uint8 // 0=ExternalAddr, 1=MapUDP, 2=MapTCP
+	OpCode   uint8 // 0=ExternalAddr, 1=MapUDP, 2=MapTCP
 	Reserved uint16
 }
 
 // NATPMPResponse represents a NAT-PMP response
 type NATPMPResponse struct {
-	Version   uint8
-	OpCode    uint8
+	Version    uint8
+	OpCode     uint8
 	ResultCode uint8
-	Epoch     uint16
+	Epoch      uint16
 	Reserved   [2]uint16
-	Addresses []byte
+	Addresses  []byte
 }
 
 // MapPortRequest represents a port mapping request
 type MapPortRequest struct {
 	PrivatePort uint16
 	PublicPort  uint16 // 0 = any port
-	TTL        uint32
-	Reserved   [3]uint16
+	TTL         uint32
+	Reserved    [3]uint16
 }
 
 // MapPortResponse represents a port mapping response
@@ -88,7 +88,7 @@ func (c *NATPMPClient) GetExternalAddress() (net.IP, uint16, error) {
 	// Build request
 	req := NATPMPRequest{
 		Version:  NATPMPVersion,
-		OpCode:  NATPMPOpcodeExternalAddr,
+		OpCode:   NATPMPOpcodeExternalAddr,
 		Reserved: 0,
 	}
 
@@ -122,11 +122,11 @@ func (c *NATPMPClient) GetExternalAddress() (net.IP, uint16, error) {
 
 	// Parse response
 	resp := &NATPMPResponse{
-		Version:   response[0],
-		OpCode:    response[1],
+		Version:    response[0],
+		OpCode:     response[1],
 		ResultCode: response[2],
-		Epoch:     binary.BigEndian.Uint16(response[4:6]),
-		Addresses: response[8:16],
+		Epoch:      binary.BigEndian.Uint16(response[4:6]),
+		Addresses:  response[8:16],
 	}
 
 	// Check result
@@ -159,14 +159,14 @@ func (c *NATPMPClient) MapPort(protocol string, internalPort, externalPort int, 
 	mapReq := MapPortRequest{
 		PrivatePort: uint16(internalPort),
 		PublicPort:  uint16(externalPort),
-		TTL:        ttl,
-		Reserved:   [3]uint16{0, 0, 0},
+		TTL:         ttl,
+		Reserved:    [3]uint16{0, 0, 0},
 	}
 
 	// Serialize request
 	reqHeader := NATPMPRequest{
 		Version:  NATPMPVersion,
-		OpCode:  opcode,
+		OpCode:   opcode,
 		Reserved: 0,
 	}
 
@@ -191,10 +191,12 @@ func (c *NATPMPClient) MapPort(protocol string, internalPort, externalPort int, 
 		return 0, fmt.Errorf("failed to send NAT-PMP map request: %w", err)
 	}
 
-	// Read response
+	log.Printf("[NAT-PMP] Waiting for response (timeout: 5s)...")
+
 	response := make([]byte, 16)
 	n, err := conn.Read(response)
 	if err != nil {
+		log.Printf("[NAT-PMP] No response from gateway %s within timeout: %v", c.Gateway.String(), err)
 		return 0, fmt.Errorf("failed to read NAT-PMP map response: %w", err)
 	}
 
@@ -204,10 +206,10 @@ func (c *NATPMPClient) MapPort(protocol string, internalPort, externalPort int, 
 
 	// Parse response
 	respHeader := &NATPMPResponse{
-		Version:   response[0],
-		OpCode:    response[1],
+		Version:    response[0],
+		OpCode:     response[1],
 		ResultCode: response[2],
-		Epoch:     binary.BigEndian.Uint16(response[4:6]),
+		Epoch:      binary.BigEndian.Uint16(response[4:6]),
 	}
 
 	// Parse mapping response

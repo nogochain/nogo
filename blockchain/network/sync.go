@@ -65,6 +65,11 @@ const (
 
 	// BlocksAddedProgressInterval is how often to update progress during block processing
 	BlocksAddedProgressInterval = 50
+
+	// maxSyncProgressWithPartialPeers caps syncProgress when fewer than majority
+	// of connected peers responded to chain info queries.
+	// Prevents IsSynced() returning true when high-height peers are slow/unresponsive.
+	maxSyncProgressWithPartialPeers = 0.99
 )
 
 // =============================================================================
@@ -337,7 +342,8 @@ func (s *SyncLoop) startPeerSyncProgressMonitor() {
 }
 
 // updateSyncProgressFromPeers updates syncProgress based on peer-reported chain height/work.
-// If peer info cannot be fetched, it keeps the previous progress to avoid oscillation.
+// Conservative: only declares syncProgress=1.0 when a majority of connected peers confirm
+// we are caught up. This prevents premature mining when high-height peers are slow to respond.
 func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	if s == nil || s.pm == nil || s.bc == nil {
 		return
@@ -345,7 +351,6 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 
 	peers := s.pm.GetActivePeers()
 	if len(peers) == 0 {
-		// No peers: standalone mode.
 		s.mu.Lock()
 		s.syncProgress = 1.0
 		s.lastUpdateTime = time.Now()
@@ -359,28 +364,37 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 		localHeight = localTip.GetHeight()
 	}
 
+	totalPeers := len(peers)
+	responsivePeers := 0
 	maxPeerHeight := uint64(0)
-	gotAny := false
 
 	for _, peer := range peers {
 		info, err := s.pm.FetchChainInfo(ctx, peer)
 		if err != nil || info == nil || info.Work == nil {
 			continue
 		}
-		gotAny = true
+		responsivePeers++
 
 		if info.Height > maxPeerHeight {
 			maxPeerHeight = info.Height
 		}
 	}
 
-	if !gotAny {
+	if responsivePeers == 0 {
 		return
 	}
 
 	var progress float64
 	if maxPeerHeight == 0 || localHeight >= maxPeerHeight {
-		progress = 1.0
+		if responsivePeers*2 > totalPeers {
+			progress = 1.0
+		} else {
+			ratio := float64(localHeight) / float64(maxPeerHeight)
+			if ratio > maxSyncProgressWithPartialPeers {
+				ratio = maxSyncProgressWithPartialPeers
+			}
+			progress = ratio
+		}
 	} else {
 		progress = float64(localHeight) / float64(maxPeerHeight)
 	}

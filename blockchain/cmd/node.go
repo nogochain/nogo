@@ -445,6 +445,13 @@ func (n *Node) startComponents() error {
 		return fmt.Errorf("start p2p switch: %w", err)
 	}
 
+	extAddr := n.p2pSwitch.ExternalAddr()
+	if extAddr != "" {
+		log.Info("P2P NAT traversal successful — ExternalAddr=%s", extAddr)
+	} else {
+		log.Sync("P2P NAT traversal: node is outbound-only (not externally reachable)")
+	}
+
 	if n.autoMine && n.miner != nil {
 		go func() {
 			interval := time.Duration(n.config.MineIntervalMs) * time.Millisecond
