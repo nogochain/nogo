@@ -226,11 +226,33 @@ func (s *SimpleServer) handleGetMiningInfo(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, info)
 }
 
-// difficultyBitsToTarget converts difficulty bits to target string
+// difficultyBitsToTarget decodes compact difficulty bits into a target integer.
+// This implements the standard Bitcoin compact target format (nBits):
+//   byte 1 (MSB): exponent (shift)
+//   bytes 2-4:    mantissa (coefficient)
+//   target = mantissa * 256^(exponent - 3)
+//
+// This is identical to the format used in Bitcoin block headers and
+// Ethereum difficulty fields. The decoded target represents the maximum
+// acceptable hash value for a valid Proof-of-Work solution.
 func difficultyBitsToTarget(bits uint32) string {
-	// Simplified target calculation
-	// In production: would use proper formula from difficulty bits
-	target := new(big.Int).SetUint64(uint64(bits))
-	target.Lsh(target, 200) // Shift to get a large target number
-	return hex.EncodeToString(target.Bytes())
+	// Decode compact format: exponent is the high byte, mantissa is low 3 bytes
+	exponent := uint(bits >> 24)
+	mantissa := new(big.Int).SetUint64(uint64(bits & 0x00ffffff))
+
+	// Clamp invalid exponents: negative (0x00800000 signed bit) and overflow
+	if bits&0x00800000 != 0 || exponent > 34 {
+		// Return zero target for invalid bits — indicates broken difficulty
+		return "00"
+	}
+
+	// Compute target = mantissa * 256^(exponent - 3)
+	if exponent > 3 {
+		shift := new(big.Int).Lsh(big.NewInt(1), uint((exponent-3)*8))
+		mantissa.Mul(mantissa, shift)
+	} else if exponent < 3 {
+		mantissa.Rsh(mantissa, uint((3-exponent)*8))
+	}
+
+	return hex.EncodeToString(mantissa.Bytes())
 }

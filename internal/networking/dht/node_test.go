@@ -325,18 +325,19 @@ func TestMustParseNode(t *testing.T) {
 	hexStr := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	enodeURL := "enode://" + hexStr
 
-	node := MustParseNode(enodeURL)
+	node, err := MustParseNode(enodeURL)
+	if err != nil {
+		t.Fatalf("MustParseNode failed for valid URL: %v", err)
+	}
 	if node.ID[0] != 0xAB {
 		t.Error("MustParseNode decoded incorrectly")
 	}
 
-	// Should panic for invalid URL.
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("MustParseNode should panic for invalid URL")
-		}
-	}()
-	_ = MustParseNode("invalid")
+	// Should return error for invalid URL (no panic).
+	_, err = MustParseNode("invalid")
+	if err == nil {
+		t.Error("MustParseNode should return error for invalid URL")
+	}
 }
 
 func TestNodeToRPC(t *testing.T) {

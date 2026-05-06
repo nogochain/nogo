@@ -58,6 +58,42 @@ type ChainStore interface {
 	// Checkpoint persistence for fast sync
 	GetCheckpoints() ([]byte, bool, error)
 	PutCheckpoints(data []byte) error
+
+	// === State Persistence Methods (P0-1 Fix: state persistence) ===
+
+	// PutAccount persists a single account state.
+	// Thread-safe: implementation must handle concurrent access.
+	PutAccount(address string, account core.Account) error
+
+	// GetAccount retrieves an account by address.
+	// Returns the account, a boolean indicating if found, and any error.
+	GetAccount(address string) (core.Account, bool, error)
+
+	// BatchPutAccounts persists multiple accounts atomically.
+	// This is more efficient than calling PutAccount multiple times.
+	BatchPutAccounts(accounts map[string]core.Account) error
+
+	// Snapshot creates a state snapshot at the specified height.
+	// The snapshot includes all account states and the state root hash.
+	// Thread-safe: this operation should be atomic.
+	Snapshot(height uint64, stateRoot []byte, state map[string]core.Account) error
+
+	// LoadSnapshot loads the most recent state snapshot at or before the specified height.
+	// Returns the snapshot height, state root, state map, and any error.
+	LoadSnapshot(height uint64) (uint64, []byte, map[string]core.Account, error)
+
+	// LatestSnapshot returns the height of the most recent snapshot.
+	// Returns 0 and no error if no snapshot exists.
+	LatestSnapshot() (uint64, error)
+
+	// DeleteSnapshot removes a snapshot at the specified height.
+	// This is useful for pruning old snapshots to save storage space.
+	DeleteSnapshot(height uint64) error
+
+	// CalculateStateRoot calculates the state root hash from the account map.
+	// This is used to verify state integrity.
+	// Returns the state root hash (32 bytes) and any error.
+	CalculateStateRoot(state map[string]core.Account) ([]byte, error)
 }
 
 func OpenChainStoreFromEnv() (ChainStore, error) {
@@ -354,6 +390,56 @@ func (s *GobStore) PutCheckpoints(data []byte) error {
 		return fmt.Errorf("rename checkpoints file: %w", err)
 	}
 	return nil
+}
+
+// === GobStore State Persistence Stubs (not supported) ===
+
+// PutAccount is not supported by GobStore.
+// Use BoltStore for state persistence.
+func (s *GobStore) PutAccount(_ string, _ core.Account) error {
+	return fmt.Errorf("put account: not supported by GobStore - please use BoltStore for state persistence")
+}
+
+// GetAccount is not supported by GobStore.
+// Use BoltStore for state persistence.
+func (s *GobStore) GetAccount(_ string) (core.Account, bool, error) {
+	return core.Account{}, false, fmt.Errorf("get account: not supported by GobStore - please use BoltStore for state persistence")
+}
+
+// BatchPutAccounts is not supported by GobStore.
+// Use BoltStore for state persistence.
+func (s *GobStore) BatchPutAccounts(_ map[string]core.Account) error {
+	return fmt.Errorf("batch put accounts: not supported by GobStore - please use BoltStore for state persistence")
+}
+
+// Snapshot is not supported by GobStore.
+// Use BoltStore for state persistence.
+func (s *GobStore) Snapshot(_ uint64, _ []byte, _ map[string]core.Account) error {
+	return fmt.Errorf("snapshot: not supported by GobStore - please use BoltStore for state persistence")
+}
+
+// LoadSnapshot is not supported by GobStore.
+// Use BoltStore for state persistence.
+func (s *GobStore) LoadSnapshot(_ uint64) (uint64, []byte, map[string]core.Account, error) {
+	return 0, nil, nil, fmt.Errorf("load snapshot: not supported by GobStore - please use BoltStore for state persistence")
+}
+
+// LatestSnapshot is not supported by GobStore.
+// Use BoltStore for state persistence.
+func (s *GobStore) LatestSnapshot() (uint64, error) {
+	return 0, fmt.Errorf("latest snapshot: not supported by GobStore - please use BoltStore for state persistence")
+}
+
+// DeleteSnapshot is not supported by GobStore.
+// Use BoltStore for state persistence.
+func (s *GobStore) DeleteSnapshot(_ uint64) error {
+	return fmt.Errorf("delete snapshot: not supported by GobStore - please use BoltStore for state persistence")
+}
+
+// CalculateStateRoot is not supported by GobStore.
+// Use BoltStore for state persistence.
+func (s *GobStore) CalculateStateRoot(_ map[string]core.Account) ([]byte, error) {
+	return nil, fmt.Errorf("calculate state root: not supported by GobStore - please use BoltStore for state persistence")
 }
 
 func maybeMigrateGobToBolt(bolt *BoltStore, gobPath string) error {

@@ -876,6 +876,42 @@ type ChainStore interface {
 	PutBlock(block *Block) error
 	GetGenesisHash() ([]byte, bool, error)
 	PutGenesisHash(hash []byte) error
+
+	// === State Persistence Methods (P0-1 Fix: 状态持久化) ===
+
+	// PutAccount persists a single account state.
+	// Thread-safe: implementation must handle concurrent access.
+	PutAccount(address string, account Account) error
+
+	// GetAccount retrieves an account by address.
+	// Returns the account, a boolean indicating if found, and any error.
+	GetAccount(address string) (Account, bool, error)
+
+	// BatchPutAccounts persists multiple accounts atomically.
+	// This is more efficient than calling PutAccount multiple times.
+	BatchPutAccounts(accounts map[string]Account) error
+
+	// Snapshot creates a state snapshot at the specified height.
+	// The snapshot includes all account states and the state root hash.
+	// Thread-safe: this operation should be atomic.
+	Snapshot(height uint64, stateRoot []byte, state map[string]Account) error
+
+	// LoadSnapshot loads the most recent state snapshot at or before the specified height.
+	// Returns the snapshot height, state root, state map, and any error.
+	LoadSnapshot(height uint64) (uint64, []byte, map[string]Account, error)
+
+	// LatestSnapshot returns the height of the most recent snapshot.
+	// Returns 0 and no error if no snapshot exists.
+	LatestSnapshot() (uint64, error)
+
+	// DeleteSnapshot removes a snapshot at the specified height.
+	// This is useful for pruning old snapshots to save storage space.
+	DeleteSnapshot(height uint64) error
+
+	// CalculateStateRoot calculates the state root hash from the account map.
+	// This is used to verify state integrity.
+	// Returns the state root hash (32 bytes) and any error.
+	CalculateStateRoot(state map[string]Account) ([]byte, error)
 }
 
 // MempoolCleaner defines the interface for mempool cleanup operations

@@ -445,44 +445,6 @@ func getPeerHeight(pm PeerAPI) uint64 {
 	return maxHeight
 }
 
-// CRITICAL: These 3 methods implement PeerSetInterface for blockKeeper integration
-// Without these, blockKeeper cannot be created and the new sync architecture won't activate
-
-// peerAdapter implements PeerInterface for PeerManager
-type peerAdapter struct {
-	id     string
-	height uint64
-	pm     *PeerManager
-}
-
-func (p *peerAdapter) ID() string {
-	return p.id
-}
-
-func (p *peerAdapter) Height() uint64 {
-	return p.height
-}
-
-func (p *peerAdapter) getBlockByHeight(height uint64) bool {
-	log.Printf("[peerAdapter] getBlockByHeight called (not implemented for HTTP peers)")
-	return false
-}
-
-func (p *peerAdapter) getBlocksByHeights(heights []uint64) bool {
-	log.Printf("[peerAdapter] getBlocksByHeights called (not implemented for HTTP peers)")
-	return false
-}
-
-func (p *peerAdapter) getBlocks(locator [][]byte, stopHash []byte) bool {
-	log.Printf("[peerAdapter] getBlocks called (not implemented for HTTP peers)")
-	return false
-}
-
-func (p *peerAdapter) getHeaders(locator [][]byte, stopHash []byte) bool {
-	log.Printf("[peerAdapter] getHeaders called (not implemented for HTTP peers)")
-	return false
-}
-
 func (pm *PeerManager) ProcessIllegal(peerID string, level byte, reason string) {
 	pm.peersMu.Lock()
 	defer pm.peersMu.Unlock()

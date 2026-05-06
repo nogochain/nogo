@@ -25,6 +25,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/config"
@@ -108,6 +109,7 @@ type SyncLoop struct {
 	syncConfig     config.SyncConfig
 	securityMgr    *security.SecurityManager
 	progressStore  *SyncProgressStore
+	activeWorkers  atomic.Int32 // live goroutine count for block download/validation
 
 	// UNIFIED FORK RESOLUTION (core-main based architecture)
 	forkResolver     *forkresolution.ForkResolver
@@ -341,9 +343,9 @@ func (s *SyncLoop) startPeerSyncProgressMonitor() {
 	}
 }
 
-// updateSyncProgressFromPeers updates syncProgress based on peer-reported chain height/work.
-// Conservative: only declares syncProgress=1.0 when a majority of connected peers confirm
-// we are caught up. This prevents premature mining when high-height peers are slow to respond.
+// updateSyncProgressFromPeers updates syncProgress based on peer-reported chain height and work.
+// Production-grade: checks both height and cumulative work to prevent premature mining.
+// Only declares syncProgress=1.0 when local chain has both sufficient height AND work.
 func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	if s == nil || s.pm == nil || s.bc == nil {
 		return
@@ -360,23 +362,31 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 
 	localTip := s.bc.LatestBlock()
 	localHeight := uint64(0)
+	localWork := big.NewInt(0)
 	if localTip != nil {
 		localHeight = localTip.GetHeight()
+		localWork = s.bc.CanonicalWork()
 	}
 
 	totalPeers := len(peers)
 	responsivePeers := 0
 	maxPeerHeight := uint64(0)
+	var bestPeerWork *big.Int
 
 	for _, peer := range peers {
 		info, err := s.pm.FetchChainInfo(ctx, peer)
-		if err != nil || info == nil || info.Work == nil {
+		if err != nil || info == nil {
 			continue
 		}
 		responsivePeers++
 
 		if info.Height > maxPeerHeight {
 			maxPeerHeight = info.Height
+			bestPeerWork = info.Work
+		} else if info.Height == maxPeerHeight && info.Work != nil {
+			if bestPeerWork == nil || info.Work.Cmp(bestPeerWork) > 0 {
+				bestPeerWork = info.Work
+			}
 		}
 	}
 
@@ -386,7 +396,12 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 
 	var progress float64
 	if maxPeerHeight == 0 || localHeight >= maxPeerHeight {
-		if responsivePeers*2 > totalPeers {
+		workCheck := true
+		if localHeight == maxPeerHeight && bestPeerWork != nil {
+			workCheck = localWork.Cmp(bestPeerWork) >= 0
+		}
+
+		if workCheck && responsivePeers*2 > totalPeers {
 			progress = 1.0
 		} else {
 			ratio := float64(localHeight) / float64(maxPeerHeight)
@@ -394,9 +409,16 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 				ratio = maxSyncProgressWithPartialPeers
 			}
 			progress = ratio
+			if !workCheck {
+				log.Printf("[Sync] Same height (%d) but peer has more work: local=%s peer=%s, progress=%.2f",
+					localHeight, localWork.String(), bestPeerWork.String(), progress)
+			}
 		}
 	} else {
 		progress = float64(localHeight) / float64(maxPeerHeight)
+		if progress > 1.0 {
+			progress = 1.0
+		}
 	}
 
 	s.mu.Lock()
@@ -2155,10 +2177,23 @@ func (s *SyncLoop) IsMining() bool {
 	return true
 }
 
-// GetActiveWorkerCount returns active worker count
+// GetActiveWorkerCount returns the number of active download/validation goroutines.
+// Tracks real-time concurrency for block processing, useful for monitoring
+// utilization and configuring dynamic batch sizes.
 func (s *SyncLoop) GetActiveWorkerCount() int {
-	// Return 0 as we don't have worker tracking
-	return 0
+	return int(s.activeWorkers.Load())
+}
+
+// IncWorkerCount increments the active worker counter.
+// Call when a new block download or validation goroutine is spawned.
+func (s *SyncLoop) IncWorkerCount() {
+	s.activeWorkers.Add(1)
+}
+
+// DecWorkerCount decrements the active worker counter.
+// Call when a block download or validation goroutine completes.
+func (s *SyncLoop) DecWorkerCount() {
+	s.activeWorkers.Add(-1)
 }
 
 // GetBestPeerByScore returns the best peer based on comprehensive scoring

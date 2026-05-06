@@ -47,11 +47,15 @@ const (
 	// DefaultDifficultyWindow is the difficulty adjustment window in blocks
 	DefaultDifficultyWindow = 10
 	// DefaultAdjustmentSensitivity is the PI controller sensitivity
-	DefaultAdjustmentSensitivity = 0.5
+	// Mathematical rationale: Kp ∈ [0.1, 0.3] ensures system stability
+	// Kp=0.2 provides 20% correction per adjustment, preventing oscillation
+	DefaultAdjustmentSensitivity = 0.2
 	// DefaultDifficultyBoundDivisor is the difficulty bound divisor
 	DefaultDifficultyBoundDivisor = 2048
-	// DefaultDifficultyMaxStep is the maximum difficulty step change
-	DefaultDifficultyMaxStep = 100
+	// DefaultDifficultyMaxStep is the maximum difficulty step change (percentage)
+	// Reduced from 100% to 20% to prevent dramatic difficulty swings
+	// This ensures smoother difficulty adjustments and better block time stability
+	DefaultDifficultyMaxStep = 20
 	// DefaultGenesisDifficultyBits is the genesis block difficulty bits
 	DefaultGenesisDifficultyBits = uint32(0x1d00ffff)
 	// DefaultMinimumDifficulty is the minimum difficulty
@@ -130,7 +134,7 @@ func DefaultConfig() *Config {
 			MaxDifficulty:                  4294967295,
 			MinDifficultyBits:              1,
 			MaxDifficultyBits:              255,
-			MaxDifficultyChangePercent:     100, // Increased for faster difficulty adjustment
+			MaxDifficultyChangePercent:     20,  // Reduced from 100 to 20 for PI controller stability (Kp=0.2)
 			MedianTimePastWindow:           11,
 			MerkleEnable:                   true,
 			MerkleActivationHeight:         0,
@@ -383,7 +387,7 @@ func GetConsensusParams() ConsensusParams {
 		MaxBlockTimeDriftSeconds:       900,
 		MinDifficultyBits:              1,
 		MaxDifficultyBits:              255,
-		MaxDifficultyChangePercent:     100,
+		MaxDifficultyChangePercent:     20,  // Reduced for PI controller stability
 		MedianTimePastWindow:           11,
 		MinDifficulty:                  1,
 		MaxDifficulty:                  4294967295,

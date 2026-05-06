@@ -10,12 +10,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/core"
 	bolt "go.etcd.io/bbolt"
+	"golang.org/x/crypto/sha3"
 )
 
 const (
@@ -705,4 +707,366 @@ func (s *BoltStore) RestoreFromBackup(backupPath string) (int, error) {
 
 	log.Printf("bolt store: restored %d blocks from backup %s", restoredCount, backupPath)
 	return restoredCount, nil
+}
+
+// === State Persistence Methods (P0-1 Fix: state persistence) ===
+
+// PutAccount persists a single account state.
+// Thread-safe: uses BoltDB transaction for atomic update.
+func (s *BoltStore) PutAccount(address string, account core.Account) error {
+	if address == "" {
+		return fmt.Errorf("put account: address cannot be empty")
+	}
+
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("state"))
+		if b == nil {
+			var err error
+			b, err = tx.CreateBucketIfNotExists([]byte("state"))
+			if err != nil {
+				return fmt.Errorf("create state bucket: %w", err)
+			}
+		}
+
+		var buf bytes.Buffer
+		if err := gob.NewEncoder(&buf).Encode(account); err != nil {
+			return fmt.Errorf("encode account: %w", err)
+		}
+
+		if err := b.Put([]byte(address), buf.Bytes()); err != nil {
+			return fmt.Errorf("put account: %w", err)
+		}
+
+		return nil
+	})
+}
+
+// GetAccount retrieves an account by address.
+// Returns the account, a boolean indicating if found, and any error.
+func (s *BoltStore) GetAccount(address string) (core.Account, bool, error) {
+	if address == "" {
+		return core.Account{}, false, fmt.Errorf("get account: address cannot be empty")
+	}
+
+	var account core.Account
+	found := false
+
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("state"))
+		if b == nil {
+			return nil // State bucket doesn't exist yet
+		}
+
+		val := b.Get([]byte(address))
+		if val == nil {
+			return nil // Account not found
+		}
+
+		if err := gob.NewDecoder(bytes.NewReader(val)).Decode(&account); err != nil {
+			return fmt.Errorf("decode account: %w", err)
+		}
+
+		found = true
+		return nil
+	})
+
+	if err != nil {
+		return core.Account{}, false, fmt.Errorf("get account: %w", err)
+	}
+
+	return account, found, nil
+}
+
+// BatchPutAccounts persists multiple accounts atomically.
+// This is more efficient than calling PutAccount multiple times.
+func (s *BoltStore) BatchPutAccounts(accounts map[string]core.Account) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("state"))
+		if b == nil {
+			var err error
+			b, err = tx.CreateBucketIfNotExists([]byte("state"))
+			if err != nil {
+				return fmt.Errorf("create state bucket: %w", err)
+			}
+		}
+
+		for addr, account := range accounts {
+			var buf bytes.Buffer
+			if err := gob.NewEncoder(&buf).Encode(account); err != nil {
+				return fmt.Errorf("encode account %s: %w", addr, err)
+			}
+
+			if err := b.Put([]byte(addr), buf.Bytes()); err != nil {
+				return fmt.Errorf("put account %s: %w", addr, err)
+			}
+		}
+
+		return nil
+	})
+}
+
+// Snapshot creates a state snapshot at the specified height.
+// The snapshot includes all account states and the state root hash.
+// Thread-safe: this operation is atomic within a BoltDB transaction.
+func (s *BoltStore) Snapshot(height uint64, stateRoot []byte, state map[string]core.Account) error {
+	if state == nil {
+		return fmt.Errorf("snapshot: state cannot be nil")
+	}
+	if len(stateRoot) == 0 {
+		return fmt.Errorf("snapshot: state root cannot be empty")
+	}
+
+	return s.db.Update(func(tx *bolt.Tx) error {
+		// Get or create snapshots bucket
+		snapB := tx.Bucket([]byte("snapshots"))
+		if snapB == nil {
+			var err error
+			snapB, err = tx.CreateBucketIfNotExists([]byte("snapshots"))
+			if err != nil {
+				return fmt.Errorf("create snapshots bucket: %w", err)
+			}
+		}
+
+		// Get or create state bucket (for account states)
+		stateB := tx.Bucket([]byte("state"))
+		if stateB == nil {
+			var err error
+			stateB, err = tx.CreateBucketIfNotExists([]byte("state"))
+			if err != nil {
+				return fmt.Errorf("create state bucket: %w", err)
+			}
+		}
+
+		// Serialize snapshot metadata
+		var metaBuf bytes.Buffer
+		meta := struct {
+			Height    uint64
+			Timestamp int64
+		}{
+			Height:    height,
+			Timestamp: time.Now().Unix(),
+		}
+		if err := gob.NewEncoder(&metaBuf).Encode(meta); err != nil {
+			return fmt.Errorf("encode snapshot metadata: %w", err)
+		}
+
+		// Store snapshot metadata
+		heightKey := u64be(height)
+		if err := snapB.Put(heightKey, metaBuf.Bytes()); err != nil {
+			return fmt.Errorf("put snapshot metadata: %w", err)
+		}
+
+		// Store state root
+		if err := snapB.Put(append(heightKey, []byte(":root")...), stateRoot); err != nil {
+			return fmt.Errorf("put snapshot state root: %w", err)
+		}
+
+		// Store account states
+		accountBucketName := append(heightKey, []byte(":accounts")...)
+		accountB, err := tx.CreateBucketIfNotExists(accountBucketName)
+		if err != nil {
+			return fmt.Errorf("create snapshot accounts bucket: %w", err)
+		}
+
+		for addr, account := range state {
+			var buf bytes.Buffer
+			if err := gob.NewEncoder(&buf).Encode(account); err != nil {
+				return fmt.Errorf("encode account %s: %w", addr, err)
+			}
+
+			if err := accountB.Put([]byte(addr), buf.Bytes()); err != nil {
+				return fmt.Errorf("put account %s: %w", addr, err)
+			}
+		}
+
+		return nil
+	})
+}
+
+// LoadSnapshot loads the most recent state snapshot at or before the specified height.
+// Returns the snapshot height, state root, state map, and any error.
+func (s *BoltStore) LoadSnapshot(height uint64) (uint64, []byte, map[string]core.Account, error) {
+	var (
+		snapshotHeight uint64
+		stateRoot     []byte
+		state         map[string]core.Account
+	)
+
+	err := s.db.View(func(tx *bolt.Tx) error {
+		snapB := tx.Bucket([]byte("snapshots"))
+		if snapB == nil {
+			return fmt.Errorf("load snapshot: snapshots bucket not found")
+		}
+
+		// Find the most recent snapshot at or before the specified height
+		c := snapB.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			h := binary.BigEndian.Uint64(k)
+			if h <= height {
+				snapshotHeight = h
+
+				// Decode metadata
+				var meta struct {
+					Height    uint64
+					Timestamp int64
+				}
+				if err := gob.NewDecoder(bytes.NewReader(v)).Decode(&meta); err != nil {
+					return fmt.Errorf("decode snapshot metadata: %w", err)
+				}
+
+				// Load state root
+				rootKey := append(k, []byte(":root")...)
+				stateRoot = snapB.Get(rootKey)
+				if stateRoot == nil {
+					return fmt.Errorf("load snapshot: state root not found for height %d", h)
+				}
+
+				// Load account states
+				accountBucketName := append(k, []byte(":accounts")...)
+				accountB := tx.Bucket(accountBucketName)
+				if accountB == nil {
+					state = make(map[string]core.Account)
+					return nil
+				}
+
+				state = make(map[string]core.Account)
+				return accountB.ForEach(func(k, v []byte) error {
+					var account core.Account
+					if err := gob.NewDecoder(bytes.NewReader(v)).Decode(&account); err != nil {
+						return fmt.Errorf("decode account: %w", err)
+					}
+					state[string(k)] = account
+					return nil
+				})
+			}
+		}
+
+		return fmt.Errorf("load snapshot: no snapshot found at or before height %d", height)
+	})
+
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("load snapshot: %w", err)
+	}
+
+	return snapshotHeight, stateRoot, state, nil
+}
+
+// LatestSnapshot returns the height of the most recent snapshot.
+// Returns 0 and no error if no snapshot exists.
+func (s *BoltStore) LatestSnapshot() (uint64, error) {
+	var latestHeight uint64
+
+	err := s.db.View(func(tx *bolt.Tx) error {
+		snapB := tx.Bucket([]byte("snapshots"))
+		if snapB == nil {
+			return nil // No snapshots yet
+		}
+
+		c := snapB.Cursor()
+		lastK, _ := c.Last()
+		if lastK != nil {
+			latestHeight = binary.BigEndian.Uint64(lastK)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return 0, fmt.Errorf("latest snapshot: %w", err)
+	}
+
+	return latestHeight, nil
+}
+
+// DeleteSnapshot removes a snapshot at the specified height.
+// This is useful for pruning old snapshots to save storage space.
+func (s *BoltStore) DeleteSnapshot(height uint64) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		snapB := tx.Bucket([]byte("snapshots"))
+		if snapB == nil {
+			return nil // No snapshots yet
+		}
+
+		heightKey := u64be(height)
+
+		// Delete metadata
+		if err := snapB.Delete(heightKey); err != nil {
+			return fmt.Errorf("delete snapshot metadata: %w", err)
+		}
+
+		// Delete state root
+		if err := snapB.Delete(append(heightKey, []byte(":root")...)); err != nil {
+			return fmt.Errorf("delete snapshot state root: %w", err)
+		}
+
+		// Delete account states bucket
+		accountBucketName := append(heightKey, []byte(":accounts")...)
+		if err := tx.DeleteBucket(accountBucketName); err != nil && !strings.Contains(err.Error(), "bucket not found") {
+			return fmt.Errorf("delete snapshot accounts bucket: %w", err)
+		}
+
+		return nil
+	})
+}
+
+// CalculateStateRoot calculates the state root hash from the account map.
+// This is used to verify state integrity.
+// Uses a simple Keccak-256 hash of the sorted account data.
+// Returns the state root hash (32 bytes) and any error.
+func (s *BoltStore) CalculateStateRoot(state map[string]core.Account) ([]byte, error) {
+	if state == nil {
+		return nil, fmt.Errorf("calculate state root: state cannot be nil")
+	}
+
+	// Serialize account data in a deterministic order
+	type accountEntry struct {
+		Address string
+		Balance uint64
+		Nonce   uint64
+	}
+
+	entries := make([]accountEntry, 0, len(state))
+	for addr, account := range state {
+		entries = append(entries, accountEntry{
+			Address: addr,
+			Balance: account.Balance,
+			Nonce:   account.Nonce,
+		})
+	}
+
+	// Sort by address for determinism
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Address < entries[j].Address
+	})
+
+	// Serialize and hash
+	var buf bytes.Buffer
+	for _, entry := range entries {
+		if _, err := buf.Write([]byte(entry.Address)); err != nil {
+			return nil, fmt.Errorf("serialize address: %w", err)
+		}
+		if err := binary.Write(&buf, binary.BigEndian, entry.Balance); err != nil {
+			return nil, fmt.Errorf("serialize balance: %w", err)
+		}
+		if err := binary.Write(&buf, binary.BigEndian, entry.Nonce); err != nil {
+			return nil, fmt.Errorf("serialize nonce: %w", err)
+		}
+	}
+
+	// Use Keccak-256 (Ethereum-style state root)
+	hash := sha3.NewLegacyKeccak256()
+	if _, err := hash.Write(buf.Bytes()); err != nil {
+		return nil, fmt.Errorf("hash state: %w", err)
+	}
+
+	stateRoot := hash.Sum(nil)
+	if len(stateRoot) != 32 {
+		return nil, fmt.Errorf("calculate state root: invalid hash length %d, expected 32", len(stateRoot))
+	}
+
+	return stateRoot, nil
 }

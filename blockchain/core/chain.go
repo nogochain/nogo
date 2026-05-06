@@ -587,9 +587,26 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 		}
 	}
 
-	// Recompute state from blocks
-	if err := chain.recomputeStateLocked(); err != nil {
-		return nil, fmt.Errorf("recompute state: %w", err)
+	// Try loading state snapshot first (P0-1 Fix: state persistence)
+	// This is O(1) vs O(n) for recomputing from all blocks
+	if chain.store != nil {
+		snapshotHeight, stateRoot, snapshotState, err := chain.store.LoadSnapshot(chain.currentHeight())
+		if err == nil && snapshotState != nil && len(snapshotState) > 0 {
+			// Loaded snapshot successfully - O(1) operation
+			chain.state = snapshotState
+			log.Printf("[Chain] Loaded state snapshot at height %d (root=%x)", snapshotHeight, stateRoot[:8])
+		} else {
+			// Snapshot not found or failed, recompute from blocks - O(n)
+			if err := chain.recomputeStateLocked(); err != nil {
+				return nil, fmt.Errorf("recompute state: %w", err)
+			}
+			log.Printf("[Chain] Recomputed state from %d blocks (no snapshot available)", len(chain.blocks))
+		}
+	} else {
+		// No persistent store available, recompute from blocks - O(n)
+		if err := chain.recomputeStateLocked(); err != nil {
+			return nil, fmt.Errorf("recompute state: %w", err)
+		}
 	}
 
 	// Initialize indexes
@@ -665,45 +682,6 @@ func (c *Chain) validateRulesHashLocked() error {
 	}
 
 	return nil
-}
-
-// tryForkCompatibleStateApplication attempts to apply block state with fork tolerance
-// This handles legitimate blocks from network forks that have minor parameter differences
-// Production-grade: maintains strict validation with minimal tolerance for security
-// Caller must hold c.mu lock
-func (c *Chain) tryForkCompatibleStateApplication(block *Block, hashHex string) bool {
-	log.Printf("[Chain] Attempting fork-compatible state application for block %d", block.GetHeight())
-
-	// Strict validation: verify block structure and cryptographic integrity
-	if err := c.validateBlockStructure(block); err != nil {
-		log.Printf("[Chain] Fork-tolerant application failed: invalid block structure: %v", err)
-		return false
-	}
-
-	// Verify proof-of-work is valid
-	if err := c.validateBlockPoW(block); err != nil {
-		log.Printf("[Chain] Fork-tolerant application failed: invalid PoW: %v", err)
-		return false
-	}
-
-	// Attempt to apply state with strict fork tolerance
-	tempState := make(map[string]Account)
-	err := applyBlockToStateWithStrictTolerance(c.consensus, c.monetaryPolicy, tempState, block, c.genesisAddress, c.genesisTimestamp, c.state)
-	if err == nil {
-		// Validate state integrity before merging
-		if err := c.validateStateIntegrity(tempState); err != nil {
-			log.Printf("[Chain] Fork-tolerant state validation failed: %v", err)
-			return false
-		}
-
-		// Merge temp state with canonical state
-		c.mergeStatesWithStrictValidation(tempState)
-		log.Printf("[Chain] Fork-tolerant application successful for block %d", block.GetHeight())
-		return true
-	}
-
-	log.Printf("[Chain] Fork-tolerant application failed: %v", err)
-	return false
 }
 
 // validateBlockStructure performs strict structural validation
@@ -1207,6 +1185,31 @@ func (c *Chain) AppendBlock(block *Block) error {
 	// Apply block to state
 	if err := applyBlockToState(c.consensus, c.monetaryPolicy, c.state, block, c.genesisAddress, c.genesisTimestamp); err != nil {
 		return fmt.Errorf("apply block to state: %w", err)
+	}
+
+	// Persist account state to database (P0-1 Fix: state persistence)
+	// Update each modified account in the state map
+	if c.store != nil {
+		for addr, acct := range c.state {
+			if err := c.store.PutAccount(addr, acct); err != nil {
+				log.Printf("[Chain] WARNING: failed to persist account %s: %v", addr, err)
+				// Continue - don't fail block append due to persistence error
+			}
+		}
+	}
+
+	// Create state snapshot periodically (every 1000 blocks)
+	if c.store != nil && block.GetHeight()%1000 == 0 {
+		stateRoot, err := c.store.CalculateStateRoot(c.state)
+		if err != nil {
+			log.Printf("[Chain] WARNING: failed to calculate state root at height %d: %v", block.GetHeight(), err)
+		} else {
+			if err := c.store.Snapshot(block.GetHeight(), stateRoot, c.state); err != nil {
+				log.Printf("[Chain] WARNING: failed to create snapshot at height %d: %v", block.GetHeight(), err)
+			} else {
+				log.Printf("[Chain] Created state snapshot at height %d (root=%x)", block.GetHeight(), stateRoot[:8])
+			}
+		}
 	}
 
 	// Store block
@@ -3484,20 +3487,15 @@ func (c *Chain) addCanonicalBlockLocked(block *Block, hashHex string) (bool, err
 
 	// Apply block to state after successful persistence
 	// This is critical for reward distribution
+	// UNIFIED STATE APPLICATION: All nodes MUST apply the same state transition rules
+	// DIFFERENT RULES = CHAIN SPLIT!
+	// No "fork-tolerant" or "compatible" modes allowed - they cause chain splits!
 	if err := applyBlockToState(c.consensus, c.monetaryPolicy, c.state, block, c.genesisAddress, c.genesisTimestamp); err != nil {
-		log.Printf("[Chain] WARNING: Failed to apply block %d to state: %v", block.GetHeight(), err)
-
-		// Enhanced fork compatibility: attempt fork-tolerant state application
-		// This allows blocks from slightly divergent forks to be accepted
-		if c.tryForkCompatibleStateApplication(block, hashHex) {
-			log.Printf("[Chain] Fork-compatible state application succeeded for block %d", block.GetHeight())
-		} else {
-			log.Printf("[Chain] ERROR: Fork-compatible state application also failed for block %d", block.GetHeight())
-			// Rollback in-memory changes
-			c.blocks = c.blocks[:len(c.blocks)-1]
-			delete(c.blocksByHash, hashHex)
-			return false, fmt.Errorf("apply block to state: %w", err)
-		}
+		log.Printf("[Chain] ERROR: Failed to apply block %d to state: %v", block.GetHeight(), err)
+		// Rollback in-memory changes - NO fallback to "compatible" mode
+		c.blocks = c.blocks[:len(c.blocks)-1]
+		delete(c.blocksByHash, hashHex)
+		return false, fmt.Errorf("apply block to state: %w", err)
 	}
 
 	// CRITICAL: Remove confirmed transactions from mempool

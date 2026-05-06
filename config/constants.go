@@ -20,6 +20,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -970,11 +971,10 @@ type ConsensusParams struct {
 	BinaryEncodingActivationHeight uint64
 }
 
-// GetGenesisConfig returns the genesis configuration for the specified chain ID
-// For mainnet (chainID=1) and testnet (chainID=2), returns hardcoded configuration
-// For custom networks, loads from JSON file (not yet implemented)
+// GetGenesisConfig returns the genesis configuration for the specified chain ID.
+// For mainnet (chainID=1) and testnet (chainID=2), returns hardcoded configuration.
+// For custom chain IDs, loads the configuration from a genesis JSON file.
 func GetGenesisConfig(chainID uint64, genesisPath string) (*GenesisConfiguration, error) {
-	// Return hardcoded config for known networks
 	switch chainID {
 	case 1:
 		cfg := MainnetGenesisConfig
@@ -983,7 +983,33 @@ func GetGenesisConfig(chainID uint64, genesisPath string) (*GenesisConfiguration
 		cfg := TestnetGenesisConfig
 		return &cfg, nil
 	default:
-		// For custom networks, would load from JSON file
-		return nil, fmt.Errorf("custom chainID %d not supported, only mainnet (1) and testnet (2) are available", chainID)
+		return loadCustomGenesisConfig(chainID, genesisPath)
 	}
+}
+
+// loadCustomGenesisConfig reads a GenesisConfiguration from a JSON file.
+// This enables deployment of private networks and sidechains with custom parameters.
+// The JSON structure must match GenesisConfiguration with all required fields.
+func loadCustomGenesisConfig(chainID uint64, genesisPath string) (*GenesisConfiguration, error) {
+	if genesisPath == "" {
+		genesisPath = fmt.Sprintf("genesis_%d.json", chainID)
+	}
+
+	data, err := os.ReadFile(genesisPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot load genesis config for chainID %d: %w", chainID, err)
+	}
+
+	var cfg GenesisConfiguration
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("invalid genesis JSON for chainID %d in %s: %w", chainID, genesisPath, err)
+	}
+
+	// Validate that the config file matches the requested chain ID
+	if cfg.ChainID != 0 && cfg.ChainID != chainID {
+		return nil, fmt.Errorf("genesis file chainID %d does not match requested chainID %d", cfg.ChainID, chainID)
+	}
+
+	log.Printf("Loaded custom genesis config for chainID %d from %s", chainID, genesisPath)
+	return &cfg, nil
 }

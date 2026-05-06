@@ -228,7 +228,16 @@ func (n *Node) initializeComponents() error {
 		log.Printf("Node: Seed Mode enabled - this node will act as a bootstrap node")
 	}
 
+	// BYTOM-STYLE SECURITY INTEGRATION: Create SecurityManager
+	// This provides IP filtering, blacklisting, and dynamic ban scoring
+	securityMgr, secErr := security.NewSecurityManager(n.config.DataDir)
+	if secErr != nil {
+		return fmt.Errorf("failed to create security manager: %w", secErr)
+	}
+	log.Printf("Node: SecurityManager created with data dir: %s", n.config.DataDir)
+
 	n.p2pSwitch = network.NewSwitch(switchCfg)
+	n.p2pSwitch.SetSecurityManager(securityMgr) // Bytom-style integration
 	n.p2pSwitch.SetNodeInfo(nodeID, fmt.Sprintf("%d", n.config.ChainID), config.NodeVersion)
 
 	handlers, err := reactor.NewReactorHandlers(n.networkChainWrapper, n.mempool, n.p2pSwitch, n.miner)

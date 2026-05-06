@@ -5,7 +5,9 @@
 package network
 
 import (
+	"math"
 	"net"
+	"sort"
 	"sync"
 	"time"
 )
@@ -307,14 +309,56 @@ func (nt *NetworkTopology) AnalyzeNetworkLatency() map[string]interface{} {
 
 	avg := float64(sum) / float64(len(latencies))
 
+	// Real percentile calculation using sorted positions.
+	// Produces exact p50 (median) and p95 values rather than estimates.
+	sorted := make([]int64, len(latencies))
+	copy(sorted, latencies)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	p50 := percentileLatency(sorted, 0.50)
+	p95 := percentileLatency(sorted, 0.95)
+
 	return map[string]interface{}{
 		"sample_size":    len(latencies),
 		"min_latency_ms": min,
 		"max_latency_ms": max,
 		"avg_latency_ms": avg,
-		"p50_estimate":   avg, // Simplified, could implement full percentile
-		"p95_estimate":   max, // Conservative estimate
+		"p50_latency_ms": p50,
+		"p95_latency_ms": p95,
 	}
+}
+
+// percentileLatency computes the p-th percentile from sorted latency data.
+// Uses linear interpolation between the two nearest ranks for non-integer positions.
+// p should be in [0.0, 1.0]. Returns the interpolated percentile in milliseconds.
+func percentileLatency(sorted []int64, p float64) float64 {
+	n := len(sorted)
+	if n == 0 {
+		return 0.0
+	}
+	if n == 1 {
+		return float64(sorted[0])
+	}
+
+	// Compute fractional rank: p * (n - 1)
+	rank := p * float64(n-1)
+	lower := int(math.Floor(rank))
+	upper := int(math.Ceil(rank))
+
+	if lower < 0 {
+		lower = 0
+	}
+	if upper >= n {
+		upper = n - 1
+	}
+
+	if lower == upper {
+		return float64(sorted[lower])
+	}
+
+	// Linear interpolation between sorted[lower] and sorted[upper]
+	fraction := rank - float64(lower)
+	return float64(sorted[lower])*(1.0-fraction) + float64(sorted[upper])*fraction
 }
 
 // GetConnectionGraph returns the network connection graph

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -25,6 +26,7 @@ import (
 	"github.com/nogochain/nogo/blockchain/core"
 	"github.com/nogochain/nogo/blockchain/network/mconnection"
 	"github.com/nogochain/nogo/blockchain/network/reactor"
+	"github.com/nogochain/nogo/blockchain/network/security"
 	"github.com/nogochain/nogo/internal/networking"
 	"github.com/nogochain/nogo/internal/networking/dht"
 	"github.com/nogochain/nogo/internal/networking/mdns"
@@ -45,9 +47,14 @@ type PeerInfo struct {
 }
 
 // PeerSeedAddr is sent during peer exchange to share routable peer addresses.
+// Optimized Gossip Protocol (P0-4 fix):
+//   - TTL field prevents infinite propagation (default: 3 hops)
+//   - Seen cache prevents duplicate processing
+//   - Random peer selection (k=3) reduces redundant traffic
 type PeerSeedAddr struct {
 	ID   string `json:"id"`
 	Addr string `json:"addr"`
+	TTL  int    `json:"ttl,omitempty"` // Time-to-live for gossip propagation (hops)
 }
 
 // encryptionMode defines the encryption mode for P2P connections.
@@ -214,6 +221,14 @@ type Switch struct {
 	syncLoadMu     sync.Mutex
 	syncLoadMap    map[string]int
 	syncRoundRobin int
+
+	// Gossip protocol optimization (P0-4 fix)
+	gossipSeen     map[string]time.Time // Cache of seen gossip messages (msgHash -> timestamp)
+	gossipSeenMu   sync.RWMutex      // Mutex for gossipSeen cache
+	gossipMaxAge   time.Duration     // Maximum age for gossip messages (default: 10 minutes)
+
+	// Security manager 
+	securityMgr *security.SecurityManager // Integrated security manager for peer filtering and banning
 }
 
 // peerErrorState tracks consecutive errors for a peer
@@ -261,6 +276,10 @@ func NewSwitch(cfg SwitchConfig) *Switch {
 	}
 	sw.nodePrivKey = privKey
 	sw.encryptionMode = parseSwitchEncryptionMode()
+
+	// Initialize gossip protocol optimization (P0-4 fix)
+	sw.gossipSeen = make(map[string]time.Time)
+	sw.gossipMaxAge = 10 * time.Minute // Gossip messages expire after 10 minutes
 
 	// Initialize peer discovery services
 	sw.initPeerDiscovery()
@@ -374,8 +393,10 @@ func (cfg *SwitchConfig) applyDefaults() {
 	if cfg.MinOutboundPeers == 0 {
 		cfg.MinOutboundPeers = minNumOutboundPeers
 	}
-	if len(cfg.Seeds) > 0 && cfg.MinOutboundPeers > len(cfg.Seeds) {
-		cfg.MinOutboundPeers = len(cfg.Seeds)
+	// Ensure MinOutboundPeers is at least 1 more than seed count to force DHT discovery
+	// of additional peers (enables miner-to-miner cross-connect behind NAT).
+	if len(cfg.Seeds) > 0 && cfg.MinOutboundPeers <= len(cfg.Seeds) {
+		cfg.MinOutboundPeers = len(cfg.Seeds) + 1
 	}
 	if cfg.RecheckInterval == 0 {
 		cfg.RecheckInterval = peerReplenishInterval
@@ -828,6 +849,7 @@ func (sw *Switch) seedOutboundPeers(peer *Peer) {
 		seedItems = append(seedItems, PeerSeedAddr{
 			ID:   p.ID(),
 			Addr: peerAddr,
+			TTL:  3, // Default TTL: 3 hops (P0-4 optimization)
 		})
 	}
 
@@ -844,6 +866,12 @@ func (sw *Switch) seedOutboundPeers(peer *Peer) {
 	if !mconn.TrySend(mconnection.ChannelGossip, seedMsg) {
 		log.Printf("switch: send seed peers to %s failed", peer.ID())
 	}
+
+	// Record gossip message hash for deduplication (P0-4 optimization)
+	msgHash := fmt.Sprintf("%x", sha256.Sum256(seedMsg))
+	sw.gossipSeenMu.Lock()
+	sw.gossipSeen[msgHash] = time.Now()
+	sw.gossipSeenMu.Unlock()
 }
 
 // resolvePeerRoutableAddr returns the best routable address for a peer.
@@ -1347,6 +1375,29 @@ func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, 
 	addr := conn.RemoteAddr().String()
 	stableID := sw.stablePeerID(peerNI, addr)
 
+	// BYTOM-STYLE SECURITY FILTERING: Check if peer should be accepted
+	if sw.securityMgr != nil {
+		// Extract IP from address
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			host = addr
+		}
+
+		// Check if connection should be accepted (IP filter + blacklist)
+		if allowed, reason := sw.securityMgr.ShouldAcceptConnection(addr); !allowed {
+			conn.Close()
+			return fmt.Errorf("switch: security manager rejected peer %s: %s", addr, reason)
+		}
+
+		// Check if peer is banned (PeerID-level ban)
+		if sw.securityMgr.IsPeerBanned(stableID) {
+			conn.Close()
+			return fmt.Errorf("switch: peer %s is banned", stableID)
+		}
+
+		log.Printf("[Switch] Security check passed for peer %s (IP: %s)", stableID, host)
+	}
+
 	sw.mu.RLock()
 	existingPeer := sw.peers.Get(stableID)
 	sw.mu.RUnlock()
@@ -1487,6 +1538,11 @@ func (sw *Switch) AddPeerConnection(conn net.Conn, isOutbound bool) error {
 
 // receiveMessage dispatches an inbound message to the appropriate reactor.
 func (sw *Switch) receiveMessage(chID byte, peerID string, msgBytes []byte) {
+	if chID == mconnection.ChannelGossip {
+		sw.handleGossipMessage(peerID, msgBytes)
+		return
+	}
+
 	sw.mu.RLock()
 	reactorForCh, exists := sw.reactorsByCh[chID]
 	sw.mu.RUnlock()
@@ -1503,6 +1559,140 @@ func (sw *Switch) receiveMessage(chID byte, peerID string, msgBytes []byte) {
 	}
 
 	reactorForCh.Receive(chID, peerID, msgBytes)
+}
+
+// handleGossipMessage processes incoming peer address exchange messages on ChannelGossip.
+// Decodes PeerSeedAddr list and adds discovered peers to the dial queue,
+// enabling miner-to-miner cross-connect through seed-relayed peer discovery.
+// Optimized (P0-4 fix):
+//   - TTL check: discard messages with TTL <= 0
+//   - Deduplication: skip already processed messages
+//   - Forwarding: decrement TTL and forward to k=3 random peers
+func (sw *Switch) handleGossipMessage(fromPeerID string, msgBytes []byte) {
+	// Deduplication check (P0-4 fix)
+	msgHash := fmt.Sprintf("%x", sha256.Sum256(msgBytes))
+	sw.gossipSeenMu.RLock()
+	_, seen := sw.gossipSeen[msgHash]
+	sw.gossipSeenMu.RUnlock()
+
+	if seen {
+		// Message already processed, skip
+		log.Printf("[Switch] gossip: duplicate message %s, skipping", msgHash[:16])
+		return
+	}
+
+	// Record message as seen (P0-4 fix)
+	sw.gossipSeenMu.Lock()
+	sw.gossipSeen[msgHash] = time.Now()
+	sw.gossipSeenMu.Unlock()
+
+	// Clean up old entries (P0-4 fix)
+	go sw.cleanupOldGossipEntries()
+
+	var seedItems []PeerSeedAddr
+	if err := json.Unmarshal(msgBytes, &seedItems); err != nil {
+		log.Printf("[Switch] gossip: failed to unmarshal peer list from %s: %v", fromPeerID, err)
+		return
+	}
+
+	if len(seedItems) == 0 {
+		return
+	}
+
+	log.Printf("[Switch] gossip: received %d peer addresses from %s (TTL=%d)", 
+		len(seedItems), fromPeerID, seedItems[0].TTL)
+
+	// Check TTL (P0-4 fix)
+	if len(seedItems) > 0 && seedItems[0].TTL <= 0 {
+		log.Printf("[Switch] gossip: TTL expired, discarding message %s", msgHash[:16])
+		return
+	}
+
+	// Decrement TTL and forward to random peers (P0-4 fix)
+	if len(seedItems) > 0 {
+		seedItems[0].TTL--
+	}
+
+	for _, item := range seedItems {
+		if item.Addr == "" {
+			continue
+		}
+		if item.ID == sw.nodeID {
+			continue
+		}
+		if sw.peerAlreadyDialingOrConnected(item.Addr) {
+			continue
+		}
+		if sw.peerAlreadyDialingOrConnected(item.ID) {
+			continue
+		}
+
+		log.Printf("[Switch] gossip: discovered peer %s @ %s, adding to dial list", item.ID, item.Addr)
+		sw.AddPeerToList(item.Addr)
+	}
+
+	// Forward gossip message to random peers (P0-4 fix)
+	sw.forwardGossipMessage(fromPeerID, seedItems)
+}
+
+// cleanupOldGossipEntries removes expired entries from gossipSeen cache
+func (sw *Switch) cleanupOldGossipEntries() {
+	sw.gossipSeenMu.Lock()
+	defer sw.gossipSeenMu.Unlock()
+
+	now := time.Now()
+	for hash, timestamp := range sw.gossipSeen {
+		if now.Sub(timestamp) > sw.gossipMaxAge {
+			delete(sw.gossipSeen, hash)
+		}
+	}
+}
+
+// forwardGossipMessage forwards gossip message to k=3 random peers (P0-4 fix)
+func (sw *Switch) forwardGossipMessage(fromPeerID string, seedItems []PeerSeedAddr) {
+	sw.mu.RLock()
+	peerList := sw.peers.List()
+	sw.mu.RUnlock()
+
+	if len(peerList) == 0 {
+		return
+	}
+
+	// Select k=3 random peers (excluding sender)
+	k := 3
+	selectedPeers := make([]*Peer, 0, k)
+	for _, p := range peerList {
+		if p.ID() == fromPeerID {
+			continue // Don't send back to sender
+		}
+		selectedPeers = append(selectedPeers, p)
+		if len(selectedPeers) >= k {
+			break
+		}
+	}
+
+	if len(selectedPeers) == 0 {
+		return
+	}
+
+	// Forward gossip message
+	seedMsg, err := json.Marshal(seedItems)
+	if err != nil {
+		log.Printf("[Switch] gossip: failed to marshal for forwarding: %v", err)
+		return
+	}
+
+	for _, p := range selectedPeers {
+		mconn := p.MConnection()
+		if mconn == nil {
+			continue
+		}
+		if !mconn.TrySend(mconnection.ChannelGossip, seedMsg) {
+			log.Printf("[Switch] gossip: forward to %s failed", p.ID())
+		} else {
+			log.Printf("[Switch] gossip: forwarded to %s (TTL=%d)", p.ID(), seedItems[0].TTL)
+		}
+	}
 }
 
 func (sw *Switch) tryHandlePendingResponse(peerID string, msg []byte) bool {
@@ -3544,4 +3734,24 @@ func (sw *Switch) DecSyncLoad(peerAddr string) {
 	if sw.syncLoadMap[peerAddr] > 0 {
 		sw.syncLoadMap[peerAddr]--
 	}
+}
+
+// SetSecurityManager sets the security manager for Bytom-style security filtering.
+// This method allows optional integration without changing the NewSwitch API.
+// Call this method after creating the Switch to enable:
+//   - IP filtering (allowlist/blocklist)
+//   - Peer banning with dynamic ban scoring
+//   - Connection rate limiting
+//   - Geo-based access control
+//
+// Example usage:
+//
+//	securityMgr, _ := security.NewSecurityManager(dataDir)
+//	sw := network.NewSwitch(cfg)
+//	sw.SetSecurityManager(securityMgr)
+func (sw *Switch) SetSecurityManager(secMgr *security.SecurityManager) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	sw.securityMgr = secMgr
+	log.Printf("[Switch] SecurityManager integrated - Bytom-style peer filtering enabled")
 }

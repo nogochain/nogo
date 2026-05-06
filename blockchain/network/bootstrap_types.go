@@ -250,6 +250,19 @@ type SyncStatistics struct {
 	PeersCount        int
 }
 
+// SyncMetrics carries live operational data for feeding into sync status tracking.
+// External sync loops call UpdateSyncMetrics with this data to keep
+// GetSyncStatus and GetSyncStatistics responses current.
+type SyncMetrics struct {
+	CurrentHeight  uint64
+	TargetHeight   uint64
+	ConnectedPeers int
+	TotalPeers     int
+	BlockAdded     bool
+	SyncStarted    bool
+	SyncCompleted  bool
+}
+
 // === Helper Functions ===
 
 // String returns the string representation of PriorityLevel
@@ -302,7 +315,10 @@ func (m ExecutionMode) String() string {
 
 // DefaultSyncManager creates a basic sync manager implementation
 func DefaultSyncManager() SyncManager {
-	return &defaultSyncManager{}
+	return &defaultSyncManager{
+		blockTimeBufMax: 128,
+		blockTimeBuffer: make([]time.Duration, 0, 128),
+	}
 }
 
 // defaultSyncManager implements basic synchronization management
@@ -312,6 +328,21 @@ type defaultSyncManager struct {
 	isSyncing     bool
 	handlers      []SyncEventHandler
 	handlerMu     sync.RWMutex
+
+	// Real-time sync metrics tracking
+	mu                sync.RWMutex
+	peersConnected    int
+	peersTotal        int
+	lastSyncTime      time.Time
+	lastSyncDuration  time.Duration
+	syncStartTime     time.Time
+	syncStartHeight   uint64
+	blocksAdded       uint64
+	syncAttempts      uint64
+	syncSuccesses     uint64
+	lastBlockTime     time.Time
+	blockTimeBuffer   []time.Duration // rolling buffer for average block time calculation
+	blockTimeBufMax   int
 }
 
 func (d *defaultSyncManager) IsSyncing() bool {
@@ -331,29 +362,44 @@ func (d *defaultSyncManager) GetTargetHeight() uint64 {
 }
 
 func (d *defaultSyncManager) GetSyncProgress() float64 {
-	if d.targetHeight == 0 {
-		return 0.0
-	}
-	return float64(d.currentHeight) / float64(d.targetHeight)
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.computeSyncProgress()
 }
 
 func (d *defaultSyncManager) StartSync() error {
+	d.mu.Lock()
 	d.isSyncing = true
+	d.syncAttempts++
+	d.syncStartTime = time.Now()
+	d.syncStartHeight = d.currentHeight
+	d.mu.Unlock()
 	return nil
 }
 
 func (d *defaultSyncManager) StopSync() error {
+	d.mu.Lock()
+	if d.isSyncing {
+		d.syncSuccesses++
+		d.lastSyncTime = time.Now()
+		d.lastSyncDuration = time.Since(d.syncStartTime)
+	}
 	d.isSyncing = false
+	d.mu.Unlock()
 	return nil
 }
 
 func (d *defaultSyncManager) PauseSync() error {
+	d.mu.Lock()
 	d.isSyncing = false
+	d.mu.Unlock()
 	return nil
 }
 
 func (d *defaultSyncManager) ResumeSync() error {
+	d.mu.Lock()
 	d.isSyncing = true
+	d.mu.Unlock()
 	return nil
 }
 
@@ -375,25 +421,109 @@ func (d *defaultSyncManager) UnregisterSyncHandler(handler SyncEventHandler) {
 }
 
 func (d *defaultSyncManager) GetSyncStatus() *SyncStatus {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var estimatedTime time.Duration
+	if d.isSyncing && d.targetHeight > d.currentHeight {
+		remaining := d.targetHeight - d.currentHeight
+		avgBlockTime := d.computeAvgBlockTime()
+		if avgBlockTime > 0 {
+			estimatedTime = time.Duration(float64(remaining) * avgBlockTime.Seconds() * float64(time.Second))
+		}
+	}
+
 	return &SyncStatus{
 		IsSyncing:      d.isSyncing,
 		CurrentHeight:  d.currentHeight,
 		TargetHeight:   d.targetHeight,
-		Progress:       d.GetSyncProgress(),
-		PeersConnected: 0,           // Would be implemented in real code
-		LastSyncTime:   time.Time{}, // Would be implemented in real code
-		EstimatedTime:  0,           // Would be calculated
+		Progress:       d.computeSyncProgress(),
+		PeersConnected: d.peersConnected,
+		LastSyncTime:   d.lastSyncTime,
+		EstimatedTime:  estimatedTime,
 	}
 }
 
 func (d *defaultSyncManager) GetSyncStatistics() *SyncStatistics {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	avgBlockTime := d.computeAvgBlockTime()
+	successRate := 1.0
+	if d.syncAttempts > 0 {
+		successRate = float64(d.syncSuccesses) / float64(d.syncAttempts)
+	}
+
 	return &SyncStatistics{
 		TotalBlocksSynced: d.currentHeight,
-		AverageBlockTime:  0,   // Would be calculated
-		SuccessRate:       1.0, // Would be calculated
-		LastSyncDuration:  0,   // Would be recorded
-		PeersCount:        0,   // Would be tracked
+		AverageBlockTime:  avgBlockTime,
+		SuccessRate:       successRate,
+		LastSyncDuration:  d.lastSyncDuration,
+		PeersCount:        d.peersTotal,
 	}
+}
+
+// computeAvgBlockTime calculates the exponential moving average of block times.
+// Uses a rolling buffer of recent block intervals for stability.
+func (d *defaultSyncManager) computeAvgBlockTime() time.Duration {
+	if len(d.blockTimeBuffer) == 0 {
+		return 0
+	}
+	var total time.Duration
+	for _, dt := range d.blockTimeBuffer {
+		total += dt
+	}
+	return total / time.Duration(len(d.blockTimeBuffer))
+}
+
+// computeSyncProgress calculates sync progress as a ratio (caller must hold lock).
+func (d *defaultSyncManager) computeSyncProgress() float64 {
+	if d.targetHeight == 0 {
+		return 0.0
+	}
+	return float64(d.currentHeight) / float64(d.targetHeight)
+}
+
+// UpdateSyncMetrics updates tracking fields from operational data.
+// Thread-safe; can be called by external sync loops to feed real metrics.
+func (d *defaultSyncManager) UpdateSyncMetrics(metrics SyncMetrics) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.currentHeight = metrics.CurrentHeight
+	d.targetHeight = metrics.TargetHeight
+	d.peersConnected = metrics.ConnectedPeers
+	d.peersTotal = metrics.TotalPeers
+
+	if metrics.BlockAdded {
+		d.blocksAdded++
+		now := time.Now()
+		if !d.lastBlockTime.IsZero() {
+			interval := now.Sub(d.lastBlockTime)
+			d.appendBlockTime(interval)
+		}
+		d.lastBlockTime = now
+	}
+
+	if metrics.SyncStarted {
+		d.syncAttempts++
+		d.syncStartTime = time.Now()
+		d.syncStartHeight = d.currentHeight
+	}
+
+	if metrics.SyncCompleted {
+		d.syncSuccesses++
+		d.lastSyncTime = time.Now()
+		d.lastSyncDuration = time.Since(d.syncStartTime)
+	}
+}
+
+func (d *defaultSyncManager) appendBlockTime(dt time.Duration) {
+	if len(d.blockTimeBuffer) >= d.blockTimeBufMax {
+		// Slide window: remove oldest entry
+		d.blockTimeBuffer = d.blockTimeBuffer[1:]
+	}
+	d.blockTimeBuffer = append(d.blockTimeBuffer, dt)
 }
 
 // === Health Assessment System Types ===

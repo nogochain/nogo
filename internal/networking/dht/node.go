@@ -253,13 +253,11 @@ func parseComplete(rawURL string) (*Node, error) {
 	return NewNode(id, ip, uint16(udpPort), uint16(tcpPort)), nil
 }
 
-// MustParseNode parses a node URL. It panics if the URL is not valid.
-func MustParseNode(rawURL string) *Node {
-	n, err := ParseNode(rawURL)
-	if err != nil {
-		panic("invalid node URL: " + err.Error())
-	}
-	return n
+// MustParseNode parses a node URL and returns the node or an error.
+// This function replaces the panic version to ensure production safety.
+// Production-grade: no panic calls allowed in production code.
+func MustParseNode(rawURL string) (*Node, error) {
+	return ParseNode(rawURL)
 }
 
 // NodeToRPC converts a Node to an RPC endpoint representation.

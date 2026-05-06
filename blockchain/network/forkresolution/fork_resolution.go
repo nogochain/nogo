@@ -237,8 +237,12 @@ func (fr *ForkResolver) ShouldReorg(remoteBlock *core.Block) bool {
 	remoteWork := fr.chain.CalculateCumulativeWork(remoteBlock)
 
 	if remoteWork != nil && localWork != nil {
-		remoteTotalWork := new(big.Int).Add(localWork, remoteWork)
-		if remoteTotalWork.Cmp(localWork) > 0 {
+		// FIX P1-3: Compare remote chain's total work vs local chain's total work
+		// Original bug: incorrectly added localWork + remoteWork, then compared with localWork
+		// Correct logic: remote chain is heavier if remoteWork > localWork
+		if remoteWork.Cmp(localWork) > 0 {
+			log.Printf("[ForkResolver] ShouldReorg: remote work %s > local work %s, triggering reorg",
+				remoteWork.String(), localWork.String())
 			return true
 		}
 	}
