@@ -608,17 +608,12 @@ body {
     </div>
   </div>
   
-  <!-- Special Addresses -->
-  <div class="stats-grid" id="specialAddresses" style="margin-top: 30px;">
-    <div class="stat-card" style="grid-column: span 2;">
-      <div class="stat-label">🏛️ Community Fund</div>
-      <div class="stat-value" id="communityFundBalance" style="font-size: 16px;">-</div>
-      <div class="stat-subtext" id="communityFundAddr">-</div>
-    </div>
-    <div class="stat-card" style="grid-column: span 2;">
-      <div class="stat-label">🎯 Integrity Pool</div>
-      <div class="stat-value" id="integrityPoolBalance" style="font-size: 16px;">-</div>
-      <div class="stat-subtext" id="integrityPoolAddr">-</div>
+  <!-- Candidate Pool Competition -->
+  <div class="stats-grid" id="candidatePoolSection" style="margin-top: 30px;">
+    <div class="stat-card" style="grid-column: span 4; background: linear-gradient(135deg, var(--bg-secondary), var(--bg-tertiary));">
+      <div class="stat-label" style="font-size: 18px;">🏟️ Candidate Pool Competition</div>
+      <div class="stat-value" id="poolCount" style="font-size: 14px;">Loading...</div>
+      <div class="stat-subtext" id="poolList" style="font-size: 12px;"></div>
     </div>
   </div>
   
@@ -814,8 +809,8 @@ async function loadStats() {
   document.getElementById('difficulty').textContent = info.difficultyBits?.toLocaleString() || '-';
   document.getElementById('peers').textContent = (info.peersCount || 0).toLocaleString();
   
-  // Load special addresses
-  loadSpecialAddresses();
+  // Load candidate pool competition stats
+  loadPoolStats();
   
   const tbody = document.getElementById('blocksBody');
   
@@ -840,30 +835,36 @@ async function loadStats() {
   }
 }
 
-// Load special addresses (community fund and integrity pool)
-async function loadSpecialAddresses() {
-  const special = await api('/chain/special_addresses');
-  if (!special) return;
+// Load candidate pool competition stats
+async function loadPoolStats() {
+  const data = await api('/pool/stats');
+  if (!data || !data.pools) return;
   
-  if (special.communityFund) {
-    const cfBalance = ((special.communityFund.balance || 0) / 1e8).toFixed(8);
-    const cfAddr = special.communityFund.address || '-';
-    document.getElementById('communityFundBalance').textContent = cfBalance + ' NOGO';
-    document.getElementById('communityFundAddr').textContent = cfAddr;
-    window.communityFundAddr = cfAddr;
+  const activePools = data.pools.filter(p => p.windowState === 'open' || p.windowState === 'active');
+  const totalPools = data.pools.length;
+  
+  document.getElementById('poolCount').textContent = 
+    activePools.length > 0 
+      ? `${activePools.length} active / ${totalPools} total pools`
+      : 'No active competitions';
+  
+  if (data.pools.length === 0) {
+    document.getElementById('poolList').innerHTML = '<span style="color:var(--text-secondary);">No candidate pools</span>';
+    return;
   }
   
-  if (special.integrityPool) {
-    const ipBalance = ((special.integrityPool.balance || 0) / 1e8).toFixed(8);
-    const ipAddr = special.integrityPool.address || '-';
-    document.getElementById('integrityPoolBalance').textContent = ipBalance + ' NOGO';
-    document.getElementById('integrityPoolAddr').textContent = ipAddr;
-    window.integrityPoolAddr = ipAddr;
+  // Show recent pools (last 10)
+  const recentPools = data.pools.slice(0, 10);
+  let html = '';
+  for (const p of recentPools) {
+    const stateIcon = p.windowState === 'open' ? '🟢' : p.windowState === 'closed' ? '🏁' : '⏱️';
+    const candidates = p.candidateCount || 0;
+    html += `<div style="margin:3px 0;display:flex;justify-content:space-between;">
+      <span>${stateIcon} Height ${p.height}</span>
+      <span style="color:${candidates > 1 ? 'var(--accent-green)' : 'var(--text-secondary)'};">${candidates} candidate${candidates !== 1 ? 's' : ''}</span>
+    </div>`;
   }
-  
-  if (special.genesis) {
-    window.genesisAddr = special.genesis.address || '-';
-  }
+  document.getElementById('poolList').innerHTML = html;
 }
 
 // Incrementally add new block at the top
@@ -920,8 +921,8 @@ async function checkForNewBlocks() {
     document.getElementById('difficulty').textContent = info.difficultyBits?.toLocaleString() || '-';
     document.getElementById('peers').textContent = (info.peersCount || 0).toLocaleString();
     
-    // Refresh special addresses balances (real-time update)
-    loadSpecialAddresses();
+    // Refresh pool stats (real-time update)
+    loadPoolStats();
     
     // Incrementally add new blocks from lastKnownHeight + 1 to currentHeight
     for (let h = lastKnownHeight + 1; h <= currentHeight; h++) {
@@ -1063,39 +1064,29 @@ async function showBlock(height) {
   // Add coinbase/reward details if available
   if (block.coinbase) {
     const minerReward = (block.coinbase.minerReward || 0) / 1e8;
-    const fee = (block.coinbase.fee || 0) / 1e8;
+    const txFees = (block.totalFees || 0) / 1e8; // Real transaction fees from block data
     
-    // Get special addresses (will be loaded when page loads)
-    const communityAddr = window.communityFundAddr || 'NOGO_COMMUNITY_FUND';
-    const integrityAddr = window.integrityPoolAddr || 'NOGO_INTEGRITY_POOL';
-    const genesisAddr = window.genesisAddr || 'NOGO_GENESIS';
-    
-    // Parse coinbase data to extract reward amounts
-    let communityAmount = 0;
+    // Parse coinbase data to extract genesis reward amount
+    // Coinbase data format: "block reward (height=%d, miner=%d, genesis=%d)"
     let genesisAmount = 0;
-    let integrityAmount = 0;
     if (block.coinbase.data && block.coinbase.data.includes('block reward')) {
-      const match = block.coinbase.data.match(/community=(\d+), genesis=(\d+), integrity=(\d+)/);
+      const match = block.coinbase.data.match(/genesis=(\d+)/);
       if (match) {
-        communityAmount = parseInt(match[1]) / 1e8;
-        genesisAmount = parseInt(match[2]) / 1e8;
-        integrityAmount = parseInt(match[3]) / 1e8;
+        genesisAmount = parseInt(match[1]) / 1e8;
       }
     }
     
-    // Total coinbase = miner reward + community + genesis + integrity (100% of block reward)
-    const totalCoinbase = minerReward + communityAmount + genesisAmount + integrityAmount;
+    // Total coinbase = miner reward + genesis (99% + 1% = 100% of block reward)
+    const totalCoinbase = minerReward + genesisAmount;
     
     blockInfoHTML += `
       <div class="detail-row" style="background: var(--bg-tertiary); margin: 10px -15px; padding: 15px;">
         <span class="detail-label" style="color: var(--accent-purple); font-weight: 600;">💰 Block Reward Distribution</span>
       </div>
       <div class="detail-row"><span class="detail-label">Total Block Reward</span><span class="detail-value" style="color: var(--accent-green);">${totalCoinbase.toFixed(8)} NOGO</span></div>
-      <div class="detail-row"><span class="detail-label">Miner Reward (96%)</span><span class="detail-value">${minerReward.toFixed(8)} NOGO</span></div>
-      <div class="detail-row"><span class="detail-label">Fees Burned (100%)</span><span class="detail-value">${fee.toFixed(8)} NOGO</span></div>
-      <div class="detail-row"><span class="detail-label">Community Fund (2%)</span><span class="detail-value">${communityAmount.toFixed(8)} NOGO → ${communityAddr}</span></div>
-      <div class="detail-row"><span class="detail-label">Genesis (1%)</span><span class="detail-value">${genesisAmount.toFixed(8)} NOGO → ${genesisAddr}</span></div>
-      <div class="detail-row"><span class="detail-label">Integrity Pool (1%)</span><span class="detail-value">${integrityAmount.toFixed(8)} NOGO → ${integrityAddr}</span></div>
+      <div class="detail-row"><span class="detail-label">Miner Reward (99%)</span><span class="detail-value">${minerReward.toFixed(8)} NOGO</span></div>
+      <div class="detail-row"><span class="detail-label">Fees Burned 🔥</span><span class="detail-value" style="color:${txFees > 0 ? 'var(--accent-orange)' : 'var(--text-secondary)'};">${txFees.toFixed(8)} NOGO</span></div>
+      <div class="detail-row"><span class="detail-label">Genesis (1%)</span><span class="detail-value">${genesisAmount.toFixed(8)} NOGO</span></div>
     `;
   }
   

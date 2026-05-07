@@ -1050,6 +1050,23 @@ func (bk *blockKeeper) checkStuckEscape() bool {
 		bk.syncPeer = nil
 	}
 
+	// Force re-broadcast of latest block to catch up any peers that may have
+	// missed the initial broadcast due to candidate pool processing delays.
+	latestBlock := bk.chain.LatestBlock()
+	if latestBlock != nil && bk.peers != nil {
+		if broadcaster, ok := bk.peers.(interface {
+			broadcastMinedBlock(block *core.Block) error
+		}); ok {
+			if err := broadcaster.broadcastMinedBlock(latestBlock); err != nil {
+				log.Printf("[BlockKeeper] stuck escape: re-broadcast failed h=%d: %v",
+					latestBlock.GetHeight(), err)
+			} else {
+				log.Printf("[BlockKeeper] stuck escape: re-broadcasted block h=%d to peers",
+					latestBlock.GetHeight())
+			}
+		}
+	}
+
 	// Reset stall tracking to allow immediate retry with a new peer
 	bk.lastSuccessfulSyncTime = time.Now()
 	bk.lastSuccessfulSyncHeight = currentHeight

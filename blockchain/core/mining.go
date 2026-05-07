@@ -163,17 +163,13 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 		return nil, errors.New("monetary policy not loaded correctly")
 	}
 
-	if c.integrityDistributor != nil {
-		c.integrityDistributor.AddToPool(baseReward)
-	}
+	// IntegrityPool reward distribution removed from economic model
 
 	minerReward := baseReward * uint64(policy.MinerRewardShare) / 100
-	communityFund := baseReward * uint64(policy.CommunityFundShare) / 100
 	genesisReward := baseReward * uint64(policy.GenesisShare) / 100
-	integrityPool := baseReward * uint64(policy.IntegrityPoolShare) / 100
 
-	coinbaseData := fmt.Sprintf("block reward (height=%d, miner=%d, community=%d, genesis=%d, integrity=%d)",
-		height, minerReward, communityFund, genesisReward, integrityPool)
+	coinbaseData := fmt.Sprintf("block reward (height=%d, miner=%d, genesis=%d)",
+		height, minerReward, genesisReward)
 	if height == 1 {
 		coinbaseData = "Memphis"
 	}
@@ -319,9 +315,9 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 
 	c.mu.Unlock()
 
-	// Return the mined block without adding to chain
-	// The caller (Miner) is responsible for submitting to candidate pool
-	// This ensures fair competition: all blocks must go through candidate pool selection
+	// Return mined block. The caller (Miner) adds it to chain via AddBlock
+	// and broadcasts to peers. Bytom Classic PoW mode: first valid block
+	// extending current tip wins; longest-chain rule resolves forks.
 	return newBlock, nil
 }
 

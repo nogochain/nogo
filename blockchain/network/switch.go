@@ -229,7 +229,21 @@ type Switch struct {
 
 	// Security manager 
 	securityMgr *security.SecurityManager // Integrated security manager for peer filtering and banning
+
+	// Peer height cache: avoids expensive FetchChainInfo on every sync cycle.
+	// Updated on successful FetchChainInfo and on incoming status broadcasts.
+	peerHeightCache   map[string]cachedPeerHeight
+	peerHeightCacheMu sync.RWMutex
 }
+
+// cachedPeerHeight stores a peer's chain height with an expiry to prevent stale data.
+type cachedPeerHeight struct {
+	Height    uint64
+	UpdatedAt time.Time
+}
+
+// cacheTTL is the maximum age of a cached peer height before re-fetching.
+const cachedPeerHeightTTL = 10 * time.Second
 
 // peerErrorState tracks consecutive errors for a peer
 type peerErrorState struct {
@@ -261,7 +275,8 @@ func NewSwitch(cfg SwitchConfig) *Switch {
 		peerErrors:      make(map[string]*peerErrorState),
 		maxPeerErrors:   3,               // Allow 3 consecutive errors before removing peer
 		peerRetryDelay:  5 * time.Second, // Wait 5 seconds before retry after error
-		syncLoadMap:     make(map[string]int),
+		syncLoadMap:       make(map[string]int),
+		peerHeightCache:   make(map[string]cachedPeerHeight),
 	}
 
 	privKey, err := sw.loadOrGenerateNodeKey()
@@ -3503,12 +3518,39 @@ func (sw *Switch) bestPeer(serviceFlag int) PeerInterface {
 			fallbackPeerID = peer.ID()
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		chainInfo, err := sw.FetchChainInfo(ctx, peer.ID())
-		cancel()
+		// Check peer height cache first to avoid expensive FetchChainInfo on every cycle
+		sw.peerHeightCacheMu.RLock()
+		cached, hasCached := sw.peerHeightCache[peer.ID()]
+		sw.peerHeightCacheMu.RUnlock()
 
-		if err != nil {
-			continue
+		var peerHeight uint64
+		if hasCached && time.Since(cached.UpdatedAt) < cachedPeerHeightTTL {
+			peerHeight = cached.Height
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			chainInfo, err := sw.FetchChainInfo(ctx, peer.ID())
+			cancel()
+
+			if err != nil {
+				// Fetch failed — use expired cache as fallback if available.
+				// Without this, a slow/unreachable peer becomes invisible,
+				// causing sync nodes to think they are caught up when they are not.
+				if hasCached {
+					peerHeight = cached.Height
+				} else {
+					continue
+				}
+			} else {
+				peerHeight = chainInfo.Height
+
+				// Update cache
+				sw.peerHeightCacheMu.Lock()
+				sw.peerHeightCache[peer.ID()] = cachedPeerHeight{
+					Height:    chainInfo.Height,
+					UpdatedAt: time.Now(),
+				}
+				sw.peerHeightCacheMu.Unlock()
+			}
 		}
 
 		sw.syncLoadMu.Lock()
@@ -3517,7 +3559,7 @@ func (sw *Switch) bestPeer(serviceFlag int) PeerInterface {
 
 		candidates = append(candidates, candidate{
 			addr:   peer.ID(),
-			height: chainInfo.Height,
+			height: peerHeight,
 			load:   load,
 		})
 	}

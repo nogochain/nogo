@@ -141,46 +141,20 @@ func applyBlockToState(p ConsensusParams, mp MonetaryPolicy, state map[string]Ac
 			return fmt.Errorf("bad coinbase amount: expected %d got %d", expected, cb.Amount)
 		}
 
-		// Distribute block rewards according to economic model
-		// Contract addresses are generated using genesis timestamp (fixed for all blocks)
+		// Distribute block rewards according to economic model.
+		// CommunityFund and IntegrityPool allocations have been removed
+		// from the economic model (shares set to 0 in MonetaryPolicy).
 		blockReward := policy.BlockReward(b.GetHeight())
 
-		// 1. Community Fund (2%) - to governance contract address (fixed at genesis)
-		communityFund := blockReward * uint64(policy.CommunityFundShare) / 100
-		if communityFund > 0 {
-			communityAddr := generateContractAddress(cb.ChainID, genesisTimestamp, "COMMUNITY_FUND_GOVERNANCE")
-			acct := state[communityAddr]
-			// Overflow check: ensure balance + communityFund doesn't overflow
-			if acct.Balance > math.MaxUint64-communityFund {
-				return errors.New("community fund balance overflow")
-			}
-			acct.Balance += communityFund
-			state[communityAddr] = acct
-		}
-
-		// 2. Genesis Address (1%) - to preset genesis miner address
+		// Genesis Address (1%) - to preset genesis miner address
 		genesisReward := blockReward * uint64(policy.GenesisShare) / 100
 		if genesisReward > 0 {
 			acct := state[genesisAddress]
-			// Overflow check: ensure balance + genesisReward doesn't overflow
 			if acct.Balance > math.MaxUint64-genesisReward {
 				return errors.New("genesis address balance overflow")
 			}
 			acct.Balance += genesisReward
 			state[genesisAddress] = acct
-		}
-
-		// 3. Integrity Pool (1%) - to reward contract address (fixed at genesis)
-		integrityPool := blockReward * uint64(policy.IntegrityPoolShare) / 100
-		if integrityPool > 0 {
-			integrityAddr := generateContractAddress(cb.ChainID, genesisTimestamp, "INTEGRITY_REWARD_CONTRACT")
-			acct := state[integrityAddr]
-			// Overflow check: ensure balance + integrityPool doesn't overflow
-			if acct.Balance > math.MaxUint64-integrityPool {
-				return errors.New("integrity pool balance overflow")
-			}
-			acct.Balance += integrityPool
-			state[integrityAddr] = acct
 		}
 	}
 

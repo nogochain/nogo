@@ -225,10 +225,14 @@ func (s *SyncLoop) SetProgressStore(store *SyncProgressStore) {
 	s.progressStore = store
 }
 
+// SetCandidatePool injects the candidate pool into the sync loop and all sub-components.
+// This enables unified fair-competition: P2P-received blocks and self-mined blocks
+// compete in the same candidate pool before being added to the chain.
 func (s *SyncLoop) SetCandidatePool(pool *core.CandidatePool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.candidatePool = pool
+
 	if s.blockKeeper != nil {
 		s.blockKeeper.candidatePool = pool
 	}

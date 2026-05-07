@@ -868,10 +868,10 @@ var MainnetGenesisConfig = GenesisConfiguration{
 		MinimumBlockReward:     10000000,  // 0.1 NOGO minimum reward
 		AnnualReductionPercent: 10,        // 10% annual reduction
 		MinerFeeShare:          0,         // 0% of fees to miner (fees are burned)
-		MinerRewardShare:       96,        // 96% of block reward to miner
-		CommunityFundShare:     2,         // 2% of block reward to community fund
+		MinerRewardShare:       99,        // 99% of block reward to miner
+		CommunityFundShare:     0,         // community fund allocation removed
 		GenesisShare:           1,         // 1% of block reward to genesis address
-		IntegrityPoolShare:     1,         // 1% of block reward to integrity pool
+		IntegrityPoolShare:     0,         // integrity pool allocation removed
 	},
 	ConsensusParams: ConsensusParams{
 		DifficultyEnable:               true,
@@ -905,10 +905,10 @@ var TestnetGenesisConfig = GenesisConfiguration{
 		MinimumBlockReward:     10000000,   // 0.1 NOGO minimum reward
 		AnnualReductionPercent: 10,         // 10% annual reduction
 		MinerFeeShare:          0,          // 0% of fees to miner (fees are burned)
-		MinerRewardShare:       96,         // 96% of block reward to miner
-		CommunityFundShare:     2,          // 2% of block reward to community fund
-		GenesisShare:           1,          // 1% of block reward to genesis address
-		IntegrityPoolShare:     1,          // 1% of block reward to integrity pool
+		MinerRewardShare:       99,   // 99% of block reward to miner
+		CommunityFundShare:     0,    // community fund allocation removed
+		GenesisShare:           1,    // 1% of block reward to genesis address
+		IntegrityPoolShare:     0,    // integrity pool allocation removed
 	},
 	ConsensusParams: ConsensusParams{
 		DifficultyEnable:               true,

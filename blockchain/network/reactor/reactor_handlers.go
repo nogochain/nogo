@@ -810,25 +810,6 @@ func (h *BlockReactorHandler) OnBlock(peerID string, blocks []*core.Block) error
 			continue
 		}
 
-		if h.handlers.candidatePool != nil && h.handlers.candidatePool.ShouldPool(block.GetHeight()) {
-			if submitErr := h.handlers.candidatePool.SubmitCandidate(block, "peer-"+peerID, time.Now()); submitErr != nil {
-				log.Printf("[BlockHandler] candidate pool rejected block %d from peer %s: %v",
-					block.GetHeight(), peerID, submitErr)
-			} else {
-				addedCount++
-				if h.handlers.sw != nil {
-					go func(b *core.Block, sender string) {
-						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-						defer cancel()
-						if err := h.handlers.sw.BroadcastBlockExcluding(ctx, b, sender); err != nil {
-							log.Printf("[BlockHandler] flood broadcast failed: %v", err)
-						}
-					}(block, peerID)
-				}
-			}
-			continue
-		}
-
 		accepted, addErr := h.handlers.chain.AddBlock(block)
 		if addErr != nil {
 			log.Printf("[BlockHandler] Failed to add block %d (hash=%x) from peer %s: %v",

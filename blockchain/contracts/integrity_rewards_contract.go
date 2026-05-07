@@ -31,8 +31,9 @@ const (
 	// 5082 blocks ≈ 1 day (with 17 second block time)
 	DefaultDistributionInterval = 5082
 
-	// IntegrityPoolSharePercent is the percentage of block reward allocated to integrity pool (1%)
-	IntegrityPoolSharePercent = 1
+	// IntegrityPoolSharePercent is the percentage of block reward allocated to integrity pool.
+	// Set to 0 after integrity pool removal from economic model.
+	IntegrityPoolSharePercent = 0
 
 	// MinQualifiedScore is the minimum integrity score to receive rewards
 	MinQualifiedScore = 60

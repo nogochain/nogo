@@ -402,18 +402,10 @@ body {
           <span class="http-method get">GET</span>
           <span class="endpoint-path">/chain/special_addresses</span>
         </div>
-        <p class="endpoint-description">Get special system addresses (Community Fund, Integrity Pool, Genesis).</p>
+        <p class="endpoint-description">Get system addresses (Genesis). Community Fund and Integrity Pool allocations removed from economic model.</p>
         <div class="endpoint-details">
           <h4>Response Example</h4>
           <div class="code-block">{
-  "communityFund": {
-    "address": "NOGO00...",
-    "balance": 50000000000000
-  },
-  "integrityPool": {
-    "address": "NOGO01...",
-    "balance": 10000000000000
-  },
   "genesis": {
     "address": "NOGO02...",
     "balance": 100000000000000

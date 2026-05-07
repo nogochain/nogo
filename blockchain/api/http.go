@@ -235,6 +235,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/proposals/vote", mw.Wrap("vote_proposal", false, 0, s.handleVoteProposal))
 	mux.HandleFunc("/api/proposals/deposit", mw.Wrap("create_deposit", false, 0, s.handleCreateDeposit))
 
+	// Candidate pool statistics for explorer visualization
+	mux.HandleFunc("/pool/stats", mw.Wrap("pool_stats", false, 0, s.handlePoolStats))
+
 	// Community proposals page
 	mux.HandleFunc("/proposals/", mw.Wrap("proposals_page", false, 0, s.handleProposalsPage))
 
@@ -894,22 +897,30 @@ func (s *Server) handleBlockByHeight(w http.ResponseWriter, r *http.Request) {
 		"txCount":        len(b.Transactions),
 	}
 
+	// Calculate total transaction fees burned
+	var totalFees uint64
+	for _, tx := range b.Transactions {
+		if tx.Type == "transfer" && tx.Fee > 0 {
+			totalFees += tx.Fee
+		}
+	}
+	blockData["totalFees"] = totalFees
+
 	// Add reward distribution details if coinbase transaction exists
 	if len(b.Transactions) > 0 && b.Transactions[0].Type == "coinbase" {
 		coinbase := b.Transactions[0]
 		blockData["coinbase"] = map[string]any{
 			"totalAmount": coinbase.Amount,
-			"minerReward": coinbase.Amount, // Miner receives 96% block reward + 100% fees
-			"fee":         coinbase.Fee,    // Fees included in miner reward
+			"minerReward": coinbase.Amount,
+			"fee":         totalFees, // Actual fees burned from all transactions
 			"data":        coinbase.Data,
 		}
 
-		// Parse coinbase data to extract reward breakdown if available
 		if coinbase.Data != "" && strings.Contains(coinbase.Data, "block reward") {
-			// Parse reward distribution from coinbase data
 			blockData["rewardBreakdown"] = map[string]any{
 				"miner":       coinbase.Amount,
-				"description": "96% to miner + 100% fees, 2% community fund, 1% genesis, 1% integrity pool",
+				"feesBurned":  totalFees,
+				"description": "99% to miner, 1% genesis, all fees burned",
 			}
 		}
 	}
@@ -962,6 +973,14 @@ func (s *Server) handleBlockByHashParam(w http.ResponseWriter, r *http.Request) 
 		"transactions":   enrichedTxs,
 		"txCount":        len(b.Transactions),
 	}
+	// Calculate total transaction fees burned
+	var totalFees uint64
+	for _, tx := range b.Transactions {
+		if tx.Type == "transfer" && tx.Fee > 0 {
+			totalFees += tx.Fee
+		}
+	}
+	blockData["totalFees"] = totalFees
 
 	_ = writeJSON(w, http.StatusOK, blockData)
 }
@@ -2099,6 +2118,51 @@ func (s *Server) handleProposalsPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+// handlePoolStats returns candidate pool statistics for explorer visualization.
+// Shows active pools, candidate counts, window deadlines, and selection results.
+func (s *Server) handlePoolStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.candidatePool == nil {
+		_ = writeJSON(w, http.StatusOK, map[string]any{
+			"message": "candidate pool not initialized",
+			"pools":   []any{},
+		})
+		return
+	}
+
+	stats := s.candidatePool.GetPoolStats()
+	type poolEntry struct {
+		Height         uint64 `json:"height"`
+		CandidateCount int    `json:"candidateCount"`
+		WindowState    string `json:"windowState"`
+		Deadline       int64  `json:"deadline"`
+	}
+
+	pools := make([]poolEntry, 0, len(stats))
+	for height, s := range stats {
+		pools = append(pools, poolEntry{
+			Height:         height,
+			CandidateCount: s.CandidateCount,
+			WindowState:    s.WindowState,
+			Deadline:       s.Deadline.Unix(),
+		})
+	}
+	// Sort by height descending for recent-first display
+	for i := 0; i < len(pools)/2; i++ {
+		j := len(pools) - 1 - i
+		pools[i], pools[j] = pools[j], pools[i]
+	}
+
+	_ = writeJSON(w, http.StatusOK, map[string]any{
+		"totalPools": len(pools),
+		"pools":      pools,
+	})
 }
 
 func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {

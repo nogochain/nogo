@@ -143,6 +143,7 @@ type Blockchain interface {
 	LatestBlock() *core.Block
 	SelectMempoolTxs(mp Mempool, maxTxPerBlock int) ([]core.Transaction, []string, error)
 	MineTransfers(ctx context.Context, txs []core.Transaction) (*core.Block, error)
+	AddBlock(block *core.Block) (bool, error)
 	CanonicalWork() *big.Int
 	RollbackToHeight(height uint64) error
 	GetConsensus() config.ConsensusParams
@@ -267,8 +268,9 @@ func (m *Miner) SetCandidatePool(pool *core.CandidatePool) {
 // CRITICAL: This is called AFTER block validation completes
 func (m *Miner) OnBlockAdded() {
 	// Block processing completed, ensure verification is ended
-	// This allows mining to resume immediately
+	// and trigger immediate mining restart (Bytom Classic continuous mining)
 	m.EndVerification()
+	m.Wake()
 }
 
 // Wake triggers an immediate mining attempt
@@ -465,14 +467,15 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 	block, err := m.MineOnce(ctx)
 	if err != nil {
 		logf(colorRed, "❌ ", fmt.Sprintf("Mine once failed: %v", err))
+		m.Wake() // Retry immediately on failure (Bytom Classic continuous mining)
 		return
 	}
 
 	if block != nil {
 		m.handleMinedBlock(ctx, block)
-	} else {
-		logf(colorBrightYellow, "⏸️ ", "Mining tick: MineOnce returned nil, no block mined")
 	}
+	// Bytom Classic continuous mining: restart immediately without waiting for next tick
+	m.Wake()
 }
 
 // handleMinedBlock handles a successfully mined block
@@ -678,17 +681,11 @@ func (m *Miner) MineOnce(ctx context.Context) (*core.Block, error) {
 		return nil, fmt.Errorf("select mempool txs: %w", err)
 	}
 
-	minedAt := time.Now()
 	b, err := m.bc.MineTransfers(ctx, selected)
 	if err != nil {
 		if b != nil {
 			logf(colorBrightYellow, "⚠️ ", "Mined block stored as fork/error: %v (broadcasting anyway for reorg)", err)
 			go m.broadcastBlock(ctx, b)
-			go m.broadcastCandidate(ctx, b, minedAt)
-			// Even on error, try to submit for potential recovery
-			if m.candidatePool != nil {
-				_ = m.candidatePool.SubmitCandidate(b, m.minerAddress, minedAt)
-			}
 			return b, err
 		}
 		logf(colorRed, "❌ ", "Mine failed: %v", err)
@@ -699,25 +696,14 @@ func (m *Miner) MineOnce(ctx context.Context) (*core.Block, error) {
 		return nil, nil
 	}
 
-	// 🎯 CRITICAL: Submit to candidate pool FIRST (before any broadcast)
-	// This ensures local blocks compete fairly with remote blocks through the same selection process
-	var windowDeadline time.Time
-	var submitErr error
-	if m.candidatePool != nil {
-		if submitErr = m.candidatePool.SubmitCandidate(b, m.minerAddress, minedAt); submitErr != nil {
-			logf(colorBrightYellow, "⚠️ ", "Pool submit failed height %d: %v", b.Header.Height, submitErr)
-		} else if wd, exists := m.candidatePool.GetWindowDeadline(b.Header.Height); exists {
-			windowDeadline = wd
-		}
+	// Bytom Classic PoW mode: add mined block to local chain first,
+	// then broadcast to peers. PoW longest-chain resolves forks.
+	if accepted, addErr := m.bc.AddBlock(b); addErr != nil {
+		logf(colorBrightYellow, "⚠️ ", "Self-mined block add failed height %d: %v (broadcasting anyway)", b.Header.Height, addErr)
+	} else if accepted {
+		logf(colorGreen, "✅ ", "Self-mined block added: height=%d hash=%x", b.Header.Height, b.Hash[:8])
 	}
-
 	go m.broadcastBlock(ctx, b)
-
-	if !windowDeadline.IsZero() {
-		go m.broadcastCandidateWithDeadline(ctx, b, minedAt, windowDeadline)
-	} else if submitErr != nil {
-		logf(colorYellow, "⚠️ ", "Skipping deadline broadcast: %v", submitErr)
-	}
 
 	if len(selectedIDs) > 0 {
 		m.mp.RemoveMany(selectedIDs)

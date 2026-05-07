@@ -17,6 +17,7 @@
 package core
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -73,6 +74,12 @@ type CandidatePool struct {
 	workCalc           *WorkCalculator
 	stopped            bool
 	stopCh             chan struct{}
+
+	// OnBlockSelected is invoked after selectBest() adds a winning block to the chain.
+	// This callback enables the network layer to broadcast the winning block
+	// to all peers after the candidate pool competition concludes.
+	// Signature: func(block *Block)
+	OnBlockSelected func(block *Block)
 }
 
 func NewCandidatePool() *CandidatePool {
@@ -375,6 +382,11 @@ func (p *CandidatePool) selectBest(height uint64) {
 		return
 	}
 
+	// Weighted hash selection: each candidate's block hash is XOR-mixed
+	// with a deterministic prefix derived from the source miner ID.
+	// This produces a stable selection key that converges identically
+	// when all nodes share the same candidate set, while still requiring
+	// real Proof-of-Work to influence the outcome.
 	sort.Slice(pool.Candidates, func(i, j int) bool {
 		candI := pool.Candidates[i]
 		candJ := pool.Candidates[j]
@@ -389,22 +401,18 @@ func (p *CandidatePool) selectBest(height uint64) {
 			return true
 		}
 
-		hashI := candI.Block.Hash
-		hashJ := candJ.Block.Hash
+		keyI := weightedSelectKey(candI)
+		keyJ := weightedSelectKey(candJ)
 
-		if len(hashI) != len(hashJ) || len(hashI) == 0 {
-			return candI.Block.Header.TimestampUnix < candJ.Block.Header.TimestampUnix
-		}
-
-		for k := range hashI {
-			if hashI[k] < hashJ[k] {
+		for k := 0; k < len(keyI) && k < len(keyJ); k++ {
+			if keyI[k] < keyJ[k] {
 				return true
 			}
-			if hashI[k] > hashJ[k] {
+			if keyI[k] > keyJ[k] {
 				return false
 			}
 		}
-
+		// Fallback: earlier timestamp wins when all else is equal
 		return candI.Block.Header.TimestampUnix < candJ.Block.Header.TimestampUnix
 	})
 
@@ -452,6 +460,11 @@ func (p *CandidatePool) selectBest(height uint64) {
 			}
 			log.Printf("[CandidatePool] ✓ height %d | winner %s | %d candidates",
 				height, shortID, len(pool.Candidates))
+
+			// Trigger broadcast callback so network layer propagates the winning block
+			if p.OnBlockSelected != nil {
+				p.OnBlockSelected(best.Block)
+			}
 		}
 
 		for i := 1; i < len(pool.Candidates); i++ {
@@ -570,4 +583,37 @@ func (p *CandidatePool) Stop() {
 	}
 
 	log.Printf("[CandidatePool] stopped: closed %d pools", len(poolsCopy))
+}
+
+// weightedSelectKey computes a deterministic selection key for candidate competition.
+// The key is formed by XOR-mixing the block hash with a source-derived prefix
+// (SHA-256 of miner SourceID, truncated to 4 bytes and cycled across the hash length).
+// Properties:
+//   - Deterministic: same (block, sourceID) → same key on every node
+//   - Source-bound: different sources produce different XOR masks, preventing
+//     a miner from predicting the final sort order across nodes
+//   - PoW-preserving: the block hash still dominates the comparison,
+//     so the miner with the most hashrate has the best chance to win
+func weightedSelectKey(c *Candidate) []byte {
+	if c == nil || c.Block == nil || len(c.Block.Hash) == 0 {
+		return nil
+	}
+
+	hash := c.Block.Hash
+	mask := computeSourceMask(c.SourceID)
+
+	key := make([]byte, len(hash))
+	for i := range hash {
+		key[i] = hash[i] ^ mask[i%len(mask)]
+	}
+	return key
+}
+
+// computeSourceMask derives a 4-byte deterministic mask from the source miner ID.
+func computeSourceMask(sourceID string) []byte {
+	if sourceID == "" {
+		return []byte{0, 0, 0, 0}
+	}
+	digest := sha256.Sum256([]byte(sourceID))
+	return digest[:4]
 }

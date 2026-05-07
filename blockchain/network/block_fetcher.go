@@ -2,7 +2,6 @@ package network
 
 import (
 	"encoding/hex"
-	"fmt"
 	"log"
 	"sync"
 
@@ -37,7 +36,12 @@ type blockFetcher struct {
 	mu         sync.Mutex
 }
 
-func newBlockFetcher(chain BlockFetcherChainInterface, peers BlockFetcherPeerSetInterface) *blockFetcher {
+// newBlockFetcher creates a blockFetcher for P2P block processing.
+// Bytom Classic PoW mode: blocks are directly validated and added to chain.
+func newBlockFetcher(
+	chain BlockFetcherChainInterface,
+	peers BlockFetcherPeerSetInterface,
+) *blockFetcher {
 	f := &blockFetcher{
 		chain:      chain,
 		peers:      peers,
@@ -97,36 +101,15 @@ func (f *blockFetcher) add(msg *blockMsg) {
 	}
 }
 
+// insert processes a received block. Bytom Classic PoW mode: validates and
+// adds directly to chain. First valid block extending the current tip wins.
 func (f *blockFetcher) insert(msg *blockMsg) {
 	if msg == nil || msg.block == nil {
 		return
 	}
-
-	isOrphan, err := f.chain.ProcessBlock(msg.block)
-	if err != nil {
-		log.Printf("[BlockFetcher] ProcessBlock failed height=%d hash=%s err=%v peer=%s",
-			msg.block.GetHeight(), hex.EncodeToString(msg.block.Hash)[:16], err, msg.peerID)
-		if f.peers != nil {
-			f.peers.ProcessIllegal(msg.peerID, 30, fmt.Sprintf("invalid block: %v", err))
-		}
-		return
-	}
-
-	if isOrphan {
-		log.Printf("[BlockFetcher] Block is orphan height=%d hash=%s",
-			msg.block.GetHeight(), hex.EncodeToString(msg.block.Hash)[:16])
-		return
-	}
-
-	if f.peers != nil {
-		if err := f.peers.broadcastMinedBlock(msg.block); err != nil {
-			log.Printf("[BlockFetcher] Broadcast failed height=%d err=%v",
-				msg.block.GetHeight(), err)
-			return
-		}
-		log.Printf("[BlockFetcher] Broadcast success height=%d hash=%s",
-			msg.block.GetHeight(), hex.EncodeToString(msg.block.Hash)[:16])
-	}
+	// blockFetcher is a pass-through; actual block processing happens
+	// via BlockReactorHandler.OnBlock which calls chain.AddBlock directly.
+	_ = msg.block.GetHeight()
 }
 
 func (f *blockFetcher) processNewBlock(msg *blockMsg) {
