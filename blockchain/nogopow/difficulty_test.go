@@ -156,11 +156,12 @@ func TestPIControllerAntiWindup(t *testing.T) {
 	}
 
 	integralValue := adjuster.GetIntegralValue()
-	if integralValue > 10.0 {
-		t.Errorf("Expected integral to be clamped at 10.0, got %f", integralValue)
+	// New anti-windup clamp is ±3.0 (was ±10.0)
+	if integralValue > 3.0 {
+		t.Errorf("Expected integral to be clamped at 3.0, got %f", integralValue)
 	}
 
-	if integralValue < 9.0 {
+	if integralValue < 2.5 {
 		t.Errorf("Expected integral to be near upper bound, got %f", integralValue)
 	}
 
@@ -210,13 +211,14 @@ func TestPIControllerParameters(t *testing.T) {
 
 	kp, ki, integral, avgTime := adjuster.GetParameters()
 
-	expectedKp := float64(consensusParams.MaxDifficultyChangePercent) / 100.0
-	if kp != expectedKp {
-		t.Errorf("Expected Kp to be %f, got %f", expectedKp, kp)
+	// Kp is now fixed at 0.15 (was config.MaxDifficultyChangePercent/100=0.5)
+	if kp != 0.15 {
+		t.Errorf("Expected Kp to be 0.15, got %f", kp)
 	}
 
-	if ki != 0.1 {
-		t.Errorf("Expected Ki to be 0.1, got %f", ki)
+	// Ki is now fixed at 0.03 (was 0.1)
+	if ki != 0.03 {
+		t.Errorf("Expected Ki to be 0.03, got %f", ki)
 	}
 
 	if integral != 0.0 {
@@ -227,10 +229,10 @@ func TestPIControllerParameters(t *testing.T) {
 		t.Errorf("Expected initial average block time to be 0, got %d", avgTime)
 	}
 
-	adjuster.SetIntegralGain(0.2)
+	adjuster.SetIntegralGain(0.05)
 	_, newKi, _, _ := adjuster.GetParameters()
-	if newKi != 0.2 {
-		t.Errorf("Expected Ki to be updated to 0.2, got %f", newKi)
+	if newKi != 0.05 {
+		t.Errorf("Expected Ki to be updated to 0.05, got %f", newKi)
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"github.com/nogochain/nogo/blockchain/network"
 	"github.com/nogochain/nogo/blockchain/network/reactor"
 	"github.com/nogochain/nogo/blockchain/network/security"
+	"github.com/nogochain/nogo/blockchain/p2p/discover"
 	"github.com/nogochain/nogo/blockchain/storage"
 	"github.com/nogochain/nogo/blockchain/utils"
 )
@@ -48,6 +49,9 @@ type NodeConfig struct {
 	RateLimitReqs        int
 	RateLimitBurst       int
 	Mempool              config.MempoolConfig
+	EnableRelayServer    bool
+	RelayServerPort      int
+	RelayServers         string
 }
 
 type Node struct {
@@ -71,6 +75,7 @@ type Node struct {
 	orphanPool  *utils.OrphanPool
 	validator   *consensus.BlockValidator
 	securityMgr *security.SecurityManager
+	discoverMgr *discover.Discover
 
 	pool *core.CandidatePool
 
@@ -209,6 +214,19 @@ func (n *Node) initializeComponents() error {
 	switchCfg.ListenAddr = n.config.P2PListenAddr
 	switchCfg.Seeds = seeds
 	switchCfg.MaxPeers = n.config.P2PMaxPeers
+	switchCfg.NetworkID = fmt.Sprintf("%d", n.config.ChainID)
+
+	// Apply relay server configuration from flags
+	if n.config.EnableRelayServer {
+		switchCfg.EnableRelayServer = n.config.EnableRelayServer
+	}
+	if n.config.RelayServerPort > 0 {
+		switchCfg.RelayServerPort = n.config.RelayServerPort
+	}
+	if n.config.RelayServers != "" {
+		switchCfg.RelayServers = network.ParseSeedNodes(n.config.RelayServers)
+	}
+
 	if switchCfg.MaxPeers <= 0 {
 		switchCfg.MaxPeers = 50
 	}
@@ -237,8 +255,11 @@ func (n *Node) initializeComponents() error {
 	log.Printf("Node: SecurityManager created with data dir: %s", n.config.DataDir)
 
 	n.p2pSwitch = network.NewSwitch(switchCfg)
-	n.p2pSwitch.SetSecurityManager(securityMgr) // Bytom-style integration
+	n.p2pSwitch.SetSecurityManager(securityMgr)
 	n.p2pSwitch.SetNodeInfo(nodeID, fmt.Sprintf("%d", n.config.ChainID), config.NodeVersion)
+
+	// Initialize P2P peer discovery (DHT + DNS + mDNS)
+	n.initDiscovery(seeds)
 
 	handlers, err := reactor.NewReactorHandlers(n.networkChainWrapper, n.mempool, n.p2pSwitch, n.miner)
 	if err != nil {
@@ -544,6 +565,11 @@ func (n *Node) Shutdown() {
 		}
 	}
 
+	if n.discoverMgr != nil {
+		n.discoverMgr.Stop()
+		log.Info("P2P discovery stopped")
+	}
+
 	if n.pool != nil {
 		n.pool.Stop()
 	}
@@ -664,4 +690,47 @@ func maskString(s string) string {
 		return "****"
 	}
 	return s[:4] + "****" + s[len(s)-4:]
+}
+
+func (n *Node) initDiscovery(seeds []string) {
+	discCfg := discover.Config{
+		ListenUDP:  extractUDPAddr(n.config.P2PListenAddr),
+		DNSSeeds:   []string{"node.nogochain.org", "wallet.nogochain.org"},
+		Bootstrap:  seeds,
+		EnableMDNS: false, // Disabled: use internal/networking/mdns instead (switch.go)
+		DBPath:     filepath.Join(n.config.DataDir, "dht_nodes"),
+	}
+	mgr, err := discover.New(discCfg)
+	if err != nil {
+		log.Printf("[Node] P2P discovery init failed: %v (continuing without DHT/mDNS)", err)
+		return
+	}
+	n.discoverMgr = mgr
+	if err := n.discoverMgr.Start(); err != nil {
+		log.Printf("[Node] P2P discovery start failed: %v", err)
+		n.discoverMgr = nil
+		return
+	}
+	// Feed discovered peers into P2P Switch
+	go n.feedDiscoveredPeers()
+	log.Printf("[Node] P2P discovery active (DHT=%s, mDNS=enabled)", discCfg.ListenUDP)
+}
+
+func (n *Node) feedDiscoveredPeers() {
+	if n.discoverMgr == nil {
+		return
+	}
+	for peer := range n.discoverMgr.PeerChannel() {
+		if err := n.p2pSwitch.DialPeerWithAddress(peer.TCPAddr()); err != nil {
+			log.Printf("[Node] Discovered peer dial failed %s: %v", peer.TCPAddr(), err)
+		}
+	}
+}
+
+func extractUDPAddr(p2pAddr string) string {
+	host, port, err := net.SplitHostPort(p2pAddr)
+	if err != nil {
+		return "0.0.0.0:30303"
+	}
+	return net.JoinHostPort(host, port)
 }

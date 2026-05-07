@@ -30,7 +30,9 @@ import (
 // ErrInvalidSeal is returned when a seal is invalid
 var ErrInvalidSeal = errors.New("invalid seal")
 
-// NogopowEngine implements consensus.Engine for NogoPow PoW
+// NogopowEngine implements consensus.Engine for NogoPow PoW.
+// Matrices are allocated per computePoW call — fresh allocation each time,
+// not stored on the engine — eliminates cross-node state differences.
 type NogopowEngine struct {
 	config       *Config
 	sealCh       chan *Block
@@ -41,9 +43,6 @@ type NogopowEngine struct {
 	hashrate     uint64
 	cache        *Cache
 	diffAdjuster *DifficultyAdjuster
-	matA         *denseMatrix
-	matB         *denseMatrix
-	matRes       *denseMatrix
 }
 
 // New creates a new NogopowEngine
@@ -60,12 +59,6 @@ func New(config *Config) *NogopowEngine {
 		hashrate:     0,
 		cache:        NewCache(config),
 		diffAdjuster: NewDifficultyAdjuster(config.ConsensusParams),
-	}
-
-	if config.ReuseObjects {
-		engine.matA = GetMatrix(matSize, matSize)
-		engine.matB = GetMatrix(matSize, matSize)
-		engine.matRes = GetMatrix(matSize, matSize)
 	}
 
 	return engine
@@ -381,16 +374,11 @@ func (t *NogopowEngine) calcSeed(chain ChainHeaderReader, header *Header) Hash {
 	return header.ParentHash
 }
 
-// computePoW computes the proof-of-work hash using NogoPow algorithm
+// computePoW computes the proof-of-work hash using NogoPow algorithm.
+// Fresh matrix allocation per call, no shared pool state.
 func (t *NogopowEngine) computePoW(blockHash, seed Hash) Hash {
 	cacheData := t.cache.GetData(seed.Bytes())
-
-	if t.config.ReuseObjects && t.matA != nil {
-		result := mulMatrixWithPool(blockHash.Bytes(), cacheData, t.matA, t.matB, t.matRes)
-		return hashMatrix(result)
-	}
-
-	result := mulMatrix(blockHash.Bytes(), cacheData)
+	result := mulMatrixPooled(blockHash.Bytes(), cacheData)
 	return hashMatrix(result)
 }
 
@@ -400,15 +388,10 @@ func (t *NogopowEngine) ComputePoW(blockHash, seed Hash) Hash {
 	return t.computePoW(blockHash, seed)
 }
 
-// ComputePoWWithCache computes the proof-of-work hash using provided cache data
-// Exported version for external validation with custom cache
+// ComputePoWWithCache computes the proof-of-work hash using provided cache data.
+// Fresh matrix per call, deterministic no shared state.
 func (t *NogopowEngine) ComputePoWWithCache(blockHash, seed Hash, cacheData []uint32) Hash {
-	if t.config.ReuseObjects && t.matA != nil {
-		result := mulMatrixWithPool(blockHash.Bytes(), cacheData, t.matA, t.matB, t.matRes)
-		return hashMatrix(result)
-	}
-
-	result := mulMatrix(blockHash.Bytes(), cacheData)
+	result := mulMatrixPooled(blockHash.Bytes(), cacheData)
 	return hashMatrix(result)
 }
 
@@ -432,9 +415,10 @@ func (t *NogopowEngine) CalcDifficulty(chain ChainHeaderReader, time uint64, par
 		return big.NewInt(int64(minDifficulty))
 	}
 
-	// Use PI controller difficulty calculation (same as validation)
-	// Each call creates a fresh adjuster to ensure deterministic results
-	adjuster := NewDifficultyAdjuster(t.config.ConsensusParams)
+	// Use PI controller difficulty calculation (same as validation).
+	// The diffAdjuster is persistent — integral accumulator and sliding
+	// window carry over across blocks for true PI convergence.
+	adjuster := t.diffAdjuster
 	newDifficulty := adjuster.CalcDifficulty(time, parent)
 
 	t.config.Log.Info("NogoPow CalcDifficulty (PI Controller)",
@@ -459,19 +443,6 @@ func (t *NogopowEngine) APIs(chain ChainHeaderReader) []API {
 func (t *NogopowEngine) Close() error {
 	close(t.exitCh)
 	t.wg.Wait()
-
-	if t.config.ReuseObjects {
-		if t.matA != nil {
-			PutMatrix(t.matA)
-		}
-		if t.matB != nil {
-			PutMatrix(t.matB)
-		}
-		if t.matRes != nil {
-			PutMatrix(t.matRes)
-		}
-	}
-
 	return nil
 }
 

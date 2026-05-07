@@ -37,7 +37,7 @@ type blockFetcher struct {
 }
 
 // newBlockFetcher creates a blockFetcher for P2P block processing.
-// Bytom Classic PoW mode: blocks are directly validated and added to chain.
+// Blocks are directly validated and added to the chain.
 func newBlockFetcher(
 	chain BlockFetcherChainInterface,
 	peers BlockFetcherPeerSetInterface,
@@ -101,7 +101,7 @@ func (f *blockFetcher) add(msg *blockMsg) {
 	}
 }
 
-// insert processes a received block. Bytom Classic PoW mode: validates and
+// insert processes a received block. Validates and
 // adds directly to chain. First valid block extending the current tip wins.
 func (f *blockFetcher) insert(msg *blockMsg) {
 	if msg == nil || msg.block == nil {

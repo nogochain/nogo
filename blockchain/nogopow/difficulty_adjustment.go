@@ -31,6 +31,38 @@ const (
 	maxReasonableTimeDiff = int64(3600) // 1 hour max time difference
 )
 
+// PI controller tuning constants.
+// These were recalibrated after observing extreme difficulty swings
+// (blocks taking minutes, then 2-3 seconds) caused by:
+//   - Ratio-based error amplifying slow-block deviations by 16x+
+//   - Integral windup fighting the P term in opposite direction
+//   - Integral accumulating without decay, permanently skewing output
+const (
+	// Kp: proportional gain. Small to avoid over-reacting to single outliers.
+	// Previously 0.5 — too aggressive for ratio-based error.
+	defaultKp = 0.15
+
+	// Ki: integral gain. Must be small to prevent integral from dominating.
+	// Previously 0.1 — with ±10 anti‑windup giving ±1.0 output swing.
+	defaultKi = 0.03
+
+	// Integral decay factor applied each block.
+	// Prevents "memory of forever ago" — past extremes fade over ~33 blocks.
+	integralDecay = 0.97
+
+	// Anti-windup clamp for integral accumulator.
+	// With Ki=0.03, ±3.0 → ±0.09 max integral influence.
+	// Previously ±10 → ±1.0, which completely dominated the P term.
+	integralClampMin = -3.0
+	integralClampMax = 3.0
+
+	// Max/min timeRatio clamp before computing error.
+	// Prevents a single 500s block from producing error=28.4 → P=14.2.
+	// 0.25 = blocks at most 4x faster than target; 4.0 = at most 4x slower.
+	maxTimeRatio = 4.0
+	minTimeRatio = 0.25
+)
+
 // DifficultyAdjuster implements production-grade difficulty adjustment
 // Thread-safety: all state mutations are protected by a single mutex for atomicity
 // Mathematical foundation: Proportional-Integral (PI) controller for block time stabilization
@@ -39,14 +71,15 @@ const (
 //   - Proportional term (Kp): Responds to current error (deviation from target block time)
 //   - Integral term (Ki): Accumulates past errors to eliminate steady-state offset
 //   - Formula: output = Kp * error + Ki * integral(error)
-//   - Anti-windup: Integral clamped to [-10, 10] to prevent overshoot
+//   - Anti-windup: Integral clamped to [-3, 3] to prevent overshoot
+//   - Integral decay: 3% per block prevents stale-error accumulation
 type DifficultyAdjuster struct {
 	mu sync.Mutex // Single mutex protects all state for atomic operations
 
 	consensusParams     *config.ConsensusParams
-	integralAccumulator *big.Float // Accumulated error for integral term
-	integralGain        float64    // Ki coefficient (integral gain)
-	proportionalGain    float64    // Kp coefficient (proportional gain)
+	integralAccumulator *big.Float // Accumulated error for integral term (with decay)
+	integralGain        float64    // Ki coefficient (integral gain), default 0.03
+	proportionalGain    float64    // Kp coefficient (proportional gain), default 0.15
 	windowSize          int        // Sliding window size for block time analysis
 	blockTimes          []int64    // Recent block times for window-based analysis
 	lastProcessedHeight uint64     // Last processed block height for deduplication
@@ -54,9 +87,10 @@ type DifficultyAdjuster struct {
 
 // NewDifficultyAdjuster creates a new difficulty adjuster with production configuration
 // PI Controller Parameters:
-//   - Proportional Gain (Kp): config.AdjustmentSensitivity (default 0.5)
-//   - Integral Gain (Ki): 0.1 (fixed for stable convergence)
-//   - Integral Anti-windup: [-10.0, 10.0] (prevents integral saturation)
+//   - Proportional Gain (Kp): 0.15 (reduced from 0.5 — was too aggressive)
+//   - Integral Gain (Ki): 0.03 (reduced from 0.1 — was dominating output)
+//   - Integral Anti-windup: [-3.0, 3.0] (reduced from [-10, 10])
+//   - Integral Decay: 3% per block (prevents stale error memory)
 func NewDifficultyAdjuster(consensusParams *config.ConsensusParams) *DifficultyAdjuster {
 	if consensusParams == nil {
 		consensusParams = &config.ConsensusParams{
@@ -73,8 +107,8 @@ func NewDifficultyAdjuster(consensusParams *config.ConsensusParams) *DifficultyA
 	return &DifficultyAdjuster{
 		consensusParams:     consensusParams,
 		integralAccumulator: big.NewFloat(0.0),
-		integralGain:        0.1,
-		proportionalGain:    float64(consensusParams.MaxDifficultyChangePercent) / 100.0,
+		integralGain:        defaultKi,
+		proportionalGain:    defaultKp,
 		windowSize:          windowSize,
 		blockTimes:          make([]int64, 0, windowSize),
 		lastProcessedHeight: 0,
@@ -125,7 +159,10 @@ func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header)
 	parentDiff := new(big.Int).Set(parent.Difficulty)
 
 	// Use block height as deduplication key instead of time diff
-	currentHeight := parent.Number.Uint64()
+	var currentHeight uint64
+	if parent.Number != nil {
+		currentHeight = parent.Number.Uint64()
+	}
 	if currentHeight <= da.lastProcessedHeight {
 		// Repeated call for same block, return cached or recalculated result
 		log.Printf("[Difficulty] Repeated call for height %d (last processed: %d), recalculating",
@@ -197,42 +234,81 @@ func (da *DifficultyAdjuster) calculateAverageBlockTimeLocked() int64 {
 // calculatePIDifficultyLocked implements core PI controller algorithm (must hold lock)
 // PI Controller Formula:
 //
-//	error = (actualTime - targetTime) / targetTime
-//	integral = integral + error (clamped to [-10, 10])
-//	output = Kp * error + Ki * integral
+//	error = clamp(timeRatio, minTimeRatio, maxTimeRatio) - 1
+//	newError = clamp(error, -0.75, 3.0)  // single-block error clip
+//	integral = integral * decay + newError  // with 3% per-block memory loss
+//	integral = clamp(integral, integralClampMin, integralClampMax)
+//	output = Kp * newError + Ki * integral
 //	newDifficulty = parentDifficulty * (1 - output)
+//
+// Key improvements over previous version:
+//  1. timeRatio is clamped to [0.25, 4.0] — prevents 500s block→error=28
+//  2. newError is further clamped to [-0.75, 3.0] — limits single-block impact
+//  3. Integral decays by 3% each block — eliminates "memory of forever ago"
+//  4. Integral anti-windup reduced to [-3, 3] — prevents I-term domination
+//  5. Conditional accumulation: only adds to integral when output is in-range
 func (da *DifficultyAdjuster) calculatePIDifficultyLocked(actualTime, targetTime int64, parentDiff *big.Int) *big.Int {
 	actualTimeFloat := new(big.Float).SetInt64(actualTime)
 	targetTimeFloat := new(big.Float).SetInt64(targetTime)
 	parentDiffFloat := new(big.Float).SetInt(parentDiff)
 
 	one := big.NewFloat(1.0)
+	zero := big.NewFloat(0.0)
+
+	// Step 1: Compute timeRatio, clamped so one extreme block can't dominate.
 	timeRatio := new(big.Float).Quo(actualTimeFloat, targetTimeFloat)
-	error := new(big.Float).Sub(timeRatio, one)
+	clampFloat(timeRatio, big.NewFloat(minTimeRatio), big.NewFloat(maxTimeRatio))
 
-	// Update integral accumulator with error
-	if error.Cmp(big.NewFloat(0.0)) != 0 {
-		da.integralAccumulator.Add(da.integralAccumulator, error)
+	// Step 2: Raw error from clamped ratio.
+	//          → blocks too slow: error > 0 (want lower difficulty)
+	//          → blocks too fast: error < 0 (want higher difficulty)
+	rawError := new(big.Float).Sub(timeRatio, one)
+
+	// Step 3: Single-block error clamp — smooths extreme outliers.
+	clampFloat(rawError, big.NewFloat(-0.75), big.NewFloat(3.0))
+
+	// Step 4: Integral with decay.
+	//         decay = 0.97 → loses 3% of accumulated error per block.
+	//         This prevents past extremes from permanently skewing output.
+	if da.integralAccumulator.Cmp(zero) != 0 {
+		da.integralAccumulator.Mul(da.integralAccumulator, big.NewFloat(integralDecay))
 	}
 
-	// Apply anti-windup clamping
-	integralMin := big.NewFloat(-10.0)
-	integralMax := big.NewFloat(10.0)
-	if da.integralAccumulator.Cmp(integralMax) > 0 {
-		da.integralAccumulator.Set(integralMax)
-	}
-	if da.integralAccumulator.Cmp(integralMin) < 0 {
-		da.integralAccumulator.Set(integralMin)
-	}
+	// Step 5: Add current error to integral.
+	da.integralAccumulator.Add(da.integralAccumulator, rawError)
 
-	// Calculate proportional and integral terms
-	proportionalTerm := new(big.Float).Mul(error, big.NewFloat(da.proportionalGain))
-	integralGain := big.NewFloat(da.integralGain)
-	integralTerm := new(big.Float).Mul(da.integralAccumulator, integralGain)
+	// Step 6: Anti-windup clamp — prevent integral from dominating.
+	clampFloat(da.integralAccumulator,
+		big.NewFloat(integralClampMin), big.NewFloat(integralClampMax))
+
+	// Step 7: PI output.
+	proportionalTerm := new(big.Float).Mul(rawError, big.NewFloat(da.proportionalGain))
+	integralGainFloat := big.NewFloat(da.integralGain)
+	integralTerm := new(big.Float).Mul(da.integralAccumulator, integralGainFloat)
 
 	piOutput := new(big.Float).Add(proportionalTerm, integralTerm)
 	multiplier := new(big.Float).Sub(one, piOutput)
 
+	// Step 8: Conditional integral accumulation.
+	//         If the multiplier would be clamped by boundary conditions,
+	//         don't accumulate the current error into the integral.
+	//         This is standard anti-windup: don't "remember" being clamped.
+	outputClamped := false
+	maxF := big.NewFloat(2.0)  // boundary max increase
+	minF := big.NewFloat(0.5) // boundary max decrease
+	if multiplier.Cmp(maxF) > 0 || multiplier.Cmp(minF) < 0 {
+		outputClamped = true
+		// Rollback: subtract the error we just added — the clamp already corrected
+		da.integralAccumulator.Sub(da.integralAccumulator, rawError)
+		if outputClamped {
+			log.Printf("[PI] Clamp-detected: multiplier=%.4f outside [0.5, 2.0], suppressing integral accumulation", valF(multiplier))
+		}
+	}
+
+	// Clamp multiplier to boundary range
+	clampFloat(multiplier, minF, maxF)
+
+	// Recompute newDiffFloat with the clamped multiplier
 	newDiffFloat := new(big.Float).Mul(parentDiffFloat, multiplier)
 
 	// Use ceiling when difficulty should increase to prevent stuck-at-1 issue
@@ -246,7 +322,31 @@ func (da *DifficultyAdjuster) calculatePIDifficultyLocked(actualTime, targetTime
 		newDifficulty = big.NewInt(0)
 	}
 
+	// Diagnostic log
+	integralVal, _ := da.integralAccumulator.Float64()
+	pVal, _ := proportionalTerm.Float64()
+	iVal, _ := integralTerm.Float64()
+	mVal, _ := multiplier.Float64()
+	log.Printf("[PI] actual=%ds target=%ds | err=%.3f P=%.3f I=%.3f(int=%.3f) | mult=%.3f clamped=%v",
+		actualTime, targetTime, valF(rawError), pVal, iVal, integralVal, mVal, outputClamped)
+
 	return newDifficulty
+}
+
+// clampFloat clamps f to [min, max].
+func clampFloat(f, min, max *big.Float) {
+	if f.Cmp(min) < 0 {
+		f.Set(min)
+	}
+	if f.Cmp(max) > 0 {
+		f.Set(max)
+	}
+}
+
+// valF returns float64 representation for logging, 0.0 on overflow.
+func valF(f *big.Float) float64 {
+	v, _ := f.Float64()
+	return v
 }
 
 // enforceBoundaryConditionsLocked applies safety constraints (must hold lock)

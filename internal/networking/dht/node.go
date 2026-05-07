@@ -36,10 +36,15 @@ type Node struct {
 	// Internal cached hash of ID for distance calculations.
 	// Computed once during node creation.
 	sha Hash
+
+	// NAT awareness fields (for relay support).
+	// These are not part of the DHT protocol but are used for
+	// P2P connection establishment decisions.
+	IsNAT     bool   // true if the node is believed to be behind NAT
+	RelayAddr string // relay address if the node is behind NAT and registered with a relay
 }
 
 // NewNode creates a new node with the given parameters.
-// Used primarily for testing purposes.
 func NewNode(id NodeID, ip net.IP, udpPort, tcpPort uint16) *Node {
 	// Normalize IPv4 addresses to 4-byte representation.
 	if ipv4 := ip.To4(); ipv4 != nil {
@@ -51,6 +56,8 @@ func NewNode(id NodeID, ip net.IP, udpPort, tcpPort uint16) *Node {
 		TCP: tcpPort,
 		ID:  id,
 		sha: NodeIDSha256(id),
+		IsNAT:     false,
+		RelayAddr: "",
 	}
 }
 
@@ -62,6 +69,19 @@ func (n *Node) Sha() Hash {
 // Addr returns the UDP address of the node.
 func (n *Node) Addr() *net.UDPAddr {
 	return &net.UDPAddr{IP: n.IP, Port: int(n.UDP)}
+}
+
+// TCPAddr returns the TCP address string for P2P connections.
+func (n *Node) TCPAddr() string {
+	return net.JoinHostPort(n.IP.String(), strconv.Itoa(int(n.TCP)))
+}
+
+// IsReachable returns true if the node can be directly connected or reached via relay.
+func (n *Node) IsReachable() bool {
+	if n.RelayAddr != "" {
+		return true
+	}
+	return !n.IsNAT && n.IP != nil && !n.IP.IsUnspecified()
 }
 
 // SetAddr updates the node's IP and UDP port from the given address.

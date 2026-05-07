@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -117,6 +118,19 @@ func handleServerCommand() {
 	}
 	if dataDir := os.Getenv("NOGO_DATA_DIR"); dataDir != "" {
 		cfg.DataDir = dataDir
+	}
+
+	// Override with relay server configuration from environment variables
+	if relayServer := os.Getenv("NOGO_RELAY_SERVER"); relayServer == "true" || relayServer == "1" {
+		cfg.EnableRelayServer = true
+	}
+	if relayPort := os.Getenv("NOGO_RELAY_PORT"); relayPort != "" {
+		if port, err := strconv.Atoi(relayPort); err == nil && port > 0 {
+			cfg.RelayServerPort = port
+		}
+	}
+	if relayServers := os.Getenv("NOGO_RELAY_SERVERS"); relayServers != "" {
+		cfg.RelayServers = relayServers
 	}
 
 	node := NewNode(cfg, miner, adminToken, autoMine, isTestnet)

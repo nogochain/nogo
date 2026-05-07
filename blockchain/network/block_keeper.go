@@ -38,11 +38,11 @@ const (
 	blocksProcessChSize  = 128
 	headersProcessChSize = 1024
 
-	// Bytom-style sync type classification for intelligent strategy selection
-	syncTypeNone        = iota // no peer available or already synced
-	syncTypeFast               // fast sync via checkpoint skeleton download
-	syncTypeRegular            // regular sequential block download
-	syncTypeForkDetection      // equal height but peer has more cumulative work
+	// NogoChain-style sync type classification for intelligent strategy selection
+	syncTypeNone          = iota // no peer available or already synced
+	syncTypeFast                 // fast sync via checkpoint skeleton download
+	syncTypeRegular              // regular sequential block download
+	syncTypeForkDetection        // equal height but peer has more cumulative work
 )
 
 var (
@@ -524,7 +524,7 @@ func (bk *blockKeeper) regularBlockSync(targetHeight uint64) error {
 			continue
 		}
 
-		// Bytom-style anti-dust-block loop detection:
+		// NogoChain-style anti-dust-block loop detection:
 		// Peer returned blocks within the expected height range but none connected
 		// to our canonical chain — all were orphans from an incompatible fork.
 		// Without this check, the sync loop may retry indefinitely at the same height.
@@ -548,7 +548,7 @@ func (bk *blockKeeper) regularBlockSync(targetHeight uint64) error {
 
 			consecutiveOrphan++
 			if consecutiveOrphan > maxConsecutiveOrphanWalkback {
-				// Bytom-style ProcessIllegal: peer is on an unreachable fork
+				// NogoChain-style ProcessIllegal: peer is on an unreachable fork
 				pID := bk.syncPeer.ID()
 				bk.peers.ProcessIllegal(pID, LevelMsgIllegal,
 					fmt.Sprintf("unreachable fork: %d consecutive orphan walkbacks from height %d",
@@ -755,7 +755,7 @@ func (bk *blockKeeper) resetHeaderState() {
 }
 
 // checkSyncType determines the optimal synchronization strategy.
-// Bytom-style tiered selection: evaluates peer capabilities, height gap,
+// NogoChain-style tiered selection: evaluates peer capabilities, height gap,
 // and chain state to classify the scenario as fast sync, regular sync,
 // fork detection, or no-sync-needed.
 // Returns the sync type and the best-available peer for sync operations.
@@ -803,7 +803,7 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 }
 
 // startSync is the main synchronization entry point.
-// Bytom-style dispatch: uses checkSyncType() for intelligent strategy selection,
+// NogoChain-style dispatch: uses checkSyncType() for intelligent strategy selection,
 // then dispatches to the appropriate sync handler.
 func (bk *blockKeeper) startSync() bool {
 	if bk.checkStuckEscape() {
@@ -847,7 +847,7 @@ func (bk *blockKeeper) startSync() bool {
 }
 
 // dispatchFastSync executes fast synchronization via checkpoint skeleton download.
-// Bytom-style pattern: single responsibility dispatch with clear error handling.
+// NogoChain-style pattern: single responsibility dispatch with clear error handling.
 func (bk *blockKeeper) dispatchFastSync(peer PeerInterface, localHeight uint64) bool {
 	checkpoint := bk.nextCheckpoint()
 	if checkpoint == nil {
@@ -1022,7 +1022,7 @@ func (bk *blockKeeper) recordSyncProgress(height uint64) {
 }
 
 // checkStuckEscape detects sync stalls and forces peer rotation.
-// Bytom-style recovery: when the sync peer fails to deliver progress
+// NogoChain-style recovery: when the sync peer fails to deliver progress
 // within stuckEscapeThreshold, reset sync state to force peer reselection
 // on the next sync cycle. This prevents indefinite stalls with a dead peer.
 func (bk *blockKeeper) checkStuckEscape() bool {
@@ -1044,7 +1044,7 @@ func (bk *blockKeeper) checkStuckEscape() bool {
 	log.Printf("[BlockKeeper] STUCK ESCAPE: no progress for %v at h=%d (last progress at h=%d), forcing peer rotation",
 		timeSinceProgress, currentHeight, bk.lastSuccessfulSyncHeight)
 
-	// Bytom-style recovery: reset sync peer to force reselection on next cycle
+	// NogoChain-style recovery: reset sync peer to force reselection on next cycle
 	if bk.syncPeer != nil {
 		bk.peers.DecSyncLoad(bk.syncPeer.ID())
 		bk.syncPeer = nil

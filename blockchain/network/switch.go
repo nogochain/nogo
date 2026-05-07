@@ -27,6 +27,7 @@ import (
 	"github.com/nogochain/nogo/blockchain/network/mconnection"
 	"github.com/nogochain/nogo/blockchain/network/reactor"
 	"github.com/nogochain/nogo/blockchain/network/security"
+	"github.com/nogochain/nogo/blockchain/p2p/discover"
 	"github.com/nogochain/nogo/internal/networking"
 	"github.com/nogochain/nogo/internal/networking/dht"
 	"github.com/nogochain/nogo/internal/networking/mdns"
@@ -51,10 +52,13 @@ type PeerInfo struct {
 //   - TTL field prevents infinite propagation (default: 3 hops)
 //   - Seen cache prevents duplicate processing
 //   - Random peer selection (k=3) reduces redundant traffic
+//   - RelayAddr for NAT-node-to-NAT-node connectivity via relay
 type PeerSeedAddr struct {
-	ID   string `json:"id"`
-	Addr string `json:"addr"`
-	TTL  int    `json:"ttl,omitempty"` // Time-to-live for gossip propagation (hops)
+	ID        string `json:"id"`
+	Addr      string `json:"addr"`
+	TTL       int    `json:"ttl,omitempty"`       // Time-to-live for gossip propagation (hops)
+	RelayAddr string `json:"relayAddr,omitempty"` // Relay address if peer is behind NAT
+	NATType   string `json:"natType,omitempty"`   // NAT type: "Public", "NAT", or ""
 }
 
 // encryptionMode defines the encryption mode for P2P connections.
@@ -93,9 +97,16 @@ type SwitchConfig struct {
 	// Persistent peers that must stay connected (like core-main KeepDial)
 	// These peers are dialed on every RecheckInterval to ensure stable connectivity
 	PersistentPeers []string // Persistent peer addresses (e.g., ["node1.nogochain.org:9090"])
+
+	// Relay support for NAT traversal
+	EnableRelayServer bool     // Enable relay server on this node (for fixed-IP nodes)
+	RelayServerPort   int      // Relay server TCP listen port (default 9091)
+	RelayServers      []string // Relay server addresses to connect to (for NAT nodes)
+	STUNServers       []string // STUN servers for NAT detection
 }
 
 // NodeInfo holds metadata about a node for handshake and identification.
+// Extended with NAT awareness fields for relay support.
 type NodeInfo struct {
 	PubKey     string `json:"pubKey"`
 	Moniker    string `json:"moniker"`
@@ -103,6 +114,10 @@ type NodeInfo struct {
 	Version    string `json:"version"`
 	ListenAddr string `json:"listenAddr"`
 	Channels   string `json:"channels"`
+
+	// NAT awareness (for relay support)
+	NATType   string `json:"natType"`   // "Public", "NAT", or "" (unknown)
+	RelayAddr string `json:"relayAddr"` // Assigned relay address if behind NAT
 }
 
 // NodeInfoHandshake is the wire format for the application-level handshake.
@@ -143,13 +158,13 @@ func DefaultSwitchConfig() SwitchConfig {
 	return SwitchConfig{
 		MaxPeers:         50,
 		MaxLANPeers:      maxNumLANPeers,
-		MinOutboundPeers: minNumOutboundPeers, // Aligned with core-main minimum outbound peers
+		MinOutboundPeers: minNumOutboundPeers,
 		RecheckInterval:  peerReplenishInterval,
 		DialTimeout:      30 * time.Second,
 		HandshakeTimeout: 20 * time.Second,
 		ListenAddr:       "tcp://0.0.0.0:9090",
 		ExternalAddr:     "",
-		Seeds:            DefaultSeedNodes, // Use official seed nodes by default
+		Seeds:            DefaultSeedNodes,
 		SeedMode:         false,
 		UPNP:             envBool("NOGO_UPNP", true),
 		Peers:            []PeerInfo{},
@@ -158,16 +173,27 @@ func DefaultSwitchConfig() SwitchConfig {
 		MaxMsgSize:       1048576,
 
 		// Peer discovery defaults
-		EnablemDNS: true,        // Enable mDNS by default for LAN discovery
-		EnableDHT:  true,        // Enable DHT by default for WAN discovery
-		NetworkID:  "nogochain", // Default network identifier
+		EnablemDNS: true, // Enable mDNS by default for LAN discovery
+		EnableDHT:  true, // Enable DHT by default for WAN discovery
+		NetworkID:  "1",  // Default network identifier (matches Chain ID 1)
 
-		// Persistent peers: official seed nodes that must stay connected (like core-main KeepDial)
-		// These ensure network stability - dialed every 10s to maintain connectivity
+		// Persistent peers: official seed nodes that must stay connected
 		PersistentPeers: []string{
-			"main.nogochain.org:9090",   // Primary seed node
-			"node.nogochain.org:9090",   // Secondary seed node
-			"wallet.nogochain.org:9090", // Tertiary seed node
+			"main.nogochain.org:9090",
+			"node.nogochain.org:9090",
+			"wallet.nogochain.org:9090",
+		},
+
+		// Relay support
+		EnableRelayServer: envBool("NOGO_RELAY_SERVER", false), // Off by default
+		RelayServerPort:   envInt("NOGO_RELAY_PORT", 9091),
+		RelayServers: []string{ // Fixed-IP relay servers for NAT nodes to connect to
+			"main.nogochain.org:9091",
+			"node.nogochain.org:9091",
+		},
+		STUNServers: []string{ // STUN servers for NAT detection
+			"stun.l.google.com:19302",
+			"stun1.l.google.com:19302",
 		},
 	}
 }
@@ -202,6 +228,18 @@ type Switch struct {
 
 	natManager *NATManager // NAT traversal manager (UPnP/NAT-PMP/PCP)
 
+	// NAT detection
+	nodeType    discover.NodeType     // Detected NAT type: Public, NAT, or Unknown
+	natDetector *discover.NATDetector // STUN-based NAT detector
+
+	// Relay support (for fixed-IP nodes acting as relay servers)
+	relayServer *RelayServer // TCP relay server on port 9091 (for fixed-IP nodes)
+	relayPort   int          // Relay server listen port (default 9091)
+
+	// Relay client (for NAT nodes connecting to relay servers)
+	relayClient *discover.RelayClient // Client for relay communication
+	relayAddr   string                // Assigned relay address if registered
+
 	nodePrivKey    ed25519.PrivateKey
 	encryptionMode encryptionMode
 
@@ -223,11 +261,11 @@ type Switch struct {
 	syncRoundRobin int
 
 	// Gossip protocol optimization (P0-4 fix)
-	gossipSeen     map[string]time.Time // Cache of seen gossip messages (msgHash -> timestamp)
-	gossipSeenMu   sync.RWMutex      // Mutex for gossipSeen cache
-	gossipMaxAge   time.Duration     // Maximum age for gossip messages (default: 10 minutes)
+	gossipSeen   map[string]time.Time // Cache of seen gossip messages (msgHash -> timestamp)
+	gossipSeenMu sync.RWMutex         // Mutex for gossipSeen cache
+	gossipMaxAge time.Duration        // Maximum age for gossip messages (default: 10 minutes)
 
-	// Security manager 
+	// Security manager
 	securityMgr *security.SecurityManager // Integrated security manager for peer filtering and banning
 
 	// Peer height cache: avoids expensive FetchChainInfo on every sync cycle.
@@ -275,8 +313,8 @@ func NewSwitch(cfg SwitchConfig) *Switch {
 		peerErrors:      make(map[string]*peerErrorState),
 		maxPeerErrors:   3,               // Allow 3 consecutive errors before removing peer
 		peerRetryDelay:  5 * time.Second, // Wait 5 seconds before retry after error
-		syncLoadMap:       make(map[string]int),
-		peerHeightCache:   make(map[string]cachedPeerHeight),
+		syncLoadMap:     make(map[string]int),
+		peerHeightCache: make(map[string]cachedPeerHeight),
 	}
 
 	privKey, err := sw.loadOrGenerateNodeKey()
@@ -510,9 +548,12 @@ func (sw *Switch) OnStart() error {
 // startPeerDiscovery starts mDNS peer discovery goroutines
 func (sw *Switch) startPeerDiscovery() {
 	// Start mDNS browsing
+	log.Printf("Switch: startPeerDiscovery called, mdnsDiscovery=%v", sw.mdnsDiscovery)
 	if sw.mdnsDiscovery != nil {
 		go sw.handleMDNSPeers(sw.mdnsDiscovery.Browse())
 		log.Printf("Switch: mDNS peer discovery started")
+	} else {
+		log.Printf("Switch: WARNING - mDNS discovery is nil, cannot start peer discovery")
 	}
 
 	// Start DHT discovery for WAN peer finding (like core-main)
@@ -553,6 +594,20 @@ func (sw *Switch) OnStop() error {
 		log.Printf("Switch: DHT discovery stopped")
 	}
 
+	// Stop relay server
+	if sw.relayServer != nil {
+		sw.relayServer.Stop()
+		sw.relayServer = nil
+		log.Printf("Switch: relay server stopped")
+	}
+
+	// Stop relay client
+	if sw.relayClient != nil {
+		sw.relayClient.Close()
+		sw.relayClient = nil
+		log.Printf("Switch: relay client stopped")
+	}
+
 	if sw.natManager != nil {
 		if cleanupErr := sw.natManager.DeletePortMapping(); cleanupErr != nil {
 			log.Printf("Switch: NAT port mapping cleanup error: %v", cleanupErr)
@@ -580,6 +635,23 @@ func (sw *Switch) Start(ctx context.Context) error {
 	sw.ctx, sw.cancelFunc = context.WithCancel(ctx)
 	sw.mu.Unlock()
 
+	// Step 1: NAT detection via STUN (before anything else)
+	sw.detectNATType()
+
+	// Step 2: Start relay server if:
+	// - User explicitly enabled it via config/env, OR
+	// - This is a public node (not behind NAT) — can help NAT nodes
+	autoEnableRelay := sw.config.EnableRelayServer
+	if !autoEnableRelay && sw.nodeType == discover.NodeTypePublic {
+		// Auto-enable relay server for public nodes (can help NAT nodes)
+		autoEnableRelay = true
+		log.Printf("Switch: auto-enabling relay server for public node")
+	}
+	if autoEnableRelay {
+		sw.startRelayServer()
+	}
+
+	// Step 3: Start P2P listener
 	if sw.config.ListenAddr != "" {
 		listenAddr := sw.config.ListenAddr
 		if !strings.Contains(listenAddr, "://") {
@@ -604,14 +676,28 @@ func (sw *Switch) Start(ctx context.Context) error {
 		log.Printf("Switch: listening on %s://%s", protocol, addr)
 	}
 
+	// Step 4: NAT traversal (UPnP/NAT-PMP/PCP) — try to open port if behind NAT
 	sw.wg.Add(1)
 	go func() {
 		defer sw.wg.Done()
 		sw.initNatTraversal()
 	}()
 
+	// Step 5: Start relay client if we're behind NAT and relay servers are configured
+	if sw.nodeType == discover.NodeTypeNAT && len(sw.config.RelayServers) > 0 {
+		sw.wg.Add(1)
+		go func() {
+			defer sw.wg.Done()
+			sw.startRelayClient()
+		}()
+	}
+
+	// Step 6: Start seed dialing
 	sw.wg.Add(1)
 	go sw.dialSeedsRoutine()
+
+	// Step 7: Start mDNS and DHT peer discovery
+	sw.startPeerDiscovery()
 
 	sw.mu.RLock()
 	for _, r := range sw.reactors {
@@ -624,12 +710,13 @@ func (sw *Switch) Start(ctx context.Context) error {
 	sw.mu.RUnlock()
 
 	sw.wg.Add(1)
-	go sw.runReactorRoutine() // Dead peer health check (was missing - caused stale connections)
+	go sw.runReactorRoutine()
 
 	sw.wg.Add(1)
 	go sw.ensureOutboundPeersLoop()
 
-	log.Printf("Switch: started with maxPeers=%d", sw.config.MaxPeers)
+	log.Printf("Switch: started (maxPeers=%d, NAT=%s, relayServer=%v, relayClient=%v)",
+		sw.config.MaxPeers, sw.nodeType, sw.relayServer != nil, sw.relayClient != nil)
 	return nil
 }
 
@@ -637,6 +724,203 @@ func (sw *Switch) Start(ctx context.Context) error {
 // Implements PeerAPI interface compatibility.
 func (sw *Switch) Stop() error {
 	return sw.OnStop()
+}
+
+// detectNATType uses STUN to determine whether this node is on a public IP or behind NAT.
+// This is the first thing done on startup — before any network operations.
+func (sw *Switch) detectNATType() {
+	tcpPort := sw.extractTCPPort()
+	if tcpPort <= 0 {
+		tcpPort = 9090
+	}
+
+	stunServers := sw.config.STUNServers
+	if len(stunServers) == 0 {
+		stunServers = discover.DefaultSTUNServers()
+	}
+
+	sw.natDetector = discover.NewNATDetector(tcpPort, stunServers)
+	result := sw.natDetector.Detect()
+
+	switch result.Type {
+	case discover.NATTypePublic:
+		sw.nodeType = discover.NodeTypePublic
+		log.Printf("Switch: NAT=PUBLIC (no NAT detected, local=%s:%d)", result.LocalIP, result.LocalPort)
+	case discover.NATTypeUnknown:
+		sw.nodeType = discover.NodeTypeNAT
+		log.Printf("Switch: NAT=UNKNOWN (STUN failed — assuming NAT mode, local=%s:%d)", result.LocalIP, result.LocalPort)
+	default:
+		sw.nodeType = discover.NodeTypeNAT
+		log.Printf("Switch: NAT=%s (local=%s:%d, external=%s:%d)", result.Type, result.LocalIP, result.LocalPort, result.ExternalIP, result.ExternalPort)
+	}
+}
+
+// startRelayServer starts a relay server on this node.
+// Only fixed-IP nodes should run the relay server.
+// The relay server allows NAT nodes to register and communicate through it.
+func (sw *Switch) startRelayServer() {
+	relayPort := sw.config.RelayServerPort
+	if relayPort <= 0 {
+		relayPort = 9091
+	}
+
+	addr := fmt.Sprintf("0.0.0.0:%d", relayPort)
+
+	// Get node public key hex for relay address prefix
+	nodeIDHex := ""
+	if sw.nodeID != "" {
+		nodeIDHex = sw.nodeID
+	} else {
+		nodeIDHex = hex.EncodeToString(sw.nodePrivKey)
+	}
+
+	cfg := RelayServerConfig{
+		ListenAddr: addr,
+		MaxClients: 1000,
+		NodeID:     nodeIDHex,
+		TCPPort:    uint16(sw.extractTCPPort()),
+	}
+
+	relayPeerCh := make(chan *relayPeerInfo, 64)
+
+	server := NewRelayServer(cfg)
+	if err := server.Start(relayPeerCh); err != nil {
+		log.Printf("Switch: relay server failed to start: %v", err)
+		return
+	}
+
+	sw.relayServer = server
+	sw.relayPort = relayPort
+
+	// Handle new relay peer discoveries
+	sw.wg.Add(1)
+	go func() {
+		defer sw.wg.Done()
+		for {
+			select {
+			case <-sw.quit:
+				return
+			case peerInfo := <-relayPeerCh:
+				if peerInfo == nil {
+					continue
+				}
+				// Convert relayPeerInfo to DHT node and add to dial queue
+				nodeIDBytes := peerInfo.nodeID
+				var nid dht.NodeID
+				if len(nodeIDBytes) == 32 {
+					copy(nid[:], nodeIDBytes[:])
+				}
+				ip := net.ParseIP(peerInfo.externalIP)
+				if ip == nil {
+					ip = net.IPv4zero
+				}
+				node := dht.NewNode(nid, ip, peerInfo.tcpPort, peerInfo.tcpPort)
+				node.IsNAT = peerInfo.isNAT
+				node.RelayAddr = peerInfo.relayAddr
+				log.Printf("Switch: relay peer discovered: %s (relay=%s)", node.ID.String(), peerInfo.relayAddr)
+				sw.AddPeerToList(node.TCPAddr())
+			}
+		}
+	}()
+
+	log.Printf("Switch: relay server started on %s (nodeID=%s...)", addr, nodeIDHex[:16])
+}
+
+// startRelayClient connects to configured relay servers.
+// Called when this node is behind NAT and needs relay support.
+func (sw *Switch) startRelayClient() {
+	// Use the already-detected NAT result
+	natResult := discover.NATResult{}
+	if sw.natDetector != nil {
+		natResult = sw.natDetector.LastResult()
+	}
+
+	nodeIDHex := ""
+	if sw.nodeID != "" {
+		nodeIDHex = sw.nodeID
+	} else {
+		nodeIDHex = hex.EncodeToString(sw.nodePrivKey)
+	}
+
+	cfg := discover.RelayClientConfig{
+		NodeID:     nodeIDHex,
+		TCPPort:    sw.extractTCPPort(),
+		ExternalIP: natResult.ExternalIP,
+	}
+
+	client := discover.NewRelayClient(cfg)
+
+	if err := client.Start(sw.config.RelayServers); err != nil {
+		log.Printf("Switch: relay client failed: %v (NAT nodes can still connect outbound to fixed-IP nodes)", err)
+		return
+	}
+
+	sw.relayClient = client
+	sw.relayAddr = client.RelayAddress()
+
+	// Subscribe to peers discovered via relay
+	peerCh := client.PeerChannel()
+	sw.wg.Add(1)
+	go func() {
+		defer sw.wg.Done()
+		for {
+			select {
+			case <-sw.quit:
+				return
+			case peer := <-peerCh:
+				if peer != nil {
+					peer.IsNAT = true
+					peer.RelayAddr = client.RelayAddress()
+					log.Printf("Switch: relay peer: %s (via relay %s)", peer.ID.String(), peer.RelayAddr)
+					sw.AddPeerToList(peer.TCPAddr())
+				}
+			}
+		}
+	}()
+
+	log.Printf("Switch: relay client connected (relayAddr=%s, relayServers=%d)",
+		sw.relayAddr, len(sw.config.RelayServers))
+}
+
+// NodeType returns the detected NAT type of this node.
+func (sw *Switch) NodeType() discover.NodeType {
+	sw.mu.RLock()
+	defer sw.mu.RUnlock()
+	return sw.nodeType
+}
+
+// RelayAddress returns this node's relay address if registered with a relay server.
+func (sw *Switch) RelayAddress() string {
+	sw.mu.RLock()
+	defer sw.mu.RUnlock()
+	return sw.relayAddr
+}
+
+// IsNAT returns true if this node is behind NAT and cannot accept inbound connections.
+func (sw *Switch) IsNAT() bool {
+	return sw.NodeType() == discover.NodeTypeNAT
+}
+
+// CanAcceptInbound returns true if this node can accept inbound P2P connections.
+// This is true for public nodes, or NAT nodes with successful UPnP.
+func (sw *Switch) CanAcceptInbound() bool {
+	sw.mu.RLock()
+	defer sw.mu.RUnlock()
+
+	// Public nodes can always accept inbound
+	if sw.nodeType == discover.NodeTypePublic {
+		return true
+	}
+
+	// NAT nodes with successful UPnP port mapping can accept inbound
+	if sw.natManager != nil {
+		extIP, extPort := sw.natManager.GetExternalAddress()
+		if extIP != "" && extPort > 0 {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (sw *Switch) parseListenAddr(addr string) (string, string, error) {
@@ -662,6 +946,12 @@ func (sw *Switch) initNatTraversal() {
 		return
 	}
 
+	// Skip if we're already public (no NAT)
+	if sw.nodeType == discover.NodeTypePublic {
+		log.Printf("Switch: Public IP detected — no NAT traversal needed")
+		return
+	}
+
 	tcpPort := sw.extractTCPPort()
 	if tcpPort <= 0 {
 		log.Printf("Switch: cannot determine TCP port for NAT traversal")
@@ -674,11 +964,11 @@ func (sw *Switch) initNatTraversal() {
 		return
 	}
 
-	log.Printf("Switch: starting NAT traversal for TCP port %d", tcpPort)
+	log.Printf("Switch: starting NAT traversal for TCP port %d (nodeType=%s)", tcpPort, sw.nodeType)
 
 	if err := sw.natManager.ForwardPortMultiProtocol(); err != nil {
 		log.Printf("Switch: WARNING — NAT traversal failed: %v", err)
-		log.Printf("Switch: node will operate in outbound-only mode (not externally reachable)")
+		log.Printf("Switch: node will operate in outbound-only mode (relay fallback available)")
 		return
 	}
 
@@ -686,7 +976,7 @@ func (sw *Switch) initNatTraversal() {
 	if extIP != "" && extPort > 0 {
 		sw.config.ExternalAddr = fmt.Sprintf("%s:%d", extIP, extPort)
 		sw.config.AdvertisedPort = extPort
-		log.Printf("Switch: NAT traversal successful — ExternalAddr=%s", sw.config.ExternalAddr)
+		log.Printf("Switch: NAT traversal successful — ExternalAddr=%s (node can accept inbound)", sw.config.ExternalAddr)
 	} else {
 		log.Printf("Switch: WARNING — NAT mapping created but external address unknown")
 	}
@@ -861,11 +1151,23 @@ func (sw *Switch) seedOutboundPeers(peer *Peer) {
 	seedItems := make([]PeerSeedAddr, 0, len(peerList))
 	for _, p := range peerList {
 		peerAddr := sw.resolvePeerRoutableAddr(p)
-		seedItems = append(seedItems, PeerSeedAddr{
+
+		item := PeerSeedAddr{
 			ID:   p.ID(),
 			Addr: peerAddr,
 			TTL:  3, // Default TTL: 3 hops (P0-4 optimization)
-		})
+		}
+
+		// Include relay address and NAT type for NAT peers
+		if relayAddr := sw.getPeerRelayAddr(p.ID()); relayAddr != "" {
+			item.Addr = relayAddr
+			item.RelayAddr = relayAddr
+			item.NATType = "NAT"
+		} else if sw.CanAcceptInbound() {
+			item.NATType = "Public"
+		}
+
+		seedItems = append(seedItems, item)
 	}
 
 	seedMsg, err := json.Marshal(seedItems)
@@ -887,6 +1189,31 @@ func (sw *Switch) seedOutboundPeers(peer *Peer) {
 	sw.gossipSeenMu.Lock()
 	sw.gossipSeen[msgHash] = time.Now()
 	sw.gossipSeenMu.Unlock()
+}
+
+// peerRelayCache maps wallet address to relay address for NAT peers.
+var peerRelayCache = make(map[string]string)
+var peerRelayCacheMu sync.RWMutex
+
+// registerRelayPeer registers a peer's relay address in the cache.
+func (sw *Switch) registerRelayPeer(peerID, relayAddr string) {
+	peerRelayCacheMu.Lock()
+	defer peerRelayCacheMu.Unlock()
+	if relayAddr != "" {
+		peerRelayCache[peerID] = relayAddr
+	}
+}
+
+// getPeerRelayAddr returns the relay address of a peer if known.
+// Returns empty string if the peer is not a NAT node.
+func (sw *Switch) getPeerRelayAddr(peerID string) string {
+	peerRelayCacheMu.RLock()
+	relayAddr, ok := peerRelayCache[peerID]
+	peerRelayCacheMu.RUnlock()
+	if ok && relayAddr != "" {
+		return relayAddr
+	}
+	return ""
 }
 
 // resolvePeerRoutableAddr returns the best routable address for a peer.
@@ -1040,7 +1367,41 @@ func (sw *Switch) ensureOutboundPeers() {
 		}
 	}
 
-	// PRIORITY 2: Fallback to configured Seeds (if still need peers)
+	// PRIORITY 2: NAT nodes use relay for peer discovery (relay server knows all registered NAT peers)
+	if numToDial > 0 && sw.relayClient != nil {
+		relayPeers := sw.relayClient.GetPeersList()
+		if len(relayPeers) > 0 {
+			log.Printf("Switch: Relay found %d NAT peer candidates", len(relayPeers))
+			for _, node := range relayPeers {
+				if outboundCount >= sw.config.MinOutboundPeers {
+					break
+				}
+				if numToDial <= 0 {
+					break
+				}
+
+				// NAT peers can be reached via their relay address
+				addr := node.TCPAddr()
+				if sw.peerAlreadyDialingOrConnected(addr) {
+					continue
+				}
+
+				// Register relay address for this peer
+				if node.RelayAddr != "" {
+					sw.registerRelayPeer(node.ID.String(), node.RelayAddr)
+				}
+
+				if dialErr := sw.DialPeerWithAddress(addr); dialErr != nil {
+					log.Printf("Switch: failed to dial relay peer %s: %v", addr, dialErr)
+					continue
+				}
+				outboundCount++
+				numToDial--
+			}
+		}
+	}
+
+	// PRIORITY 3: Fallback to configured Seeds (if still need peers)
 	if numToDial > 0 && len(sw.config.Seeds) > 0 {
 		for _, seed := range sw.config.Seeds {
 			if outboundCount >= sw.config.MinOutboundPeers {
@@ -1064,7 +1425,7 @@ func (sw *Switch) ensureOutboundPeers() {
 		}
 	}
 
-	// PRIORITY 3: Fallback to static Peers config (if still need peers)
+	// PRIORITY 4: Fallback to static Peers config (if still need peers)
 	if outboundCount < sw.config.MinOutboundPeers && len(sw.config.Peers) > 0 {
 		for _, pi := range sw.config.Peers {
 			if outboundCount >= sw.config.MinOutboundPeers {
@@ -1445,6 +1806,12 @@ func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, 
 		return fmt.Errorf("switch: failed to create peer from %s", addr)
 	}
 
+	// Register peer relay address if provided (for NAT-aware peer exchange)
+	if peerNI.RelayAddr != "" {
+		sw.registerRelayPeer(stableID, peerNI.RelayAddr)
+		log.Printf("[Switch] Peer %s registered relay address: %s (NAT=%s)", stableID, peerNI.RelayAddr, peerNI.NATType)
+	}
+
 	sw.mu.Lock()
 	if sw.peers.Size() >= sw.config.MaxPeers {
 		sw.mu.Unlock()
@@ -1614,7 +1981,7 @@ func (sw *Switch) handleGossipMessage(fromPeerID string, msgBytes []byte) {
 		return
 	}
 
-	log.Printf("[Switch] gossip: received %d peer addresses from %s (TTL=%d)", 
+	log.Printf("[Switch] gossip: received %d peer addresses from %s (TTL=%d)",
 		len(seedItems), fromPeerID, seedItems[0].TTL)
 
 	// Check TTL (P0-4 fix)
@@ -1635,6 +2002,13 @@ func (sw *Switch) handleGossipMessage(fromPeerID string, msgBytes []byte) {
 		if item.ID == sw.nodeID {
 			continue
 		}
+
+		// Register relay address for NAT peers (for later relay-based connection)
+		if item.RelayAddr != "" {
+			sw.registerRelayPeer(item.ID, item.RelayAddr)
+		}
+
+		// Skip if already connected
 		if sw.peerAlreadyDialingOrConnected(item.Addr) {
 			continue
 		}
@@ -1642,7 +2016,24 @@ func (sw *Switch) handleGossipMessage(fromPeerID string, msgBytes []byte) {
 			continue
 		}
 
-		log.Printf("[Switch] gossip: discovered peer %s @ %s, adding to dial list", item.ID, item.Addr)
+		ntype := "Public"
+		if item.NATType != "" {
+			ntype = item.NATType
+		}
+
+		if item.RelayAddr != "" {
+			// NAT peer — add via relay if we have relay client, otherwise via direct address
+			if sw.relayClient != nil {
+				log.Printf("[Switch] gossip: discovered NAT peer %s @ %s (relay=%s), will connect via relay",
+					item.ID, item.Addr, item.RelayAddr)
+			} else {
+				log.Printf("[Switch] gossip: discovered NAT peer %s @ %s (relay=%s), relay client not available",
+					item.ID, item.Addr, item.RelayAddr)
+			}
+		} else {
+			log.Printf("[Switch] gossip: discovered %s peer %s @ %s, adding to dial list", ntype, item.ID, item.Addr)
+		}
+
 		sw.AddPeerToList(item.Addr)
 	}
 
@@ -2115,6 +2506,11 @@ func (sw *Switch) buildLocalNodeInfo() NodeInfo {
 	pubKeyHex := hex.EncodeToString(sw.nodePrivKey.Public().(ed25519.PublicKey))
 	channels := sw.buildChannelsString()
 
+	sw.mu.RLock()
+	nodeType := sw.nodeType
+	relayAddr := sw.relayAddr
+	sw.mu.RUnlock()
+
 	return NodeInfo{
 		PubKey:     pubKeyHex,
 		Moniker:    sw.nodeID,
@@ -2122,6 +2518,8 @@ func (sw *Switch) buildLocalNodeInfo() NodeInfo {
 		Version:    sw.version,
 		ListenAddr: sw.config.ExternalAddr,
 		Channels:   channels,
+		NATType:    nodeType.String(),
+		RelayAddr:  relayAddr,
 	}
 }
 
@@ -3778,7 +4176,7 @@ func (sw *Switch) DecSyncLoad(peerAddr string) {
 	}
 }
 
-// SetSecurityManager sets the security manager for Bytom-style security filtering.
+// SetSecurityManager sets the security manager for NogoChain-style security filtering.
 // This method allows optional integration without changing the NewSwitch API.
 // Call this method after creating the Switch to enable:
 //   - IP filtering (allowlist/blocklist)
@@ -3795,5 +4193,5 @@ func (sw *Switch) SetSecurityManager(secMgr *security.SecurityManager) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 	sw.securityMgr = secMgr
-	log.Printf("[Switch] SecurityManager integrated - Bytom-style peer filtering enabled")
+	log.Printf("[Switch] SecurityManager integrated - NogoChain-style peer filtering enabled")
 }

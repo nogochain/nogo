@@ -228,7 +228,10 @@ func mulMatrixBlocked(dst, a, b []int64, size int) {
 	}
 }
 
-func mulMatrixWithPool(headerHash []byte, cache []uint32, matA, matB, matRes *denseMatrix) []uint8 {
+// mulMatrixPooled computes the NogoPow matrix hash using fresh matrix allocations
+// per goroutine. No global matrix pool or GOMAXPROCS side effects —
+// fully deterministic given identical inputs on any node.
+func mulMatrixPooled(hashBytes []byte, cache []uint32) []uint8 {
 	ui32data := make([]uint32, matNum*matSize*matSize/4)
 
 	for i := 0; i < 128; i++ {
@@ -239,8 +242,6 @@ func mulMatrixWithPool(headerHash []byte, cache []uint32, matA, matB, matRes *de
 		}
 	}
 
-	// Convert []uint32 to []byte for fixed-point arithmetic
-	// Security: Use binary.LittleEndian for safe type conversion instead of unsafe.Pointer
 	byteData := make([]byte, len(ui32data)*4)
 	for i, v := range ui32data {
 		binary.LittleEndian.PutUint32(byteData[i*4:i*4+4], v)
@@ -259,7 +260,6 @@ func mulMatrixWithPool(headerHash []byte, cache []uint32, matA, matB, matRes *de
 	var tmp [matSize][matSize]int64
 	var maArr [4][matSize][matSize]int64
 
-	runtime.GOMAXPROCS(4)
 	var wg sync.WaitGroup
 	wg.Add(4)
 
@@ -267,16 +267,15 @@ func mulMatrixWithPool(headerHash []byte, cache []uint32, matA, matB, matRes *de
 		go func(i int) {
 			defer wg.Done()
 
-			localMatA := GetMatrix(matSize, matSize)
-			localMatB := GetMatrix(matSize, matSize)
-			defer PutMatrix(localMatA)
-			defer PutMatrix(localMatB)
-
+			// Allocate fresh matrices per goroutine — no shared pool.
+			// No shared pool — each goroutine has independent matrix state.
+			localMatA := newDenseMatrix(matSize, matSize, nil)
+			localMatB := newDenseMatrix(matSize, matSize, nil)
 			copy(localMatA.data, dataIdentity)
 
 			var sequence [32]byte
 			hasher := sha3.NewLegacyKeccak256()
-			hasher.Write(headerHash[i*8 : (i+1)*8])
+			hasher.Write(hashBytes[i*8 : (i+1)*8])
 			copy(sequence[:], hasher.Sum(nil))
 
 			for j := 0; j < 2; j++ {

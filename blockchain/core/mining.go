@@ -186,14 +186,7 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 	txs = append(txs, coinbase)
 	txs = append(txs, transfers...)
 
-	var engine *nogopow.NogopowEngine
-	if powModeCache.mode == "fake" {
-		engine = nogopow.NewFaker()
-	} else {
-		powConfig := nogopow.DefaultConfig()
-		powConfig.ConsensusParams = &c.consensus
-		engine = nogopow.New(powConfig)
-	}
+	engine := c.getPowEngine()
 
 	parentHeader := &nogopow.Header{
 		Number:     big.NewInt(int64(latest.GetHeight())),
@@ -316,7 +309,7 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 	c.mu.Unlock()
 
 	// Return mined block. The caller (Miner) adds it to chain via AddBlock
-	// and broadcasts to peers. Bytom Classic PoW mode: first valid block
+	// and broadcasts to peers. First valid block
 	// extending current tip wins; longest-chain rule resolves forks.
 	return newBlock, nil
 }

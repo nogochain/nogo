@@ -7,28 +7,31 @@ import (
 )
 
 type Flags struct {
-	ConfigPath     string
-	NodePort       int
-	P2PPort        int
-	DataDir        string
-	MiningEnabled  bool
-	MiningThreads  int
-	MaxPeers       int
-	LogLevel       string
-	ChainID        uint64
-	GenesisPath    string
-	MinerAddress   string
-	AdminToken     string
-	P2PEnable      bool
-	WSEnable       bool
-	WSMaxConns     int
-	AIAuditorURL   string
-	RPCPort        int
-	EnableCORS     bool
-	RateLimitRPS   int
-	RateLimitBurst int
-	KeystoreDir    string
-	TrustProxy     bool
+	ConfigPath        string
+	NodePort          int
+	P2PPort           int
+	DataDir           string
+	MiningEnabled     bool
+	MiningThreads     int
+	MaxPeers          int
+	LogLevel          string
+	ChainID           uint64
+	GenesisPath       string
+	MinerAddress      string
+	AdminToken        string
+	P2PEnable         bool
+	WSEnable          bool
+	WSMaxConns        int
+	AIAuditorURL      string
+	RPCPort           int
+	EnableCORS        bool
+	RateLimitRPS      int
+	RateLimitBurst    int
+	KeystoreDir       string
+	TrustProxy        bool
+	EnableRelayServer bool
+	RelayServerPort   int
+	RelayServers      string
 }
 
 func ParseFlags() *Flags {
@@ -56,6 +59,11 @@ func ParseFlags() *Flags {
 	flag.IntVar(&f.RateLimitBurst, "rate-limit-burst", 0, "Rate limit burst size")
 	flag.StringVar(&f.KeystoreDir, "keystore-dir", "", "Directory for wallet keystore files")
 	flag.BoolVar(&f.TrustProxy, "trust-proxy", false, "Trust X-Forwarded-For headers")
+
+	// Relay server configuration
+	flag.BoolVar(&f.EnableRelayServer, "enable-relay-server", false, "Enable relay server mode (for fixed-IP nodes)")
+	flag.IntVar(&f.RelayServerPort, "relay-server-port", 9091, "Relay server TCP listen port")
+	flag.StringVar(&f.RelayServers, "relay-servers", "", "Comma-separated list of relay server addresses (for NAT nodes)")
 
 	flag.Parse()
 

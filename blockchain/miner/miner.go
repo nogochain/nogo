@@ -268,7 +268,7 @@ func (m *Miner) SetCandidatePool(pool *core.CandidatePool) {
 // CRITICAL: This is called AFTER block validation completes
 func (m *Miner) OnBlockAdded() {
 	// Block processing completed, ensure verification is ended
-	// and trigger immediate mining restart (Bytom Classic continuous mining)
+	// and trigger immediate mining restart on next tick.
 	m.EndVerification()
 	m.Wake()
 }
@@ -467,15 +467,15 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 	block, err := m.MineOnce(ctx)
 	if err != nil {
 		logf(colorRed, "❌ ", fmt.Sprintf("Mine once failed: %v", err))
-		m.Wake() // Retry immediately on failure (Bytom Classic continuous mining)
+		m.Wake() // Retry immediately on failure
 		return
 	}
 
 	if block != nil {
 		m.handleMinedBlock(ctx, block)
 	}
-	// Bytom Classic continuous mining: restart immediately without waiting for next tick
-	m.Wake()
+	// Block time is controlled by PoW difficulty + ticker interval.
+	// NogoChain uses ticker to pace mining at the configured interval.
 }
 
 // handleMinedBlock handles a successfully mined block
@@ -696,7 +696,7 @@ func (m *Miner) MineOnce(ctx context.Context) (*core.Block, error) {
 		return nil, nil
 	}
 
-	// Bytom Classic PoW mode: add mined block to local chain first,
+	// Add mined block to local chain first before P2P broadcast.
 	// then broadcast to peers. PoW longest-chain resolves forks.
 	if accepted, addErr := m.bc.AddBlock(b); addErr != nil {
 		logf(colorBrightYellow, "⚠️ ", "Self-mined block add failed height %d: %v (broadcasting anyway)", b.Header.Height, addErr)
