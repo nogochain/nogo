@@ -137,6 +137,7 @@ type Metrics struct {
 	nogoOrphanPoolSize           prometheus.Gauge
 	nogoMiningPaused             prometheus.Gauge
 	nogoChainSwitchesTotal       prometheus.Counter
+	nogoForkDetectedTotal        prometheus.Counter
 	nogoInstantValidationEnabled prometheus.Gauge
 	nogoBlockEventsTotal         prometheus.Counter
 	nogoHeaderEventsTotal        prometheus.Counter
@@ -331,6 +332,12 @@ func NewMetrics(bc Blockchain, mp Mempool, peers PeerManager, sl SyncLoop, nodeI
 		ConstLabels: commonLabels,
 	})
 
+	m.nogoForkDetectedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name:        "nogo_fork_detected_total",
+		Help:        "Total number of fork detections (blocks with same height but different hash)",
+		ConstLabels: commonLabels,
+	})
+
 	m.nogoInstantValidationEnabled = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "nogo_instant_validation_enabled",
 		Help:        "Whether instant validation is enabled (1 = enabled, 0 = disabled)",
@@ -484,6 +491,7 @@ func NewMetrics(bc Blockchain, mp Mempool, peers PeerManager, sl SyncLoop, nodeI
 	mustRegister(m.nogoOrphanPoolSize)
 	mustRegister(m.nogoMiningPaused)
 	mustRegister(m.nogoChainSwitchesTotal)
+	mustRegister(m.nogoForkDetectedTotal)
 	mustRegister(m.nogoInstantValidationEnabled)
 	mustRegister(m.nogoBlockEventsTotal)
 	mustRegister(m.nogoHeaderEventsTotal)
@@ -905,6 +913,13 @@ func (m *Metrics) RecordChainSwitch() {
 		return
 	}
 	m.nogoChainSwitchesTotal.Inc()
+}
+
+func (m *Metrics) RecordForkDetected() {
+	if m == nil {
+		return
+	}
+	m.nogoForkDetectedTotal.Inc()
 }
 
 func (m *Metrics) RecordBlockEvent() {

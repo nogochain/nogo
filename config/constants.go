@@ -39,6 +39,14 @@ const (
 	// Configurable via genesis.json: consensusParams.difficultyTargetMs
 	DefaultTargetBlockTime = 17
 
+	// MinBlockIntervalFraction is the minimum fraction of target block time
+	// that must elapse between successive blocks from ANY miner.
+	// Default: 80% of target time (13.6s for 17s target).
+	// This prevents N miners from producing blocks every 17/N seconds,
+	// which would cause 2-3s block intervals and deep forks.
+	// Configurable via: MIN_BLOCK_INTERVAL_FRACTION
+	MinBlockIntervalFraction = 80
+
 	// DefaultDifficultyWindow is the number of blocks for difficulty adjustment
 	// Configurable via genesis.json: consensusParams.difficultyWindow
 	DefaultDifficultyWindow = 10

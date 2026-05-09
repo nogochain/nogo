@@ -126,7 +126,8 @@ type SyncLoop struct {
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	syncProgress        float64
-	syncRoundInProgress bool // CRITICAL: Prevent concurrent SyncWithPeer execution
+	syncRoundInProgress bool       // CRITICAL: Prevent concurrent SyncWithPeer execution
+	reorgMu             sync.Mutex // CRITICAL: Prevent concurrent fork reorg operations (P0)
 	lastUpdateTime      time.Time
 }
 
@@ -299,6 +300,13 @@ func (s *SyncLoop) Start(ctx context.Context) error {
 				s.blockKeeper.TriggerImmediateReSync()
 			}
 		})
+		s.forkResolver.SetOnForkDetected(func(event forkresolution.ForkEvent) {
+			log.Printf("[SyncManager] Fork detected: type=%v depth=%d localHeight=%d remoteHeight=%d peer=%s",
+				event.Type, event.Depth, event.LocalHeight, event.RemoteHeight, event.PeerID)
+			if s.metrics != nil {
+				s.metrics.RecordForkDetected()
+			}
+		})
 
 		// Create MultiNodeArbitrator for enhanced consensus in 3+ node networks
 		s.multiNodeArbiter = forkresolution.NewMultiNodeArbitrator(s.ctx, s.forkResolver)
@@ -385,7 +393,15 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	totalPeers := len(peers)
 	responsivePeers := 0
 	maxPeerHeight := uint64(0)
+	workCheck := true
 	var bestPeerWork *big.Int
+
+	// Collect all peer chain info in one pass for both sync progress AND fork detection
+	type peerInfo struct {
+		id   string
+		info *ChainInfo
+	}
+	allPeerInfos := make([]peerInfo, 0, len(peers))
 
 	for _, peer := range peers {
 		info, err := s.pm.FetchChainInfo(ctx, peer)
@@ -393,6 +409,8 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 			continue
 		}
 		responsivePeers++
+
+		allPeerInfos = append(allPeerInfos, peerInfo{id: peer, info: info})
 
 		if info.Height > maxPeerHeight {
 			maxPeerHeight = info.Height
@@ -410,7 +428,7 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 
 	var progress float64
 	if maxPeerHeight == 0 || localHeight >= maxPeerHeight {
-		workCheck := true
+		workCheck = true
 		if localHeight == maxPeerHeight && bestPeerWork != nil {
 			workCheck = localWork.Cmp(bestPeerWork) >= 0
 		}
@@ -439,6 +457,23 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	s.syncProgress = progress
 	s.lastUpdateTime = time.Now()
 	s.mu.Unlock()
+
+	// CRITICAL: After updating sync progress, check if ANY peer has more cumulative work.
+	// If so, trigger fork reorg to switch to the heavier chain.
+	// This handles the case where a peer's fork chain has more total work even though
+	// heights are equal (or peer is slightly ahead), which is typical in deep fork scenarios.
+	if !workCheck && bestPeerWork != nil && bestPeerWork.Cmp(localWork) > 0 {
+		log.Printf("[Sync] Peer has more work than local (%s > %s), scanning all peers for fork reorg",
+			bestPeerWork.String(), localWork.String())
+		for _, pi := range allPeerInfos {
+			if pi.info.Work != nil && pi.info.Work.Cmp(localWork) > 0 {
+				log.Printf("[Sync] Peer %s has more work (%s > %s), triggering fork reorg",
+					pi.id, pi.info.Work.String(), localWork.String())
+				s.TriggerForkReorgForPeer(pi.id)
+				break
+			}
+		}
+	}
 }
 
 // Stop halts the synchronization loop
@@ -466,15 +501,21 @@ func (s *SyncLoop) Stop() {
 	}
 }
 
-// IsSyncing returns whether sync is in progress
-// REFACTORED: Always returns false in stateless architecture
-// Old behavior: returned s.isSyncing (global state that caused stuck issues)
-// New behavior: sync state is managed internally by blockKeeper.syncWorker()
-// External callers should use IsSynced() to check if mining can proceed
+// IsSyncing returns whether sync is in progress.
+// Uses syncRoundInProgress and blockKeeper.status so the miner can skip peer-work
+// checks during sync, preventing the deadlock where miner pauses for fork resolution
+// while sync is running.
 func (s *SyncLoop) IsSyncing() bool {
-	// Stateless architecture: no global isSyncing flag
-	// Sync is handled by blockKeeper internally, external components don't need to know
-	// This prevents the permanent stuck state caused by isSyncing=true never being reset
+	s.mu.RLock()
+	if s.syncRoundInProgress {
+		s.mu.RUnlock()
+		return true
+	}
+	s.mu.RUnlock()
+
+	if s.blockKeeper != nil && s.blockKeeper.isActive() {
+		return true
+	}
 	return false
 }
 
@@ -655,6 +696,12 @@ func (s *SyncLoop) TriggerForkReorg(peerID string, forkBlock *core.Block) {
 			}
 		}()
 
+		if !s.reorgMu.TryLock() {
+			log.Printf("[Sync] TriggerForkReorg: another reorg in progress, skipping")
+			return
+		}
+		defer s.reorgMu.Unlock()
+
 		localWork := big.NewInt(0)
 		if bc != nil {
 			if cw := bc.CanonicalWork(); cw != nil {
@@ -709,6 +756,111 @@ func (s *SyncLoop) TriggerForkReorg(peerID string, forkBlock *core.Block) {
 			if bk != nil {
 				bk.TriggerImmediateReSync()
 			}
+		}
+	}()
+}
+
+// TriggerForkReorgForPeer triggers fork resolution when a periodic scan detects
+// that a peer's chain has more cumulative work than the local canonical chain.
+// Unlike TriggerForkReorg, this does not require a specific fork block - it fetches
+// the peer's latest block and chain info to perform the comparison.
+// CRITICAL: This is the mechanism for detecting deep forks where the peer chain
+// has mined significantly more blocks (and accumulated more work) while the local
+// node was unaware of the fork.
+func (s *SyncLoop) TriggerForkReorgForPeer(peerID string) {
+	if s == nil {
+		return
+	}
+
+	s.mu.RLock()
+	forkResolver := s.forkResolver
+	pm := s.pm
+	ctx := s.ctx
+	bc := s.bc
+	bk := s.blockKeeper
+	s.mu.RUnlock()
+
+	if pm == nil || ctx == nil {
+		return
+	}
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[Sync] TriggerForkReorgForPeer panic recovered: %v", r)
+			}
+		}()
+
+		if !s.reorgMu.TryLock() {
+			log.Printf("[Sync] TriggerForkReorgForPeer: another reorg in progress, skipping")
+			return
+		}
+		defer s.reorgMu.Unlock()
+
+		localWork := big.NewInt(0)
+		localHeight := uint64(0)
+		if bc != nil {
+			if cw := bc.CanonicalWork(); cw != nil {
+				localWork.Set(cw)
+			}
+			if tip := bc.LatestBlock(); tip != nil {
+				localHeight = tip.GetHeight()
+			}
+		}
+
+		fetchCtx, cancel := context.WithTimeout(context.Background(), fetchChainInfoTimeout)
+		defer cancel()
+
+		chainInfo, err := pm.FetchChainInfo(fetchCtx, peerID)
+		if err != nil {
+			log.Printf("[Sync] TriggerForkReorgForPeer: fetch chain info from %s failed: %v",
+				peerID, err)
+			return
+		}
+
+		peerWork := chainInfo.Work
+		if peerWork == nil {
+			peerWork = big.NewInt(0)
+		}
+
+		if peerWork.Cmp(localWork) <= 0 {
+			return
+		}
+
+		log.Printf("[Sync] TriggerForkReorgForPeer: peer=%s has more work local=%s peer=%s local_h=%d peer_h=%d, fetching tip block",
+			peerID, localWork.String(), peerWork.String(), localHeight, chainInfo.Height)
+
+		fetchBlockCtx, fetchBlockCancel := context.WithTimeout(context.Background(), fetchChainInfoTimeout)
+		defer fetchBlockCancel()
+
+		peerBlock, err := pm.FetchBlockByHeight(fetchBlockCtx, peerID, chainInfo.Height)
+		if err != nil {
+			log.Printf("[Sync] TriggerForkReorgForPeer: fetch tip block from %s failed: %v, falling back to resync",
+				peerID, err)
+			if bk != nil {
+				bk.TriggerImmediateReSync()
+			}
+			return
+		}
+
+		if peerBlock == nil {
+			log.Printf("[Sync] TriggerForkReorgForPeer: peer %s returned nil block at height %d, falling back to resync",
+				peerID, chainInfo.Height)
+			if bk != nil {
+				bk.TriggerImmediateReSync()
+			}
+			return
+		}
+
+		if forkResolver != nil {
+			if err := forkResolver.RequestReorg(peerBlock, "TriggerForkReorgForPeer-"+peerID); err != nil {
+				log.Printf("[Sync] TriggerForkReorgForPeer: RequestReorg failed: %v, falling back to resync", err)
+				if bk != nil {
+					bk.TriggerImmediateReSync()
+				}
+			}
+		} else if bk != nil {
+			bk.TriggerImmediateReSync()
 		}
 	}()
 }

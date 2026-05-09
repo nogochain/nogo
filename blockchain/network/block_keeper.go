@@ -24,6 +24,7 @@ import (
 	"log"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/config"
@@ -94,19 +95,33 @@ type blockKeeper struct {
 	// UNIFIED FORK RESOLUTION: Uses core-main based architecture
 	forkResolver     *forkresolution.ForkResolver
 	multiNodeArbiter *forkresolution.MultiNodeArbitrator
+
+	forkDetectionCooldown    map[string]time.Time
+	forkDetectionCooldownDur time.Duration
+
+	syncActive   bool
+	syncActiveMu sync.Mutex
+}
+
+func (bk *blockKeeper) isActive() bool {
+	bk.syncActiveMu.Lock()
+	defer bk.syncActiveMu.Unlock()
+	return bk.syncActive
 }
 
 func newBlockKeeper(chain ChainInterface, peers PeerSetInterface, candidatePool *core.CandidatePool) *blockKeeper {
 	bk := &blockKeeper{
-		chain:            chain,
-		peers:            peers,
-		candidatePool:    candidatePool,
-		blockProcessCh:   make(chan *blockMsg, blockProcessChSize),
-		blocksProcessCh:  make(chan *blocksMsg, blocksProcessChSize),
-		headersProcessCh: make(chan *headersMsg, headersProcessChSize),
-		headerList:       list.New(),
-		forkResolvedCh:   make(chan struct{}, 1),
-		quit:             make(chan struct{}),
+		chain:                    chain,
+		peers:                    peers,
+		candidatePool:            candidatePool,
+		blockProcessCh:           make(chan *blockMsg, blockProcessChSize),
+		blocksProcessCh:          make(chan *blocksMsg, blocksProcessChSize),
+		headersProcessCh:         make(chan *headersMsg, headersProcessChSize),
+		headerList:               list.New(),
+		forkResolvedCh:           make(chan struct{}, 1),
+		quit:                     make(chan struct{}),
+		forkDetectionCooldown:    make(map[string]time.Time),
+		forkDetectionCooldownDur: 5 * time.Second,
 	}
 	bk.resetHeaderState()
 	go bk.syncWorker()
@@ -945,25 +960,34 @@ func (bk *blockKeeper) dispatchForkDetection(peer PeerInterface, localHeight uin
 	}
 
 	peerHeight := peer.Height()
+	peerID := peer.ID()
+
+	cooldownKey := fmt.Sprintf("%s:%d", peerID, peerHeight)
+	if lastCheck, exists := bk.forkDetectionCooldown[cooldownKey]; exists {
+		if time.Since(lastCheck) < bk.forkDetectionCooldownDur {
+			return false
+		}
+	}
+	bk.forkDetectionCooldown[cooldownKey] = time.Now()
+
 	log.Printf("[BlockKeeper] dispatchForkDetection: fork candidate (local=%d peer=%d), evaluating work",
 		localHeight, peerHeight)
 
-	// Build a minimal peer tip block for work comparison
 	peerTip := bk.getPeerTipBlock(peer)
 	if peerTip == nil {
 		log.Printf("[BlockKeeper] dispatchForkDetection: cannot build peer tip block")
+		delete(bk.forkDetectionCooldown, cooldownKey)
 		return false
 	}
 
-	// Use ForkResolver.ShouldReorg for work-weighted decision
 	if !bk.forkResolver.ShouldReorg(peerTip) {
-		log.Printf("[BlockKeeper] dispatchForkDetection: peer chain does not have more work, keeping local chain")
+		log.Printf("[BlockKeeper] dispatchForkDetection: peer chain does not have more work, keeping local chain (cooldown=%v)",
+			bk.forkDetectionCooldownDur)
 		return false
 	}
 
 	log.Printf("[BlockKeeper] dispatchForkDetection: peer chain has more work, rolling back and re-syncing")
 
-	// Roll back below the peer's height so the next sync cycle fetches the correct chain.
 	rollbackTarget := peerHeight
 	if rollbackTarget > 0 {
 		rollbackTarget = peerHeight - 1
@@ -971,14 +995,17 @@ func (bk *blockKeeper) dispatchForkDetection(peer PeerInterface, localHeight uin
 
 	if err := bk.forkResolver.RollbackToHeight(rollbackTarget); err != nil {
 		log.Printf("[BlockKeeper] dispatchForkDetection: rollback to %d failed: %v", rollbackTarget, err)
+		delete(bk.forkDetectionCooldown, cooldownKey)
 		return false
 	}
+
+	delete(bk.forkDetectionCooldown, cooldownKey)
 
 	log.Printf("[BlockKeeper] dispatchForkDetection: rolled back to height %d, triggering re-sync",
 		rollbackTarget)
 
 	bk.TriggerImmediateReSync()
-	return false
+	return true
 }
 
 // handleChainMismatchInSync processes chain mismatch events during sync.
@@ -1150,22 +1177,49 @@ func (bk *blockKeeper) syncWorker() {
 	for {
 		select {
 		case <-syncTicker.C:
-			if bk.startSync() {
-				bk.broadcastAfterSync(genesisBlock)
-			} else {
-				localHeight := bk.chain.LatestBlock().GetHeight()
-				if localHeight > 0 {
-					bk.syncLaggingPeers(localHeight)
-				}
-			}
+			bk.syncActiveMu.Lock()
+			bk.syncActive = true
+			bk.syncActiveMu.Unlock()
+
+			bk.safeStartSync(genesisBlock)
+
+			bk.syncActiveMu.Lock()
+			bk.syncActive = false
+			bk.syncActiveMu.Unlock()
 
 		case <-bk.forkResolvedCh:
 			log.Printf("[BlockKeeper] Fork resolved, triggering immediate re-sync")
+			bk.syncActiveMu.Lock()
+			bk.syncActive = true
+			bk.syncActiveMu.Unlock()
+
 			bk.startSync()
+
+			bk.syncActiveMu.Lock()
+			bk.syncActive = false
+			bk.syncActiveMu.Unlock()
 
 		case <-bk.quit:
 			log.Printf("[BlockKeeper] syncWorker shutting down")
 			return
+		}
+	}
+}
+
+// safeStartSync wraps startSync/broadcastAfterSync/syncLaggingPeers with panic
+// recovery to ensure syncWorker survives unexpected panics during sync.
+func (bk *blockKeeper) safeStartSync(genesisBlock *core.Block) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[BlockKeeper] PANIC in startSync/broadcast: %v - continuing sync loop", r)
+		}
+	}()
+	if bk.startSync() {
+		bk.broadcastAfterSync(genesisBlock)
+	} else {
+		localHeight := bk.chain.LatestBlock().GetHeight()
+		if localHeight > 0 {
+			bk.syncLaggingPeers(localHeight)
 		}
 	}
 }

@@ -95,7 +95,19 @@ func (f *blockFetcher) add(msg *blockMsg) {
 	currentSetSize := len(f.msgSet)
 	f.mu.Unlock()
 
-	if currentSetSize > maxMsgSetSize || bestHeight > blockHeight || blockHeight-bestHeight > maxBlockDistance {
+	// CRITICAL FIX: Do NOT drop blocks based on maxBlockDistance.
+	// Previously, if blockHeight-bestHeight > maxBlockDistance (64), the
+	// block was silently dropped. This prevented deep fork detection when
+	// a mining node on a fork chain produced blocks 65+ ahead of the
+	// canonical chain. The dropped blocks never reached the chain's orphan
+	// pool, so requestMissingParentAsync was never triggered, and the fork
+	// became permanently invisible.
+	//
+	// Now we only enforce maxMsgSetSize (rate limiting). The chain's own
+	// orphan/fork handling (addOrphanBlockLocked → requestMissingParentAsync
+	// → EnsureAncestors → shouldReorgToHeaviestLocked) correctly manages
+	// deep fork detection and reorganization.
+	if currentSetSize > maxMsgSetSize || bestHeight > blockHeight {
 		return
 	}
 

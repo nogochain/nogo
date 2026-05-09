@@ -363,6 +363,18 @@ func (m *Miner) isMiningActive() bool {
 	}
 }
 
+// isSyncingOrReorging returns true if the node is currently syncing or performing a chain reorg.
+// The miner skips peer-work checks during sync/reorg to avoid deadlock.
+func (m *Miner) isSyncingOrReorging() bool {
+	if m.syncLoop != nil && m.syncLoop.IsSyncing() {
+		return true
+	}
+	if m.syncLoop != nil && !m.syncLoop.IsSynced() {
+		return true
+	}
+	return false
+}
+
 // isVerificationActive checks if verification context is active
 func (m *Miner) isVerificationActive() bool {
 	m.mu.RLock()
@@ -398,10 +410,6 @@ func (m *Miner) Run(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if m.syncLoop != nil && m.syncLoop.IsSyncing() {
-				continue
-			}
-
 			synced := m.syncLoop == nil || m.syncLoop.IsSynced()
 			m.handleMiningTick(ctx, !synced)
 		case <-m.wakeCh:
@@ -463,6 +471,51 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 		return
 	}
 
+	// CRITICAL FIX: Enforce minimum block time spacing
+	// Without this, N miners each firing at 17s intervals produce blocks
+	// every 17/N seconds (e.g., 6 miners → 2.8s blocks). This causes:
+	// 1. Rapid consecutive blocks from different miners
+	// 2. Deep forks that overwhelm the fork resolution mechanism
+	// 3. Network instability and permanent chain splits
+	// The check ensures at least MIN_BLOCK_INTERVAL_FRACTION of target time
+	// has elapsed since the latest block, regardless of which miner mined it.
+	latestBlock := m.bc.LatestBlock()
+	if latestBlock != nil {
+		latestTimestamp := latestBlock.Header.TimestampUnix
+		timeSinceLastBlock := time.Since(time.Unix(int64(latestTimestamp), 0))
+		minInterval := time.Duration(config.DefaultTargetBlockTime*config.MinBlockIntervalFraction/100) * time.Second
+		if timeSinceLastBlock < minInterval {
+			logf(colorBrightYellow, "⏸️ ", "Mining tick: last block was %.1fs ago (minimum %.1fs), waiting...",
+				timeSinceLastBlock.Seconds(), minInterval.Seconds())
+			return
+		}
+	}
+
+	// CRITICAL FIX: Check peer cumulative work before mining.
+	// In a fork scenario, a miner on its own fork has the same local height as
+	// peers on other forks (or even higher). The IsSynced() check only compares
+	// height, not cumulative work. If a peer has more cumulative work at the same
+	// or higher height, we should NOT mine because we're on a stale fork.
+	// This prevents miners from mining on a minority fork and deepening the split.
+	//
+	// SAFEGUARD: Skip peer work check if sync is currently in progress —
+	// the sync/reorg mechanism is already handling the fork resolution.
+	// Without this, the miner permanently pauses while waiting for sync
+	// that may itself be blocked, causing deadlock.
+	if m.pm != nil && !m.isSyncingOrReorging() {
+		peerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		maxPeerWork := getPeerWorkWithCtx(peerCtx, m.pm)
+		cancel()
+		if maxPeerWork != nil && maxPeerWork.Sign() > 0 {
+			localWork := m.bc.CanonicalWork()
+			if localWork != nil && maxPeerWork.Cmp(localWork) > 0 {
+				logf(colorBrightYellow, "⏸️ ", "Mining tick: peer has more cumulative work (peer=%s local=%s), waiting for fork resolution",
+					maxPeerWork.String(), localWork.String())
+				return
+			}
+		}
+	}
+
 	logf(colorBrightGreen, "⛏️ ", "Mining tick: attempting to mine...")
 	block, err := m.MineOnce(ctx)
 	if err != nil {
@@ -474,8 +527,6 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 	if block != nil {
 		m.handleMinedBlock(ctx, block)
 	}
-	// Block time is controlled by PoW difficulty + ticker interval.
-	// NogoChain uses ticker to pace mining at the configured interval.
 }
 
 // handleMinedBlock handles a successfully mined block
@@ -830,6 +881,46 @@ func getPeerHeight(pm PeerAPI) uint64 {
 		}
 	}
 	return maxPeerHeight
+}
+
+// getPeerWorkWithCtx gets the maximum peer cumulative work with context timeout.
+// Unlike getPeerWork, this accepts a context to prevent blocking indefinitely
+// when peers are slow or unresponsive.
+func getPeerWorkWithCtx(ctx context.Context, pm PeerAPI) *big.Int {
+	maxWork := big.NewInt(0)
+	for _, peer := range pm.Peers() {
+		select {
+		case <-ctx.Done():
+			return maxWork
+		default:
+		}
+		info, err := pm.FetchChainInfo(ctx, peer)
+		if err != nil || info == nil {
+			continue
+		}
+		if info.Work != nil && info.Work.Cmp(maxWork) > 0 {
+			maxWork.Set(info.Work)
+		}
+	}
+	return maxWork
+}
+
+// getPeerWork gets the maximum peer cumulative work
+// CRITICAL: Used to detect deep forks where peer chains have more cumulative
+// work at the same or higher height. This prevents the miner from mining on
+// a minority fork.
+func getPeerWork(pm PeerAPI) *big.Int {
+	maxWork := big.NewInt(0)
+	for _, peer := range pm.Peers() {
+		info, err := pm.FetchChainInfo(context.Background(), peer)
+		if err != nil || info == nil {
+			continue
+		}
+		if info.Work != nil && info.Work.Cmp(maxWork) > 0 {
+			maxWork.Set(info.Work)
+		}
+	}
+	return maxWork
 }
 
 // validateBlockPoW validates the proof of work for a block

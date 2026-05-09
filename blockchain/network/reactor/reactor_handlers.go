@@ -379,12 +379,12 @@ func (h *SyncReactorHandler) OnGetBlockLocator(peerID string, tipHeight uint64) 
 		return nil
 	}
 
-	locator, err := buildBlockLocatorFromChain(h.handlers.chain)
+	topHeight, locator, err := buildBlockLocatorFromChain(h.handlers.chain)
 	if err != nil {
 		return fmt.Errorf("sync handler: build block locator for peer %s: %w", peerID, err)
 	}
 
-	msg, msgErr := BuildBlockLocatorMsg(locator)
+	msg, msgErr := BuildBlockLocatorMsg(topHeight, locator)
 	if msgErr != nil {
 		return fmt.Errorf("sync handler: build block locator message for peer %s: %w", peerID, msgErr)
 	}
@@ -1008,15 +1008,17 @@ func marshalBlocksToJSONRaw(blocks []*core.Block) []byte {
 // buildBlockLocatorFromChain builds a block locator using exponential step
 // doubling, aligned with Bitcoin Core's block_keeper.go::blockLocator.
 // Max 50 entries to bound P2P message size.
-func buildBlockLocatorFromChain(chain Chain) ([][]byte, error) {
+func buildBlockLocatorFromChain(chain Chain) (uint64, [][]byte, error) {
 	if chain == nil {
-		return nil, fmt.Errorf("buildBlockLocatorFromChain: chain is nil")
+		return 0, nil, fmt.Errorf("buildBlockLocatorFromChain: chain is nil")
 	}
 
 	tip := chain.LatestBlock()
 	if tip == nil {
-		return nil, fmt.Errorf("buildBlockLocatorFromChain: no tip block")
+		return 0, nil, fmt.Errorf("buildBlockLocatorFromChain: no tip block")
 	}
+
+	tipHeight := tip.GetHeight()
 
 	const maxLocatorEntries = 50
 	const stepDoubleInterval = 9
@@ -1062,7 +1064,7 @@ func buildBlockLocatorFromChain(chain Chain) ([][]byte, error) {
 		}
 	}
 
-	return locator, nil
+	return tipHeight, locator, nil
 }
 
 // buildNotFoundMsgForSync builds a NotFound message on the sync channel.

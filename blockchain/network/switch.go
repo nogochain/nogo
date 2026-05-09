@@ -140,7 +140,8 @@ const maxNodeInfoSize = 1024
 // blockLocatorResponse is used for JSON parsing in FetchChainInfo.
 // Defined at package level to avoid "JSON decoder out of sync" error in concurrent environment.
 type blockLocatorResponse struct {
-	Locators [][]byte `json:"locators"`
+	TopHeight uint64   `json:"topHeight"`
+	Locators  [][]byte `json:"locators"`
 }
 
 // Encode serializes NodeInfo to JSON bytes for wire transmission.
@@ -282,6 +283,12 @@ type Switch struct {
 	// Updated on successful FetchChainInfo and on incoming status broadcasts.
 	peerHeightCache   map[string]cachedPeerHeight
 	peerHeightCacheMu sync.RWMutex
+
+	// Per-peer message rate limiting for DoS protection
+	peerRateLimiters  map[string]*peerRateLimiter
+	peerRateLimiterMu sync.Mutex
+	maxMsgsPerSecond  int
+	maxMsgsBurst      int
 }
 
 // cachedPeerHeight stores a peer's chain height with an expiry to prevent stale data.
@@ -301,6 +308,17 @@ type peerErrorState struct {
 	lastErrorType     string
 }
 
+// peerRateLimiter implements token bucket rate limiting per peer for DoS protection
+type peerRateLimiter struct {
+	tokens   float64
+	lastTime time.Time
+}
+
+const (
+	defaultMaxMsgsPerSecond = 100
+	defaultMaxMsgsBurst     = 200
+)
+
 type syncPendingRequest struct {
 	msgType  byte
 	respCh   chan []byte
@@ -312,20 +330,23 @@ func NewSwitch(cfg SwitchConfig) *Switch {
 	cfg.applyDefaults()
 
 	sw := &Switch{
-		config:          cfg,
-		reactors:        make(map[string]reactor.Reactor),
-		reactorsByCh:    make(map[byte]reactor.Reactor),
-		peers:           NewPeerSet(),
-		dialing:         make(map[string]struct{}),
-		quit:            make(chan struct{}),
-		syncPendingReqs: make(map[string]*syncPendingRequest),
-		peerAddresses:   make(map[string]string),
-		peerRelayAddrs:  make(map[string]string),
-		peerErrors:      make(map[string]*peerErrorState),
-		maxPeerErrors:   3,               // Allow 3 consecutive errors before removing peer
-		peerRetryDelay:  5 * time.Second, // Wait 5 seconds before retry after error
-		syncLoadMap:     make(map[string]int),
-		peerHeightCache: make(map[string]cachedPeerHeight),
+		config:           cfg,
+		reactors:         make(map[string]reactor.Reactor),
+		reactorsByCh:     make(map[byte]reactor.Reactor),
+		peers:            NewPeerSet(),
+		dialing:          make(map[string]struct{}),
+		quit:             make(chan struct{}),
+		syncPendingReqs:  make(map[string]*syncPendingRequest),
+		peerAddresses:    make(map[string]string),
+		peerRelayAddrs:   make(map[string]string),
+		peerErrors:       make(map[string]*peerErrorState),
+		maxPeerErrors:    3,               // Allow 3 consecutive errors before removing peer
+		peerRetryDelay:   5 * time.Second, // Wait 5 seconds before retry after error
+		syncLoadMap:      make(map[string]int),
+		peerHeightCache:  make(map[string]cachedPeerHeight),
+		peerRateLimiters: make(map[string]*peerRateLimiter),
+		maxMsgsPerSecond: defaultMaxMsgsPerSecond,
+		maxMsgsBurst:     defaultMaxMsgsBurst,
 	}
 
 	privKey, err := sw.loadOrGenerateNodeKey()
@@ -1974,6 +1995,11 @@ func (sw *Switch) AddPeerConnection(conn net.Conn, isOutbound bool) error {
 
 // receiveMessage dispatches an inbound message to the appropriate reactor.
 func (sw *Switch) receiveMessage(chID byte, peerID string, msgBytes []byte) {
+	if !sw.allowMessage(peerID) {
+		log.Printf("[Switch] rate limit exceeded for peer %s, dropping message", peerID)
+		return
+	}
+
 	if chID == mconnection.ChannelGossip {
 		sw.handleGossipMessage(peerID, msgBytes)
 		return
@@ -1995,6 +2021,36 @@ func (sw *Switch) receiveMessage(chID byte, peerID string, msgBytes []byte) {
 	}
 
 	reactorForCh.Receive(chID, peerID, msgBytes)
+}
+
+// allowMessage implements token bucket rate limiting per peer for DoS protection.
+// Returns false if the peer has exceeded the configured message rate.
+func (sw *Switch) allowMessage(peerID string) bool {
+	sw.peerRateLimiterMu.Lock()
+	defer sw.peerRateLimiterMu.Unlock()
+
+	limiter, exists := sw.peerRateLimiters[peerID]
+	if !exists {
+		limiter = &peerRateLimiter{
+			tokens:   float64(sw.maxMsgsBurst),
+			lastTime: time.Now(),
+		}
+		sw.peerRateLimiters[peerID] = limiter
+	}
+
+	now := time.Now()
+	elapsed := now.Sub(limiter.lastTime).Seconds()
+	limiter.tokens += elapsed * float64(sw.maxMsgsPerSecond)
+	if limiter.tokens > float64(sw.maxMsgsBurst) {
+		limiter.tokens = float64(sw.maxMsgsBurst)
+	}
+	limiter.lastTime = now
+
+	if limiter.tokens < 1.0 {
+		return false
+	}
+	limiter.tokens -= 1.0
+	return true
 }
 
 // handleGossipMessage processes incoming peer address exchange messages on ChannelGossip.
@@ -3159,24 +3215,38 @@ func (sw *Switch) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, 
 
 	// Build ChainInfo from block locator
 	chainInfo := &ChainInfo{
-		Height:     0,
+		Height:     locatorResp.TopHeight,
 		LatestHash: "",
 		Work:       big.NewInt(0),
 	}
 
 	if len(locatorResp.Locators) > 0 {
-		// First locator is the tip block hash
 		tipHash := locatorResp.Locators[0]
 		chainInfo.LatestHash = fmt.Sprintf("%x", tipHash)
 
-		// CRITICAL: Must fetch the actual block to get accurate height
-		// Locator is a SPARSE list (exponential step doubling), NOT all blocks
-		// Cannot estimate height from locator count - this would be completely wrong
-		// Example: height 100 might only have 10-20 locator entries
-		if len(tipHash) > 0 {
+		if len(tipHash) > 0 && locatorResp.TopHeight > 0 {
+			chainInfo.Height = locatorResp.TopHeight
 			hashHex := fmt.Sprintf("%x", tipHash)
 
-			// Create dedicated context for block fetch to avoid parent context cancellation
+			fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			block, err := sw.FetchBlockByHash(fetchCtx, peer, hashHex)
+			fetchCancel()
+
+			if err == nil && block != nil {
+				if block.TotalWork != "" {
+					if work, ok := core.StringToWork(block.TotalWork); ok {
+						chainInfo.Work = work
+					}
+				}
+				log.Printf("[ChainInfo] Height=%d from locator, work=%s from peer=%s",
+					chainInfo.Height, chainInfo.Work.String(), peer)
+			} else {
+				log.Printf("[ChainInfo] failed to fetch work from peer=%s: %v, using height=%d from locator",
+					peer, err, chainInfo.Height)
+			}
+		} else if len(tipHash) > 0 {
+			hashHex := fmt.Sprintf("%x", tipHash)
+
 			fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			block, err := sw.FetchBlockByHash(fetchCtx, peer, hashHex)
 			fetchCancel()
@@ -3188,12 +3258,10 @@ func (sw *Switch) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, 
 						chainInfo.Work = work
 					}
 				}
-				log.Printf("[ChainInfo] Retrieved accurate height %d and work %s from peer %s", chainInfo.Height, chainInfo.Work.String(), peer)
+				log.Printf("[ChainInfo] Retrieved height=%d work=%s from peer=%s",
+					chainInfo.Height, chainInfo.Work.String(), peer)
 			} else {
-				// CRITICAL: Cannot estimate height from locator count
-				// AND cannot allow mining with unknown height (causes forks)
-				// Return error to indicate sync state is uncertain
-				return nil, fmt.Errorf("switch: failed to fetch tip block %s from peer %s for height: %w", hashHex, peer, err)
+				return nil, fmt.Errorf("switch: failed to fetch tip block %s from peer %s: %w", hashHex, peer, err)
 			}
 		}
 	}

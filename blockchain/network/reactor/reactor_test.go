@@ -554,7 +554,7 @@ func TestSyncReactorMessageParsing(t *testing.T) {
 		{
 			name: "BlockLocator",
 			build: func() ([]byte, error) {
-				return BuildBlockLocatorMsg([][]byte{{0x01}, {0x02}})
+				return BuildBlockLocatorMsg(100, [][]byte{{0x01}, {0x02}})
 			},
 			msgType: SyncMsgBlockLocator,
 		},

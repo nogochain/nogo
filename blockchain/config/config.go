@@ -364,6 +364,10 @@ func (c *Config) IsWSEnabled() bool {
 // DefaultTargetBlockTime is the default target block time in seconds
 const DefaultTargetBlockTime = int64(17)
 
+// MinBlockIntervalFraction is the minimum fraction (percentage) of target block time
+// that must elapse before a new block can be mined. Prevents rapid-fire mining.
+const MinBlockIntervalFraction = int64(50)
+
 // GetBlocksPerYear calculates blocks per year based on target block time
 func GetBlocksPerYear() uint64 {
 	secondsPerYear := uint64(365 * 24 * 60 * 60)

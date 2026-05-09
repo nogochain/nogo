@@ -660,8 +660,8 @@ func BuildGetBlockLocatorMsg(tipHeight uint64) ([]byte, error) {
 }
 
 // BuildBlockLocatorMsg serializes a BlockLocator response message.
-func BuildBlockLocatorMsg(locators [][]byte) ([]byte, error) {
-	resp := blockLocatorPayload{Locators: locators}
+func BuildBlockLocatorMsg(topHeight uint64, locators [][]byte) ([]byte, error) {
+	resp := blockLocatorPayload{TopHeight: topHeight, Locators: locators}
 	payload, err := json.Marshal(resp)
 	if err != nil {
 		return nil, fmt.Errorf("build blockLocator message: %w", err)
@@ -737,7 +737,8 @@ type getBlockLocatorPayload struct {
 }
 
 type blockLocatorPayload struct {
-	Locators [][]byte `json:"locators"`
+	TopHeight uint64   `json:"topHeight"`
+	Locators  [][]byte `json:"locators"`
 }
 
 type notFoundPayload struct {

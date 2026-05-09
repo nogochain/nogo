@@ -3155,11 +3155,20 @@ func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error)
 	log.Printf("[Chain] Orphan block stored: height=%d hash=%s parent=%s (pool size: %d/%d)",
 		block.GetHeight(), hashHex[:16], parentHashHex[:16], len(c.orphanPool), MaxOrphanPoolSize)
 
-	// DO NOT request missing parent here!
-	// Following core-main's design: orphan blocks are stored but parent is NOT requested.
-	// The sync loop (running every 5 seconds) is responsible for batch downloading blocks.
-	// This prevents deep recursion (470 levels) and allows efficient batch sync.
-	// c.requestMissingParentAsync(block) // REMOVED - let sync loop handle it
+	// CRITICAL FIX: Always request missing parent for orphan blocks.
+	// Previously, this was gated by "block.GetHeight() > uint64(len(c.blocks))",
+	// meaning orphans at heights equal to or below the canonical chain were
+	// silently stored without requesting their parent chain. This prevented
+	// deep fork detection when:
+	// 1. A miner's fork chain grows to the same height as the canonical chain
+	// 2. The fork chain's blocks arrive as orphans (parent not found)
+	// 3. The height check fails (height == canonical height)
+	// 4. The parent is never fetched, so the fork chain is never reconstructed
+	// 5. shouldReorgToHeaviestLocked never detects the heavier fork
+	//
+	// Now we unconditionally request the missing parent. EnsureAncestors
+	// handles this with maxDepth=500 batch downloading and deduplication.
+	c.requestMissingParentAsync(block)
 
 	// Try to process orphan children
 	return c.tryProcessOrphansLocked()
