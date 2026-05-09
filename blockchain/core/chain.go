@@ -1790,9 +1790,16 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	removeStart := int(ancestorHeight) + 1
 	if removeStart < currentChainLen {
 		oldCanonical := c.blocks[removeStart:]
-		for _, block := range oldCanonical {
-			hashHex := hex.EncodeToString(block.Hash)
-			delete(c.blocksByHash, hashHex)
+		for range oldCanonical {
+			// CRITICAL FIX: Do NOT delete old canonical blocks from blocksByHash.
+			// Children of these blocks (e.g., blocks from miners who built on
+			// this chain before the reorg) must be able to trace their parent
+			// chain through blocksByHash. Without this, future reorg detection
+			// via calculateCumulativeWorkLocked and findCommonAncestorLocked
+			// becomes impossible, making the fork permanently irresolvable.
+			//
+			// Also do NOT add them to forkBlocks - that would cause reorg
+			// oscillation when findBestChainTipLocked picks them via tiebreaker.
 		}
 	}
 
@@ -3035,6 +3042,14 @@ func (c *Chain) findBestChainTipLocked() *Block {
 					isBetter = forkChainComplete
 				} else if forkWork.Cmp(bestWork) > 0 {
 					isBetter = true
+				} else if forkWork.Cmp(bestWork) == 0 {
+					// CRITICAL FIX: Equal work - use tiebreaker rules
+					// Without this, competing blocks at the same height with equal work
+					// would never trigger a reorg, making the second miner's blocks
+					// permanently stuck as forks regardless of timing or hash value.
+					if c.shouldSwitchBasedOnTieBreakerLocked(block, bestTip) {
+						isBetter = true
+					}
 				}
 			}
 
@@ -3760,6 +3775,18 @@ func (c *Chain) calculateCumulativeWorkLocked(block *Block) *big.Int {
 		}
 	}
 
+	// Parent not found in any local storage — the fork chain is incomplete.
+	// Estimate cumulative work using canonical chain up to parent height.
+	// This enables accurate fork comparison even when only sporadic fork
+	// blocks have been received via broadcast (not full sync).
+	parentHeight := block.GetHeight() - 1
+	if parentHeight < uint64(len(c.blocks)) {
+		canonicalParent := c.blocks[parentHeight]
+		parentWork := c.calculateCumulativeWorkLocked(canonicalParent)
+		work.Add(work, parentWork)
+		return work
+	}
+
 	return work
 }
 
@@ -3855,7 +3882,11 @@ func (c *Chain) shouldReorgToHeaviestLocked() bool {
 	heaviestWork := c.canonicalWork
 
 	for height, blocks := range c.forkBlocks {
-		if height < uint64(len(c.blocks)) {
+		// CRITICAL FIX: Check fork blocks at tip height AND beyond
+		// Old behavior: height < len(c.blocks) skipped ALL fork blocks at or below tip height
+		// New behavior: only skip blocks below tip height (height < len(c.blocks)-1)
+		// This enables competing blocks at the same height as the tip to trigger reorg
+		if height < uint64(len(c.blocks)-1) {
 			continue
 		}
 
@@ -3885,7 +3916,11 @@ func (c *Chain) reorganizeToHeaviestLocked() error {
 	heaviestWork := c.canonicalWork
 
 	for height, blocks := range c.forkBlocks {
-		if height < uint64(len(c.blocks)) {
+		// CRITICAL FIX: Check fork blocks at tip height AND beyond
+		// Old behavior: height < len(c.blocks) skipped ALL fork blocks at or below tip height
+		// New behavior: only skip blocks below tip height (height < len(c.blocks)-1)
+		// This enables competing blocks at the same height as the tip to trigger reorg
+		if height < uint64(len(c.blocks)-1) {
 			continue
 		}
 

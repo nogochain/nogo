@@ -23,6 +23,7 @@ import (
 	"github.com/nogochain/nogo/blockchain/metrics"
 	"github.com/nogochain/nogo/blockchain/miner"
 	"github.com/nogochain/nogo/blockchain/network"
+	"github.com/nogochain/nogo/blockchain/network/forkresolution"
 	"github.com/nogochain/nogo/blockchain/network/reactor"
 	"github.com/nogochain/nogo/blockchain/network/security"
 	"github.com/nogochain/nogo/blockchain/p2p/discover"
@@ -86,6 +87,8 @@ type Node struct {
 	syncReactor         *reactor.SyncReactor
 	txReactor           *reactor.TxReactor
 	blockReactor        *reactor.BlockReactor
+
+	seedConsensus *forkresolution.SeedConsensusEngine
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -216,15 +219,22 @@ func (n *Node) initializeComponents() error {
 	switchCfg.MaxPeers = n.config.P2PMaxPeers
 	switchCfg.NetworkID = fmt.Sprintf("%d", n.config.ChainID)
 
-	// Apply relay server configuration from flags
+	// Apply relay server configuration from flags/env
+	// Use default relay servers if not explicitly configured
 	if n.config.EnableRelayServer {
 		switchCfg.EnableRelayServer = n.config.EnableRelayServer
+		log.Printf("Node: relay server enabled: %v", n.config.EnableRelayServer)
 	}
 	if n.config.RelayServerPort > 0 {
 		switchCfg.RelayServerPort = n.config.RelayServerPort
+		log.Printf("Node: relay server port: %v", n.config.RelayServerPort)
 	}
 	if n.config.RelayServers != "" {
 		switchCfg.RelayServers = network.ParseSeedNodes(n.config.RelayServers)
+		log.Printf("Node: using custom relay servers: %v", switchCfg.RelayServers)
+	} else if len(network.DefaultRelayServers) > 0 {
+		switchCfg.RelayServers = network.DefaultRelayServers
+		log.Printf("Node: using default relay servers: %v", switchCfg.RelayServers)
 	}
 
 	if switchCfg.MaxPeers <= 0 {
@@ -284,6 +294,35 @@ func (n *Node) initializeComponents() error {
 			log.Printf("Node: warning - failed to set candidate pool on sync reactor: %v", setErr)
 		}
 	}
+
+	// Initialize seed consensus engine for inter-seed block finalization.
+	// Seed nodes (NOGO_SEED_MODE=true) will wait for confirmations from peer
+	// seeds before finalizing blocks, preventing network partition forks.
+	swID := n.p2pSwitch.ID()
+	n.seedConsensus = forkresolution.NewSeedConsensusEngine(
+		n.ctx,
+		n.p2pSwitch,
+		switchCfg.SeedMode,
+	)
+	n.seedConsensus.SetLocalPeerID(swID)
+
+	// Attach the consensus engine to the chain wrapper so that ProcessBlock
+	// (called by block_fetcher) waits for inter-seed confirmation.
+	n.networkChainWrapper.SetSeedConsensusEngine(n.seedConsensus)
+
+	// Register the seed vote callback so incoming SyncMsgSeedVote messages
+	// are forwarded to the consensus engine.
+	n.syncReactor.SetSeedVoteCallback(func(peerID string, data []byte) {
+		if n.seedConsensus == nil {
+			return
+		}
+		vote, parseErr := forkresolution.ParseSeedVoteMsg(data)
+		if parseErr != nil {
+			log.Printf("[Node] Failed to parse seed vote from %s: %v", peerID, parseErr)
+			return
+		}
+		n.seedConsensus.ReceiveVote(*vote)
+	})
 
 	n.txReactor, err = reactor.NewTxReactor(n.txReactorHandler)
 	if err != nil {
@@ -695,7 +734,7 @@ func maskString(s string) string {
 func (n *Node) initDiscovery(seeds []string) {
 	discCfg := discover.Config{
 		ListenUDP:  extractUDPAddr(n.config.P2PListenAddr),
-		DNSSeeds:   []string{"node.nogochain.org", "wallet.nogochain.org"},
+		DNSSeeds:   []string{"node.nogochain.org", "wallet.nogochain.org", "main.nogochain.org"},
 		Bootstrap:  seeds,
 		EnableMDNS: false, // Disabled: use internal/networking/mdns instead (switch.go)
 		DBPath:     filepath.Join(n.config.DataDir, "dht_nodes"),

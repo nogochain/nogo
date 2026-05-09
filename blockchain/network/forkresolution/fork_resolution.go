@@ -6,6 +6,7 @@
 package forkresolution
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -24,6 +25,15 @@ const (
 	// MaxReorgDepth is maximum allowed reorganization depth
 	MaxReorgDepth = 100
 
+	// IrreversibleDepth is the maximum reorg depth allowed.
+	// Blocks deeper than this threshold are considered irreversible and
+	// reorganization will be refused to prevent chain instability.
+	IrreversibleDepth = 6
+
+	// IrreversibleTimeWindow is the minimum age threshold for irreversible blocks.
+	// If the ancestor block's timestamp is older than this window, reorg is refused.
+	IrreversibleTimeWindow = 60 * time.Second
+
 	// === PREVENTIVE FORK HANDLING STRATEGY ===
 	// The key insight: resolve forks EARLY before they accumulate into deep forks
 
@@ -37,8 +47,8 @@ const (
 	EmergencyForkInterval = 1 * time.Second
 
 	// Depth thresholds for classification
-	LightForkMaxDepth   = 3 // Shallow forks: handle immediately
-	NormalForkMaxDepth  = 6 // Medium forks: handle quickly
+	LightForkMaxDepth  = 3 // Shallow forks: handle immediately
+	NormalForkMaxDepth = 6 // Medium forks: handle quickly
 	// DeepForkDepthThreshold = 7+ (implicit: > NormalForkMaxDepth)
 )
 
@@ -46,9 +56,9 @@ const (
 type ForkSeverity int
 
 const (
-	ForkSeverityLight    ForkSeverity = iota // depth 1-3: immediate (< 500ms)
-	ForkSeverityNormal                      // depth 4-6: fast (2s)
-	ForkSeverityEmergency                   // depth 7+: urgent (1s)
+	ForkSeverityLight     ForkSeverity = iota // depth 1-3: immediate (< 500ms)
+	ForkSeverityNormal                        // depth 4-6: fast (2s)
+	ForkSeverityEmergency                     // depth 7+: urgent (1s)
 )
 
 // ForkType represents the type of fork detected
@@ -247,7 +257,9 @@ func (fr *ForkResolver) ShouldReorg(remoteBlock *core.Block) bool {
 		}
 	}
 
-	if remoteBlock.GetHeight() > localTip.GetHeight() && remoteWork != nil && remoteWork.Sign() > 0 {
+	if remoteBlock.GetHeight() > localTip.GetHeight() && remoteWork != nil && localWork != nil && remoteWork.Cmp(localWork) > 0 {
+		log.Printf("[ForkResolver] ShouldReorg: remote higher height (%d > %d) with more work (%s > %s), triggering reorg",
+			remoteBlock.GetHeight(), localTip.GetHeight(), remoteWork.String(), localWork.String())
 		return true
 	}
 
@@ -340,8 +352,9 @@ func (fr *ForkResolver) getIntervalForSeverity(severity ForkSeverity) time.Durat
 	}
 }
 
-// executeReorg performs the actual reorganization
-// Core-main style: rollback to common ancestor then extend to new tip
+// executeReorg performs the actual reorganization.
+// Core-main style: find common ancestor, validate irreversibility,
+// rollback to ancestor, then extend chain to the new tip.
 func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgResult {
 	startTime := time.Now()
 
@@ -369,26 +382,40 @@ func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgR
 		return result
 	}
 
-	localHeight := localTip.GetHeight()
-	targetHeight := newBlock.GetHeight()
+	// Case 1: Direct extension of local tip (no reorg needed, simple append)
+	if bytes.Equal(newBlock.Header.PrevHash, localTip.Hash) {
+		accepted, err := fr.chain.AddBlock(newBlock)
+		if err != nil {
+			result.Error = fmt.Errorf("add extension block: %w", err)
+			result.Success = false
+			fr.recordFailedReorg()
+			return result
+		}
+		result.Switched = accepted
+		result.Success = true
+		result.Duration = time.Since(startTime)
+		result.ReorgDepth = 0
+		fr.recordSuccessfulReorg(0, result.Duration)
 
-	log.Printf("[ForkResolver] Starting reorg: local_h=%d target_h=%d source=%s",
-		localHeight, targetHeight, source)
-
-	rollbackTarget := localHeight
-	if targetHeight < localHeight && targetHeight > 0 {
-		rollbackTarget = targetHeight - 1
-	} else if localHeight > 0 {
-		rollbackTarget = localHeight - 1
+		if fr.onReorgComplete != nil && accepted {
+			go fr.onReorgComplete(newBlock.GetHeight())
+		}
+		return result
 	}
 
-	reorgDepth := uint64(0)
-	if localHeight > rollbackTarget {
-		reorgDepth = localHeight - rollbackTarget
+	// Case 2: Find the common ancestor between local chain and the remote block
+	ancestor, err := fr.findAncestorForReorg(localTip, newBlock)
+	if err != nil {
+		result.Error = fmt.Errorf("find ancestor: %w", err)
+		result.Success = false
+		fr.recordFailedReorg()
+		return result
 	}
 
+	reorgDepth := localTip.GetHeight() - ancestor.GetHeight()
 	result.ReorgDepth = reorgDepth
 
+	// Validate against maximum reorg depth
 	if reorgDepth > MaxReorgDepth {
 		result.Error = fmt.Errorf("reorg depth %d exceeds maximum %d", reorgDepth, MaxReorgDepth)
 		result.Success = false
@@ -396,19 +423,47 @@ func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgR
 		return result
 	}
 
-	if rollbackTarget < localHeight {
-		log.Printf("[ForkResolver] Rolling back from %d to %d", localHeight, rollbackTarget)
-		if err := fr.chain.RollbackToHeight(rollbackTarget); err != nil {
-			result.Error = fmt.Errorf("rollback failed: %w", err)
+	// Irreversible depth protection: refuse reorgs that would remove too many blocks
+	if reorgDepth > IrreversibleDepth {
+		result.Error = fmt.Errorf("reorg refused: depth %d exceeds irreversible threshold %d",
+			reorgDepth, IrreversibleDepth)
+		result.Success = false
+		fr.recordFailedReorg()
+		return result
+	}
+
+	// Time-based irreversibility: refuse reorg if ancestor block is too old
+	if ancestor.GetHeight() > 0 && reorgDepth > 0 {
+		ancestorBlock, exists := fr.chain.BlockByHeight(ancestor.GetHeight())
+		if exists && ancestorBlock != nil && ancestorBlock.Header.TimestampUnix > 0 {
+			blockTime := time.Unix(ancestorBlock.Header.TimestampUnix, 0)
+			if time.Since(blockTime) > IrreversibleTimeWindow {
+				result.Error = fmt.Errorf("reorg refused: ancestor at height %d timestamp %v exceeds irreversibility window",
+					ancestor.GetHeight(), blockTime)
+				result.Success = false
+				fr.recordFailedReorg()
+				return result
+			}
+		}
+	}
+
+	log.Printf("[ForkResolver] Starting reorg: local_h=%d ancestor_h=%d target_h=%d depth=%d source=%s",
+		localTip.GetHeight(), ancestor.GetHeight(), newBlock.GetHeight(), reorgDepth, source)
+
+	// Rollback chain to the ancestor height
+	if reorgDepth > 0 {
+		if err := fr.chain.RollbackToHeight(ancestor.GetHeight()); err != nil {
+			result.Error = fmt.Errorf("rollback to height %d failed: %w", ancestor.GetHeight(), err)
 			result.Success = false
 			fr.recordFailedReorg()
 			return result
 		}
 	}
 
+	// Add the remote block after rollback; it should now connect to the ancestor
 	accepted, err := fr.chain.AddBlock(newBlock)
 	if err != nil {
-		result.Error = fmt.Errorf("add block failed: %w", err)
+		result.Error = fmt.Errorf("add block after reorg failed: %w", err)
 		result.Success = false
 		fr.recordFailedReorg()
 		return result
@@ -420,14 +475,63 @@ func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgR
 
 	fr.recordSuccessfulReorg(reorgDepth, result.Duration)
 
-	log.Printf("[ForkResolver] Reorg completed: success=%v switched=%v duration=%v",
-		result.Success, result.Switched, result.Duration)
+	log.Printf("[ForkResolver] Reorg completed: success=%v switched=%v duration=%v depth=%d",
+		result.Success, result.Switched, result.Duration, reorgDepth)
 
 	if fr.onReorgComplete != nil && accepted {
 		go fr.onReorgComplete(newBlock.GetHeight())
 	}
 
 	return result
+}
+
+// findAncestorForReorg finds the common ancestor between the local chain and a remote block.
+// Strategy 1: Check if the remote block's prevHash matches a local chain block.
+// Strategy 2: Walk back from the remote block using local chain lookups.
+// Returns the common ancestor block or an error if none is found.
+func (fr *ForkResolver) findAncestorForReorg(localTip, remoteBlock *core.Block) (*core.Block, error) {
+	localAncestors := make(map[uint64]*core.Block)
+	current := localTip
+	for current != nil {
+		localAncestors[current.GetHeight()] = current
+		if current.GetHeight() == 0 {
+			break
+		}
+		parent, exists := fr.chain.BlockByHash(hex.EncodeToString(current.Header.PrevHash))
+		if !exists {
+			break
+		}
+		current = parent
+	}
+
+	// Strategy 1: Check if remoteBlock's prevHash directly matches a local ancestor
+	prevHashHex := hex.EncodeToString(remoteBlock.Header.PrevHash)
+	for _, block := range localAncestors {
+		if hex.EncodeToString(block.Hash) == prevHashHex {
+			return block, nil
+		}
+	}
+
+	// Strategy 2: Walk back from remoteBlock using local chain lookups
+	remote := remoteBlock
+	for i := 0; i < 100; i++ {
+		parentHashHex := hex.EncodeToString(remote.Header.PrevHash)
+		if parent, exists := fr.chain.BlockByHash(parentHashHex); exists {
+			return parent, nil
+		}
+		if remote.GetHeight() > 0 {
+			expectedHeight := remote.GetHeight() - 1
+			if localBlock, exists := localAncestors[expectedHeight]; exists {
+				if hex.EncodeToString(localBlock.Hash) == parentHashHex {
+					return localBlock, nil
+				}
+			}
+		}
+		break
+	}
+
+	return nil, fmt.Errorf("no common ancestor found between local tip h=%d and remote block h=%d",
+		localTip.GetHeight(), remoteBlock.GetHeight())
 }
 
 // HandleChainMismatch handles chain mismatch during synchronization
@@ -509,6 +613,15 @@ func (fr *ForkResolver) IsReorgInProgress() bool {
 	fr.mu.RLock()
 	defer fr.mu.RUnlock()
 	return fr.reorgInProgress
+}
+
+// RollbackToHeight delegates rollback to the underlying chain provider.
+// This is used by the sync system to roll back the chain before triggering
+// a full re-sync when a fork is detected and the peer's chain is heavier.
+func (fr *ForkResolver) RollbackToHeight(height uint64) error {
+	fr.reorgMu.Lock()
+	defer fr.reorgMu.Unlock()
+	return fr.chain.RollbackToHeight(height)
 }
 
 // GetStats returns current resolver statistics

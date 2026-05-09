@@ -28,12 +28,12 @@ const (
 	relayMsgConnectReq    = 0x07 // Client→Server: request connection to another client
 	relayMsgConnectNotify = 0x08 // Server→Both: notify both parties of relay connection
 	relayMsgData          = 0x09 // Bidirectional: tunneled P2P data
-	relayMsgDisconnect   = 0x0A // Client→Server: deregister
-	relayMsgError        = 0xFF // Error response
+	relayMsgDisconnect    = 0x0A // Client→Server: deregister
+	relayMsgError         = 0xFF // Error response
 )
 
 const (
-	relayDialTimeout   = 30 * time.Second
+	relayDialTimeout  = 30 * time.Second
 	relayPingInterval = 30 * time.Second
 	relayPingTimeout  = 10 * time.Second
 	relayReadDeadline = 60 * time.Second
@@ -46,33 +46,77 @@ type RelayClientConfig struct {
 	ExternalIP string // External IP if known (from NAT detection)
 }
 
+// RelayDataMsg carries tunneled data from a relay session.
+type RelayDataMsg struct {
+	SessionID [8]byte
+	Data      []byte
+}
+
+// relaySyncRequest represents a pending synchronous relay request awaiting a response.
+type relaySyncRequest struct {
+	respCh chan relayResponseMsg
+}
+
+// relayResponseMsg wraps a relay message delivered to a synchronous requestor.
+type relayResponseMsg struct {
+	msgType byte
+	payload []byte
+}
+
+// RelaySessionInfo tracks an active relay tunnel session on the client side.
+type RelaySessionInfo struct {
+	SessionID  [8]byte
+	PeerNodeID [32]byte
+	CreatedAt  time.Time
+}
+
+// relaySessionInfo tracks an active relay tunnel session on the client side.
+// Deprecated: use RelaySessionInfo instead.
+type relaySessionInfo = RelaySessionInfo
+
 // RelayClient allows a NAT node to register with relay servers
 // and communicate with other NAT nodes through relay tunnels.
 type RelayClient struct {
-	cfg      RelayClientConfig
-	nodeID   dht.NodeID
-	servers  []string
-	conn     net.Conn
+	cfg       RelayClientConfig
+	nodeID    dht.NodeID
+	servers   []string
+	conn      net.Conn
 	relayAddr string // Assigned relay address (nodeID@relayHost:relayPort)
-	peerCh   chan *dht.Node
-	quit     chan struct{}
-	wg       sync.WaitGroup
-	mu       sync.RWMutex
-	running  bool
+	peerCh    chan *dht.Node
+	dataCh    chan *RelayDataMsg
+	quit      chan struct{}
+	wg        sync.WaitGroup
+	mu        sync.RWMutex
+	running   bool
+
+	syncReqs   []relaySyncRequest
+	syncReqsMu sync.Mutex
+
+	activeSessions   map[[8]byte]*relaySessionInfo
+	activeSessionsMu sync.RWMutex
+
+	sessionCh chan *relaySessionInfo // notified on incoming relay session establishment
 }
 
 // NewRelayClient creates a new relay client.
 func NewRelayClient(cfg RelayClientConfig) *RelayClient {
 	var nid dht.NodeID
-	if idBytes, err := hex.DecodeString(cfg.NodeID); err == nil && len(idBytes) == 32 {
+	nodeIDHex := cfg.NodeID
+	if len(cfg.NodeID) == 78 {
+		nodeIDHex = cfg.NodeID[8:72]
+	}
+	if idBytes, err := hex.DecodeString(nodeIDHex); err == nil && len(idBytes) == 32 {
 		copy(nid[:], idBytes)
 	}
 
 	return &RelayClient{
-		cfg:       cfg,
-		nodeID:    nid,
-		peerCh:    make(chan *dht.Node, 64),
-		quit:      make(chan struct{}),
+		cfg:            cfg,
+		nodeID:         nid,
+		peerCh:         make(chan *dht.Node, 64),
+		dataCh:         make(chan *RelayDataMsg, 128),
+		quit:           make(chan struct{}),
+		activeSessions: make(map[[8]byte]*relaySessionInfo),
+		sessionCh:      make(chan *relaySessionInfo, 32),
 	}
 }
 
@@ -125,8 +169,11 @@ func (rc *RelayClient) dialServer(server string) (net.Conn, error) {
 		ExternalIP: rc.cfg.ExternalIP,
 		Timestamp:  time.Now().Unix(),
 	}
+	helloPayload := hello.Marshal()
+	log.Printf("[RelayClient] Sending hello to %s, msgType=0x%02x, nodeID=%.6s...(%d chars), tcpPort=%d, externalIP=%s",
+		addr, relayMsgHello, rc.cfg.NodeID, len(rc.cfg.NodeID), rc.cfg.TCPPort, rc.cfg.ExternalIP)
 
-	if err := rc.sendMsg(conn, relayMsgHello, hello.Marshal()); err != nil {
+	if err := rc.sendMsg(conn, relayMsgHello, helloPayload); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("hello send: %w", err)
 	}
@@ -140,6 +187,18 @@ func (rc *RelayClient) dialServer(server string) (net.Conn, error) {
 	}
 
 	if msgType != relayMsgHelloAck {
+		if msgType == relayMsgError {
+			var errMsg RelayError
+			if uerr := errMsg.Unmarshal(payload); uerr == nil {
+				log.Printf("[Relay] Server %s rejected hello: code=%d err=%s", addr, errMsg.Code, errMsg.Message)
+			} else {
+				log.Printf("[Relay] Server %s sent error 0x%02x but unmarshal failed: %v (rawLen=%d)",
+					addr, msgType, uerr, len(payload))
+			}
+		} else {
+			log.Printf("[Relay] Server %s sent unexpected msgType=0x%02x (payloadLen=%d)",
+				addr, msgType, len(payload))
+		}
 		conn.Close()
 		return nil, fmt.Errorf("unexpected msg type 0x%02x after hello (expected 0x02)", msgType)
 	}
@@ -189,7 +248,20 @@ func (rc *RelayClient) readLoop() {
 			return
 		}
 
-		rc.handleMessage(msgType, payload)
+		rc.syncReqsMu.Lock()
+		if len(rc.syncReqs) > 0 {
+			req := rc.syncReqs[0]
+			rc.syncReqs = rc.syncReqs[1:]
+			rc.syncReqsMu.Unlock()
+			select {
+			case req.respCh <- relayResponseMsg{msgType: msgType, payload: payload}:
+			case <-rc.quit:
+				return
+			}
+		} else {
+			rc.syncReqsMu.Unlock()
+			rc.handleMessage(msgType, payload)
+		}
 	}
 }
 
@@ -218,8 +290,21 @@ func (rc *RelayClient) handleMessage(msgType byte, payload []byte) {
 			log.Printf("[Relay] connect notify unmarshal error: %v", err)
 			return
 		}
-		log.Printf("[Relay] Connection relay established: target=%s relaySession=%s",
-			cn.TargetNodeID[:16], cn.SessionID[:8])
+		sessionInfo := &relaySessionInfo{
+			SessionID:  cn.SessionID,
+			PeerNodeID: cn.TargetNodeID,
+			CreatedAt:  time.Now(),
+		}
+		rc.activeSessionsMu.Lock()
+		rc.activeSessions[cn.SessionID] = sessionInfo
+		rc.activeSessionsMu.Unlock()
+		select {
+		case rc.sessionCh <- sessionInfo:
+		default:
+			log.Printf("[Relay] session channel full, dropping incoming session %x", cn.SessionID[:4])
+		}
+		log.Printf("[Relay] Connection relay established: target=%x session=%x",
+			cn.TargetNodeID[:8], cn.SessionID[:8])
 
 	case relayMsgPing:
 		rc.mu.RLock()
@@ -237,11 +322,28 @@ func (rc *RelayClient) handleMessage(msgType byte, payload []byte) {
 		if err := errMsg.Unmarshal(payload); err != nil {
 			return
 		}
-		log.Printf("[Relay] Server error: %s", errMsg.Message)
+		log.Printf("[Relay] Server error: code=%d message=%s", errMsg.Code, errMsg.Message)
 
 	case relayMsgDisconnect:
 		log.Printf("[Relay] Server requested disconnect")
 		rc.handleDisconnect()
+
+	case relayMsgData:
+		if len(payload) < 8 {
+			return
+		}
+		var sessionID [8]byte
+		copy(sessionID[:], payload[:8])
+		data := make([]byte, len(payload)-8)
+		copy(data, payload[8:])
+		select {
+		case rc.dataCh <- &RelayDataMsg{SessionID: sessionID, Data: data}:
+		default:
+			log.Printf("[Relay] data channel full, dropping packet for session %x", sessionID[:4])
+		}
+
+	default:
+		log.Printf("[Relay] unknown message type 0x%02x (%d bytes)", msgType, len(payload))
 	}
 }
 
@@ -343,34 +445,48 @@ func (rc *RelayClient) RequestConnect(targetRelayAddr string) ([]byte, error) {
 		return nil, errors.New("not connected to relay server")
 	}
 
+	respCh := make(chan relayResponseMsg, 1)
+	rc.syncReqsMu.Lock()
+	rc.syncReqs = append(rc.syncReqs, relaySyncRequest{respCh: respCh})
+	rc.syncReqsMu.Unlock()
+
+	defer func() {
+		rc.syncReqsMu.Lock()
+		for i, r := range rc.syncReqs {
+			if r.respCh == respCh {
+				rc.syncReqs = append(rc.syncReqs[:i], rc.syncReqs[i+1:]...)
+				break
+			}
+		}
+		rc.syncReqsMu.Unlock()
+	}()
+
 	req := RelayConnectReq{
 		TargetRelayAddr: targetRelayAddr,
 		Timestamp:       time.Now().Unix(),
 	}
 	if err := rc.sendMsg(conn, relayMsgConnectReq, req.Marshal()); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("connect request send: %w", err)
 	}
 
-	// Read response
-	conn.SetReadDeadline(time.Now().Add(relayDialTimeout))
-	msgType, payload, err := rc.readMsg(conn)
-	if err != nil {
-		return nil, fmt.Errorf("connect response read: %w", err)
+	select {
+	case <-rc.quit:
+		return nil, errors.New("relay client shutting down")
+	case <-time.After(relayDialTimeout):
+		return nil, errors.New("connect request timed out")
+	case resp := <-respCh:
+		if resp.msgType == relayMsgError {
+			var e RelayError
+			e.Unmarshal(resp.payload)
+			return nil, fmt.Errorf("connect denied: code=%d message=%s", e.Code, e.Message)
+		}
+		if resp.msgType != relayMsgConnectNotify {
+			return nil, fmt.Errorf("unexpected response type 0x%02x", resp.msgType)
+		}
+		var cn RelayConnectNotify
+		cn.Unmarshal(resp.payload)
+		return cn.SessionID[:], nil
 	}
-
-	if msgType == relayMsgError {
-		var e RelayError
-		e.Unmarshal(payload)
-		return nil, fmt.Errorf("connect denied: %s", e.Message)
-	}
-
-	if msgType != relayMsgConnectNotify {
-		return nil, fmt.Errorf("unexpected msg type 0x%02x", msgType)
-	}
-
-	var cn RelayConnectNotify
-	cn.Unmarshal(payload)
-	return cn.SessionID[:], nil
 }
 
 // PeerChannel returns the channel where peers discovered via relay are delivered.
@@ -378,11 +494,63 @@ func (rc *RelayClient) PeerChannel() <-chan *dht.Node {
 	return rc.peerCh
 }
 
+// SessionChannel returns the channel notified on new incoming relay tunnel sessions.
+func (rc *RelayClient) SessionChannel() <-chan *relaySessionInfo {
+	return rc.sessionCh
+}
+
 // RelayAddress returns this client's assigned relay address.
 func (rc *RelayClient) RelayAddress() string {
 	rc.mu.RLock()
 	defer rc.mu.RUnlock()
 	return rc.relayAddr
+}
+
+// DataChannel returns the channel where relay-tunneled data messages are delivered.
+func (rc *RelayClient) DataChannel() <-chan *RelayDataMsg {
+	return rc.dataCh
+}
+
+// SendRelayData sends P2P data through an established relay tunnel session.
+// The data is prepended with the session ID for the relay server to route.
+func (rc *RelayClient) SendRelayData(sessionID [8]byte, data []byte) error {
+	rc.mu.RLock()
+	conn := rc.conn
+	rc.mu.RUnlock()
+
+	if conn == nil {
+		return errors.New("not connected to relay server")
+	}
+
+	totalLen := 8 + len(data)
+	if totalLen > 65536 {
+		return errors.New("relay data payload exceeds maximum size")
+	}
+
+	payload := make([]byte, totalLen)
+	copy(payload[:8], sessionID[:])
+	copy(payload[8:], data)
+
+	conn.SetWriteDeadline(time.Now().Add(relayDialTimeout))
+	if err := rc.sendMsg(conn, relayMsgData, payload); err != nil {
+		return fmt.Errorf("send relay data: %w", err)
+	}
+	conn.SetWriteDeadline(time.Time{})
+	return nil
+}
+
+// ActiveSession returns the session info for a given session ID, or nil if not found.
+func (rc *RelayClient) ActiveSession(sessionID [8]byte) *relaySessionInfo {
+	rc.activeSessionsMu.RLock()
+	defer rc.activeSessionsMu.RUnlock()
+	return rc.activeSessions[sessionID]
+}
+
+// CloseSession removes a relay session from the active set.
+func (rc *RelayClient) CloseSession(sessionID [8]byte) {
+	rc.activeSessionsMu.Lock()
+	delete(rc.activeSessions, sessionID)
+	rc.activeSessionsMu.Unlock()
 }
 
 // GetPeersList returns a snapshot of currently known peers from the relay.
@@ -416,40 +584,57 @@ func (rc *RelayClient) ResolvePeer(relayAddr string) (*dht.Node, error) {
 		return nil, errors.New("not connected to relay server")
 	}
 
+	respCh := make(chan relayResponseMsg, 1)
+	rc.syncReqsMu.Lock()
+	rc.syncReqs = append(rc.syncReqs, relaySyncRequest{respCh: respCh})
+	rc.syncReqsMu.Unlock()
+
+	defer func() {
+		rc.syncReqsMu.Lock()
+		for i, r := range rc.syncReqs {
+			if r.respCh == respCh {
+				rc.syncReqs = append(rc.syncReqs[:i], rc.syncReqs[i+1:]...)
+				break
+			}
+		}
+		rc.syncReqsMu.Unlock()
+	}()
+
 	req := RelayResolveReq{
 		TargetRelayAddr: relayAddr,
 	}
 	data := req.Marshal()
 
 	if err := rc.sendMsg(conn, relayMsgConnectReq, data); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve request send: %w", err)
 	}
 
-	conn.SetReadDeadline(time.Now().Add(relayDialTimeout))
-	msgType, payload, err := rc.readMsg(conn)
-	if err != nil {
-		return nil, err
-	}
-
-	if msgType == relayMsgError {
-		var e RelayError
-		e.Unmarshal(payload)
-		return nil, fmt.Errorf("resolve failed: %s", e.Message)
-	}
-
-	if msgType == relayMsgPeerList {
-		var pl RelayPeerList
-		if err := pl.Unmarshal(payload); err != nil {
-			return nil, err
+	select {
+	case <-rc.quit:
+		return nil, errors.New("relay client shutting down")
+	case <-time.After(relayDialTimeout):
+		return nil, errors.New("resolve request timed out")
+	case resp := <-respCh:
+		if resp.msgType == relayMsgError {
+			var e RelayError
+			e.Unmarshal(resp.payload)
+			return nil, fmt.Errorf("resolve failed: code=%d message=%s", e.Code, e.Message)
 		}
-		for _, p := range pl.Peers {
-			if p.RelayAddr == relayAddr {
-				return p.ToDHTNode(), nil
+
+		if resp.msgType == relayMsgPeerList {
+			var pl RelayPeerList
+			if err := pl.Unmarshal(resp.payload); err != nil {
+				return nil, fmt.Errorf("peer list unmarshal: %w", err)
+			}
+			for _, p := range pl.Peers {
+				if p.RelayAddr == relayAddr {
+					return p.ToDHTNode(), nil
+				}
 			}
 		}
-	}
 
-	return nil, fmt.Errorf("peer %s not found on relay", relayAddr)
+		return nil, fmt.Errorf("peer %s not found on relay", relayAddr)
+	}
 }
 
 // Close shuts down the relay client.
@@ -551,12 +736,12 @@ type RelayPeerList struct {
 
 // RelayPeerInfo represents a peer registered with the relay server.
 type RelayPeerInfo struct {
-	NodeID      string `json:"nodeID"`      // hex node public key
-	TCPPort     uint16 `json:"tcpPort"`     // TCP port
-	ExternalIP  string `json:"externalIP"`  // external IP
-	RelayAddr   string `json:"relayAddr"`   // assigned relay address
-	IsNAT       bool   `json:"isNAT"`       // true if behind NAT
-	LastSeen    int64  `json:"lastSeen"`    // Unix timestamp
+	NodeID     string `json:"nodeID"`     // hex node public key
+	TCPPort    uint16 `json:"tcpPort"`    // TCP port
+	ExternalIP string `json:"externalIP"` // external IP
+	RelayAddr  string `json:"relayAddr"`  // assigned relay address
+	IsNAT      bool   `json:"isNAT"`      // true if behind NAT
+	LastSeen   int64  `json:"lastSeen"`   // Unix timestamp
 }
 
 // Marshal serializes the peer info.
@@ -613,8 +798,8 @@ func (m *RelayConnectReq) Unmarshal(data []byte) error {
 
 // RelayConnectNotify notifies both peers of an established relay session.
 type RelayConnectNotify struct {
-	SessionID     [8]byte // relay session identifier
-	TargetNodeID  [32]byte
+	SessionID       [8]byte // relay session identifier
+	TargetNodeID    [32]byte
 	InitiatorNodeID [32]byte
 }
 

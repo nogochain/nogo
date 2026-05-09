@@ -2,6 +2,7 @@ package network
 
 import (
 	"encoding/hex"
+	"fmt"
 	"log"
 	"sync"
 
@@ -34,18 +35,28 @@ type blockFetcher struct {
 	queue      *prque.Prque
 	msgSet     map[string]*blockMsg
 	mu         sync.Mutex
+
+	// onForkBlock is an optional callback triggered when a mined block
+	// is stored as a fork (accepted=false, err=nil). This enables the
+	// caller to initiate real-time fork resolution and reorg.
+	onForkBlock func(peerID string, block *core.Block)
+}
+
+// SetOnForkBlock registers a callback for fork blocks detected during
+// mined block processing. Used by SyncLoop to trigger TriggerForkReorg.
+func (f *blockFetcher) SetOnForkBlock(cb func(peerID string, block *core.Block)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onForkBlock = cb
 }
 
 // newBlockFetcher creates a blockFetcher for P2P block processing.
 // Blocks are directly validated and added to the chain.
-func newBlockFetcher(
-	chain BlockFetcherChainInterface,
-	peers BlockFetcherPeerSetInterface,
-) *blockFetcher {
+func newBlockFetcher(chain BlockFetcherChainInterface, peers BlockFetcherPeerSetInterface) *blockFetcher {
 	f := &blockFetcher{
 		chain:      chain,
 		peers:      peers,
-		newBlockCh: make(chan *blockMsg, newBlockChSize),
+		newBlockCh: make(chan *blockMsg, 1<<8),
 		queue:      prque.New(),
 		msgSet:     make(map[string]*blockMsg),
 	}
@@ -101,15 +112,39 @@ func (f *blockFetcher) add(msg *blockMsg) {
 	}
 }
 
-// insert processes a received block. Validates and
-// adds directly to chain. First valid block extending the current tip wins.
+// insert processes a received mined block from P2P broadcast.
+// Validates the block via ProcessBlock and adds it to the chain.
+// Reports invalid blocks to the peer scoring system.
 func (f *blockFetcher) insert(msg *blockMsg) {
 	if msg == nil || msg.block == nil {
 		return
 	}
-	// blockFetcher is a pass-through; actual block processing happens
-	// via BlockReactorHandler.OnBlock which calls chain.AddBlock directly.
-	_ = msg.block.GetHeight()
+
+	accepted, err := f.chain.ProcessBlock(msg.block)
+	if err != nil {
+		log.Printf("[BlockFetcher] ProcessBlock failed height=%d hash=%s peer=%s: %v",
+			msg.block.GetHeight(), hex.EncodeToString(msg.block.Hash)[:16], msg.peerID, err)
+		f.peers.ProcessIllegal(msg.peerID, 1, fmt.Sprintf("ProcessBlock invalid: %v", err))
+		return
+	}
+
+	if accepted {
+		log.Printf("[BlockFetcher] Block accepted height=%d hash=%s peer=%s",
+			msg.block.GetHeight(), hex.EncodeToString(msg.block.Hash)[:16], msg.peerID)
+		return
+	}
+
+	// Block was stored as fork (not rejected). The canonical chain
+	// may still be on the other fork. Trigger fork resolution to
+	// compare cumulative work and reorg if peer chain is heavier.
+	log.Printf("[BlockFetcher] Block stored as fork height=%d hash=%s peer=%s, triggering fork reorg check",
+		msg.block.GetHeight(), hex.EncodeToString(msg.block.Hash)[:16], msg.peerID)
+	f.mu.Lock()
+	cb := f.onForkBlock
+	f.mu.Unlock()
+	if cb != nil {
+		cb(msg.peerID, msg.block)
+	}
 }
 
 func (f *blockFetcher) processNewBlock(msg *blockMsg) {

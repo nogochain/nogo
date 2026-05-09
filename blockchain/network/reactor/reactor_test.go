@@ -202,6 +202,14 @@ func (m *mockSyncHandler) OnStatusRequest(peerID string) error {
 	return nil
 }
 
+func (m *mockSyncHandler) OnCompactBlock(peerID string, cb *CompactBlockMsg) error {
+	return nil
+}
+
+func (m *mockSyncHandler) OnMissingTxRequest(peerID string, req *MissingTxRequest) error {
+	return nil
+}
+
 // mockTxHandler implements TxHandler for testing.
 type mockTxHandler struct {
 	mu     sync.Mutex

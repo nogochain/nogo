@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/nogochain/nogo/blockchain/metrics"
 	"github.com/nogochain/nogo/blockchain/miner"
 	"github.com/nogochain/nogo/blockchain/network"
+	"github.com/nogochain/nogo/blockchain/network/forkresolution"
 )
 
 // chainWrapper wraps core.Chain to implement miner.Blockchain
@@ -59,13 +61,13 @@ func (w *chainWrapper) SelectMempoolTxs(mp miner.Mempool, maxTxPerBlock int) ([]
 		}
 
 		fromAddr, _ := tx.FromAddress()
-		
+
 		// Get current nonce from chain state
 		acct, exists := w.chain.Balance(fromAddr)
 		if !exists {
 			acct = core.Account{Balance: 0, Nonce: 0}
 		}
-		
+
 		// Check if we've already picked a transaction from this address
 		expectedNonce, hasPending := expectedNonces[fromAddr]
 		if hasPending {
@@ -79,7 +81,7 @@ func (w *chainWrapper) SelectMempoolTxs(mp miner.Mempool, maxTxPerBlock int) ([]
 				continue
 			}
 		}
-		
+
 		totalDebit := tx.Amount + tx.Fee
 		if acct.Balance < totalDebit {
 			continue
@@ -122,13 +124,13 @@ func (w *chainWrapper) SelectMempoolTxsNetwork(mp network.Mempool, maxTxPerBlock
 		}
 
 		fromAddr, _ := tx.FromAddress()
-		
+
 		// Get current nonce from chain state
 		acct, exists := w.chain.Balance(fromAddr)
 		if !exists {
 			acct = core.Account{Balance: 0, Nonce: 0}
 		}
-		
+
 		// Check if we've already picked a transaction from this address
 		expectedNonce, hasPending := expectedNonces[fromAddr]
 		if hasPending {
@@ -142,7 +144,7 @@ func (w *chainWrapper) SelectMempoolTxsNetwork(mp network.Mempool, maxTxPerBlock
 				continue
 			}
 		}
-		
+
 		totalDebit := tx.Amount + tx.Fee
 		if acct.Balance < totalDebit {
 			continue
@@ -286,8 +288,9 @@ func (w *chainWrapper) GetHeaderByHeight(height uint64) (*network.HeaderLocator,
 
 // networkChainWrapper wraps core.Chain to implement network.BlockchainInterface
 type networkChainWrapper struct {
-	chain    *core.Chain
-	syncLoop *network.SyncLoop
+	chain         *core.Chain
+	syncLoop      *network.SyncLoop
+	seedConsensus *forkresolution.SeedConsensusEngine
 }
 
 func newNetworkChainWrapper(chain *core.Chain) *networkChainWrapper {
@@ -297,6 +300,32 @@ func newNetworkChainWrapper(chain *core.Chain) *networkChainWrapper {
 // SetSyncLoop sets the sync loop reference
 func (w *networkChainWrapper) SetSyncLoop(syncLoop *network.SyncLoop) {
 	w.syncLoop = syncLoop
+}
+
+// SetSeedConsensusEngine attaches the seed consensus engine for pre-consensus
+// block finalization. If set, ProcessBlock will wait for inter-seed agreement
+// before adding the block to the canonical chain.
+func (w *networkChainWrapper) SetSeedConsensusEngine(engine *forkresolution.SeedConsensusEngine) {
+	w.seedConsensus = engine
+}
+
+// ProcessBlock implements network.BlockFetcherChainInterface.
+// If a seed consensus engine is configured (seed mode), it first obtains
+// inter-seed confirmation before adding the block. Non-seed nodes pass
+// through directly to AddBlock.
+func (w *networkChainWrapper) ProcessBlock(block *core.Block) (bool, error) {
+	if w.seedConsensus != nil {
+		if !w.seedConsensus.RequestConsensus(block) {
+			log.Printf("[ChainWrapper] Seed consensus refused block height=%d", block.GetHeight())
+			return false, nil
+		}
+	}
+	return w.chain.AddBlock(block)
+}
+
+// BestBlockHeight implements network.BlockFetcherChainInterface.
+func (w *networkChainWrapper) BestBlockHeight() uint64 {
+	return w.chain.GetHeight()
 }
 
 // LatestBlock returns the latest block

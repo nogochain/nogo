@@ -797,6 +797,19 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 		}
 	}
 
+	// Priority 4: local height > peer height but peer may be on heavier canonical chain.
+	// When the peer has more cumulative work at a lower height, it indicates we are
+	// on an orphaned fork that the network has abandoned.
+	if peer.Height() < blockHeight {
+		localWork := bk.chain.CanonicalWork()
+		peerWork := bk.getPeerWork(peer)
+		if peerWork != nil && localWork != nil && peerWork.Cmp(localWork) > 0 {
+			log.Printf("[BlockKeeper] checkSyncType: fork detection (local_ahead local=%d peer=%d, peer has more work)",
+				blockHeight, peer.Height())
+			return syncTypeForkDetection, peer
+		}
+	}
+
 	log.Printf("[BlockKeeper] checkSyncType: no sync needed (local=%d, peer=%d)",
 		blockHeight, peer.Height())
 	return syncTypeNone, peer
@@ -892,6 +905,23 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 			bk.peers.DecSyncLoad(peer.ID())
 			return true
 		}
+
+		// CRITICAL FIX: Check if peer has more work before marking as illegal
+		// When regularBlockSync fails (e.g., dust block loop from fork blocks),
+		// the peer may simply be on a different fork with more cumulative work.
+		// Without this check, we'd ban the peer and stall sync indefinitely.
+		peerWork := bk.getPeerWork(peer)
+		if peerWork != nil {
+			localWork := bk.chain.CanonicalWork()
+			if localWork != nil && peerWork.Cmp(localWork) > 0 {
+				log.Printf("[BlockKeeper] Peer %s has more work (peer=%s > local=%s) but sync failed: %v - treating as chain mismatch",
+					peer.ID(), peerWork.String(), localWork.String(), err)
+				bk.handleChainMismatchInSync(peer)
+				bk.peers.DecSyncLoad(peer.ID())
+				return true
+			}
+		}
+
 		log.Printf("[BlockKeeper] Sync FAILED at h=%d: %v (will retry in 1s)", localHeight, err)
 		bk.peers.ProcessIllegal(peer.ID(), LevelMsgIllegal, errMsg)
 		bk.peers.DecSyncLoad(peer.ID())
@@ -907,20 +937,53 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 
 // dispatchForkDetection handles the case where local and peer are at the same height
 // but the peer has a chain with greater cumulative work — indicating a fork.
+// Uses ForkResolver.ShouldReorg for work-weighted decision before any rollback.
 func (bk *blockKeeper) dispatchForkDetection(peer PeerInterface, localHeight uint64) bool {
-	remoteBlock := bk.getPeerTipBlock(peer)
-	if remoteBlock == nil || bk.forkResolver == nil {
+	if bk.forkResolver == nil {
+		log.Printf("[BlockKeeper] dispatchForkDetection: forkResolver is nil")
 		return false
 	}
 
-	log.Printf("[BlockKeeper] Same height (%d) but peer has more work, triggering reorg", localHeight)
-	go bk.forkResolver.RequestReorg(remoteBlock, "startSync-same-height-"+peer.ID())
+	peerHeight := peer.Height()
+	log.Printf("[BlockKeeper] dispatchForkDetection: fork candidate (local=%d peer=%d), evaluating work",
+		localHeight, peerHeight)
+
+	// Build a minimal peer tip block for work comparison
+	peerTip := bk.getPeerTipBlock(peer)
+	if peerTip == nil {
+		log.Printf("[BlockKeeper] dispatchForkDetection: cannot build peer tip block")
+		return false
+	}
+
+	// Use ForkResolver.ShouldReorg for work-weighted decision
+	if !bk.forkResolver.ShouldReorg(peerTip) {
+		log.Printf("[BlockKeeper] dispatchForkDetection: peer chain does not have more work, keeping local chain")
+		return false
+	}
+
+	log.Printf("[BlockKeeper] dispatchForkDetection: peer chain has more work, rolling back and re-syncing")
+
+	// Roll back below the peer's height so the next sync cycle fetches the correct chain.
+	rollbackTarget := peerHeight
+	if rollbackTarget > 0 {
+		rollbackTarget = peerHeight - 1
+	}
+
+	if err := bk.forkResolver.RollbackToHeight(rollbackTarget); err != nil {
+		log.Printf("[BlockKeeper] dispatchForkDetection: rollback to %d failed: %v", rollbackTarget, err)
+		return false
+	}
+
+	log.Printf("[BlockKeeper] dispatchForkDetection: rolled back to height %d, triggering re-sync",
+		rollbackTarget)
+
+	bk.TriggerImmediateReSync()
 	return false
 }
 
 // handleChainMismatchInSync processes chain mismatch events during sync.
-// Detects fork events, updates multi-node arbitrator state, and attempts
-// preventive fork resolution before the fork deepens.
+// Uses work comparison via ForkResolver.ShouldReorg to determine whether
+// the peer's chain is heavier before performing any rollback.
 func (bk *blockKeeper) handleChainMismatchInSync(peer PeerInterface) {
 	if bk.forkResolver == nil {
 		return
@@ -931,13 +994,20 @@ func (bk *blockKeeper) handleChainMismatchInSync(peer PeerInterface) {
 		return
 	}
 
-	forkEvent := bk.forkResolver.DetectFork(localTip, nil, peer.ID())
-	if forkEvent == nil {
+	// Build peer tip block for work comparison
+	peerTip := bk.getPeerTipBlock(peer)
+	if peerTip == nil {
+		log.Printf("[BlockKeeper] handleChainMismatchInSync: cannot build peer tip block from %s", peer.ID())
 		return
 	}
 
-	log.Printf("[BlockKeeper] Fork detected: type=%v depth=%d local_h=%d peer=%s",
-		forkEvent.Type, forkEvent.Depth, forkEvent.LocalHeight, peer.ID())
+	// Use work-weighted decision before any rollback
+	if !bk.forkResolver.ShouldReorg(peerTip) {
+		log.Printf("[BlockKeeper] handleChainMismatchInSync: peer chain does not have more work, keeping local chain")
+		return
+	}
+
+	log.Printf("[BlockKeeper] Chain mismatch: peer=%s has more work, rolling back and re-syncing", peer.ID())
 
 	if bk.multiNodeArbiter != nil {
 		tipHash := hex.EncodeToString(localTip.Hash)
@@ -946,31 +1016,24 @@ func (bk *blockKeeper) handleChainMismatchInSync(peer PeerInterface) {
 			tipHash,
 			localTip.GetHeight(),
 			bk.chain.CanonicalWork(),
-			int(forkEvent.Depth),
+			8,
 		)
 	}
 
-	remoteBlock := &core.Block{
-		Height: peer.Height(),
-		Header: core.BlockHeader{
-			TimestampUnix: time.Now().Unix(),
-		},
-		TotalWork: fmt.Sprintf("%d", int64(peer.Height())*1000+500),
+	// Rollback below the fork point and trigger re-sync.
+	peerHeight := peer.Height()
+	rollbackTarget := peerHeight
+	if rollbackTarget > 0 {
+		rollbackTarget = peerHeight - 1
+	}
+	if rollbackTarget > localTip.GetHeight() {
+		rollbackTarget = localTip.GetHeight() - 1
 	}
 
-	reorgErr := bk.forkResolver.RequestReorgWithDepth(
-		remoteBlock,
-		fmt.Sprintf("blockkeeper-chain-mismatch-%s", peer.ID()),
-		forkEvent.Depth,
-	)
-
-	if reorgErr != nil {
-		log.Printf("[BlockKeeper] Reorg attempt: %v (will retry on next sync cycle)", reorgErr)
-		if strings.Contains(reorgErr.Error(), "too frequent") {
-			log.Printf("[BlockKeeper] Rate-limited: normal preventive behavior")
-		}
+	if rbErr := bk.forkResolver.RollbackToHeight(rollbackTarget); rbErr != nil {
+		log.Printf("[BlockKeeper] Chain mismatch rollback to %d failed: %v (will retry on next sync cycle)", rollbackTarget, rbErr)
 	} else {
-		log.Printf("[BlockKeeper] Reorg SUCCESS: fork at depth %d resolved preventively", forkEvent.Depth)
+		log.Printf("[BlockKeeper] Chain mismatch: rolled back to height %d, triggering re-sync", rollbackTarget)
 	}
 
 	bk.TriggerImmediateReSync()

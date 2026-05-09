@@ -61,6 +61,9 @@ const (
 	// (no recent sync activity while in isolated mode)
 	StuckNodeThreshold = 5 * time.Minute
 
+	// fetchChainInfoTimeout is the timeout for fetching peer chain info during fork resolution
+	fetchChainInfoTimeout = 5 * time.Second
+
 	// ProgressChannelBufferSize is the buffer size for progress update channel
 	ProgressChannelBufferSize = 10
 
@@ -188,7 +191,14 @@ func NewSyncLoop(pm PeerAPI, bc BlockchainInterface, miner Miner,
 	if fetcherChainImpl, ok := bc.(BlockFetcherChainInterface); ok {
 		if fetcherPeerImpl, ok := pm.(BlockFetcherPeerSetInterface); ok {
 			sm.blockFetcher = newBlockFetcher(fetcherChainImpl, fetcherPeerImpl)
-			log.Printf("[SyncManager] BlockFetcher created and blockProcessor started")
+			// CRITICAL: Register fork block callback for real-time reorg
+			// When a mined block arrives as a fork (not canonical), the
+			// blockFetcher triggers this callback to compare cumulative work
+			// and request a reorg if the peer chain is heavier.
+			sm.blockFetcher.SetOnForkBlock(func(peerID string, block *core.Block) {
+				sm.TriggerForkReorg(peerID, block)
+			})
+			log.Printf("[SyncManager] BlockFetcher created, blockProcessor started, fork callback registered")
 		} else {
 			log.Printf("[SyncManager] WARNING: PeerAPI does not implement BlockFetcherPeerSetInterface, blockFetcher not created")
 		}
@@ -580,11 +590,8 @@ func (s *SyncLoop) OnChainReorganized(newTip *core.Block) {
 }
 
 // TriggerSyncCheck immediately triggers a sync check without waiting for the ticker.
-// This is called when a peer broadcasts a status message with higher height/work,
-// allowing the node to start syncing immediately instead of waiting for the next
-// scheduled sync check (up to 2 seconds delay).
-// CRITICAL for fast sync initiation when new peers connect with higher chains.
-// REFACTORED: Removed isSyncing check - now always allows sync re-evaluation
+// REFACTORED: Routes exclusively through blockKeeper. Legacy performSyncStep fallback
+// removed since blockKeeper is the single sync coordinator.
 func (s *SyncLoop) TriggerSyncCheck() {
 	if s == nil {
 		log.Printf("[Sync] TriggerSyncCheck: SyncLoop is nil")
@@ -600,25 +607,120 @@ func (s *SyncLoop) TriggerSyncCheck() {
 		return
 	}
 
-	// NOTE: Removed "if isSyncing { return }" check!
-	// Old behavior: Skipped sync check if already syncing (caused stuck state)
-	// New behavior: Always allow re-evaluation - performSyncStep will decide if sync needed
-	// This prevents the permanent stuck where isSyncing=true blocked all re-checks
+	if s.blockKeeper != nil {
+		s.blockKeeper.TriggerImmediateReSync()
+	} else {
+		log.Printf("[Sync] TriggerSyncCheck: blockKeeper is nil, cannot trigger sync")
+	}
+}
 
-	log.Printf("[Sync] TriggerSyncCheck: triggering sync check")
+// TriggerForkReorg directly triggers fork resolution when a fork block is received.
+// Unlike TriggerSyncCheck which goes through height-gated checkSyncType,
+// this fetches the peer's actual chain info to accurately compare cumulative work,
+// then executes reorganization if the peer's chain is heavier.
+// CRITICAL: Enables real-time fork resolution when localHeight >= peerHeight,
+// which checkSyncType would otherwise classify as syncTypeNone.
+func (s *SyncLoop) TriggerForkReorg(peerID string, forkBlock *core.Block) {
+	if s == nil || forkBlock == nil {
+		return
+	}
+
+	s.mu.RLock()
+	forkResolver := s.forkResolver
+	pm := s.pm
+	ctx := s.ctx
+	bc := s.bc
+	bk := s.blockKeeper
+	s.mu.RUnlock()
+
+	if pm == nil {
+		log.Printf("[Sync] TriggerForkReorg: peer API is nil, cannot resolve fork")
+		return
+	}
+	if ctx == nil {
+		log.Printf("[Sync] TriggerForkReorg: ctx is nil, sync loop not started")
+		return
+	}
+
+	log.Printf("[Sync] TriggerForkReorg: fork block h=%d from peer=%s, evaluating reorg",
+		forkBlock.GetHeight(), peerID)
+
+	peerIDCopy := peerID
+	blockCopy := forkBlock
 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("[Sync] TriggerSyncCheck panic recovered: %v", r)
+				log.Printf("[Sync] TriggerForkReorg panic recovered: %v", r)
 			}
 		}()
-		if s.blockKeeper != nil {
-			s.blockKeeper.TriggerImmediateReSync()
+
+		localWork := big.NewInt(0)
+		if bc != nil {
+			if cw := bc.CanonicalWork(); cw != nil {
+				localWork.Set(cw)
+			}
+		}
+
+		// Fetch peer's actual chain info for accurate work comparison.
+		// calculateCumulativeWorkLocked cannot accurately compute remote chain work
+		// because it falls back to local canonical chain for missing fork parents.
+		fetchCtx, cancel := context.WithTimeout(context.Background(), fetchChainInfoTimeout)
+		defer cancel()
+
+		chainInfo, err := pm.FetchChainInfo(fetchCtx, peerIDCopy)
+		if err != nil {
+			log.Printf("[Sync] TriggerForkReorg: fetch chain info from %s failed: %v; local work=%s, falling back to sync",
+				peerIDCopy, err, localWork.String())
+			if bk != nil {
+				bk.TriggerImmediateReSync()
+			}
+			return
+		}
+
+		peerWork := chainInfo.Work
+		if peerWork == nil {
+			peerWork = big.NewInt(0)
+		}
+
+		log.Printf("[Sync] TriggerForkReorg: comparing work - local=%s peer=%s peer_h=%d",
+			localWork.String(), peerWork.String(), chainInfo.Height)
+
+		if peerWork.Cmp(localWork) <= 0 {
+			log.Printf("[Sync] TriggerForkReorg: local chain is heavier, keeping current chain")
+			return
+		}
+
+		log.Printf("[Sync] TriggerForkReorg: peer chain heavier, requesting fork resolution")
+
+		if forkResolver != nil {
+			// Use ForkResolver to execute the reorganization.
+			// The complete fork block from the handler is used (not an incomplete
+			// block from getPeerTipBlock), so AddBlock in executeReorg can validate
+			// prevHash and transactions properly.
+			if err := forkResolver.RequestReorg(blockCopy, "TriggerForkReorg-"+peerIDCopy); err != nil {
+				log.Printf("[Sync] TriggerForkReorg: RequestReorg failed: %v, falling back to immediate re-sync", err)
+				if bk != nil {
+					bk.TriggerImmediateReSync()
+				}
+			}
 		} else {
-			s.performSyncStep()
+			log.Printf("[Sync] TriggerForkReorg: forkResolver is nil, falling back to immediate re-sync")
+			if bk != nil {
+				bk.TriggerImmediateReSync()
+			}
 		}
 	}()
+}
+
+// LatestWork returns the local chain's canonical work as a string for logging.
+func (s *SyncLoop) LatestWork() string {
+	if s.bc != nil {
+		if work := s.bc.CanonicalWork(); work != nil {
+			return work.String()
+		}
+	}
+	return "unknown"
 }
 
 func (s *SyncLoop) DeliverSyncBlock(peerID string, block *core.Block) {

@@ -41,6 +41,19 @@ var DefaultSeedNodes = []string{
 	"wallet.nogochain.org:9090",
 }
 
+// DefaultRelayServers are the default relay servers for NAT nodes to connect to.
+var DefaultRelayServers = []string{
+	"main.nogochain.org:9091",
+	"node.nogochain.org:9091",
+	"wallet.nogochain.org:9091",
+}
+
+const (
+	blockSendRetryTimeout  = 3 * time.Second
+	blockSendRetryInterval = 50 * time.Millisecond
+	blockSendMaxRetries    = 60
+)
+
 // PeerInfo holds pre-configured peer connection information.
 type PeerInfo struct {
 	Addr    string `json:"addr"`
@@ -48,11 +61,6 @@ type PeerInfo struct {
 }
 
 // PeerSeedAddr is sent during peer exchange to share routable peer addresses.
-// Optimized Gossip Protocol (P0-4 fix):
-//   - TTL field prevents infinite propagation (default: 3 hops)
-//   - Seen cache prevents duplicate processing
-//   - Random peer selection (k=3) reduces redundant traffic
-//   - RelayAddr for NAT-node-to-NAT-node connectivity via relay
 type PeerSeedAddr struct {
 	ID        string `json:"id"`
 	Addr      string `json:"addr"`
@@ -237,8 +245,9 @@ type Switch struct {
 	relayPort   int          // Relay server listen port (default 9091)
 
 	// Relay client (for NAT nodes connecting to relay servers)
-	relayClient *discover.RelayClient // Client for relay communication
-	relayAddr   string                // Assigned relay address if registered
+	relayClient  *discover.RelayClient // Client for relay communication
+	relayAddr    string                // Assigned relay address if registered
+	relayDemuxer *relayDataDemuxer     // Demuxes incoming relay data to relay connections
 
 	nodePrivKey    ed25519.PrivateKey
 	encryptionMode encryptionMode
@@ -246,8 +255,9 @@ type Switch struct {
 	syncPendingReqs   map[string]*syncPendingRequest
 	syncPendingReqMtx sync.RWMutex
 
-	peerAddresses map[string]string
-	peerAddrMtx   sync.RWMutex
+	peerAddresses  map[string]string
+	peerAddrMtx    sync.RWMutex
+	peerRelayAddrs map[string]string // tcpAddr -> relayAddr mapping for NAT peers
 
 	// Peer error tracking and retry mechanism
 	peerErrors     map[string]*peerErrorState
@@ -310,6 +320,7 @@ func NewSwitch(cfg SwitchConfig) *Switch {
 		quit:            make(chan struct{}),
 		syncPendingReqs: make(map[string]*syncPendingRequest),
 		peerAddresses:   make(map[string]string),
+		peerRelayAddrs:  make(map[string]string),
 		peerErrors:      make(map[string]*peerErrorState),
 		maxPeerErrors:   3,               // Allow 3 consecutive errors before removing peer
 		peerRetryDelay:  5 * time.Second, // Wait 5 seconds before retry after error
@@ -513,6 +524,7 @@ func (sw *Switch) AddReactor(name string, r reactor.Reactor) reactor.Reactor {
 	defer sw.mu.Unlock()
 
 	sw.reactors[name] = r
+	r.SetSwitch(sw)
 
 	for _, desc := range r.GetChannels() {
 		if _, exists := sw.reactorsByCh[desc.ID]; !exists {
@@ -641,12 +653,15 @@ func (sw *Switch) Start(ctx context.Context) error {
 	// Step 2: Start relay server if:
 	// - User explicitly enabled it via config/env, OR
 	// - This is a public node (not behind NAT) — can help NAT nodes
+	log.Printf("Switch: relay server check - config.EnableRelayServer=%v, nodeType=%v",
+		sw.config.EnableRelayServer, sw.nodeType)
 	autoEnableRelay := sw.config.EnableRelayServer
 	if !autoEnableRelay && sw.nodeType == discover.NodeTypePublic {
 		// Auto-enable relay server for public nodes (can help NAT nodes)
 		autoEnableRelay = true
 		log.Printf("Switch: auto-enabling relay server for public node")
 	}
+	log.Printf("Switch: final autoEnableRelay=%v, will start relay server=%v", autoEnableRelay, autoEnableRelay)
 	if autoEnableRelay {
 		sw.startRelayServer()
 	}
@@ -684,12 +699,23 @@ func (sw *Switch) Start(ctx context.Context) error {
 	}()
 
 	// Step 5: Start relay client if we're behind NAT and relay servers are configured
-	if sw.nodeType == discover.NodeTypeNAT && len(sw.config.RelayServers) > 0 {
+	log.Printf("Switch: relay client check - nodeType=%v (type=%T), isNAT=%v, RelayServers count=%d",
+		sw.nodeType, sw.nodeType, sw.nodeType == 2, len(sw.config.RelayServers))
+
+	// Use direct integer comparison for reliability
+	// NodeTypeNAT = 2 (from discover package)
+	isBehindNAT := sw.nodeType == 2 || sw.nodeType.String() == "NAT"
+
+	if isBehindNAT && len(sw.config.RelayServers) > 0 {
+		log.Printf("Switch: conditions met (isNAT=%v), calling startRelayClient()", isBehindNAT)
 		sw.wg.Add(1)
 		go func() {
 			defer sw.wg.Done()
 			sw.startRelayClient()
 		}()
+	} else {
+		log.Printf("Switch: relay client NOT started - isNAT=%v, RelayServers count=%d",
+			isBehindNAT, len(sw.config.RelayServers))
 	}
 
 	// Step 6: Start seed dialing
@@ -766,13 +792,8 @@ func (sw *Switch) startRelayServer() {
 
 	addr := fmt.Sprintf("0.0.0.0:%d", relayPort)
 
-	// Get node public key hex for relay address prefix
-	nodeIDHex := ""
-	if sw.nodeID != "" {
-		nodeIDHex = sw.nodeID
-	} else {
-		nodeIDHex = hex.EncodeToString(sw.nodePrivKey)
-	}
+	// Get node ID for relay address prefix (NOGO format address)
+	nodeIDHex := sw.nodeID
 
 	cfg := RelayServerConfig{
 		ListenAddr: addr,
@@ -835,12 +856,8 @@ func (sw *Switch) startRelayClient() {
 		natResult = sw.natDetector.LastResult()
 	}
 
-	nodeIDHex := ""
-	if sw.nodeID != "" {
-		nodeIDHex = sw.nodeID
-	} else {
-		nodeIDHex = hex.EncodeToString(sw.nodePrivKey)
-	}
+	// Get node ID for relay identity (NOGO format address)
+	nodeIDHex := sw.nodeID
 
 	cfg := discover.RelayClientConfig{
 		NodeID:     nodeIDHex,
@@ -858,6 +875,14 @@ func (sw *Switch) startRelayClient() {
 	sw.relayClient = client
 	sw.relayAddr = client.RelayAddress()
 
+	// Start relay data demuxer for relay-tunneled connections
+	sw.relayDemuxer = newRelayDataDemuxer(client, sw.quit)
+	sw.wg.Add(1)
+	go func() {
+		defer sw.wg.Done()
+		sw.relayDemuxer.run()
+	}()
+
 	// Subscribe to peers discovered via relay
 	peerCh := client.PeerChannel()
 	sw.wg.Add(1)
@@ -871,8 +896,10 @@ func (sw *Switch) startRelayClient() {
 				if peer != nil {
 					peer.IsNAT = true
 					peer.RelayAddr = client.RelayAddress()
+					tcpAddr := peer.TCPAddr()
+					sw.peerRelayAddrs[tcpAddr] = peer.RelayAddr
 					log.Printf("Switch: relay peer: %s (via relay %s)", peer.ID.String(), peer.RelayAddr)
-					sw.AddPeerToList(peer.TCPAddr())
+					sw.AddPeerToList(tcpAddr)
 				}
 			}
 		}
@@ -880,6 +907,33 @@ func (sw *Switch) startRelayClient() {
 
 	log.Printf("Switch: relay client connected (relayAddr=%s, relayServers=%d)",
 		sw.relayAddr, len(sw.config.RelayServers))
+
+	// Handle incoming relay tunnel connections from other NAT peers
+	sessionCh := client.SessionChannel()
+	sw.wg.Add(1)
+	go func() {
+		defer sw.wg.Done()
+		for {
+			select {
+			case <-sw.quit:
+				return
+			case sessionInfo, ok := <-sessionCh:
+				if !ok || sessionInfo == nil {
+					continue
+				}
+				peerID := hex.EncodeToString(sessionInfo.PeerNodeID[:8])
+				rc := newRelayConn(client, sessionInfo.SessionID, peerID)
+				sw.relayDemuxer.register(sessionInfo.SessionID, rc)
+				log.Printf("Switch: incoming relay connection from peer %x (session=%x)",
+					sessionInfo.PeerNodeID[:8], sessionInfo.SessionID[:4])
+				sw.wg.Add(1)
+				go func(c net.Conn) {
+					defer sw.wg.Done()
+					sw.addInboundRelayPeer(c)
+				}(rc)
+			}
+		}
+	}()
 }
 
 // NodeType returns the detected NAT type of this node.
@@ -2064,31 +2118,19 @@ func (sw *Switch) forwardGossipMessage(fromPeerID string, seedItems []PeerSeedAd
 		return
 	}
 
-	// Select k=3 random peers (excluding sender)
-	k := 3
-	selectedPeers := make([]*Peer, 0, k)
-	for _, p := range peerList {
-		if p.ID() == fromPeerID {
-			continue // Don't send back to sender
-		}
-		selectedPeers = append(selectedPeers, p)
-		if len(selectedPeers) >= k {
-			break
-		}
-	}
-
-	if len(selectedPeers) == 0 {
-		return
-	}
-
-	// Forward gossip message
+	// Forward gossip to all peers except sender to ensure full network propagation.
+	// For small networks (≤1 TTL hops remaining), limiting to K peers causes
+	// gossip messages to die before reaching all nodes, leading to peer isolation.
 	seedMsg, err := json.Marshal(seedItems)
 	if err != nil {
 		log.Printf("[Switch] gossip: failed to marshal for forwarding: %v", err)
 		return
 	}
 
-	for _, p := range selectedPeers {
+	for _, p := range peerList {
+		if p.ID() == fromPeerID {
+			continue
+		}
 		mconn := p.MConnection()
 		if mconn == nil {
 			continue
@@ -2096,7 +2138,7 @@ func (sw *Switch) forwardGossipMessage(fromPeerID string, seedItems []PeerSeedAd
 		if !mconn.TrySend(mconnection.ChannelGossip, seedMsg) {
 			log.Printf("[Switch] gossip: forward to %s failed", p.ID())
 		} else {
-			log.Printf("[Switch] gossip: forwarded to %s (TTL=%d)", p.ID(), seedItems[0].TTL)
+			log.Printf("[Switch] gossip: forwarded to %s", p.ID())
 		}
 	}
 }
@@ -2493,6 +2535,13 @@ func (sw *Switch) SetNodeInfo(nodeID, chainID, version string) {
 	sw.version = version
 }
 
+// ID returns the local node's unique identifier.
+func (sw *Switch) ID() string {
+	sw.mu.RLock()
+	defer sw.mu.RUnlock()
+	return sw.nodeID
+}
+
 // SetPeerFilter assigns a custom peer filtering function.
 func (sw *Switch) SetPeerFilter(filter func(string) bool) {
 	sw.mu.Lock()
@@ -2605,7 +2654,10 @@ func (sw *Switch) DialPeerWithAddress(addr string) error {
 
 	conn, dialErr := d.DialContext(dialCtx, "tcp", addr)
 	if dialErr != nil {
-		return fmt.Errorf("dial peer %s: %w", addr, dialErr)
+		conn = sw.tryRelayDial(addr)
+		if conn == nil {
+			return fmt.Errorf("dial peer %s: %w", addr, dialErr)
+		}
 	}
 
 	if !sw.filterPeer(addr) {
@@ -2615,7 +2667,8 @@ func (sw *Switch) DialPeerWithAddress(addr string) error {
 		return fmt.Errorf("dial peer: peer %s rejected by filter", addr)
 	}
 
-	if sw.shouldWrapSecretConnection() {
+	_, isRelayConn := conn.(*relayConn)
+	if !isRelayConn && sw.shouldWrapSecretConnection() {
 		wrappedConn, wrapErr := sw.wrapConnectionWithSecret(conn, true)
 		if wrapErr != nil {
 			conn.Close()
@@ -2654,6 +2707,57 @@ func (sw *Switch) DialPeerWithAddress(addr string) error {
 	sw.peerAddrMtx.Unlock()
 
 	return nil
+}
+
+// tryRelayDial attempts to connect to a peer via the relay network
+// when direct TCP dialing fails. Returns nil if relay is unavailable.
+func (sw *Switch) tryRelayDial(addr string) net.Conn {
+	if sw.relayClient == nil || sw.relayDemuxer == nil {
+		return nil
+	}
+
+	sw.peerAddrMtx.RLock()
+	relayAddr, hasRelay := sw.peerRelayAddrs[addr]
+	sw.peerAddrMtx.RUnlock()
+
+	if !hasRelay || relayAddr == "" {
+		return nil
+	}
+
+	sessionIDBytes, err := sw.relayClient.RequestConnect(relayAddr)
+	if err != nil {
+		log.Printf("Switch: relay dial to %s failed: %v", addr, err)
+		return nil
+	}
+
+	var sessionID [8]byte
+	copy(sessionID[:], sessionIDBytes)
+
+	rc := newRelayConn(sw.relayClient, sessionID, addr)
+	sw.relayDemuxer.register(sessionID, rc)
+
+	log.Printf("Switch: relay tunnel established to %s (session=%x)", addr, sessionID[:4])
+	return rc
+}
+
+// addInboundRelayPeer handles an incoming relay tunnel connection.
+// It performs the NodeInfo handshake and registers the peer with the Switch.
+func (sw *Switch) addInboundRelayPeer(conn net.Conn) {
+	defer conn.Close()
+
+	conn.SetReadDeadline(time.Now().Add(sw.config.HandshakeTimeout))
+	peerNI, handshakeErr := sw.handshakePeer(conn, false)
+	if handshakeErr != nil {
+		log.Printf("Switch: inbound relay handshake failed: %v", handshakeErr)
+		return
+	}
+	conn.SetReadDeadline(time.Time{})
+
+	if addErr := sw.AddPeerConnectionWithNodeInfo(conn, false, peerNI); addErr != nil {
+		log.Printf("Switch: failed to add inbound relay peer: %v", addErr)
+		return
+	}
+	log.Printf("Switch: inbound relay peer added (moniker=%s)", peerNI.Moniker)
 }
 
 // AddListener registers an external listener to the switch.
@@ -2792,8 +2896,27 @@ func (sw *Switch) BroadcastBlock(ctx context.Context, block *core.Block) error {
 		if mconn.TrySend(mconnection.ChannelBlock, blockBytes) {
 			successCount++
 		} else {
-			failedCount++
-			broadcastErr = fmt.Errorf("switch: failed to send block to peer %s", peer.ID())
+			log.Printf("[Switch] Block broadcast to %s queue full, retrying (%d×%v)",
+				peer.ID(), blockSendMaxRetries, blockSendRetryInterval)
+			sent := false
+			for retry := 0; retry < blockSendMaxRetries; retry++ {
+				select {
+				case <-ctx.Done():
+					failedCount++
+					return fmt.Errorf("switch: broadcast block cancelled: %w", ctx.Err())
+				case <-time.After(blockSendRetryInterval):
+				}
+				if mconn.TrySend(mconnection.ChannelBlock, blockBytes) {
+					sent = true
+					break
+				}
+			}
+			if sent {
+				successCount++
+			} else {
+				failedCount++
+				broadcastErr = fmt.Errorf("switch: failed to send block to peer %s after %d retries", peer.ID(), blockSendMaxRetries)
+			}
 		}
 	}
 
@@ -2851,8 +2974,27 @@ func (sw *Switch) BroadcastBlockExcluding(ctx context.Context, block *core.Block
 		if mconn.TrySend(mconnection.ChannelBlock, blockBytes) {
 			successCount++
 		} else {
-			failedCount++
-			broadcastErr = fmt.Errorf("switch: failed to send block to peer %s", peer.ID())
+			log.Printf("[Switch] Block broadcast(excl) to %s queue full, retrying (%d×%v)",
+				peer.ID(), blockSendMaxRetries, blockSendRetryInterval)
+			sent := false
+			for retry := 0; retry < blockSendMaxRetries; retry++ {
+				select {
+				case <-ctx.Done():
+					failedCount++
+					return fmt.Errorf("switch: broadcast block cancelled: %w", ctx.Err())
+				case <-time.After(blockSendRetryInterval):
+				}
+				if mconn.TrySend(mconnection.ChannelBlock, blockBytes) {
+					sent = true
+					break
+				}
+			}
+			if sent {
+				successCount++
+			} else {
+				failedCount++
+				broadcastErr = fmt.Errorf("switch: failed to send block to peer %s after %d retries", peer.ID(), blockSendMaxRetries)
+			}
 		}
 	}
 
@@ -4064,6 +4206,14 @@ func (sw *Switch) broadcastMinedBlock(block *core.Block) error {
 		return fmt.Errorf("broadcastMinedBlock failed: %w", err)
 	}
 
+	cb := reactor.BuildCompactBlock(block)
+	if cb != nil {
+		compactData := reactor.SerializeCompactBlock(cb)
+		if compactData != nil {
+			sw.Broadcast(mconnection.ChannelSync, compactData)
+		}
+	}
+
 	log.Printf("[Switch] broadcastMinedBlock: broadcasted via BroadcastBlock (height=%d)", block.GetHeight())
 	return nil
 }
@@ -4081,6 +4231,12 @@ func (sw *Switch) broadcastNewStatus(bestBlock, genesisBlock *core.Block) error 
 
 	log.Printf("[Switch] broadcastNewStatus: broadcasted via BroadcastNewStatus (height=%d)", bestBlock.GetHeight())
 	return nil
+}
+
+// BroadcastSyncMsg sends a raw message on the sync channel to ALL connected peers.
+// This implements the seedVoteDispatcher interface used by SeedConsensusEngine.
+func (sw *Switch) BroadcastSyncMsg(msg []byte) {
+	sw.Broadcast(mconnection.ChannelSync, msg)
 }
 
 func (sw *Switch) GetPeerChainInfo(peerID string) (height uint64, work *big.Int, tipHash string, err error) {

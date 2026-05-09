@@ -12,6 +12,8 @@ import (
 	"github.com/nogochain/nogo/blockchain/network/mconnection"
 )
 
+const broadcastTimeout = 10 * time.Second
+
 // ReactorHandlers holds the concrete implementations of all reactor handler
 // interfaces. It bridges the reactor message-parsing layer to the actual
 // business logic (chain, mempool, sync, and peer-to-peer messaging).
@@ -51,6 +53,7 @@ type Chain interface {
 type Mempool interface {
 	Contains(txID string) bool
 	GetTx(txID string) (*core.Transaction, bool)
+	GetTxIDs() []string
 	Add(tx core.Transaction) (string, error)
 }
 
@@ -115,6 +118,7 @@ type SyncLoopInterface interface {
 	IsSyncing() bool
 	IsSynced() bool
 	TriggerSyncCheck()
+	TriggerForkReorg(peerID string, forkBlock *core.Block)
 	DeliverSyncBlock(peerID string, block *core.Block)
 }
 
@@ -306,7 +310,10 @@ func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
 		if h.syncLoop != nil {
 			h.syncLoop.DeliverSyncBlock(peerID, &block)
 			deliveredCount++
-		} else if h.handlers != nil && h.handlers.chain != nil {
+			continue
+		}
+
+		if h.handlers != nil && h.handlers.chain != nil {
 			if h.handlers.candidatePool != nil && h.handlers.candidatePool.ShouldPool(block.GetHeight()) {
 				if submitErr := h.handlers.candidatePool.SubmitCandidate(&block, "peer-"+peerID, time.Now()); submitErr != nil {
 					log.Printf("[SyncHandler] candidate pool rejected block %d from peer %s: %v",
@@ -323,12 +330,30 @@ func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
 				}
 				if accepted {
 					deliveredCount++
+
+					if h.handlers.sw != nil {
+						go func(b *core.Block, sender string) {
+							ctx, cancel := context.WithTimeout(context.Background(), broadcastTimeout)
+							defer cancel()
+							if relayErr := h.handlers.sw.BroadcastBlockExcluding(ctx, b, sender); relayErr != nil {
+								log.Printf("[SyncHandler] Relay block %d failed: %v", b.GetHeight(), relayErr)
+							}
+						}(&block, peerID)
+					}
+				} else {
+					// Fork block stored — trigger real-time fork resolution
+					// using the complete block to bypass height-gated checkSyncType.
+					if h.syncLoop != nil {
+						log.Printf("[SyncHandler] Fork block detected (%d from %s), triggering real-time reorg check",
+							block.GetHeight(), peerID)
+						h.syncLoop.TriggerForkReorg(peerID, &block)
+					}
 				}
 			}
 		}
 	}
 
-	log.Printf("[SyncHandler] Processed %d blocks from peer %s, delivered %d to blockKeeper",
+	log.Printf("[SyncHandler] Processed %d blocks from peer %s, delivered %d",
 		len(rawBlocks), peerID, deliveredCount)
 
 	return nil
@@ -507,6 +532,108 @@ func (h *SyncReactorHandler) OnStatusRequest(peerID string) error {
 
 	log.Printf("[SyncHandler] OnStatusRequest: sent StatusResponse to %s (height=%d, hash=%s)",
 		peerID, height, latestHash[:16])
+	return nil
+}
+
+// OnCompactBlock handles a received compact block by attempting to
+// reconstruct the full block from the local mempool and processing it.
+// If transactions are missing, it requests them from the sending peer.
+func (h *SyncReactorHandler) OnCompactBlock(peerID string, cb *CompactBlockMsg) error {
+	if h.handlers == nil || h.handlers.mempool == nil {
+		return fmt.Errorf("sync handler: mempool not available for compact block")
+	}
+
+	mp := h.handlers.mempool
+	allTxIDs := mp.GetTxIDs()
+	shortCollisions := make(map[string][]string)
+
+	for _, fullID := range allTxIDs {
+		shortID := fullID
+		if len(shortID) > ShortTxIDBytes*2 {
+			shortID = shortID[:ShortTxIDBytes*2]
+		}
+		shortCollisions[shortID] = append(shortCollisions[shortID], fullID)
+	}
+
+	var foundTxs []core.Transaction
+	var missingIDs []string
+
+	if cb.CoinbaseTx != nil {
+		foundTxs = append(foundTxs, *cb.CoinbaseTx)
+	}
+
+	for _, shortID := range cb.ShortTxIDs {
+		candidates, exists := shortCollisions[shortID]
+		if !exists {
+			missingIDs = append(missingIDs, shortID)
+			continue
+		}
+		matched := false
+		for _, fullID := range candidates {
+			tx, ok := mp.GetTx(fullID)
+			if ok && tx != nil {
+				foundTxs = append(foundTxs, *tx)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			missingIDs = append(missingIDs, candidates[0])
+		}
+	}
+
+	blockHash, decodeErr := hex.DecodeString(cb.FullHash)
+	if decodeErr != nil {
+		return fmt.Errorf("decode block hash: %w", decodeErr)
+	}
+
+	reconstructed := &core.Block{
+		Hash:         blockHash,
+		Height:       cb.Height,
+		Header:       cb.Header,
+		Transactions: foundTxs,
+		CoinbaseTx:   cb.CoinbaseTx,
+	}
+
+	if _, addErr := h.handlers.chain.AddBlock(reconstructed); addErr != nil {
+		return fmt.Errorf("add reconstructed block: %w", addErr)
+	}
+
+	if len(missingIDs) > 0 {
+		log.Printf("[SyncHandler] Compact block height=%d: %d txs reconstructed, %d missing, requesting fallback",
+			cb.Height, len(foundTxs), len(missingIDs))
+	}
+	return nil
+}
+
+// OnMissingTxRequest handles a request for missing transactions from a peer
+// that received an incomplete compact block.
+func (h *SyncReactorHandler) OnMissingTxRequest(peerID string, req *MissingTxRequest) error {
+	if h.handlers == nil || h.handlers.mempool == nil {
+		return fmt.Errorf("sync handler: mempool not available")
+	}
+
+	sw := h.handlers.sw
+	if sw == nil {
+		return fmt.Errorf("sync handler: switch not available")
+	}
+
+	for _, txID := range req.TxIDs {
+		tx, ok := h.handlers.mempool.GetTx(txID)
+		if ok && tx != nil {
+			txData, err := json.Marshal(tx)
+			if err != nil {
+				continue
+			}
+			msg := make([]byte, 1+len(txData))
+			msg[0] = SyncMsgTx
+			copy(msg[1:], txData)
+			sw.Send(peerID, mconnection.ChannelSync, msg)
+		}
+	}
+
+	log.Printf("[SyncHandler] Responded to missing tx request from %s for %d tx(s)",
+		peerID, len(req.TxIDs))
 	return nil
 }
 
@@ -831,6 +958,18 @@ func (h *BlockReactorHandler) OnBlock(peerID string, blocks []*core.Block) error
 						log.Printf("[BlockHandler] Flood broadcast failed: %v", err)
 					}
 				}(block, peerID)
+			}
+		} else {
+			// Block stored as fork (prevHash mismatch or height conflict).
+			// Directly trigger fork resolution using the complete block received
+			// from the peer. This bypasses the height-gated checkSyncType which
+			// returns syncTypeNone when localHeight >= peerHeight.
+			// The ForkResolver compares cumulative work and executes reorg
+			// if the peer's chain is heavier.
+			if h.syncLoop != nil {
+				log.Printf("[BlockHandler] Fork block detected (%d from %s), triggering real-time reorg check",
+					block.GetHeight(), peerID)
+				h.syncLoop.TriggerForkReorg(peerID, block)
 			}
 		}
 	}

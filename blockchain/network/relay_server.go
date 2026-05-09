@@ -3,6 +3,7 @@ package network
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -28,12 +29,12 @@ const (
 	relayMsgConnectReq    = 0x07
 	relayMsgConnectNotify = 0x08
 	relayMsgData          = 0x09
-	relayMsgDisconnect   = 0x0A
-	relayMsgError        = 0xFF
+	relayMsgDisconnect    = 0x0A
+	relayMsgError         = 0xFF
 )
 
 const (
-	relayServerPort   = 9091   // Default relay server TCP port
+	relayServerPort   = 9091 // Default relay server TCP port
 	relayPingInterval = 30 * time.Second
 	relayPingTimeout  = 10 * time.Second
 	relayReadDeadline = 60 * time.Second
@@ -43,21 +44,24 @@ const (
 
 // RelayServerConfig holds configuration for the relay server.
 type RelayServerConfig struct {
-	ListenAddr string   // TCP listen address, e.g. "0.0.0.0:9091"
-	MaxClients int      // Maximum simultaneous relay clients
-	NodeID     string   // This node's public key hex (identity prefix)
-	TCPPort    uint16  // This node's P2P TCP port (for peer advertisement)
+	ListenAddr string // TCP listen address, e.g. "0.0.0.0:9091"
+	MaxClients int    // Maximum simultaneous relay clients
+	NodeID     string // This node's public key hex (identity prefix)
+	TCPPort    uint16 // This node's P2P TCP port (for peer advertisement)
 }
 
 // RelayServer runs on fixed-IP nodes and provides relay services for NAT nodes.
 // It maintains a registry of connected NAT clients and tunnels P2P connections
 // between them when direct DHT-based connections are not possible.
 type RelayServer struct {
-	cfg       RelayServerConfig
-	listener  net.Listener
-	quit      chan struct{}
-	wg        sync.WaitGroup
-	mu        sync.RWMutex
+	cfg      RelayServerConfig
+	listener net.Listener
+	quit     chan struct{}
+	wg       sync.WaitGroup
+	mu       sync.RWMutex
+
+	closed  bool
+	closeMu sync.Mutex
 
 	// Registered clients: relayAddr -> client
 	clients map[string]*relayClient
@@ -74,12 +78,12 @@ type RelayServer struct {
 
 // relayClient represents a connected relay client.
 type relayClient struct {
-	nodeID     [32]byte
-	relayAddr  string
-	conn       net.Conn
-	tcpPort    uint16
-	externalIP string
-	lastPing   time.Time
+	nodeID      [32]byte
+	relayAddr   string
+	conn        net.Conn
+	tcpPort     uint16
+	externalIP  string
+	lastPing    time.Time
 	connectedAt time.Time
 }
 
@@ -139,7 +143,16 @@ func (rs *RelayServer) Start(peerUpdates chan<- *relayPeerInfo) error {
 }
 
 // Stop gracefully shuts down the relay server.
+// Safe to call multiple times.
 func (rs *RelayServer) Stop() {
+	rs.closeMu.Lock()
+	if rs.closed {
+		rs.closeMu.Unlock()
+		return
+	}
+	rs.closed = true
+	rs.closeMu.Unlock()
+
 	close(rs.quit)
 	if rs.listener != nil {
 		rs.listener.Close()
@@ -184,7 +197,10 @@ func (rs *RelayServer) handleClient(conn net.Conn) {
 		return
 	}
 
+	log.Printf("[RelayServer] Received msgType=0x%02x from %v", msgType, conn.RemoteAddr())
+
 	if msgType != relayMsgHello {
+		log.Printf("[RelayServer] Expected hello (0x01), got 0x%02x - rejecting", msgType)
 		rs.sendError(conn, 0x01, "expected hello message")
 		return
 	}
@@ -195,12 +211,21 @@ func (rs *RelayServer) handleClient(conn net.Conn) {
 		return
 	}
 
-	if len(hello.NodeID) != 64 {
-		rs.sendError(conn, 0x03, "invalid node ID length")
+	if len(hello.NodeID) != 64 && len(hello.NodeID) != 78 {
+		rs.sendError(conn, 0x03, fmt.Sprintf("invalid node ID length: %d", len(hello.NodeID)))
 		return
 	}
 
-	nodeIDBytes, _ := hex.DecodeString(hello.NodeID)
+	hexKey := hello.NodeID
+	if len(hello.NodeID) == 78 {
+		hexKey = hello.NodeID[8:72]
+	}
+
+	nodeIDBytes, err := hex.DecodeString(hexKey)
+	if err != nil || len(nodeIDBytes) != 32 {
+		rs.sendError(conn, 0x03, fmt.Sprintf("invalid node ID hex: %v", err))
+		return
+	}
 	var nodeID [32]byte
 	copy(nodeID[:], nodeIDBytes)
 
@@ -215,18 +240,18 @@ func (rs *RelayServer) handleClient(conn net.Conn) {
 	relayAddr := fmt.Sprintf("%s@%s", hello.NodeID[:16], rs.listener.Addr().String())
 
 	client := &relayClient{
-		nodeID:     nodeID,
-		relayAddr:  relayAddr,
-		conn:       conn,
-		tcpPort:    hello.TCPPort,
-		externalIP: hello.ExternalIP,
-		lastPing:   time.Now(),
+		nodeID:      nodeID,
+		relayAddr:   relayAddr,
+		conn:        conn,
+		tcpPort:     hello.TCPPort,
+		externalIP:  hello.ExternalIP,
+		lastPing:    time.Now(),
 		connectedAt: time.Now(),
 	}
 
 	rs.mu.Lock()
 	rs.clients[relayAddr] = client
-	rs.peerIndex[hello.NodeID] = &relayPeerInfo{
+	rs.peerIndex[hexKey] = &relayPeerInfo{
 		nodeID:     nodeID,
 		relayAddr:  relayAddr,
 		tcpPort:    hello.TCPPort,
@@ -238,7 +263,7 @@ func (rs *RelayServer) handleClient(conn net.Conn) {
 
 	if rs.peerUpdates != nil {
 		select {
-		case rs.peerUpdates <- rs.peerIndex[hello.NodeID]:
+		case rs.peerUpdates <- rs.peerIndex[hexKey]:
 		default:
 		}
 	}
@@ -302,19 +327,29 @@ func (rs *RelayServer) handleClientMessage(client *relayClient, msgType byte, pa
 		client.lastPing = time.Now()
 
 	case relayMsgGetPeers:
+		now := time.Now()
 		rs.mu.RLock()
 		peers := make([]discover.RelayPeerInfo, 0, len(rs.peerIndex))
-		for _, p := range rs.peerIndex {
-			if p.relayAddr != client.relayAddr {
-				peers = append(peers, discover.RelayPeerInfo{
-					NodeID:     hex.EncodeToString(p.nodeID[:]),
-					TCPPort:    p.tcpPort,
-					ExternalIP: p.externalIP,
-					RelayAddr:  p.relayAddr,
-					IsNAT:      p.isNAT,
-					LastSeen:   p.lastSeen.Unix(),
-				})
+		for relayAddr, p := range rs.peerIndex {
+			if relayAddr == client.relayAddr {
+				continue
 			}
+			// Filter out zombie peers whose client connection is dead or stale
+			cl, exists := rs.clients[relayAddr]
+			if !exists {
+				continue
+			}
+			if now.Sub(cl.lastPing) > relayPingInterval*3 {
+				continue
+			}
+			peers = append(peers, discover.RelayPeerInfo{
+				NodeID:     hex.EncodeToString(p.nodeID[:]),
+				TCPPort:    p.tcpPort,
+				ExternalIP: p.externalIP,
+				RelayAddr:  p.relayAddr,
+				IsNAT:      p.isNAT,
+				LastSeen:   p.lastSeen.Unix(),
+			})
 		}
 		rs.mu.RUnlock()
 
@@ -330,6 +365,10 @@ func (rs *RelayServer) handleClientMessage(client *relayClient, msgType byte, pa
 	case relayMsgDisconnect:
 		log.Printf("[RelayServer] Client %s disconnected gracefully", client.relayAddr)
 		rs.unregisterClient(client.relayAddr)
+
+	default:
+		log.Printf("[RelayServer] unknown message type 0x%02x from %s (%d bytes)",
+			msgType, client.relayAddr, len(payload))
 	}
 }
 
@@ -350,11 +389,16 @@ func (rs *RelayServer) handleConnectReq(client *relayClient, payload []byte) {
 		return
 	}
 
-	// Generate session ID from timestamp
+	// Generate session ID from timestamp and random bytes to avoid collisions
 	var sessionID [8]byte
 	ts := time.Now().UnixNano()
-	for i := range sessionID {
+	for i := 0; i < 4; i++ {
 		sessionID[i] = byte(ts >> (i * 8))
+	}
+	if _, err := rand.Read(sessionID[4:]); err != nil {
+		log.Printf("[RelayServer] crypto/rand read error: %v", err)
+		rs.sendError(client.conn, 0x0E, "internal error generating session ID")
+		return
 	}
 
 	// Notify both parties
@@ -399,9 +443,6 @@ func (rs *RelayServer) handleRelayData(from *relayClient, payload []byte) {
 	}
 
 	var sessionID [8]byte
-	if len(payload) < 8 {
-		return
-	}
 	copy(sessionID[:], payload[:8])
 
 	rs.mu.RLock()
@@ -478,13 +519,24 @@ func (rs *RelayServer) sessionCleanupLoop() {
 		case <-rs.quit:
 			return
 		case <-ticker.C:
-			rs.mu.Lock()
 			now := time.Now()
+			rs.mu.Lock()
+
 			for sid, session := range rs.sessions {
 				if now.Sub(session.createdAt) > relaySessionTTL {
 					delete(rs.sessions, sid)
 				}
 			}
+
+			for relayAddr, client := range rs.clients {
+				if now.Sub(client.lastPing) > relayPingInterval*3 {
+					log.Printf("[RelayServer] Removing zombie client %s (last ping %v ago)",
+						relayAddr[:min(16, len(relayAddr))], now.Sub(client.lastPing))
+					delete(rs.clients, relayAddr)
+					delete(rs.peerIndex, relayAddr)
+				}
+			}
+
 			rs.mu.Unlock()
 		}
 	}

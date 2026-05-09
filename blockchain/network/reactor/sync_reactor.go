@@ -53,6 +53,12 @@ const (
 	// Payload: JSON-encoded MiningCandidatePayload {block: json.RawMessage, source_id: string, mined_at: int64}.
 	SyncMsgMiningCandidate byte = 0x09
 
+	// SyncMsgSeedVote is a fast consensus vote exchanged between seed nodes.
+	// Seed nodes broadcast this message when they receive a valid block and
+	// wait for ≥MinSeedConfirmations votes before local finalization.
+	// This prevents the first-seen bias from creating persistent fork networks.
+	SyncMsgSeedVote byte = 0x0A
+
 	// SyncMsgNotFound indicates requested data is unavailable.
 	// Payload: JSON-encoded notFoundPayload {msgType: byte, ids: []string}.
 	SyncMsgNotFound byte = 0xFF
@@ -92,6 +98,15 @@ type SyncHandler interface {
 	// OnStatusRequest handles an incoming status request during peer handshake.
 	// The handler should respond with its current chain status (height, work, latestHash).
 	OnStatusRequest(peerID string) error
+
+	// OnCompactBlock handles a received compact block for fast relay.
+	// The handler should attempt to reconstruct the full block from the local
+	// mempool and request missing transactions if needed.
+	OnCompactBlock(peerID string, cb *CompactBlockMsg) error
+
+	// OnMissingTxRequest handles a request for missing transactions that
+	// could not be reconstructed from a compact block.
+	OnMissingTxRequest(peerID string, req *MissingTxRequest) error
 }
 
 // SyncReactor handles blockchain synchronization protocol messages.
@@ -113,6 +128,8 @@ type SyncReactor struct {
 	handshakePendingMu sync.RWMutex
 	// candidatePool stores mining candidates received from peers for validation
 	candidatePool *core.CandidatePool
+	// seedVoteCallback is invoked when a SyncMsgSeedVote is received from a peer seed.
+	seedVoteCallback func(peerID string, payload []byte)
 }
 
 // NewSyncReactor creates a new SyncReactor with the given handler.
@@ -153,6 +170,15 @@ func (sr *SyncReactor) SetHandler(handler SyncHandler) error {
 	defer sr.mu.Unlock()
 	sr.handler = handler
 	return nil
+}
+
+// SetSeedVoteCallback registers the callback for SyncMsgSeedVote messages.
+// The callback receives the peerID and the raw payload bytes (after message type byte).
+// This is used by the SeedConsensusEngine in the forkresolution package.
+func (sr *SyncReactor) SetSeedVoteCallback(cb func(peerID string, payload []byte)) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	sr.seedVoteCallback = cb
 }
 
 // SetCandidatePool sets the candidate pool for mining candidate processing.
@@ -287,6 +313,13 @@ func (sr *SyncReactor) dispatch(msgType byte, peerID string, payload []byte, han
 		sr.handleStatus(peerID, payload, handler)
 	case SyncMsgMiningCandidate:
 		sr.handleMiningCandidate(peerID, payload)
+	case SyncMsgSeedVote:
+		sr.handleSeedVote(peerID, payload)
+	case SyncMsgCompactBlock:
+		sr.handleCompactBlock(peerID, payload)
+	case SyncMsgRequestMissingTxs:
+		sr.handleMissingTxRequest(peerID, payload)
+	case SyncMsgTx:
 	case SyncMsgNotFound:
 		sr.handleNotFound(peerID, payload, handler)
 	default:
@@ -500,6 +533,62 @@ func (sr *SyncReactor) handleMiningCandidate(from string, data []byte) {
 		log.Printf("[SyncReactor] ✗ height %d from %s: %v", block.Header.Height, from, submitErr)
 		return
 	}
+}
+
+// handleSeedVote dispatches an incoming seed consensus vote to the registered callback.
+func (sr *SyncReactor) handleSeedVote(from string, data []byte) {
+	sr.mu.RLock()
+	cb := sr.seedVoteCallback
+	sr.mu.RUnlock()
+
+	if cb == nil {
+		return
+	}
+
+	cb(from, data)
+}
+
+// handleCompactBlock processes an incoming compact block message.
+// It deserializes the compact block, attempts reconstruction, and falls
+// back on requesting missing transactions if reconstruction is incomplete.
+func (sr *SyncReactor) handleCompactBlock(from string, data []byte) {
+	cb, err := DeserializeCompactBlock(data)
+	if err != nil {
+		log.Printf("[SyncReactor] Invalid compact block from %s: %v", from, err)
+		return
+	}
+
+	sr.mu.RLock()
+	handler := sr.handler
+	sr.mu.RUnlock()
+
+	if handler == nil {
+		return
+	}
+
+	if err := handler.OnCompactBlock(from, cb); err != nil {
+		log.Printf("[SyncReactor] Compact block handler rejected block from %s: %v", from, err)
+	}
+}
+
+// handleMissingTxRequest processes a request for missing transactions
+// from a peer that received an incomplete compact block.
+func (sr *SyncReactor) handleMissingTxRequest(from string, data []byte) {
+	req, err := DeserializeMissingTxRequest(data)
+	if err != nil {
+		log.Printf("[SyncReactor] Invalid missing tx request from %s: %v", from, err)
+		return
+	}
+
+	sr.mu.RLock()
+	handler := sr.handler
+	sr.mu.RUnlock()
+
+	if handler == nil {
+		return
+	}
+
+	handler.OnMissingTxRequest(from, req)
 }
 
 // BuildGetHeadersMsg serializes a GetHeaders request message.
