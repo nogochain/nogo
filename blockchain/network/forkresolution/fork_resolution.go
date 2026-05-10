@@ -227,8 +227,12 @@ func (fr *ForkResolver) DetectFork(localBlock, remoteBlock *core.Block, peerID s
 	return event
 }
 
-// ShouldReorg determines if reorganization should be performed based on work comparison
-// Core-main style: heaviest chain rule with safety checks
+// ShouldReorg determines if reorganization should be performed based on work comparison.
+// Core-main style: heaviest chain rule with safety checks.
+//
+// Uses remoteBlock.TotalWork when populated (caller already fetched work from peer chain info).
+// Falls back to chain.CalculateCumulativeWork for blocks that arrive via broadcast/fetch
+// with full header data but without pre-computed TotalWork.
 func (fr *ForkResolver) ShouldReorg(remoteBlock *core.Block) bool {
 	if remoteBlock == nil {
 		return false
@@ -244,22 +248,23 @@ func (fr *ForkResolver) ShouldReorg(remoteBlock *core.Block) bool {
 	}
 
 	localWork := fr.chain.CanonicalWork()
-	remoteWork := fr.chain.CalculateCumulativeWork(remoteBlock)
-
-	if remoteWork != nil && localWork != nil {
-		// FIX P1-3: Compare remote chain's total work vs local chain's total work
-		// Original bug: incorrectly added localWork + remoteWork, then compared with localWork
-		// Correct logic: remote chain is heavier if remoteWork > localWork
-		if remoteWork.Cmp(localWork) > 0 {
-			log.Printf("[ForkResolver] ShouldReorg: remote work %s > local work %s, triggering reorg",
-				remoteWork.String(), localWork.String())
-			return true
-		}
+	if localWork == nil {
+		return false
 	}
 
-	if remoteBlock.GetHeight() > localTip.GetHeight() && remoteWork != nil && localWork != nil && remoteWork.Cmp(localWork) > 0 {
-		log.Printf("[ForkResolver] ShouldReorg: remote higher height (%d > %d) with more work (%s > %s), triggering reorg",
-			remoteBlock.GetHeight(), localTip.GetHeight(), remoteWork.String(), localWork.String())
+	var remoteWork *big.Int
+	if remoteBlock.TotalWork != "" {
+		remoteWork = new(big.Int)
+		if _, ok := remoteWork.SetString(remoteBlock.TotalWork, 10); !ok {
+			remoteWork = fr.chain.CalculateCumulativeWork(remoteBlock)
+		}
+	} else {
+		remoteWork = fr.chain.CalculateCumulativeWork(remoteBlock)
+	}
+
+	if remoteWork != nil && remoteWork.Cmp(localWork) > 0 {
+		log.Printf("[ForkResolver] ShouldReorg: remote work %s > local work %s, triggering reorg",
+			remoteWork.String(), localWork.String())
 		return true
 	}
 

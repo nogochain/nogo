@@ -192,12 +192,14 @@ func TestSingleNodeShouldReorg(t *testing.T) {
 	resolver := NewForkResolver(ctx, chain)
 
 	localBlock := generateTestBlock(1, genesis.Hash, 200)
-	remoteBlock := generateTestBlock(1, genesis.Hash, 300)
+	// remoteBlock.TotalWork represents cumulative chain work: genesis(100) + this block
+	// Must exceed local canonical work (100+200=300) for ShouldReorg to return true
+	remoteBlock := generateTestBlock(1, genesis.Hash, 500)
 
 	chain.AddBlock(localBlock)
 
 	if !resolver.ShouldReorg(remoteBlock) {
-		t.Error("Should reorg when remote has more work")
+		t.Error("Should reorg when remote has more cumulative work")
 	}
 
 	if resolver.ShouldReorg(localBlock) {

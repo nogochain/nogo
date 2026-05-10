@@ -365,9 +365,10 @@ func (s *SyncLoop) startPeerSyncProgressMonitor() {
 	}
 }
 
-// updateSyncProgressFromPeers updates syncProgress based on peer-reported chain height and work.
-// Production-grade: checks both height and cumulative work to prevent premature mining.
-// Only declares syncProgress=1.0 when local chain has both sufficient height AND work.
+// updateSyncProgressFromPeers computes sync progress by comparing local cumulative work
+// against the peer with the most cumulative work (heaviest chain rule).
+// progress=1.0 means the local chain is the canonical chain and mining can proceed.
+// progress<1.0 means a peer has more work, triggering sync/fork-reorg and blocking mining.
 func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	if s == nil || s.pm == nil || s.bc == nil {
 		return
@@ -383,26 +384,19 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	}
 
 	localTip := s.bc.LatestBlock()
-	localHeight := uint64(0)
 	localWork := big.NewInt(0)
 	if localTip != nil {
-		localHeight = localTip.GetHeight()
 		localWork = s.bc.CanonicalWork()
 	}
 
-	totalPeers := len(peers)
 	responsivePeers := 0
-	maxPeerHeight := uint64(0)
-	workCheck := true
-	var bestPeerWork *big.Int
+	var bestByWork *big.Int
+	var bestByWorkPeerID string
 
-	// Collect all peer chain info in one pass for both sync progress AND fork detection
-	type peerInfo struct {
-		id   string
-		info *ChainInfo
-	}
-	allPeerInfos := make([]peerInfo, 0, len(peers))
-
+	// Single-pass scan: find the peer with the most cumulative work.
+	// The canonical chain is determined by total accumulated proof-of-work,
+	// not by block height. A peer with higher height but less total work
+	// is on a weaker fork and must not be treated as ahead.
 	for _, peer := range peers {
 		info, err := s.pm.FetchChainInfo(ctx, peer)
 		if err != nil || info == nil {
@@ -410,14 +404,10 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 		}
 		responsivePeers++
 
-		allPeerInfos = append(allPeerInfos, peerInfo{id: peer, info: info})
-
-		if info.Height > maxPeerHeight {
-			maxPeerHeight = info.Height
-			bestPeerWork = info.Work
-		} else if info.Height == maxPeerHeight && info.Work != nil {
-			if bestPeerWork == nil || info.Work.Cmp(bestPeerWork) > 0 {
-				bestPeerWork = info.Work
+		if info.Work != nil {
+			if bestByWork == nil || info.Work.Cmp(bestByWork) > 0 {
+				bestByWork = info.Work
+				bestByWorkPeerID = peer
 			}
 		}
 	}
@@ -426,29 +416,23 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 		return
 	}
 
+	// Work-based sync progress: localWork vs the peer with most cumulative work.
+	// - localWork >= bestByWork → we ARE the canonical chain → progress = 1.0
+	// - localWork <  bestByWork → we are on a weaker chain → progress = work ratio
 	var progress float64
-	if maxPeerHeight == 0 || localHeight >= maxPeerHeight {
-		workCheck = true
-		if localHeight == maxPeerHeight && bestPeerWork != nil {
-			workCheck = localWork.Cmp(bestPeerWork) >= 0
-		}
-
-		if workCheck && responsivePeers*2 > totalPeers {
-			progress = 1.0
-		} else {
-			ratio := float64(localHeight) / float64(maxPeerHeight)
-			if ratio > maxSyncProgressWithPartialPeers {
-				ratio = maxSyncProgressWithPartialPeers
-			}
-			progress = ratio
-			if !workCheck {
-				log.Printf("[Sync] Same height (%d) but peer has more work: local=%s peer=%s, progress=%.2f",
-					localHeight, localWork.String(), bestPeerWork.String(), progress)
-			}
-		}
+	if bestByWork == nil || localWork.Cmp(bestByWork) >= 0 {
+		progress = 1.0
 	} else {
-		progress = float64(localHeight) / float64(maxPeerHeight)
-		if progress > 1.0 {
+		if bestByWork.Sign() > 0 {
+			workRatio, _ := new(big.Float).Quo(
+				new(big.Float).SetInt(localWork),
+				new(big.Float).SetInt(bestByWork),
+			).Float64()
+			if workRatio > maxSyncProgressWithPartialPeers {
+				workRatio = maxSyncProgressWithPartialPeers
+			}
+			progress = workRatio
+		} else {
 			progress = 1.0
 		}
 	}
@@ -458,21 +442,12 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	s.lastUpdateTime = time.Now()
 	s.mu.Unlock()
 
-	// CRITICAL: After updating sync progress, check if ANY peer has more cumulative work.
-	// If so, trigger fork reorg to switch to the heavier chain.
-	// This handles the case where a peer's fork chain has more total work even though
-	// heights are equal (or peer is slightly ahead), which is typical in deep fork scenarios.
-	if !workCheck && bestPeerWork != nil && bestPeerWork.Cmp(localWork) > 0 {
-		log.Printf("[Sync] Peer has more work than local (%s > %s), scanning all peers for fork reorg",
-			bestPeerWork.String(), localWork.String())
-		for _, pi := range allPeerInfos {
-			if pi.info.Work != nil && pi.info.Work.Cmp(localWork) > 0 {
-				log.Printf("[Sync] Peer %s has more work (%s > %s), triggering fork reorg",
-					pi.id, pi.info.Work.String(), localWork.String())
-				s.TriggerForkReorgForPeer(pi.id)
-				break
-			}
-		}
+	// Trigger fork reorg if the work-optimal peer has more cumulative work.
+	// This converges the network to the single heaviest (canonical) chain.
+	if bestByWork != nil && localWork.Cmp(bestByWork) < 0 && bestByWorkPeerID != "" {
+		log.Printf("[Sync] Peer %s has more cumulative work (%s > %s), triggering fork reorg",
+			bestByWorkPeerID, bestByWork.String(), localWork.String())
+		s.TriggerForkReorgForPeer(bestByWorkPeerID)
 	}
 }
 

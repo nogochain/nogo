@@ -1217,25 +1217,33 @@ func (bk *blockKeeper) getPeerWork(peer PeerInterface) *big.Int {
 	return work
 }
 
-// getPeerTipBlock constructs a minimal block representing the peer's tip.
-// Used for fork resolution when peer has better chain.
-// The block contains only the height and latest hash needed for fork comparison.
+// getPeerTipBlock constructs a block representing the peer's tip.
+// Populates TotalWork from the peer's chain info so that fork resolution
+// (ShouldReorg / CalculateCumulativeWork) can accurately compare cumulative
+// work without needing the full block from the peer chain.
+// Previously TotalWork was not set, causing ShouldReorg to compute a near-zero
+// work value from the empty DifficultyBits/PrevHash fields — permanently
+// preventing fork switches.
 func (bk *blockKeeper) getPeerTipBlock(peer PeerInterface) *core.Block {
 	if bk.peers == nil || peer == nil {
 		return nil
 	}
 
-	height, _, tipHash, err := bk.peers.GetPeerChainInfo(peer.ID())
+	height, workBig, tipHash, err := bk.peers.GetPeerChainInfo(peer.ID())
 	if err != nil {
+		return nil
+	}
+	if workBig == nil {
 		return nil
 	}
 
 	return &core.Block{
-		Height: height,
+		Height:    height,
 		Header: core.BlockHeader{
 			TimestampUnix: time.Now().Unix(),
 		},
-		Hash: []byte(tipHash),
+		Hash:      []byte(tipHash),
+		TotalWork: workBig.String(),
 	}
 }
 
