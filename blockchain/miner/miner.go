@@ -399,7 +399,7 @@ func (m *Miner) isVerificationActive() bool {
 // Production-grade: implements all coordination logic for fork prevention
 func (m *Miner) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
-		interval = time.Duration(config.DefaultMiningIntervalSec) * time.Second
+		interval = time.Duration(config.DefaultMinerPollIntervalSec) * time.Second
 	}
 
 	t := time.NewTicker(interval)

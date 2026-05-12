@@ -904,7 +904,7 @@ func (s *SyncLoop) DeliverSyncBlock(peerID string, block *core.Block) {
 		return
 	}
 	select {
-	case s.blockKeeper.syncBlockCh <- &blockMsg{peerID: peerID, block: block}:
+	case s.blockKeeper.syncBlockCh <- &blockMsg{peerID: peerID, block: block, sessionSeq: s.blockKeeper.syncSessionSeq}:
 	default:
 		log.Printf("[Sync] DeliverSyncBlock: syncBlockCh full, dropping block height=%d from peer=%s", block.GetHeight(), peerID)
 	}

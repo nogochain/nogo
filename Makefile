@@ -1,28 +1,32 @@
 # NogoChain Makefile
 # Reproducible build system
 
-.PHONY: build build-reproducible test test-race lint vet fmt vuln docker-build docker-build-reproducible docker-up docker-down clean install-deps smoke testnet mainnet
+.PHONY: build build-no-race build-reproducible test test-race lint vet fmt vuln docker-build docker-build-reproducible docker-up docker-down clean install-deps smoke testnet mainnet
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
+CGOFLAGS := CGO_ENABLED=0
 GOFLAGS := -trimpath -mod=readonly
 LDFLAGS := -ldflags="-s -w"
-BUILD_FLAGS := -race -vet
 
-# Default build (cmd/node) with production flags
+# Default build with CGO disabled (avoids AV false positives)
 build: vet
-	go build $(BUILD_FLAGS) $(LDFLAGS) -o nogo ./cmd/node
+	$(CGOFLAGS) go build $(LDFLAGS) -o nogo ./blockchain/cmd
 
-# Reproducible build (deterministic)
-build-reproducible:
-	GOWORK=off go build -ldflags="-s -w \
+# Build with race detector (requires CGO, may trigger AV on some systems)
+build-no-race:
+	$(CGOFLAGS) go build -ldflags="-s -w" -o nogo ./blockchain/cmd
+
+# Reproducible build (deterministic, CGO disabled)
+build-reproducible: vet
+	$(CGOFLAGS) GOWORK=off go build -ldflags="-s -w \
 		-X main.version=${VERSION} \
 		-X main.buildTime=${BUILD_TIME}" \
-		-mod=vendor -o nogo ./cmd/node
+		-mod=vendor -o nogo ./blockchain/cmd
 
-# Build with debug info
-build-debug:
-	go build -o nogo ./cmd/node
+# Build with debug info (CGO disabled)
+build-debug: vet
+	$(CGOFLAGS) go build -o nogo ./blockchain/cmd
 
 # Run tests with race detector
 test:

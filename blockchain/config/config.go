@@ -38,8 +38,9 @@ const (
 	DefaultMaxTransactionsPerBlock = 100
 	// DefaultVerificationTimeoutMs is the verification timeout in milliseconds
 	DefaultVerificationTimeoutMs = 5000
-	// DefaultMiningIntervalSec is the mining interval in seconds
-	DefaultMiningIntervalSec = 1
+	// DefaultMinerPollIntervalSec is the miner polling interval in seconds.
+// This controls how frequently the miner checks whether to start a new round.
+DefaultMinerPollIntervalSec = 1
 	// DefaultNetworkSyncCheckDelayMs is the network sync check delay in milliseconds
 	DefaultNetworkSyncCheckDelayMs = 1000
 	// DefaultBlockPropagationDelayMs is the block propagation delay in milliseconds
