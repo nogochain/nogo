@@ -107,6 +107,14 @@ type MConnection struct {
 
 	// wg tracks all goroutines for graceful shutdown.
 	wg sync.WaitGroup
+
+	// lastRecvPongTime records the UnixNano timestamp of the most recent pong received.
+	// Used by pongMonitorRoutine to detect stale connections. Zero means no pong yet.
+	lastRecvPongTime atomic.Int64
+
+	// lastRecvMsgTime records the UnixNano timestamp of the most recent message received.
+	// Exposed via LastRecvTime() for external liveness checks.
+	lastRecvMsgTime atomic.Int64
 }
 
 // NewMConnection creates a new multiplexed connection wrapping the given net.Conn.
@@ -178,9 +186,10 @@ func (m *MConnection) Start() error {
 	m.pingTicker = time.NewTicker(m.config.PingTimeout)
 	m.statsTicker = time.NewTicker(channelStatsInterval)
 
-	m.wg.Add(2)
+	m.wg.Add(3)
 	go m.sendRoutine()
 	go m.recvRoutine()
+	go m.pongMonitorRoutine()
 
 	return nil
 }
@@ -293,6 +302,21 @@ func (m *MConnection) TrafficStatus() (sendRate float64, recvRate float64) {
 	return sendRate, recvRate
 }
 
+// Config returns a copy of the connection configuration.
+func (m *MConnection) Config() MConnConfig {
+	return m.config
+}
+
+// LastRecvTime returns the time when the last message was received.
+// A zero-value time indicates no message has been received yet.
+func (m *MConnection) LastRecvTime() time.Time {
+	nanos := m.lastRecvMsgTime.Load()
+	if nanos == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nanos)
+}
+
 // RemoteAddr returns the remote network address of the connection.
 func (m *MConnection) RemoteAddr() string {
 	if m.conn == nil {
@@ -374,7 +398,8 @@ func (m *MConnection) recvRoutine() {
 			}
 
 		case packetTypePong:
-			// Received a pong, connection is alive.
+			// Record pong receipt timestamp for pongMonitorRoutine.
+			m.lastRecvPongTime.Store(time.Now().UnixNano())
 
 		case packetTypeMsg:
 			// Read a message packet.
@@ -405,6 +430,9 @@ func (m *MConnection) recvRoutine() {
 				return
 			}
 
+			// Record message receipt timestamp for external liveness checks.
+			m.lastRecvMsgTime.Store(time.Now().UnixNano())
+
 			// Complete message received, deliver to callback.
 			if msgBytes != nil && m.onReceive != nil {
 				m.onReceive(packet.ChannelID, msgBytes)
@@ -424,18 +452,30 @@ func (m *MConnection) recvRoutine() {
 }
 
 // pingRoutine sends periodic ping packets for liveness detection.
-// This runs independently from the send routine to ensure pings are sent
-// even when there is no application data to transmit.
-func (m *MConnection) pingRoutine() {
+// pongMonitorRoutine monitors pong response liveness and terminates the connection
+// if no pong is received within the configured PongTimeout.
+// Uses PingTimeout as the check interval to align with heartbeat timing.
+func (m *MConnection) pongMonitorRoutine() {
 	defer m.wg.Done()
 	defer m._recover()
+
+	ticker := time.NewTicker(m.config.PingTimeout)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-m.quit:
 			return
-		case <-m.pingTicker.C:
-			m.sendPing()
+		case <-ticker.C:
+			nanos := m.lastRecvPongTime.Load()
+			// Skip check until at least one pong has been received.
+			if nanos == 0 {
+				continue
+			}
+			if time.Since(time.Unix(0, nanos)) > m.config.PongTimeout {
+				m.stopForError(fmt.Errorf("pong timeout: no response for %v", m.config.PongTimeout))
+				return
+			}
 		}
 	}
 }
@@ -665,18 +705,23 @@ func (m *MConnection) _recover() {
 
 // stopForError gracefully stops the connection and reports the error to the onError callback.
 // Uses atomic compare-and-swap to ensure the error is reported only once.
+// Stop is performed asynchronously to prevent deadlock when called from within
+// a goroutine that is tracked by the WaitGroup.
 func (m *MConnection) stopForError(err error) {
-	// Attempt to stop the connection.
-	if m.IsRunning() {
-		if stopErr := m.Stop(); stopErr != nil {
-			log.Printf("mconnection: stop on error: %v (original: %v)", stopErr, err)
-		}
+	if !atomic.CompareAndSwapUint32(&m.errored, 0, 1) {
+		return
 	}
 
-	// Report the error callback exactly once.
-	if atomic.CompareAndSwapUint32(&m.errored, 0, 1) && m.onError != nil {
-		m.onError(err)
-	}
+	go func() {
+		if m.IsRunning() {
+			if stopErr := m.Stop(); stopErr != nil {
+				log.Printf("mconnection: stop on error: %v (original: %v)", stopErr, err)
+			}
+		}
+		if m.onError != nil {
+			m.onError(err)
+		}
+	}()
 }
 
 // Context returns a context that is cancelled when the connection stops.

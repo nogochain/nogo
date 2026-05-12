@@ -40,7 +40,7 @@ import (
 
 const (
 	// MaxOrphanPoolSize is the maximum number of orphan blocks to store
-	MaxOrphanPoolSize = 256
+	MaxOrphanPoolSize = 2048
 
 	// MaxOrphanPoolAge is the maximum time an orphan can stay in the pool
 	MaxOrphanPoolAge = 60 * time.Minute
@@ -596,6 +596,20 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 				return nil, fmt.Errorf("recompute state: %w", err)
 			}
 			log.Printf("[Chain] Recomputed state from %d blocks (no snapshot available)", len(chain.blocks))
+
+			// Save snapshot after initial recomputation to avoid O(n) rebuild on next restart.
+			// This is critical: without this, every restart recomputes all state from genesis.
+			if len(chain.blocks) > 0 {
+				currentH := chain.currentHeight()
+				stateRoot, sErr := chain.store.CalculateStateRoot(chain.state)
+				if sErr == nil {
+					if snapErr := chain.store.Snapshot(currentH, stateRoot, chain.state); snapErr != nil {
+						log.Printf("[Chain] WARNING: failed to save initial snapshot at height %d: %v", currentH, snapErr)
+					} else {
+						log.Printf("[Chain] Saved initial state snapshot at height %d (root=%x, next restart will be fast)", currentH, stateRoot[:8])
+					}
+				}
+			}
 		}
 	} else {
 		// No persistent store available, recompute from blocks - O(n)
@@ -1251,6 +1265,8 @@ func (c *Chain) AppendBlock(block *Block) error {
 		}
 		if err := c.addressIndexBolt.IndexBlockSimple(block.Hash, block.GetHeight(), block.Header.TimestampUnix, entries); err != nil {
 			log.Printf("WARNING: index block %d in BoltDB: %v", block.GetHeight(), err)
+		} else {
+			c.addressIndexBolt.SetIndexedHeight(block.GetHeight())
 		}
 	}
 

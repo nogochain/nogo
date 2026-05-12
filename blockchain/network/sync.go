@@ -187,6 +187,18 @@ func NewSyncLoop(pm PeerAPI, bc BlockchainInterface, miner Miner,
 		log.Printf("[SyncManager] WARNING: BlockchainInterface(%T) does not implement ChainInterface, blockKeeper not created", bc)
 	}
 
+	if sm.blockKeeper != nil {
+		// Wire up peer disconnect notification from Switch to blockKeeper
+		// When a peer disconnects, Switch calls blockKeeper.OnPeerDisconnected
+		// to clear stale syncPeer reference (C-03 fix)
+		if notifierSetter, ok := pm.(interface{ SetPeerDisconnectNotifier(PeerDisconnectNotifier) }); ok {
+			notifierSetter.SetPeerDisconnectNotifier(sm.blockKeeper)
+			log.Printf("[SyncManager] PeerDisconnectNotifier wired: Switch -> BlockKeeper")
+		} else {
+			log.Printf("[SyncManager] WARNING: PeerAPI(%T) does not support PeerDisconnectNotifier, syncPeer may stall on peer disconnect", pm)
+		}
+	}
+
 	// blockFetcher handles mined block broadcasts from peers
 	// It automatically starts blockProcessor goroutine on creation
 	if fetcherChainImpl, ok := bc.(BlockFetcherChainInterface); ok {
@@ -343,6 +355,10 @@ func (s *SyncLoop) Start(ctx context.Context) error {
 // startPeerSyncProgressMonitor periodically evaluates whether the local node is caught up with peers.
 // It does not perform legacy SyncWithPeer logic; blockKeeper remains responsible for syncing.
 // This monitor only maintains an accurate IsSynced() signal for production safety.
+//
+// CRITICAL FIX: progress updates are suppressed while blockKeeper is actively syncing.
+// Previous bug: this monitor set syncProgress=1.0 when peers were unresponsive during sync,
+// causing IsSynced() to return true prematurely, triggering mining on an incomplete chain.
 func (s *SyncLoop) startPeerSyncProgressMonitor() {
 	s.mu.RLock()
 	ctx := s.ctx
@@ -360,6 +376,12 @@ func (s *SyncLoop) startPeerSyncProgressMonitor() {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// CRITICAL: Skip progress evaluation while blockKeeper is actively syncing.
+			// During regularBlockSync, the sync peer is busy serving blocks and may
+			// fail to respond to FetchChainInfo, causing a false "synced" signal.
+			if s.blockKeeper != nil && s.blockKeeper.isActive() {
+				continue
+			}
 			s.updateSyncProgressFromPeers(ctx)
 		}
 	}
@@ -392,17 +414,21 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	responsivePeers := 0
 	var bestByWork *big.Int
 	var bestByWorkPeerID string
+	var maxPeerHeight uint64
+	localHeight := s.getLocalHeight()
 
-	// Single-pass scan: find the peer with the most cumulative work.
-	// The canonical chain is determined by total accumulated proof-of-work,
-	// not by block height. A peer with higher height but less total work
-	// is on a weaker fork and must not be treated as ahead.
+	// Single-pass scan: find the peer with the most cumulative work
+	// AND track the maximum peer height for height-gap safety check.
 	for _, peer := range peers {
 		info, err := s.pm.FetchChainInfo(ctx, peer)
 		if err != nil || info == nil {
 			continue
 		}
 		responsivePeers++
+
+		if info.Height > maxPeerHeight {
+			maxPeerHeight = info.Height
+		}
 
 		if info.Work != nil {
 			if bestByWork == nil || info.Work.Cmp(bestByWork) > 0 {
@@ -416,25 +442,39 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 		return
 	}
 
-	// Work-based sync progress: localWork vs the peer with most cumulative work.
-	// - localWork >= bestByWork → we ARE the canonical chain → progress = 1.0
-	// - localWork <  bestByWork → we are on a weaker chain → progress = work ratio
+	// CRITICAL FIX: if we received responses but no peer reported valid work,
+	// do NOT set progress to 1.0. This can happen when the sync peer is busy
+	// serving blocks and returns incomplete chain info. Setting progress=1.0
+	// here would allow IsSynced() to return true prematurely.
+	if bestByWork == nil {
+		log.Printf("[Sync] updateSyncProgressFromPeers: %d peers responded but none reported valid work, keeping current progress=%.4f",
+			responsivePeers, s.syncProgress)
+		return
+	}
+
+	// CRITICAL: Use big.Int comparison directly instead of big.Float→Float64
+	// Float64 has only ~16 significant digits, but cumulative work values
+	// can exceed 30 decimal digits. Converting via big.Float.Quo().Float64()
+	// loses precision and rounds a ratio like 0.999999999999972 to 1.0,
+	// causing IsSynced() to return true when the node is thousands of blocks behind.
 	var progress float64
-	if bestByWork == nil || localWork.Cmp(bestByWork) >= 0 {
+	if localWork.Cmp(bestByWork) >= 0 {
 		progress = 1.0
 	} else {
-		if bestByWork.Sign() > 0 {
-			workRatio, _ := new(big.Float).Quo(
-				new(big.Float).SetInt(localWork),
-				new(big.Float).SetInt(bestByWork),
-			).Float64()
-			if workRatio > maxSyncProgressWithPartialPeers {
-				workRatio = maxSyncProgressWithPartialPeers
-			}
-			progress = workRatio
-		} else {
-			progress = 1.0
-		}
+		progress = maxSyncProgressWithPartialPeers
+	}
+
+	// CRITICAL: Height-gap safety check.
+	// Even when work comparison says we're synced, a large height gap from
+	// ANY peer means we are NOT synced. This prevents mining when the node
+	// is > MaxSyncHeightGap blocks behind the network.
+	// Covers the case where cumulative work values are near-equal (due to
+	// similar amount of PoW done on both forks) but the peer chain is much longer.
+	const MaxSyncHeightGap = 3
+	if maxPeerHeight > localHeight+MaxSyncHeightGap {
+		progress = maxSyncProgressWithPartialPeers
+		log.Printf("[Sync] Height-gap safety: peer has %d more blocks (local=%d, maxPeer=%d), forcing progress=%.4f",
+			maxPeerHeight-localHeight, localHeight, maxPeerHeight, maxSyncProgressWithPartialPeers)
 	}
 
 	s.mu.Lock()
@@ -537,13 +577,30 @@ func (s *SyncLoop) HandleMineBlockMsg(peerID string, block *core.Block) {
 }
 
 // IsSynced returns whether sync is complete.
-// REFACTORED: Implements stateless sync detection without isSyncing flag
-// Old behavior: Checked isSyncing && syncProgress to determine mining eligibility
-// New behavior: Only checks syncProgress (set by performSyncStep after peer height comparison)
-// This eliminates the stuck state where isSyncing=true blocked mining forever
+// REFACTORED: Implements stateless sync detection without isSyncing flag.
+// CRITICAL FIX: Now checks blockKeeper.isActive() before returning true.
+// Previous bug: updateSyncProgressFromPeers set syncProgress=1.0
+// while blockKeeper was still syncing, causing the miner to start
+// prematurely and create forks.
 func (s *SyncLoop) IsSynced() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// CRITICAL: If blockKeeper is actively syncing, we are NOT synced.
+	// This prevents the miner from starting during an active sync round.
+	if s.blockKeeper != nil && s.blockKeeper.isActive() {
+		return false
+	}
+
+	// CRITICAL: Check if syncProgress is stale (not updated recently)
+	// If lastUpdateTime is more than 30 seconds ago, our sync state may be outdated.
+	// This prevents mining based on stale sync state after network partitions.
+	const maxStaleDuration = 30 * time.Second
+	if time.Since(s.lastUpdateTime) > maxStaleDuration {
+		log.Printf("[Sync] IsSynced: sync state is stale (last update %v ago), returning false",
+			time.Since(s.lastUpdateTime))
+		return false
+	}
 
 	// CRITICAL: Only check syncProgress, not isSyncing
 	// syncProgress >= 1.0 means performSyncStep verified we're caught up with all peers
@@ -715,19 +772,21 @@ func (s *SyncLoop) TriggerForkReorg(peerID string, forkBlock *core.Block) {
 
 		log.Printf("[Sync] TriggerForkReorg: peer chain heavier, requesting fork resolution")
 
-		if forkResolver != nil {
-			// Use ForkResolver to execute the reorganization.
-			// The complete fork block from the handler is used (not an incomplete
-			// block from getPeerTipBlock), so AddBlock in executeReorg can validate
-			// prevHash and transactions properly.
-			if err := forkResolver.RequestReorg(blockCopy, "TriggerForkReorg-"+peerIDCopy); err != nil {
-				log.Printf("[Sync] TriggerForkReorg: RequestReorg failed: %v, falling back to immediate re-sync", err)
-				if bk != nil {
-					bk.TriggerImmediateReSync()
-				}
+		if forkResolver != nil && bk != nil {
+			rollbackTarget := blockCopy.GetHeight()
+			if rollbackTarget > 0 {
+				rollbackTarget--
 			}
+			if rbErr := forkResolver.RollbackToHeight(rollbackTarget); rbErr != nil {
+				log.Printf("[Sync] TriggerForkReorg: rollback to height %d failed: %v, falling back to resync",
+					rollbackTarget, rbErr)
+			} else {
+				log.Printf("[Sync] TriggerForkReorg: rolled back to height %d, triggering re-sync",
+					rollbackTarget)
+			}
+			bk.TriggerImmediateReSync()
 		} else {
-			log.Printf("[Sync] TriggerForkReorg: forkResolver is nil, falling back to immediate re-sync")
+			log.Printf("[Sync] TriggerForkReorg: forkResolver or blockKeeper is nil, falling back to immediate re-sync")
 			if bk != nil {
 				bk.TriggerImmediateReSync()
 			}
@@ -802,38 +861,25 @@ func (s *SyncLoop) TriggerForkReorgForPeer(peerID string) {
 			return
 		}
 
-		log.Printf("[Sync] TriggerForkReorgForPeer: peer=%s has more work local=%s peer=%s local_h=%d peer_h=%d, fetching tip block",
+		log.Printf("[Sync] TriggerForkReorgForPeer: peer=%s has more work local=%s peer=%s local_h=%d peer_h=%d, rolling back and re-syncing",
 			peerID, localWork.String(), peerWork.String(), localHeight, chainInfo.Height)
 
-		fetchBlockCtx, fetchBlockCancel := context.WithTimeout(context.Background(), fetchChainInfoTimeout)
-		defer fetchBlockCancel()
-
-		peerBlock, err := pm.FetchBlockByHeight(fetchBlockCtx, peerID, chainInfo.Height)
-		if err != nil {
-			log.Printf("[Sync] TriggerForkReorgForPeer: fetch tip block from %s failed: %v, falling back to resync",
-				peerID, err)
-			if bk != nil {
-				bk.TriggerImmediateReSync()
+		if forkResolver != nil && bk != nil {
+			rollbackTarget := chainInfo.Height
+			if rollbackTarget > 0 {
+				rollbackTarget--
 			}
-			return
-		}
-
-		if peerBlock == nil {
-			log.Printf("[Sync] TriggerForkReorgForPeer: peer %s returned nil block at height %d, falling back to resync",
-				peerID, chainInfo.Height)
-			if bk != nil {
-				bk.TriggerImmediateReSync()
+			if localHeight > 0 && rollbackTarget >= localHeight {
+				rollbackTarget = localHeight - 1
 			}
-			return
-		}
-
-		if forkResolver != nil {
-			if err := forkResolver.RequestReorg(peerBlock, "TriggerForkReorgForPeer-"+peerID); err != nil {
-				log.Printf("[Sync] TriggerForkReorgForPeer: RequestReorg failed: %v, falling back to resync", err)
-				if bk != nil {
-					bk.TriggerImmediateReSync()
-				}
+			if rbErr := forkResolver.RollbackToHeight(rollbackTarget); rbErr != nil {
+				log.Printf("[Sync] TriggerForkReorgForPeer: rollback to height %d failed: %v, falling back to resync",
+					rollbackTarget, rbErr)
+			} else {
+				log.Printf("[Sync] TriggerForkReorgForPeer: rolled back to height %d, triggering re-sync",
+					rollbackTarget)
 			}
+			bk.TriggerImmediateReSync()
 		} else if bk != nil {
 			bk.TriggerImmediateReSync()
 		}
@@ -858,9 +904,9 @@ func (s *SyncLoop) DeliverSyncBlock(peerID string, block *core.Block) {
 		return
 	}
 	select {
-	case s.blockKeeper.blockProcessCh <- &blockMsg{peerID: peerID, block: block}:
+	case s.blockKeeper.syncBlockCh <- &blockMsg{peerID: peerID, block: block}:
 	default:
-		log.Printf("[Sync] DeliverSyncBlock: blockProcessCh full, dropping block height=%d from peer=%s", block.GetHeight(), peerID)
+		log.Printf("[Sync] DeliverSyncBlock: syncBlockCh full, dropping block height=%d from peer=%s", block.GetHeight(), peerID)
 	}
 }
 

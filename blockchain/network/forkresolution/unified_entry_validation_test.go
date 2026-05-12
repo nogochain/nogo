@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,7 +33,7 @@ func TestUnifiedEntry_ChainDelegatesToForkResolver(t *testing.T) {
 	var reorgMu sync.Mutex
 
 	trackingResolver := &trackingReorgExecutor{
-		inner:   resolver,
+		inner: resolver,
 		onReorg: func() {
 			reorgMu.Lock()
 			defer reorgMu.Unlock()
@@ -97,8 +98,8 @@ func TestUnifiedEntry_SingleEntryPointPreventsDualTrack(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	successCount := int64(0)
-	failCount := int64(0)
+	var successCount atomic.Int64
+	var failCount atomic.Int64
 
 	for round := 0; round < 5; round++ {
 		wg.Add(1)
@@ -106,12 +107,12 @@ func TestUnifiedEntry_SingleEntryPointPreventsDualTrack(t *testing.T) {
 			defer wg.Done()
 
 			forkBlock := generateTestBlock(uint64(8+r), genesis.Hash, int64(500+r*50))
-			
+
 			err := resolver.RequestReorg(forkBlock, fmt.Sprintf("single-entry-test-%d", r))
 			if err == nil {
-				successCount++
+				successCount.Add(1)
 			} else {
-				failCount++
+				failCount.Add(1)
 			}
 		}(round)
 
@@ -120,14 +121,14 @@ func TestUnifiedEntry_SingleEntryPointPreventsDualTrack(t *testing.T) {
 
 	wg.Wait()
 
-	totalAttempts := successCount + failCount
+	totalAttempts := int(successCount.Load() + failCount.Load())
 	t.Logf("Total attempts: %d, Success: %d, Failed/RateLimited: %d",
-		totalAttempts, successCount, failCount)
+		totalAttempts, successCount.Load(), failCount.Load())
 
-	if totalAttempts > 0 && successCount <= 1 {
+	if totalAttempts > 0 && successCount.Load() <= 1 {
 		t.Log("✅ Single entry point enforced - only one reorg succeeded (others rate-limited)")
-	} else if successCount > 1 {
-		t.Logf("⚠️ Multiple reorgs succeeded (%d) - check interval configuration", successCount)
+	} else if successCount.Load() > 1 {
+		t.Logf("⚠️ Multiple reorgs succeeded (%d) - check interval configuration", successCount.Load())
 	}
 
 	stats := resolver.GetStats()
@@ -172,7 +173,7 @@ func TestUnifiedEntry_AllSeveritiesUseSamePath(t *testing.T) {
 			interval := resolver.getIntervalForSeverity(severity)
 			t.Logf("   Interval for %v: %v", severity, interval)
 		})
-		
+
 		time.Sleep(550 * time.Millisecond)
 	}
 }
@@ -197,8 +198,8 @@ func TestUnifiedEntry_ConcurrentReorgRequestsSerialized(t *testing.T) {
 
 	const numGoroutines = 20
 	var wg sync.WaitGroup
-	concurrentSuccess := int64(0)
-	concurrentBlocked := int64(0)
+	var concurrentSuccess atomic.Int64
+	var concurrentBlocked atomic.Int64
 
 	startTime := time.Now()
 
@@ -208,7 +209,7 @@ func TestUnifiedEntry_ConcurrentReorgRequestsSerialized(t *testing.T) {
 			defer wg.Done()
 
 			forkBlock := generateTestBlock(uint64(8+id%5), genesis.Hash, int64(500+id*10))
-			
+
 			err := resolver.RequestReorgWithDepth(
 				forkBlock,
 				fmt.Sprintf("concurrent-%d", id),
@@ -216,9 +217,9 @@ func TestUnifiedEntry_ConcurrentReorgRequestsSerialized(t *testing.T) {
 			)
 
 			if err == nil {
-				concurrentSuccess++
+				concurrentSuccess.Add(1)
 			} else {
-				concurrentBlocked++
+				concurrentBlocked.Add(1)
 			}
 		}(i)
 	}
@@ -227,9 +228,9 @@ func TestUnifiedEntry_ConcurrentReorgRequestsSerialized(t *testing.T) {
 	duration := time.Since(startTime)
 
 	t.Logf("Concurrent test (%d goroutines, %v):", numGoroutines, duration)
-	t.Logf("  Success: %d, Blocked: %d", concurrentSuccess, concurrentBlocked)
+	t.Logf("  Success: %d, Blocked: %d", concurrentSuccess.Load(), concurrentBlocked.Load())
 
-	if concurrentSuccess > 0 && concurrentSuccess <= 2 {
+	if concurrentSuccess.Load() > 0 && concurrentSuccess.Load() <= 2 {
 		t.Log("✅ TryLock serialization working - limited concurrent successes")
 	}
 

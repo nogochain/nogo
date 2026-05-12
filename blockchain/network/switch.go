@@ -289,6 +289,18 @@ type Switch struct {
 	peerRateLimiterMu sync.Mutex
 	maxMsgsPerSecond  int
 	maxMsgsBurst      int
+
+	// Non-persistent peer auto-reconnection queue (C-02 fix)
+	reconnectQueue   map[string]*reconnectEntry
+	reconnectQueueMu sync.Mutex
+
+	// Peer activity tracking for reconnection priority
+	peerActivity   map[string]time.Time
+	peerActivityMu sync.Mutex
+
+	// PeerDisconnectNotifier for components that need to react to peer disconnections.
+	// blockKeeper uses this to clear syncPeer when the sync target disconnects.
+	peerDisconnectNotifier PeerDisconnectNotifier
 }
 
 // cachedPeerHeight stores a peer's chain height with an expiry to prevent stale data.
@@ -312,6 +324,31 @@ type peerErrorState struct {
 type peerRateLimiter struct {
 	tokens   float64
 	lastTime time.Time
+}
+
+// reconnectEntry tracks a disconnected peer for automatic reconnection with backoff.
+type reconnectEntry struct {
+	addr           string
+	disconnectTime time.Time
+	retryCount     int
+	nodeID         string
+}
+
+// ReconnectConfig defines the maximum reconnection retry attempts.
+type ReconnectConfig struct {
+	MaxReconnectRetries int
+}
+
+var defaultReconnectConfig = ReconnectConfig{
+	MaxReconnectRetries: 3,
+}
+
+// reconnectBackoffIntervals defines the delay before each retry attempt.
+// retry 0: 5s, retry 1: 15s, retry 2+: 45s
+var reconnectBackoffIntervals = []time.Duration{
+	5 * time.Second,
+	15 * time.Second,
+	45 * time.Second,
 }
 
 const (
@@ -347,6 +384,9 @@ func NewSwitch(cfg SwitchConfig) *Switch {
 		peerRateLimiters: make(map[string]*peerRateLimiter),
 		maxMsgsPerSecond: defaultMaxMsgsPerSecond,
 		maxMsgsBurst:     defaultMaxMsgsBurst,
+
+		reconnectQueue: make(map[string]*reconnectEntry),
+		peerActivity:   make(map[string]time.Time),
 	}
 
 	privKey, err := sw.loadOrGenerateNodeKey()
@@ -761,6 +801,9 @@ func (sw *Switch) Start(ctx context.Context) error {
 
 	sw.wg.Add(1)
 	go sw.ensureOutboundPeersLoop()
+
+	sw.wg.Add(1)
+	go sw.gossipSeenCleanupRoutine()
 
 	log.Printf("Switch: started (maxPeers=%d, NAT=%s, relayServer=%v, relayClient=%v)",
 		sw.config.MaxPeers, sw.nodeType, sw.relayServer != nil, sw.relayClient != nil)
@@ -1400,15 +1443,44 @@ func (sw *Switch) ensureOutboundPeersLoop() {
 	}
 }
 
+// isPeerResponsive checks whether a peer's MConnection is alive and has
+// received data recently. An unresponsive peer should not be counted as a
+// valid outbound peer, preventing the outbound pool from being inflated by
+// zombie connections that have not been cleaned up by reapDeadPeers yet.
+func (sw *Switch) isPeerResponsive(peer *Peer) bool {
+	mconn := peer.MConnection()
+	if mconn == nil || !mconn.IsRunning() {
+		return false
+	}
+
+	lastRecv := mconn.LastRecvTime()
+	if lastRecv.IsZero() {
+		// No application data received yet; the connection may still be
+		// establishing or idle. The pongMonitorRoutine handles ping/pong
+		// liveness internally, so give benefit of doubt.
+		return true
+	}
+
+	cfg := mconn.Config()
+	threshold := cfg.PongTimeout + cfg.PingTimeout
+	return time.Since(lastRecv) <= threshold
+}
+
 func (sw *Switch) ensureOutboundPeers() {
 	sw.mu.RLock()
-	outboundCount := 0
-	for _, p := range sw.peers.List() {
-		if !p.isLAN {
-			outboundCount++
-		}
-	}
+	peers := sw.peers.List()
 	sw.mu.RUnlock()
+
+	outboundCount := 0
+	for _, p := range peers {
+		if p.isLAN {
+			continue
+		}
+		if !sw.isPeerResponsive(p) {
+			continue
+		}
+		outboundCount++
+	}
 
 	if outboundCount >= sw.config.MinOutboundPeers {
 		return
@@ -1417,6 +1489,11 @@ func (sw *Switch) ensureOutboundPeers() {
 	numToDial := sw.config.MinOutboundPeers - outboundCount
 	log.Printf("Switch: ensureOutboundPeers need %d more peers (current=%d, min=%d)",
 		numToDial, outboundCount, sw.config.MinOutboundPeers)
+
+	// PRIORITY 0: Reconnect previously disconnected non-persistent peers from queue (C-02 fix)
+	if numToDial > 0 {
+		sw.dialFromReconnectQueue(outboundCount, &numToDial)
+	}
 
 	// PRIORITY 1: Use DHT discovery to find random nodes (like core-main Line 471)
 	if sw.dhtDiscovery != nil && numToDial > 0 {
@@ -2078,9 +2155,6 @@ func (sw *Switch) handleGossipMessage(fromPeerID string, msgBytes []byte) {
 	sw.gossipSeen[msgHash] = time.Now()
 	sw.gossipSeenMu.Unlock()
 
-	// Clean up old entries (P0-4 fix)
-	go sw.cleanupOldGossipEntries()
-
 	var seedItems []PeerSeedAddr
 	if err := json.Unmarshal(msgBytes, &seedItems); err != nil {
 		log.Printf("[Switch] gossip: failed to unmarshal peer list from %s: %v", fromPeerID, err)
@@ -2151,7 +2225,7 @@ func (sw *Switch) handleGossipMessage(fromPeerID string, msgBytes []byte) {
 	sw.forwardGossipMessage(fromPeerID, seedItems)
 }
 
-// cleanupOldGossipEntries removes expired entries from gossipSeen cache
+// cleanupOldGossipEntries removes expired entries from gossipSeen cache.
 func (sw *Switch) cleanupOldGossipEntries() {
 	sw.gossipSeenMu.Lock()
 	defer sw.gossipSeenMu.Unlock()
@@ -2160,6 +2234,28 @@ func (sw *Switch) cleanupOldGossipEntries() {
 	for hash, timestamp := range sw.gossipSeen {
 		if now.Sub(timestamp) > sw.gossipMaxAge {
 			delete(sw.gossipSeen, hash)
+		}
+	}
+}
+
+// gossipSeenCleanupRoutine periodically cleans expired entries from gossipSeen cache.
+// Runs on a 5-minute ticker to prevent unbounded memory growth from stale entries.
+// Exits cleanly when the quit channel or context is cancelled.
+func (sw *Switch) gossipSeenCleanupRoutine() {
+	defer sw.wg.Done()
+
+	const gossipCleanupInterval = 5 * time.Minute
+	ticker := time.NewTicker(gossipCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-sw.quit:
+			return
+		case <-sw.ctx.Done():
+			return
+		case <-ticker.C:
+			sw.cleanupOldGossipEntries()
 		}
 	}
 }
@@ -2428,6 +2524,127 @@ func (sw *Switch) RemovePeer(peerID string, reason string) {
 	log.Printf("Switch: peer %s removed successfully, remaining peers: %d", peerID, sw.PeerCount())
 }
 
+// addToReconnectQueue adds a disconnected peer to the reconnection queue for automatic retry.
+// Persistent peers are excluded as they are handled by ensureKeepConnectPeers.
+// If the peer already exists in the queue, retryCount is incremented.
+// Peers exceeding MaxReconnectRetries are removed from the queue permanently.
+func (sw *Switch) addToReconnectQueue(peerID, addr string) {
+	for _, p := range sw.config.PersistentPeers {
+		if p == addr {
+			log.Printf("Switch: peer %s (%s) is persistent, skipping reconnect queue", peerID, addr)
+			return
+		}
+	}
+
+	sw.reconnectQueueMu.Lock()
+	defer sw.reconnectQueueMu.Unlock()
+
+	entry, exists := sw.reconnectQueue[peerID]
+	if exists {
+		entry.retryCount++
+		entry.disconnectTime = time.Now()
+		if entry.retryCount >= defaultReconnectConfig.MaxReconnectRetries {
+			delete(sw.reconnectQueue, peerID)
+			log.Printf("Switch: peer %s (%s) exhausted reconnect retries (%d), removed from queue",
+				peerID, addr, entry.retryCount)
+		} else {
+			log.Printf("Switch: peer %s (%s) retry incremented to %d in reconnect queue",
+				peerID, addr, entry.retryCount)
+		}
+		return
+	}
+
+	sw.reconnectQueue[peerID] = &reconnectEntry{
+		addr:           addr,
+		disconnectTime: time.Now(),
+		retryCount:     0,
+		nodeID:         peerID,
+	}
+	log.Printf("Switch: peer %s (%s) added to reconnect queue (retry 0/%d)",
+		peerID, addr, defaultReconnectConfig.MaxReconnectRetries)
+}
+
+// dialFromReconnectQueue attempts to reconnect peers in the reconnect queue.
+// Iterates entries and dials those whose backoff interval has elapsed.
+// On success or retry exhaustion, the entry is removed from the queue.
+func (sw *Switch) dialFromReconnectQueue(outboundCount int, numToDial *int) {
+	sw.reconnectQueueMu.Lock()
+	defer sw.reconnectQueueMu.Unlock()
+
+	now := time.Now()
+	for peerID, entry := range sw.reconnectQueue {
+		if *numToDial <= 0 {
+			return
+		}
+
+		var requiredWait time.Duration
+		if entry.retryCount < len(reconnectBackoffIntervals) {
+			requiredWait = reconnectBackoffIntervals[entry.retryCount]
+		} else {
+			requiredWait = reconnectBackoffIntervals[len(reconnectBackoffIntervals)-1]
+		}
+
+		if now.Sub(entry.disconnectTime) < requiredWait {
+			continue
+		}
+
+		if sw.peerAlreadyDialingOrConnected(entry.addr) {
+			log.Printf("Switch: peer %s (%s) already connected or dialing, removing from reconnect queue",
+				peerID, entry.addr)
+			delete(sw.reconnectQueue, peerID)
+			continue
+		}
+
+		err := sw.DialPeerWithAddress(entry.addr)
+		if err != nil {
+			entry.retryCount++
+			entry.disconnectTime = now
+			if entry.retryCount >= defaultReconnectConfig.MaxReconnectRetries {
+				log.Printf("Switch: peer %s (%s) exhausted reconnect retries (%d), removed from queue",
+					peerID, entry.addr, entry.retryCount)
+				delete(sw.reconnectQueue, peerID)
+			} else {
+				log.Printf("Switch: reconnect dial for %s (%s) failed (retry %d/%d): %v",
+					peerID, entry.addr, entry.retryCount, defaultReconnectConfig.MaxReconnectRetries, err)
+			}
+			continue
+		}
+
+		log.Printf("Switch: peer %s (%s) reconnected successfully via reconnect queue", peerID, entry.addr)
+		delete(sw.reconnectQueue, peerID)
+		*numToDial--
+		outboundCount++
+	}
+}
+
+// OnPeerActivity records the latest activity timestamp for a peer.
+// This information can be used to prioritize reconnection of recently active peers.
+func (sw *Switch) OnPeerActivity(peerID string) {
+	sw.peerActivityMu.Lock()
+	defer sw.peerActivityMu.Unlock()
+	sw.peerActivity[peerID] = time.Now()
+}
+
+// isFatalDisconnectReason checks whether a disconnect reason is fatal,
+// meaning the peer should NOT be added to the reconnection queue.
+// Fatal reasons: duplicate connection, banned, self-connection, fatal protocol error.
+func isFatalDisconnectReason(reason string) bool {
+	reasonLower := strings.ToLower(reason)
+	fatalPatterns := []string{
+		"duplicate",
+		"banned",
+		"self connection",
+		"self-connection",
+		"fatal error",
+	}
+	for _, p := range fatalPatterns {
+		if strings.Contains(reasonLower, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // stopAndRemovePeer performs complete peer shutdown and cleanup.
 // Removes from PeerSet, notifies all reactors, stops MConnection, closes conn.
 // Reference: core-main/p2p/switch.go StopPeerForError
@@ -2471,6 +2688,15 @@ func (sw *Switch) stopAndRemovePeer(peer *Peer, reason interface{}) {
 	sw.peerAddrMtx.Unlock()
 
 	sw.clearPeerErrorState(peerID)
+
+	if !isFatalDisconnectReason(reasonStr) {
+		sw.addToReconnectQueue(peerID, peer.addr)
+	}
+
+	// Notify blockKeeper that the sync peer may have disconnected
+	if sw.peerDisconnectNotifier != nil {
+		sw.peerDisconnectNotifier.OnPeerDisconnected(peerID)
+	}
 
 	log.Printf("Switch: peer %s stopped and removed (%s), remaining: %d", peerID, reasonStr, sw.PeerCount())
 }
@@ -3960,6 +4186,10 @@ func (sw *Switch) runReactorRoutine() {
 }
 
 // reapDeadPeers removes peers that are no longer responsive or have closed connections.
+// In addition to checking mconn.IsRunning(), it also checks LastRecvTime against
+// (PongTimeout + PingTimeout) to detect zombie connections that are "running" but
+// have stopped sending data. Removed peers are added to the reconnect queue for
+// automatic retry (unless the disconnect reason is fatal).
 // This prevents the peer count from inflating with stale connections.
 // Reference: core-main/p2p/peer_set.go Remove
 func (sw *Switch) reapDeadPeers() {
@@ -3969,11 +4199,31 @@ func (sw *Switch) reapDeadPeers() {
 
 	removedCount := 0
 	for _, p := range peers {
-		if mconn := p.MConnection(); mconn != nil {
-			// Check if connection is still running
-			if !mconn.IsRunning() {
-				log.Printf("Switch: removing stopped peer %s", p.ID())
-				sw.stopAndRemovePeer(p, "connection stopped")
+		mconn := p.MConnection()
+		if mconn == nil {
+			log.Printf("Switch: removing peer %s with nil MConnection", p.ID())
+			sw.stopAndRemovePeer(p, "nil mconnection")
+			removedCount++
+			continue
+		}
+
+		if !mconn.IsRunning() {
+			log.Printf("Switch: removing stopped peer %s", p.ID())
+			sw.stopAndRemovePeer(p, "connection stopped")
+			removedCount++
+			continue
+		}
+
+		// Enhanced check: detect zombie connections that are technically
+		// "running" but have not sent any data within (PongTimeout + PingTimeout).
+		lastRecv := mconn.LastRecvTime()
+		if !lastRecv.IsZero() {
+			cfg := mconn.Config()
+			threshold := cfg.PongTimeout + cfg.PingTimeout
+			if time.Since(lastRecv) > threshold {
+				log.Printf("Switch: removing unresponsive peer %s (last recv %v ago, threshold %v)",
+					p.ID(), time.Since(lastRecv), threshold)
+				sw.stopAndRemovePeer(p, "unresponsive: data timeout")
 				removedCount++
 				continue
 			}
@@ -4174,10 +4424,16 @@ func (sw *Switch) bestPeer(serviceFlag int) PeerInterface {
 
 	if len(candidates) == 0 {
 		if fallbackPeerID != "" {
-			log.Printf("[Switch] bestPeer: no eligible candidates, using fallback %s", fallbackPeerID)
+			fallbackHeight := uint64(0)
+			sw.peerHeightCacheMu.RLock()
+			if c, ok := sw.peerHeightCache[fallbackPeerID]; ok {
+				fallbackHeight = c.Height
+			}
+			sw.peerHeightCacheMu.RUnlock()
+			log.Printf("[Switch] bestPeer: no eligible candidates, using fallback %s (cachedH=%d)", fallbackPeerID, fallbackHeight)
 			return &switchPeerAdapter{
 				id:     fallbackPeerID,
-				height: 0,
+				height: fallbackHeight,
 				sw:     sw,
 			}
 		}
@@ -4320,6 +4576,28 @@ func (sw *Switch) GetPeerChainInfo(peerID string) (height uint64, work *big.Int,
 	return chainInfo.Height, chainInfo.Work, chainInfo.LatestHash, nil
 }
 
+func (sw *Switch) PeerByID(peerID string) PeerInterface {
+	sw.mu.RLock()
+	peer := sw.peers.Get(peerID)
+	sw.mu.RUnlock()
+	if peer == nil {
+		return nil
+	}
+
+	cachedHeight := uint64(0)
+	sw.peerHeightCacheMu.RLock()
+	if c, ok := sw.peerHeightCache[peerID]; ok {
+		cachedHeight = c.Height
+	}
+	sw.peerHeightCacheMu.RUnlock()
+
+	return &switchPeerAdapter{
+		id:     peerID,
+		height: cachedHeight,
+		sw:     sw,
+	}
+}
+
 func (sw *Switch) PushBlocksToPeer(peerID string, blocks []*core.Block) (int, error) {
 	if len(blocks) == 0 {
 		return 0, fmt.Errorf("PushBlocksToPeer: empty blocks")
@@ -4418,4 +4696,13 @@ func (sw *Switch) SetSecurityManager(secMgr *security.SecurityManager) {
 	defer sw.mu.Unlock()
 	sw.securityMgr = secMgr
 	log.Printf("[Switch] SecurityManager integrated - NogoChain-style peer filtering enabled")
+}
+
+// SetPeerDisconnectNotifier registers a notifier that receives peer disconnection events.
+// The blockKeeper uses this to clear its syncPeer reference when the sync target disconnects.
+func (sw *Switch) SetPeerDisconnectNotifier(pn PeerDisconnectNotifier) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	sw.peerDisconnectNotifier = pn
+	log.Printf("[Switch] PeerDisconnectNotifier set")
 }

@@ -136,6 +136,9 @@ type Miner struct {
 
 	minerAddress string
 	chainID      uint64
+
+	// Peer responsiveness tracking for mining timeout safeguard
+	lastPeerResponseTime time.Time
 }
 
 // Blockchain defines the blockchain interface for mining
@@ -502,17 +505,60 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 	// the sync/reorg mechanism is already handling the fork resolution.
 	// Without this, the miner permanently pauses while waiting for sync
 	// that may itself be blocked, causing deadlock.
+	//
+	// TIMEOUT SAFEGUARD: If peers consistently fail to respond for >5 minutes,
+	// assume network partition and allow mining to prevent permanent stall.
+	// This is conservative: 5 minutes is enough time for transient failures
+	// to resolve, but not so long that the miner stalls indefinitely.
+	//
+	// RELAXED CHECK: Only defer mining if peer is AHEAD in height AND has more work.
+	// This prevents new nodes (lower height) from stopping mining on established nodes.
 	if m.pm != nil && !m.isSyncingOrReorging() {
 		peerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		maxPeerWork := getPeerWorkWithCtx(peerCtx, m.pm)
+		peerWork, peersResponded := getPeerWorkWithCtxExtended(peerCtx, m.pm)
 		cancel()
-		if maxPeerWork != nil && maxPeerWork.Sign() > 0 {
+
+		totalPeers := len(m.pm.Peers())
+		
+		// Track peer responsiveness for timeout safeguard
+		if peersResponded {
+			m.lastPeerResponseTime = time.Now()
+		} else {
+			// Initialize on first call
+			if m.lastPeerResponseTime.IsZero() {
+				m.lastPeerResponseTime = time.Now()
+			}
+		}
+
+		// TIMEOUT CHECK: If peers haven't responded for >5 minutes, allow mining
+		const peerTimeout = 5 * time.Minute
+		peerTimeoutExceeded := !peersResponded && time.Since(m.lastPeerResponseTime) > peerTimeout
+
+		// ONLY defer if peers responded and actually have more work
+		// If peers didn't respond, use timeout safeguard instead of deferring forever
+		if peersResponded && peerWork != nil && peerWork.Sign() > 0 {
 			localWork := m.bc.CanonicalWork()
-			if localWork != nil && maxPeerWork.Cmp(localWork) > 0 {
-				logf(colorBrightYellow, "⏸️ ", "Mining tick: peer has more cumulative work (peer=%s local=%s), waiting for fork resolution",
-					maxPeerWork.String(), localWork.String())
+			localHeight := m.bc.LatestBlock().GetHeight()
+			peerHeight := getPeerHeight(m.pm)
+			
+			// Only defer if peer is AHEAD in height AND has more work
+			// This prevents peers at LOWER height from stopping our mining
+			if localWork != nil && peerHeight > localHeight && peerWork.Cmp(localWork) > 0 {
+				logf(colorBrightYellow, "⏸️ ", "Mining tick: peer has more cumulative work (peer=%s local=%s) and higher height (peer=%d local=%d), waiting for fork resolution",
+					peerWork.String(), localWork.String(), peerHeight, localHeight)
 				return
 			}
+		}
+
+		if !peersResponded && !peerTimeoutExceeded {
+			logf(colorBrightYellow, "⏸️ ", "Mining tick: %d peers alive but none responded to work query (likely busy syncing), deferring mining",
+				totalPeers)
+			return
+		}
+
+		if peerTimeoutExceeded {
+			logf(colorBrightYellow, "⚠️ ", "Mining tick: peers unresponsive for %.1f minutes, mining anyway (possible network partition)",
+				time.Since(m.lastPeerResponseTime).Minutes())
 		}
 	}
 
@@ -887,22 +933,32 @@ func getPeerHeight(pm PeerAPI) uint64 {
 // Unlike getPeerWork, this accepts a context to prevent blocking indefinitely
 // when peers are slow or unresponsive.
 func getPeerWorkWithCtx(ctx context.Context, pm PeerAPI) *big.Int {
+	maxWork, _ := getPeerWorkWithCtxExtended(ctx, pm)
+	return maxWork
+}
+
+// getPeerWorkWithCtxExtended returns the maximum peer cumulative work and
+// whether at least one peer responded. The response flag distinguishes
+// between "all peers timed out" (busy syncing) and "all peers have less work".
+func getPeerWorkWithCtxExtended(ctx context.Context, pm PeerAPI) (*big.Int, bool) {
 	maxWork := big.NewInt(0)
+	peersResponded := false
 	for _, peer := range pm.Peers() {
 		select {
 		case <-ctx.Done():
-			return maxWork
+			return maxWork, peersResponded
 		default:
 		}
 		info, err := pm.FetchChainInfo(ctx, peer)
 		if err != nil || info == nil {
 			continue
 		}
+		peersResponded = true
 		if info.Work != nil && info.Work.Cmp(maxWork) > 0 {
 			maxWork.Set(info.Work)
 		}
 	}
-	return maxWork
+	return maxWork, peersResponded
 }
 
 // getPeerWork gets the maximum peer cumulative work

@@ -8,7 +8,7 @@ import (
 )
 
 // DefaultOrphanPoolSize defines the default maximum number of orphan blocks
-const DefaultOrphanPoolSize = 256
+const DefaultOrphanPoolSize = 2048
 
 // DefaultOrphanTTL defines the default time-to-live for orphan blocks
 const DefaultOrphanTTL = 60 * time.Minute

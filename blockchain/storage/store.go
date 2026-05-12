@@ -107,10 +107,13 @@ func OpenChainStoreFromEnv() (ChainStore, error) {
 		s, err := OpenBoltStore(chainBoltRel)
 		if err == nil {
 			_ = maybeMigrateGobToBolt(s, blocksGobRel)
+			log.Printf("[Store] Opened BoltStore at %s (supports snapshots, fast startup)", chainBoltRel)
 			return s, nil
 		}
+		log.Printf("[Store] WARNING: BoltStore failed to open (%v), falling back to GobStore (no snapshots, slow startup). Set STORE_BACKEND=gob to suppress this.", err)
 		return OpenGobStore(blocksGobRel)
 	case "gob":
+		log.Printf("[Store] Opened GobStore at %s (no snapshots)", blocksGobRel)
 		return OpenGobStore(blocksGobRel)
 	default:
 		return nil, fmt.Errorf("unknown STORE_BACKEND: %q", backend)

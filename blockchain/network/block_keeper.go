@@ -84,6 +84,7 @@ type blockKeeper struct {
 	blockProcessCh   chan *blockMsg
 	blocksProcessCh  chan *blocksMsg
 	headersProcessCh chan *headersMsg
+	syncBlockCh      chan *blockMsg
 
 	headerList     *list.List
 	forkResolvedCh chan struct{}
@@ -101,12 +102,33 @@ type blockKeeper struct {
 
 	syncActive   bool
 	syncActiveMu sync.Mutex
+
+	lastSyncAttempt time.Time
+	syncCooldown    time.Duration
 }
 
 func (bk *blockKeeper) isActive() bool {
 	bk.syncActiveMu.Lock()
 	defer bk.syncActiveMu.Unlock()
-	return bk.syncActive
+	if bk.syncActive {
+		return true
+	}
+	if bk.syncCooldown > 0 && time.Since(bk.lastSyncAttempt) < bk.syncCooldown {
+		return true
+	}
+	return false
+}
+
+// OnPeerDisconnected is called by Switch when a peer is removed.
+// Clears the syncPeer reference if the disconnected peer is the current sync target,
+// preventing the syncWorker from trying to request blocks from a disconnected peer.
+func (bk *blockKeeper) OnPeerDisconnected(peerID string) {
+	bk.syncActiveMu.Lock()
+	defer bk.syncActiveMu.Unlock()
+	if bk.syncPeer != nil && bk.syncPeer.ID() == peerID {
+		log.Printf("[BlockKeeper] Sync peer %s disconnected, clearing syncPeer", peerID)
+		bk.syncPeer = nil
+	}
 }
 
 func newBlockKeeper(chain ChainInterface, peers PeerSetInterface, candidatePool *core.CandidatePool) *blockKeeper {
@@ -117,6 +139,7 @@ func newBlockKeeper(chain ChainInterface, peers PeerSetInterface, candidatePool 
 		blockProcessCh:           make(chan *blockMsg, blockProcessChSize),
 		blocksProcessCh:          make(chan *blocksMsg, blocksProcessChSize),
 		headersProcessCh:         make(chan *headersMsg, headersProcessChSize),
+		syncBlockCh:              make(chan *blockMsg, 128),
 		headerList:               list.New(),
 		forkResolvedCh:           make(chan struct{}, 1),
 		quit:                     make(chan struct{}),
@@ -484,104 +507,70 @@ func (bk *blockKeeper) processHeaders(peerID string, headers []*HeaderLocator) {
 
 func (bk *blockKeeper) regularBlockSync(targetHeight uint64) error {
 	i := bk.chain.LatestBlock().GetHeight() + 1
-	consecutiveOrphan := 0
-	maxConsecutiveOrphanWalkback := 500
 	startHeight := i
 
-	batchSize := uint64(128)
-	if batchSize > maxBlockPerMsg {
-		batchSize = maxBlockPerMsg
-	}
-
-	log.Printf("[BlockKeeper] Starting sync: h=%d → target=%d (gap=%d, batch=%d)", startHeight, targetHeight, targetHeight-startHeight+1, batchSize)
+	log.Printf("[BlockKeeper] Starting sequential sync: h=%d → target=%d (gap=%d)",
+		startHeight, targetHeight, targetHeight-startHeight+1)
 
 	for i <= targetHeight {
-		remaining := targetHeight - i + 1
-		currentBatchSize := remaining
-		if currentBatchSize > batchSize {
-			currentBatchSize = batchSize
+		block, err := bk.requireBlock(i)
+		if err != nil {
+			return fmt.Errorf("regularBlockSync requireBlock at height %d: %w", i, err)
 		}
 
-		blocks, batchErr := bk.requireBlocksBatch(i, currentBatchSize)
-		if batchErr != nil {
-			return fmt.Errorf("regularBlockSync requireBlocksBatch at height %d (batch=%d): %w", i, currentBatchSize, batchErr)
+		isOrphan, addErr := bk.chain.AddBlock(block)
+		if addErr != nil {
+			return fmt.Errorf("regularBlockSync add block at height %d: %w", block.GetHeight(), addErr)
 		}
 
-		heightBeforeAdd := bk.chain.LatestBlock().GetHeight()
-		addedCount := 0
+		newTip := bk.chain.LatestBlock().GetHeight()
 
-		for h := i; h <= i+currentBatchSize-1; h++ {
-			block, exists := blocks[h]
-			if !exists {
-				continue
-			}
+		if newTip < i {
+			// Block rejected: orphan (parent missing) or fork (prevHash mismatch).
+			// Root cause: external miner created a conflicting block at height i-1,
+			// making the peer's block ineligible for canonical addition.
+			// Resolution: fetch peer's block at i-1, rollback conflicting block,
+			// add parent then child to restore sync continuity.
+			if block.GetHeight() > 1 {
+				reqHeight := block.GetHeight() - 1
+				log.Printf("[BlockKeeper] Sync block h=%d rejected (tip=%d, orphan=%v), fetching parent h=%d",
+					block.GetHeight(), newTip, isOrphan, reqHeight)
 
-			isOrphan, addErr := bk.chain.AddBlock(block)
-			if addErr != nil {
-				return fmt.Errorf("regularBlockSync add block at height %d: %w", block.GetHeight(), addErr)
-			}
+				parentBlock, pErr := bk.requireBlock(reqHeight)
+				if pErr != nil {
+					return fmt.Errorf("regularBlockSync fetch h=%d for conflict resolution: %w", reqHeight, pErr)
+				}
 
-			if !isOrphan {
-				addedCount++
+				if rbErr := bk.chain.RollbackToHeight(reqHeight - 1); rbErr != nil {
+					return fmt.Errorf("regularBlockSync rollback to h=%d: %w", reqHeight-1, rbErr)
+				}
+
+				if _, paErr := bk.chain.AddBlock(parentBlock); paErr != nil {
+					return fmt.Errorf("regularBlockSync add parent h=%d: %w", reqHeight, paErr)
+				}
+
+				if _, addErr = bk.chain.AddBlock(block); addErr != nil {
+					return fmt.Errorf("regularBlockSync re-add h=%d: %w", block.GetHeight(), addErr)
+				}
+
+				newTip = bk.chain.LatestBlock().GetHeight()
 			}
 		}
 
-		heightAfterAdd := bk.chain.LatestBlock().GetHeight()
-
-		if heightAfterAdd > heightBeforeAdd {
-			bk.recordSyncProgress(heightAfterAdd)
-			consecutiveOrphan = 0
-			if heightAfterAdd%500 == 0 || heightAfterAdd >= targetHeight {
-				log.Printf("[BlockKeeper] Sync progress: %d/%d (%.1f%%) [batch +%d]",
-					heightAfterAdd, targetHeight, float64(heightAfterAdd-startHeight)/float64(targetHeight-startHeight)*100, addedCount)
+		if newTip == i {
+			bk.recordSyncProgress(newTip)
+			if newTip%500 == 0 || newTip >= targetHeight {
+				log.Printf("[BlockKeeper] Sync progress: %d/%d (%.1f%%)",
+					newTip, targetHeight, float64(newTip-startHeight)/float64(targetHeight-startHeight)*100)
 			}
-			i = heightAfterAdd + 1
-			continue
+		} else {
+			return fmt.Errorf("regularBlockSync block at height %d permanently rejected, local tip=%d",
+				block.GetHeight(), newTip)
 		}
 
-		// NogoChain-style anti-dust-block loop detection:
-		// Peer returned blocks within the expected height range but none connected
-		// to our canonical chain — all were orphans from an incompatible fork.
-		// Without this check, the sync loop may retry indefinitely at the same height.
-		if heightAfterAdd == heightBeforeAdd && heightBeforeAdd >= i {
-			pID := bk.syncPeer.ID()
-			log.Printf("[BlockKeeper] regularBlockSync: dust block loop at h=%d, peer %s returned %d blocks (all orphans), height unchanged",
-				i, pID, currentBatchSize)
-			bk.peers.ProcessIllegal(pID, LevelMsgIllegal,
-				fmt.Sprintf("dust block loop: %d blocks at height %d produced no chain progress", currentBatchSize, i))
-			bk.peers.DecSyncLoad(pID)
-			bk.syncPeer = nil
-			return fmt.Errorf("%w: dust block loop at height %d from peer %s", errPeerMisbehave, i, pID)
-		}
-
-		if addedCount == 0 {
-			currentLocalHeight := bk.chain.LatestBlock().GetHeight()
-			if currentLocalHeight >= i {
-				i = currentLocalHeight + 1
-				continue
-			}
-
-			consecutiveOrphan++
-			if consecutiveOrphan > maxConsecutiveOrphanWalkback {
-				// NogoChain-style ProcessIllegal: peer is on an unreachable fork
-				pID := bk.syncPeer.ID()
-				bk.peers.ProcessIllegal(pID, LevelMsgIllegal,
-					fmt.Sprintf("unreachable fork: %d consecutive orphan walkbacks from height %d",
-						consecutiveOrphan, i-uint64(consecutiveOrphan)+1))
-				log.Printf("[BlockKeeper] regularBlockSync: walked back %d heights from %d without finding connectable ancestor (local=%d), peer may be on unreachable fork",
-					consecutiveOrphan, i-uint64(consecutiveOrphan)+1, currentLocalHeight)
-				return fmt.Errorf("%w: cannot find common ancestor after walking back %d from height %d (local=%d)",
-					errChainMismatch, consecutiveOrphan, i-uint64(consecutiveOrphan)+1, currentLocalHeight)
-			}
-
-			if i > 1 {
-				i--
-			}
-			continue
-		}
-
-		i += currentBatchSize
+		i = bk.chain.LatestBlock().GetHeight() + 1
 	}
+
 	return nil
 }
 
@@ -599,7 +588,7 @@ func (bk *blockKeeper) requireBlock(height uint64) (*core.Block, error) {
 
 	for {
 		select {
-		case msg := <-bk.blockProcessCh:
+		case msg := <-bk.syncBlockCh:
 			if msg.peerID != bk.syncPeer.ID() {
 				continue
 			}
@@ -632,7 +621,7 @@ func (bk *blockKeeper) requireBlockFast(height uint64) (*core.Block, error) {
 
 	for {
 		select {
-		case msg := <-bk.blockProcessCh:
+		case msg := <-bk.syncBlockCh:
 			if msg.peerID != bk.syncPeer.ID() {
 				continue
 			}
@@ -846,15 +835,30 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 		if peerHeight > blockHeight {
 			log.Printf("[BlockKeeper] checkSyncType: regular sync (peer has more work + higher height, gap=%d)",
 				peerHeight-blockHeight)
+			if realPeer := bk.peers.PeerByID(bestByWork.ID()); realPeer != nil && realPeer.Height() > 0 {
+				return syncTypeRegular, realPeer
+			}
+			if fallback := bk.peers.bestPeer(SFFullNode); fallback != nil && fallback.Height() > 0 {
+				log.Printf("[BlockKeeper] checkSyncType: PeerByID(%s) returned nil or height=0, using bestPeer fallback %s (h=%d)",
+					bestByWork.ID(), fallback.ID(), fallback.Height())
+				return syncTypeRegular, fallback
+			}
+			log.Printf("[BlockKeeper] checkSyncType: all peer resolution failed, using simplePeer wrapper (h=%d)", peerHeight)
 			return syncTypeRegular, bestByWork
 		}
 		if peerHeight == blockHeight {
 			log.Printf("[BlockKeeper] checkSyncType: fork detection (peer has more work at same height=%d)",
 				blockHeight)
+			if realPeer := bk.peers.PeerByID(bestByWork.ID()); realPeer != nil && realPeer.Height() > 0 {
+				return syncTypeForkDetection, realPeer
+			}
 			return syncTypeForkDetection, bestByWork
 		}
 		log.Printf("[BlockKeeper] checkSyncType: fork detection (peer has more work but lower height=%d, local=%d)",
 			peerHeight, blockHeight)
+		if realPeer := bk.peers.PeerByID(bestByWork.ID()); realPeer != nil && realPeer.Height() > 0 {
+			return syncTypeForkDetection, realPeer
+		}
 		return syncTypeForkDetection, bestByWork
 	}
 
@@ -1004,13 +1008,26 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 	}
 
 	bk.syncPeer = peer
+
+	peerHeight := peer.Height()
+	if peerHeight == 0 {
+		h, _, _, err := bk.peers.GetPeerChainInfo(peer.ID())
+		if err == nil && h > 0 {
+			peerHeight = h
+			log.Printf("[BlockKeeper] dispatchRegularSync: peer %s Height()=0, resolved via GetPeerChainInfo to %d", peer.ID(), h)
+		} else {
+			log.Printf("[BlockKeeper] dispatchRegularSync: cannot determine peer height for %s (err=%v), skipping sync round", peer.ID(), err)
+			return false
+		}
+	}
+
 	targetHeight := localHeight + maxBlockPerMsg
-	if targetHeight > peer.Height() {
-		targetHeight = peer.Height()
+	if targetHeight > peerHeight {
+		targetHeight = peerHeight
 	}
 
 	log.Printf("[BlockKeeper] REGULAR sync: h=%d → h=%d (gap=%d) via peer %s (peerH=%d)",
-		localHeight, targetHeight, targetHeight-localHeight, peer.ID(), peer.Height())
+		localHeight, targetHeight, targetHeight-localHeight, peer.ID(), peerHeight)
 
 	if err := bk.regularBlockSync(targetHeight); err != nil {
 		errMsg := err.Error()
@@ -1035,6 +1052,17 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 				bk.peers.DecSyncLoad(peer.ID())
 				return true
 			}
+		}
+
+		// Do NOT call ProcessIllegal for network-level errors (timeout, peer drop).
+		// These are transient conditions, not peer misbehavior, and calling
+		// ProcessIllegal would increment FailCount and eventually ban the peer.
+		// With 10-ban threshold and sync timeout of 30s, the peer would be
+		// banned after just 5 minutes of slow responses, permanently stalling sync.
+		if errors.Is(err, errRequestTimeout) || errors.Is(err, errPeerDropped) {
+			log.Printf("[BlockKeeper] Sync transient failure at h=%d: %v (will retry)", localHeight, err)
+			bk.peers.DecSyncLoad(peer.ID())
+			return false
 		}
 
 		log.Printf("[BlockKeeper] Sync FAILED at h=%d: %v (will retry in 1s)", localHeight, err)
@@ -1238,7 +1266,7 @@ func (bk *blockKeeper) getPeerTipBlock(peer PeerInterface) *core.Block {
 	}
 
 	return &core.Block{
-		Height:    height,
+		Height: height,
 		Header: core.BlockHeader{
 			TimestampUnix: time.Now().Unix(),
 		},
@@ -1328,6 +1356,7 @@ func (bk *blockKeeper) syncWorker() {
 
 			bk.syncActiveMu.Lock()
 			bk.syncActive = false
+			bk.lastSyncAttempt = time.Now()
 			bk.syncActiveMu.Unlock()
 
 		case <-bk.forkResolvedCh:
@@ -1340,6 +1369,7 @@ func (bk *blockKeeper) syncWorker() {
 
 			bk.syncActiveMu.Lock()
 			bk.syncActive = false
+			bk.lastSyncAttempt = time.Now()
 			bk.syncActiveMu.Unlock()
 
 		case <-bk.quit:
@@ -1478,6 +1508,7 @@ type ChainInterface interface {
 	GetBlockByHash(hash []byte) (*core.Block, bool)
 	GetBlocksFrom(from uint64, count uint64) []*core.Block
 	CanonicalWork() *big.Int
+	RollbackToHeight(height uint64) error
 }
 
 type PeerSetInterface interface {
@@ -1491,6 +1522,7 @@ type PeerSetInterface interface {
 	SendInvToPeer(peerID string, invMsg []byte) bool
 	IncSyncLoad(peerAddr string)
 	DecSyncLoad(peerAddr string)
+	PeerByID(peerID string) PeerInterface
 }
 
 type PeerInterface interface {
@@ -1500,4 +1532,11 @@ type PeerInterface interface {
 	getBlocksByHeights(heights []uint64) bool
 	getBlocks(locator [][]byte, stopHash []byte) bool
 	getHeaders(locator [][]byte, stopHash []byte) bool
+}
+
+// PeerDisconnectNotifier defines the interface for receiving peer disconnection notifications.
+// Switch calls OnPeerDisconnected when a peer is removed so that components like
+// blockKeeper can clear stale references to the disconnected peer.
+type PeerDisconnectNotifier interface {
+	OnPeerDisconnected(peerID string)
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"gopkg.in/karalabe/cookiejar.v2/collections/prque"
 
@@ -164,10 +165,17 @@ func (f *blockFetcher) processNewBlock(msg *blockMsg) {
 		return
 	}
 
+	// CRITICAL: Use blocking send with timeout to prevent block loss
+	// Old behavior: non-blocking select drops blocks when channel is full
+	// New behavior: block for up to 5 seconds, only drop if timeout exceeded
+	// This ensures all valid blocks are processed, maintaining chain integrity
 	select {
 	case f.newBlockCh <- msg:
-	default:
-		log.Printf("[BlockFetcher] WARNING: channel full, dropping block height=%d",
-			msg.block.GetHeight())
+		// Successfully queued for processing
+	case <-time.After(5 * time.Second):
+		log.Printf("[BlockFetcher] ERROR: channel blocked for 5s, dropping block height=%d hash=%x",
+			msg.block.GetHeight(), msg.block.Hash[:8])
+		// Note: This should rarely happen in production with properly sized channel
+		// If it does, it indicates a performance bottleneck that needs investigation
 	}
 }
