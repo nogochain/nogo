@@ -313,6 +313,11 @@ type Chain struct {
 	// diffAdjuster state are identical between mining and validation paths.
 	powEngine     *nogopow.NogopowEngine
 	powEngineOnce sync.Once
+
+	// Checkpoint voter for multi-sig checkpoint consensus
+	checkpointVoter   *CheckpointVoter
+	checkpointVoteMu  sync.RWMutex
+	onCheckpointBlock func(height uint64, blockHash string) // callback to broadcast vote
 }
 
 // ReorgExecutor interface for unified fork resolution
@@ -401,6 +406,34 @@ func (c *Chain) SetReorgExecutor(executor ReorgExecutor) {
 	defer c.mu.Unlock()
 	c.reorgExecutor = executor
 	log.Printf("[Chain] ReorgExecutor set for unified fork resolution - all reorgs will go through centralized engine")
+}
+
+// SetCheckpointVoter assigns the checkpoint voter for multi-sig consensus.
+func (c *Chain) SetCheckpointVoter(voter *CheckpointVoter) {
+	c.checkpointVoteMu.Lock()
+	defer c.checkpointVoteMu.Unlock()
+	c.checkpointVoter = voter
+	if voter != nil {
+		voter.SetOnCheckpointFinalized(c.onCheckpointFinalized)
+	}
+}
+
+// SetOnCheckpointBlock sets the callback for broadcasting checkpoint votes via P2P.
+func (c *Chain) SetOnCheckpointBlock(callback func(height uint64, blockHash string)) {
+	c.checkpointVoteMu.Lock()
+	defer c.checkpointVoteMu.Unlock()
+	c.onCheckpointBlock = callback
+}
+
+func (c *Chain) onCheckpointFinalized(record *CheckpointRecord) {
+	log.Printf("[Chain] Checkpoint finalized at h=%d (sigs=%d)", record.Height, len(record.Signatures))
+}
+
+// GetCheckpointVoter returns the checkpoint voter for sync queries.
+func (c *Chain) GetCheckpointVoter() *CheckpointVoter {
+	c.checkpointVoteMu.RLock()
+	defer c.checkpointVoteMu.RUnlock()
+	return c.checkpointVoter
 }
 
 // SetOnBlockAdded sets the callback function to be called when a block is added
@@ -1219,6 +1252,30 @@ func (c *Chain) AppendBlock(block *Block) error {
 				log.Printf("[Chain] Created state snapshot at height %d (root=%x)", block.GetHeight(), stateRoot[:8])
 			}
 		}
+
+		// Auto-register checkpoint hash for fast sync support
+		blockHash := hex.EncodeToString(block.GetHash())
+		if err := c.store.PutCheckpointEntry(block.GetHeight(), blockHash); err != nil {
+			log.Printf("[Chain] WARNING: failed to register checkpoint at height %d: %v", block.GetHeight(), err)
+		} else {
+			log.Printf("[Chain] Registered checkpoint h=%d hash=%s", block.GetHeight(), blockHash[:16])
+		}
+
+		// Trigger checkpoint multi-sig voting every CheckpointInterval blocks
+		if block.GetHeight()%CheckpointInterval == 0 {
+			c.checkpointVoteMu.RLock()
+			voter := c.checkpointVoter
+			broadcast := c.onCheckpointBlock
+			c.checkpointVoteMu.RUnlock()
+
+			if voter != nil {
+				if _, err := voter.SignCheckpoint(block.GetHeight(), blockHash); err != nil {
+					log.Printf("[Chain] WARNING: failed to sign checkpoint at h=%d: %v", block.GetHeight(), err)
+				} else if broadcast != nil {
+					broadcast(block.GetHeight(), blockHash)
+				}
+			}
+		}
 	}
 
 	// Store block
@@ -1745,6 +1802,18 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 				parentHashHex := hex.EncodeToString(current.Header.PrevHash)
 				parent, exists := c.blocksByHash[parentHashHex]
 				if !exists {
+					parentHeight := current.GetHeight() - 1
+					if forkBlocksAtHeight, forkExists := c.forkBlocks[parentHeight]; forkExists {
+						for _, forkBlock := range forkBlocksAtHeight {
+							if hex.EncodeToString(forkBlock.Hash) == parentHashHex {
+								parent = forkBlock
+								exists = true
+								break
+							}
+						}
+					}
+				}
+				if !exists {
 					return errors.New("parent block not found during chain extension")
 				}
 				current = parent
@@ -1794,8 +1863,18 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
 		parent, exists := c.blocksByHash[parentHashHex]
 		if !exists {
-			// Deep fork: intermediate blocks not yet downloaded.
-			// Store as orphan and trigger sync to fetch missing range.
+			parentHeight := current.GetHeight() - 1
+			if forkBlocksAtHeight, forkExists := c.forkBlocks[parentHeight]; forkExists {
+				for _, forkBlock := range forkBlocksAtHeight {
+					if hex.EncodeToString(forkBlock.Hash) == parentHashHex {
+						parent = forkBlock
+						exists = true
+						break
+					}
+				}
+			}
+		}
+		if !exists {
 			log.Printf("[Chain] reorganizeChainLocked: missing parent at height %d on fork chain, storing as fork (ancestor=%d, newTip=%d)",
 				current.GetHeight(), ancestorHeight, newTip.GetHeight())
 			return ErrOrphanBlock
@@ -2097,6 +2176,22 @@ func (c *Chain) SetTip(newTip *Block) error {
 // Concurrency safety: thread-safe read-only operation
 func (c *Chain) CanonicalWork() *big.Int {
 	return c.GetCanonicalWork()
+}
+
+// LatestCheckpoint delegates to the store for checkpoint retrieval.
+func (c *Chain) LatestCheckpoint() (uint64, string, error) {
+	if c.store == nil {
+		return 0, "", fmt.Errorf("store not available")
+	}
+	return c.store.LatestCheckpoint()
+}
+
+// GetCheckpointByHeight delegates to the store for checkpoint lookup.
+func (c *Chain) GetCheckpointByHeight(height uint64) (string, bool, error) {
+	if c.store == nil {
+		return "", false, fmt.Errorf("store not available")
+	}
+	return c.store.GetCheckpointByHeight(height)
 }
 
 // LatestBlock returns the latest block
@@ -3510,6 +3605,39 @@ func (c *Chain) addCanonicalBlockLocked(block *Block, hashHex string) (bool, err
 	// Update indexes
 	c.updateIndexesForBlock(block, height)
 
+	// Update BoltDB address index for real-time query support
+	// Must be done during block addition to avoid expensive rebuild on restart
+	if c.addressIndexBolt != nil {
+		entries := make([]index.AddressIndexEntry, 0, len(block.Transactions))
+		for _, tx := range block.Transactions {
+			if tx.Type != TxTransfer {
+				continue
+			}
+			fromAddr, err := tx.FromAddress()
+			if err != nil {
+				continue
+			}
+			txID, err := tx.GetIDWithError()
+			if err != nil {
+				continue
+			}
+			entries = append(entries, index.AddressIndexEntry{
+				TxID:      txID,
+				FromAddr:  fromAddr,
+				ToAddress: tx.ToAddress,
+				Amount:    tx.Amount,
+				Fee:       tx.Fee,
+				Nonce:     tx.Nonce,
+				Type:      index.TransactionType(tx.Type),
+			})
+		}
+		if err := c.addressIndexBolt.IndexBlockSimple(block.Hash, block.GetHeight(), block.Header.TimestampUnix, entries); err != nil {
+			log.Printf("WARNING: index block %d in BoltDB: %v", block.GetHeight(), err)
+		} else {
+			c.addressIndexBolt.SetIndexedHeight(block.GetHeight())
+		}
+	}
+
 	// Update canonical work
 	if c.canonicalWork == nil {
 		c.canonicalWork = big.NewInt(0)
@@ -3893,86 +4021,63 @@ func (c *Chain) rebuildIndexesLocked() {
 }
 
 // shouldReorgToHeaviestLocked checks if there's a heavier fork chain
-// Query function used by Mining module to decide if reorg is needed
-// Actual reorg delegation happens in reorganizeToHeaviestLocked() via ReorgExecutor
+// Uses findBestChainTipLocked for unified work+tiebreaker comparison.
 // Caller must hold c.mu lock
 func (c *Chain) shouldReorgToHeaviestLocked() bool {
-	log.Printf("[Chain] shouldReorgToHeaviestLocked() checking for heavier fork")
-
 	if len(c.forkBlocks) == 0 {
 		return false
 	}
 
-	var heaviestFork *Block
-	heaviestWork := c.canonicalWork
-
-	for height, blocks := range c.forkBlocks {
-		// CRITICAL FIX: Check fork blocks at tip height AND beyond
-		// Old behavior: height < len(c.blocks) skipped ALL fork blocks at or below tip height
-		// New behavior: only skip blocks below tip height (height < len(c.blocks)-1)
-		// This enables competing blocks at the same height as the tip to trigger reorg
-		if height < uint64(len(c.blocks)-1) {
-			continue
-		}
-
-		for _, block := range blocks {
-			forkCumulativeWork := c.calculateCumulativeWorkLocked(block)
-
-			if forkCumulativeWork.Cmp(heaviestWork) > 0 {
-				heaviestWork = new(big.Int).Set(forkCumulativeWork)
-				heaviestFork = block
-			}
-		}
+	if len(c.blocks) == 0 {
+		return false
 	}
 
-	return heaviestFork != nil
+	bestTip := c.findBestChainTipLocked()
+	if bestTip == nil {
+		return false
+	}
+
+	currentTip := c.blocks[len(c.blocks)-1]
+	currentTipHash := hex.EncodeToString(currentTip.Hash)
+	bestTipHash := hex.EncodeToString(bestTip.Hash)
+
+	return bestTipHash != currentTipHash
 }
 
-// reorganizeToHeaviestLocked reorganizes to the heaviest fork chain
-// UNIFIED FORK RESOLUTION: Delegates to ReorgExecutor when available
-// This ensures all reorgs go through single entry point with preventive timing
+// reorganizeToHeaviestLocked reorganizes to the heaviest fork chain.
+// Uses findBestChainTipLocked for unified work+tiebreaker comparison.
 // Caller must hold c.mu lock
 func (c *Chain) reorganizeToHeaviestLocked() error {
 	if len(c.forkBlocks) == 0 {
 		return nil
 	}
 
-	var heaviestFork *Block
-	heaviestWork := c.canonicalWork
-
-	for height, blocks := range c.forkBlocks {
-		// CRITICAL FIX: Check fork blocks at tip height AND beyond
-		// Old behavior: height < len(c.blocks) skipped ALL fork blocks at or below tip height
-		// New behavior: only skip blocks below tip height (height < len(c.blocks)-1)
-		// This enables competing blocks at the same height as the tip to trigger reorg
-		if height < uint64(len(c.blocks)-1) {
-			continue
-		}
-
-		for _, block := range blocks {
-			forkCumulativeWork := c.calculateCumulativeWorkLocked(block)
-
-			if forkCumulativeWork.Cmp(heaviestWork) > 0 {
-				heaviestWork = new(big.Int).Set(forkCumulativeWork)
-				heaviestFork = block
-			}
-		}
-	}
-
-	if heaviestFork == nil {
+	if len(c.blocks) == 0 {
 		return nil
 	}
 
-	log.Printf("[Chain] Reorganizing to heaviest fork: height=%d work=%s",
-		heaviestFork.GetHeight(), heaviestWork.String())
+	bestTip := c.findBestChainTipLocked()
+	if bestTip == nil {
+		return nil
+	}
+
+	currentTip := c.blocks[len(c.blocks)-1]
+	currentTipHash := hex.EncodeToString(currentTip.Hash)
+	bestTipHash := hex.EncodeToString(bestTip.Hash)
+	if bestTipHash == currentTipHash {
+		return nil
+	}
+
+	log.Printf("[Chain] Reorganizing to heaviest fork: height=%d work=%s (current tip height=%d)",
+		bestTip.GetHeight(), c.calculateCumulativeWorkLocked(bestTip).String(), uint64(len(c.blocks)-1))
 
 	// UNIFIED ENTRY POINT: Delegate to ReorgExecutor if set (prevents dual-track)
 	if c.reorgExecutor != nil {
-		log.Printf("[Chain] 🔄 Delegating reorg to unified ReorgExecutor (height=%d)", heaviestFork.GetHeight())
+		log.Printf("[Chain] ReorgExecutor delegating (height=%d)", bestTip.GetHeight())
 
-		err := c.reorgExecutor.RequestReorg(heaviestFork, "Chain-reorganizeToHeaviest")
+		err := c.reorgExecutor.RequestReorg(bestTip, "Chain-reorganizeToHeaviest")
 		if err == nil {
-			log.Printf("[Chain] ✅ Reorg successfully delegated to unified executor")
+			log.Printf("[Chain] Reorg delegated to unified executor")
 			return nil
 		}
 
@@ -3980,7 +4085,7 @@ func (c *Chain) reorganizeToHeaviestLocked() error {
 	}
 
 	// FALLBACK: Internal reorg (only when no executor or executor declined)
-	return c.reorganizeToLocked(heaviestFork)
+	return c.reorganizeToLocked(bestTip)
 }
 
 // updateIndexesForBlock updates transaction and address indexes for a block

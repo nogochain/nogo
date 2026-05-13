@@ -21,9 +21,10 @@ const (
 	chainBoltRel    = "nogodata/data/chain.db"
 	rulesHashRel    = "nogodata/data/rules.hash"
 	genesisHashRel  = "nogodata/data/genesis.hash"
-	blocksBucket    = "blocks"
-	canonBucket     = "canonical"
-	metaBucket      = "meta"
+	blocksBucket        = "blocks"
+	canonBucket         = "canonical"
+	metaBucket          = "meta"
+	checkpointBucket    = "checkpoints"
 	metaTipHash     = "tipHash"
 	metaTipHeight   = "tipHeight"
 	metaRulesHash   = "rulesHash"
@@ -58,6 +59,23 @@ type ChainStore interface {
 	// Checkpoint persistence for fast sync
 	GetCheckpoints() ([]byte, bool, error)
 	PutCheckpoints(data []byte) error
+
+	// === Automated Checkpoint System (1000-block intervals) ===
+
+	// PutCheckpointEntry records a block hash checkpoint at the given height.
+	PutCheckpointEntry(height uint64, hash string) error
+
+	// GetCheckpointByHeight returns the checkpoint hash at the given height.
+	GetCheckpointByHeight(height uint64) (string, bool, error)
+
+	// LatestCheckpoint returns the height and hash of the most recent checkpoint.
+	LatestCheckpoint() (uint64, string, error)
+
+	// SerializeSnapshot serializes the state snapshot at the given height for P2P transfer.
+	SerializeSnapshot(height uint64) ([]byte, error)
+
+	// DeserializeSnapshot restores a state snapshot from serialized P2P data.
+	DeserializeSnapshot(data []byte) (uint64, []byte, map[string]core.Account, error)
 
 	// === State Persistence Methods (P0-1 Fix: state persistence) ===
 
@@ -443,6 +461,31 @@ func (s *GobStore) DeleteSnapshot(_ uint64) error {
 // Use BoltStore for state persistence.
 func (s *GobStore) CalculateStateRoot(_ map[string]core.Account) ([]byte, error) {
 	return nil, fmt.Errorf("calculate state root: not supported by GobStore - please use BoltStore for state persistence")
+}
+
+// PutCheckpointEntry is not supported by GobStore.
+func (s *GobStore) PutCheckpointEntry(_ uint64, _ string) error {
+	return fmt.Errorf("checkpoint entry: not supported by GobStore - please use BoltStore")
+}
+
+// GetCheckpointByHeight is not supported by GobStore.
+func (s *GobStore) GetCheckpointByHeight(_ uint64) (string, bool, error) {
+	return "", false, fmt.Errorf("checkpoint by height: not supported by GobStore - please use BoltStore")
+}
+
+// LatestCheckpoint is not supported by GobStore.
+func (s *GobStore) LatestCheckpoint() (uint64, string, error) {
+	return 0, "", fmt.Errorf("latest checkpoint: not supported by GobStore - please use BoltStore")
+}
+
+// SerializeSnapshot is not supported by GobStore.
+func (s *GobStore) SerializeSnapshot(_ uint64) ([]byte, error) {
+	return nil, fmt.Errorf("serialize snapshot: not supported by GobStore - please use BoltStore")
+}
+
+// DeserializeSnapshot is not supported by GobStore.
+func (s *GobStore) DeserializeSnapshot(_ []byte) (uint64, []byte, map[string]core.Account, error) {
+	return 0, nil, nil, fmt.Errorf("deserialize snapshot: not supported by GobStore - please use BoltStore")
 }
 
 func maybeMigrateGobToBolt(bolt *BoltStore, gobPath string) error {

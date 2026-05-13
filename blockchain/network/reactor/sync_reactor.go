@@ -59,6 +59,19 @@ const (
 	// This prevents the first-seen bias from creating persistent fork networks.
 	SyncMsgSeedVote byte = 0x0A
 
+	// SyncMsgCheckpointVote broadcasts a checkpoint vote for multi-sig consensus.
+	// Payload: JSON-encoded CheckpointVote {height, block_hash, validator_id, pub_key, signature, timestamp}.
+	SyncMsgCheckpointVote byte = 0x0E
+
+	// SyncMsgCheckpointQuery requests the latest finalized checkpoint from a peer.
+	// Payload: JSON-encoded checkpointQueryPayload {requesting_height: uint64}.
+	// Response: SyncMsgCheckpointResponse.
+	SyncMsgCheckpointQuery byte = 0x0F
+
+	// SyncMsgCheckpointResponse contains a finalized checkpoint record with multi-sig.
+	// Payload: JSON-encoded CheckpointRecord {height, block_hash, timestamp, prev_cp_hash, signatures, validator_count}.
+	SyncMsgCheckpointResponse byte = 0x10
+
 	// SyncMsgNotFound indicates requested data is unavailable.
 	// Payload: JSON-encoded notFoundPayload {msgType: byte, ids: []string}.
 	SyncMsgNotFound byte = 0xFF
@@ -107,6 +120,15 @@ type SyncHandler interface {
 	// OnMissingTxRequest handles a request for missing transactions that
 	// could not be reconstructed from a compact block.
 	OnMissingTxRequest(peerID string, req *MissingTxRequest) error
+
+	// OnCheckpointVote handles a received checkpoint vote for multi-sig consensus.
+	OnCheckpointVote(peerID string, height uint64, blockHash string, validatorID string, pubKey []byte, signature []byte, timestamp int64) error
+
+	// OnCheckpointQuery handles a received checkpoint query from a peer requesting fast sync.
+	OnCheckpointQuery(peerID string) error
+
+	// OnCheckpointResponse handles a received finalized checkpoint record.
+	OnCheckpointResponse(peerID string, record *core.CheckpointRecord) error
 }
 
 // SyncReactor handles blockchain synchronization protocol messages.
@@ -322,6 +344,12 @@ func (sr *SyncReactor) dispatch(msgType byte, peerID string, payload []byte, han
 	case SyncMsgTx:
 	case SyncMsgNotFound:
 		sr.handleNotFound(peerID, payload, handler)
+	case SyncMsgCheckpointVote:
+		sr.handleCheckpointVote(peerID, payload, handler)
+	case SyncMsgCheckpointQuery:
+		sr.handleCheckpointQuery(peerID, handler)
+	case SyncMsgCheckpointResponse:
+		sr.handleCheckpointResponse(peerID, payload, handler)
 	default:
 		// Unknown message type - silently ignore to avoid amplifying
 		// malformed or malicious traffic.
@@ -809,4 +837,113 @@ func EncodeUint64ToBytes(v uint64) []byte {
 	b := make([]byte, 8)
 	binary.LittleEndian.PutUint64(b, v)
 	return b
+}
+
+// === Checkpoint Message Handlers ===
+
+type checkpointVotePayload struct {
+	Height      uint64 `json:"height"`
+	BlockHash   string `json:"block_hash"`
+	ValidatorID string `json:"validator_id"`
+	PubKey      []byte `json:"pub_key"`
+	Signature   []byte `json:"signature"`
+	Timestamp   int64  `json:"timestamp"`
+}
+
+type checkpointQueryPayload struct {
+	RequestingHeight uint64 `json:"requesting_height"`
+}
+
+type checkpointResponsePayload struct {
+	Record []byte `json:"record"`
+}
+
+func (sr *SyncReactor) handleCheckpointVote(peerID string, payload []byte, handler SyncHandler) {
+	if len(payload) == 0 {
+		return
+	}
+	var req checkpointVotePayload
+	if err := json.Unmarshal(payload, &req); err != nil {
+		log.Printf("[SyncReactor] handleCheckpointVote: unmarshal failed from %s: %v", peerID, err)
+		return
+	}
+	if err := handler.OnCheckpointVote(peerID, req.Height, req.BlockHash, req.ValidatorID, req.PubKey, req.Signature, req.Timestamp); err != nil {
+		log.Printf("[SyncReactor] handleCheckpointVote: OnCheckpointVote failed for %s: %v", peerID, err)
+	}
+}
+
+func (sr *SyncReactor) handleCheckpointQuery(peerID string, handler SyncHandler) {
+	if err := handler.OnCheckpointQuery(peerID); err != nil {
+		log.Printf("[SyncReactor] handleCheckpointQuery: failed for %s: %v", peerID, err)
+	}
+}
+
+func (sr *SyncReactor) handleCheckpointResponse(peerID string, payload []byte, handler SyncHandler) {
+	if len(payload) == 0 {
+		return
+	}
+	var resp checkpointResponsePayload
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		log.Printf("[SyncReactor] handleCheckpointResponse: unmarshal failed: %v", err)
+		return
+	}
+
+	var record core.CheckpointRecord
+	if err := json.Unmarshal(resp.Record, &record); err != nil {
+		log.Printf("[SyncReactor] handleCheckpointResponse: unmarshal record failed: %v", err)
+		return
+	}
+
+	if err := handler.OnCheckpointResponse(peerID, &record); err != nil {
+		log.Printf("[SyncReactor] handleCheckpointResponse: failed for %s: %v", peerID, err)
+	}
+}
+
+// === Checkpoint Message Builders ===
+
+// BuildCheckpointVoteMsg serializes a checkpoint vote message.
+func BuildCheckpointVoteMsg(height uint64, blockHash string, validatorID string, pubKey []byte, signature []byte, timestamp int64) ([]byte, error) {
+	payload, err := json.Marshal(checkpointVotePayload{
+		Height:      height,
+		BlockHash:   blockHash,
+		ValidatorID: validatorID,
+		PubKey:      pubKey,
+		Signature:   signature,
+		Timestamp:   timestamp,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build checkpoint vote message: %w", err)
+	}
+	msg := make([]byte, 1+len(payload))
+	msg[0] = SyncMsgCheckpointVote
+	copy(msg[1:], payload)
+	return msg, nil
+}
+
+// BuildCheckpointQueryMsg serializes a checkpoint query message.
+func BuildCheckpointQueryMsg(requestingHeight uint64) ([]byte, error) {
+	payload, err := json.Marshal(checkpointQueryPayload{RequestingHeight: requestingHeight})
+	if err != nil {
+		return nil, fmt.Errorf("build checkpoint query message: %w", err)
+	}
+	msg := make([]byte, 1+len(payload))
+	msg[0] = SyncMsgCheckpointQuery
+	copy(msg[1:], payload)
+	return msg, nil
+}
+
+// BuildCheckpointResponseMsg serializes a checkpoint response message.
+func BuildCheckpointResponseMsg(record *core.CheckpointRecord) ([]byte, error) {
+	recordBytes, err := json.Marshal(record)
+	if err != nil {
+		return nil, fmt.Errorf("build checkpoint response message: %w", err)
+	}
+	payload, err := json.Marshal(checkpointResponsePayload{Record: recordBytes})
+	if err != nil {
+		return nil, fmt.Errorf("build checkpoint response message: %w", err)
+	}
+	msg := make([]byte, 1+len(payload))
+	msg[0] = SyncMsgCheckpointResponse
+	copy(msg[1:], payload)
+	return msg, nil
 }

@@ -105,6 +105,9 @@ type blockKeeper struct {
 	syncActive   bool
 	syncActiveMu sync.Mutex
 
+	getReceivedCheckpoint func() *core.CheckpointRecord
+	triggerSyncCheck      func()
+
 	lastSyncAttempt time.Time
 	syncCooldown    time.Duration
 }
@@ -848,11 +851,87 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 	log.Printf("[BlockKeeper] checkSyncType: local(H=%d,W=%s) vs bestPeer(H=%d,W=%s,ID=%s)",
 		blockHeight, localWork.String(), peerHeight, peerWork.String(), bestByWork.ID())
 
-	// Priority 1: fast sync when checkpoint is ahead and peer supports it.
+	// Checkpoint-aware peer filtering for new nodes:
+	// When a P2P checkpoint record exists, filter out peers that cannot verify
+	// the checkpoint. This prevents new nodes from syncing to wrong/malicious peers.
+	if (blockHeight == 0 || blockHeight < 128) && bk.getReceivedCheckpoint != nil {
+		if p2pCP := bk.getReceivedCheckpoint(); p2pCP != nil && p2pCP.Height > 0 {
+			if peerHeight < p2pCP.Height {
+				log.Printf("[BlockKeeper] checkSyncType: bestPeer(H=%d) doesn't reach checkpoint(H=%d), searching for checkpoint-compatible peer",
+					peerHeight, p2pCP.Height)
+				var cpPeer PeerInterface
+				var cpWork *big.Int
+				var cpHeight uint64
+				for _, peerID := range peerIDs {
+					ph, pw, _, err := bk.peers.GetPeerChainInfo(peerID)
+					if err != nil || pw == nil {
+						continue
+					}
+					if ph < p2pCP.Height {
+						continue
+					}
+					if cpWork == nil || pw.Cmp(cpWork) > 0 {
+						cpWork = pw
+						cpHeight = ph
+						cpPeer = bk.wrapPeer(peerID, ph)
+					}
+				}
+				if cpPeer != nil {
+					log.Printf("[BlockKeeper] checkSyncType: switched to checkpoint-compatible peer H=%d (checkpoint H=%d)",
+						cpHeight, p2pCP.Height)
+					bestByWork = cpPeer
+					peerWork = cpWork
+					peerHeight = cpHeight
+				}
+			}
+		}
+	}
+
+	// Priority 1: fast sync when hardcoded checkpoint is ahead and peer supports it.
 	if checkpoint != nil && peerHeight >= checkpoint.Height {
-		minGap := uint64(128)
+		const minGap = uint64(128)
 		if checkpoint.Height >= blockHeight+minGap {
 			return syncTypeFast, bestByWork
+		}
+	}
+
+	// Priority 2: fast sync when BoltDB checkpoint is ahead and peer supports it.
+	if checkpoint == nil && peerHeight > blockHeight {
+		boltCheckpointH, _ := bk.nextCheckpointHeight(peerHeight)
+		const boltMinGap = uint64(128)
+		if boltCheckpointH >= blockHeight+boltMinGap {
+			log.Printf("[BlockKeeper] checkSyncType: fast sync via BoltDB checkpoint h=%d (local=%d, peer=%d)",
+				boltCheckpointH, blockHeight, peerHeight)
+			return syncTypeFast, bestByWork
+		}
+	}
+
+	// Priority 3: fast sync for very large gaps without checkpoints.
+	// When gap is huge, skeleton download is still more efficient than sequential.
+	if checkpoint == nil && peerHeight > blockHeight {
+		const largeGap = uint64(5000)
+		if peerHeight-blockHeight >= largeGap {
+			boltCheckpointH, _ := bk.nextCheckpointHeight(peerHeight)
+			if boltCheckpointH > blockHeight && boltCheckpointH <= peerHeight {
+				log.Printf("[BlockKeeper] checkSyncType: fast sync for large gap (gap=%d, boltCp=%d)",
+					peerHeight-blockHeight, boltCheckpointH)
+				return syncTypeFast, bestByWork
+			}
+		}
+	}
+
+	// Priority 4: fast sync via P2P received checkpoint (new node).
+	// When local has no checkpoints, use checkpoint received from peer via P2P.
+	if checkpoint == nil && peerHeight > blockHeight {
+		if bk.getReceivedCheckpoint != nil {
+			if cp := bk.getReceivedCheckpoint(); cp != nil && cp.Height > blockHeight {
+				const p2pMinGap = uint64(128)
+				if cp.Height >= blockHeight+p2pMinGap {
+					log.Printf("[BlockKeeper] checkSyncType: fast sync via P2P checkpoint h=%d (local=%d, peer=%d)",
+						cp.Height, blockHeight, peerHeight)
+					return syncTypeFast, bestByWork
+				}
+			}
 		}
 	}
 
@@ -975,6 +1054,20 @@ func (bk *blockKeeper) dispatchFastSync(peer PeerInterface, localHeight uint64) 
 
 	checkpoint := bk.nextCheckpoint()
 	if checkpoint == nil {
+		if boltH, boltHash, err := bk.chain.LatestCheckpoint(); err == nil && boltH > localHeight {
+			checkpoint = &config.TrustedCheckpoint{Height: boltH, Hash: boltHash}
+			log.Printf("[BlockKeeper] dispatchFastSync: using BoltDB checkpoint h=%d (local=%d)", boltH, localHeight)
+		}
+	}
+	if checkpoint == nil {
+		if bk.getReceivedCheckpoint != nil {
+			if cp := bk.getReceivedCheckpoint(); cp != nil && cp.Height > localHeight {
+				checkpoint = &config.TrustedCheckpoint{Height: cp.Height, Hash: cp.BlockHash}
+				log.Printf("[BlockKeeper] dispatchFastSync: using P2P checkpoint h=%d (local=%d)", cp.Height, localHeight)
+			}
+		}
+	}
+	if checkpoint == nil {
 		return false
 	}
 
@@ -1021,7 +1114,27 @@ func (bk *blockKeeper) resolveRealPeer(wrapper PeerInterface) PeerInterface {
 	return wrapper
 }
 
-// dispatchRegularSync handles standard block synchronization from a peer
+// nextCheckpointHeight finds the nearest checkpoint height at or below the given height.
+func (bk *blockKeeper) nextCheckpointHeight(maxHeight uint64) (uint64, string) {
+	h, hash, err := bk.chain.LatestCheckpoint()
+	if err != nil || h == 0 {
+		return 0, ""
+	}
+	if maxHeight > 0 && h > maxHeight {
+		roundDown := (maxHeight / 1000) * 1000
+		for testH := roundDown; testH >= 1000; testH -= 1000 {
+			hashStr, found, _ := bk.chain.GetCheckpointByHeight(testH)
+			if found {
+				return testH, hashStr
+			}
+		}
+		return 0, ""
+	}
+	return h, hash
+}
+
+// dispatchRegularSync handles standard block synchronization from a peer.
+
 func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint64) bool {
 	// Resolve real peer: checkSyncType may return a simplePeer wrapper.
 	// Regular sync needs the actual peer with active MConnection.
@@ -1422,6 +1535,20 @@ func (bk *blockKeeper) syncWorker() {
 	}
 }
 
+// SetCheckpointCallbacks registers callbacks for checkpoint-based sync.
+func (bk *blockKeeper) SetCheckpointCallbacks(getCp func() *core.CheckpointRecord, triggerSync func()) {
+	bk.getReceivedCheckpoint = getCp
+	bk.triggerSyncCheck = triggerSync
+}
+
+// TriggerSyncCheck triggers an immediate sync cycle evaluation.
+func (bk *blockKeeper) TriggerSyncCheck() {
+	bk.syncActiveMu.Lock()
+	bk.syncActive = true
+	bk.syncActiveMu.Unlock()
+	bk.lastSyncAttempt = time.Time{}
+}
+
 // safeStartSync wraps startSync/broadcastAfterSync/syncLaggingPeers with panic
 // recovery to ensure syncWorker survives unexpected panics during sync.
 func (bk *blockKeeper) safeStartSync(genesisBlock *core.Block) {
@@ -1552,6 +1679,8 @@ type ChainInterface interface {
 	GetBlocksFrom(from uint64, count uint64) []*core.Block
 	CanonicalWork() *big.Int
 	RollbackToHeight(height uint64) error
+	LatestCheckpoint() (uint64, string, error)
+	GetCheckpointByHeight(height uint64) (string, bool, error)
 }
 
 type PeerSetInterface interface {

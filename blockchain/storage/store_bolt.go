@@ -229,6 +229,9 @@ func initBoltStore(path string, db *bolt.DB) (*BoltStore, error) {
 		if _, err := tx.CreateBucketIfNotExists([]byte(metaBucket)); err != nil {
 			return fmt.Errorf("create meta bucket: %w", err)
 		}
+		if _, err := tx.CreateBucketIfNotExists([]byte(checkpointBucket)); err != nil {
+			return fmt.Errorf("create checkpoints bucket: %w", err)
+		}
 		return nil
 	}); err != nil {
 		if closeErr := db.Close(); closeErr != nil {
@@ -574,6 +577,138 @@ func (s *BoltStore) PutCheckpoints(data []byte) error {
 		}
 		return nil
 	})
+}
+
+// PutCheckpointEntry records a block hash as a checkpoint at the given height.
+// Each checkpoint is stored in the checkpoints bucket keyed by u64be(height).
+func (s *BoltStore) PutCheckpointEntry(height uint64, hash string) error {
+	if hash == "" {
+		return fmt.Errorf("put checkpoint entry: hash cannot be empty")
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		cpB := tx.Bucket([]byte(checkpointBucket))
+		if cpB == nil {
+			return fmt.Errorf("checkpoints bucket not found")
+		}
+		heightKey := u64be(height)
+		return cpB.Put(heightKey, []byte(hash))
+	})
+}
+
+// GetCheckpointByHeight returns the checkpoint hash at the given height.
+func (s *BoltStore) GetCheckpointByHeight(height uint64) (string, bool, error) {
+	var hash string
+	err := s.db.View(func(tx *bolt.Tx) error {
+		cpB := tx.Bucket([]byte(checkpointBucket))
+		if cpB == nil {
+			return nil
+		}
+		heightKey := u64be(height)
+		v := cpB.Get(heightKey)
+		if v == nil {
+			return nil
+		}
+		hash = string(v)
+		return nil
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("get checkpoint by height: %w", err)
+	}
+	return hash, hash != "", nil
+}
+
+// LatestCheckpoint returns the height and hash of the most recent checkpoint.
+func (s *BoltStore) LatestCheckpoint() (uint64, string, error) {
+	var height uint64
+	var hash string
+	err := s.db.View(func(tx *bolt.Tx) error {
+		cpB := tx.Bucket([]byte(checkpointBucket))
+		if cpB == nil {
+			return nil
+		}
+		c := cpB.Cursor()
+		lastK, lastV := c.Last()
+		if lastK == nil {
+			return nil
+		}
+		height = binary.BigEndian.Uint64(lastK)
+		hash = string(lastV)
+		return nil
+	})
+	if err != nil {
+		return 0, "", fmt.Errorf("latest checkpoint: %w", err)
+	}
+	return height, hash, nil
+}
+
+// SerializeSnapshot serializes the state snapshot at the given height for P2P transfer.
+// The snapshot includes metadata (height, state root) and all account states.
+func (s *BoltStore) SerializeSnapshot(height uint64) ([]byte, error) {
+	snapHeight, stateRoot, state, err := s.LoadSnapshot(height)
+	if err != nil {
+		return nil, fmt.Errorf("serialize snapshot: %w", err)
+	}
+	if snapHeight == 0 {
+		return nil, fmt.Errorf("serialize snapshot: no snapshot found at or before height %d", height)
+	}
+
+	payload := struct {
+		Height    uint64
+		StateRoot []byte
+		Accounts  map[string]core.Account
+	}{
+		Height:    snapHeight,
+		StateRoot: stateRoot,
+		Accounts:  state,
+	}
+
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(payload); err != nil {
+		return nil, fmt.Errorf("serialize snapshot encode: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// DeserializeSnapshot restores a state snapshot from serialized P2P data.
+// Writes the snapshot into BoltDB and returns the height, state root, and account map.
+func (s *BoltStore) DeserializeSnapshot(data []byte) (uint64, []byte, map[string]core.Account, error) {
+	if len(data) == 0 {
+		return 0, nil, nil, fmt.Errorf("deserialize snapshot: empty data")
+	}
+
+	var payload struct {
+		Height    uint64
+		StateRoot []byte
+		Accounts  map[string]core.Account
+	}
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&payload); err != nil {
+		return 0, nil, nil, fmt.Errorf("deserialize snapshot decode: %w", err)
+	}
+
+	if len(payload.StateRoot) == 0 {
+		return 0, nil, nil, fmt.Errorf("deserialize snapshot: empty state root")
+	}
+	if payload.Accounts == nil {
+		return 0, nil, nil, fmt.Errorf("deserialize snapshot: nil accounts")
+	}
+
+	verifiedRoot, err := s.CalculateStateRoot(payload.Accounts)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("deserialize snapshot verify root: %w", err)
+	}
+	if !bytes.Equal(verifiedRoot, payload.StateRoot) {
+		return 0, nil, nil, fmt.Errorf("deserialize snapshot: state root mismatch (expected=%x, got=%x)",
+			payload.StateRoot[:8], verifiedRoot[:8])
+	}
+
+	if snapErr := s.Snapshot(payload.Height, payload.StateRoot, payload.Accounts); snapErr != nil {
+		return 0, nil, nil, fmt.Errorf("deserialize snapshot write: %w", snapErr)
+	}
+
+	log.Printf("[BoltStore] Deserialized snapshot h=%d root=%x accounts=%d",
+		payload.Height, payload.StateRoot[:8], len(payload.Accounts))
+
+	return payload.Height, payload.StateRoot, payload.Accounts, nil
 }
 
 // RunValueLogGC runs garbage collection for Bolt DB

@@ -519,6 +519,16 @@ func (w *networkChainWrapper) RollbackToHeight(height uint64) error {
 	return w.chain.RollbackToHeight(height)
 }
 
+// LatestCheckpoint returns the height and hash of the most recent checkpoint.
+func (w *networkChainWrapper) LatestCheckpoint() (uint64, string, error) {
+	return w.chain.LatestCheckpoint()
+}
+
+// GetCheckpointByHeight returns the checkpoint hash at the given height.
+func (w *networkChainWrapper) GetCheckpointByHeight(height uint64) (string, bool, error) {
+	return w.chain.GetCheckpointByHeight(height)
+}
+
 // SetOnMissingBlock sets the missing block callback
 func (w *networkChainWrapper) SetOnMissingBlock(callback func(parentHash []byte, height uint64)) {
 	w.chain.SetOnMissingBlock(callback)

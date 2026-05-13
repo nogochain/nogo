@@ -210,6 +210,18 @@ func (m *mockSyncHandler) OnMissingTxRequest(peerID string, req *MissingTxReques
 	return nil
 }
 
+func (m *mockSyncHandler) OnCheckpointVote(peerID string, height uint64, blockHash string, validatorID string, pubKey []byte, signature []byte, timestamp int64) error {
+	return nil
+}
+
+func (m *mockSyncHandler) OnCheckpointQuery(peerID string) error {
+	return nil
+}
+
+func (m *mockSyncHandler) OnCheckpointResponse(peerID string, record *core.CheckpointRecord) error {
+	return nil
+}
+
 // mockTxHandler implements TxHandler for testing.
 type mockTxHandler struct {
 	mu     sync.Mutex

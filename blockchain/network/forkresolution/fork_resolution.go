@@ -268,12 +268,13 @@ func (fr *ForkResolver) ShouldReorg(remoteBlock *core.Block) bool {
 		return false
 	}
 
-	// CRITICAL: Never reorg to a block with LOWER or EQUAL height.
-	// This prevents new nodes (height=0) from triggering reorg on bootstrap nodes.
-	// A valid reorg should only happen when the remote chain is genuinely heavier,
-	// which typically means it has a higher tip height.
-	if remoteBlock.GetHeight() <= localTip.GetHeight() {
-		log.Printf("[ForkResolver] ShouldReorg: remote height %d <= local height %d, NOT triggering reorg",
+	// CRITICAL: Never reorg to a block with LOWER height.
+	// If heights are EQUAL, continue to work comparison below —
+	// a fork at the same height with more cumulative work is a valid reorg target.
+	// This prevents new nodes (height=0) from triggering reorg on bootstrap nodes
+	// while still allowing same-height higher-work forks to trigger reorg.
+	if remoteBlock.GetHeight() < localTip.GetHeight() {
+		log.Printf("[ForkResolver] ShouldReorg: remote height %d < local height %d, NOT triggering reorg",
 			remoteBlock.GetHeight(), localTip.GetHeight())
 		return false
 	}

@@ -912,6 +912,25 @@ type ChainStore interface {
 	// This is used to verify state integrity.
 	// Returns the state root hash (32 bytes) and any error.
 	CalculateStateRoot(state map[string]Account) ([]byte, error)
+
+	// === Automated Checkpoint System (1000-block intervals) ===
+
+	// PutCheckpointEntry records a block hash checkpoint at the given height.
+	PutCheckpointEntry(height uint64, hash string) error
+
+	// GetCheckpointByHeight returns the checkpoint hash at the given height.
+	GetCheckpointByHeight(height uint64) (string, bool, error)
+
+	// LatestCheckpoint returns the height and hash of the most recent checkpoint.
+	LatestCheckpoint() (uint64, string, error)
+
+	// === Checkpoint persistence for fast sync ===
+
+	// GetCheckpoints reads all checkpoint data.
+	GetCheckpoints() ([]byte, bool, error)
+
+	// PutCheckpoints writes checkpoint data.
+	PutCheckpoints(data []byte) error
 }
 
 // MempoolCleaner defines the interface for mempool cleanup operations

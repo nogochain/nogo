@@ -59,6 +59,14 @@ func (mc *mockChainForDisconnect) RollbackToHeight(height uint64) error {
 	return nil
 }
 
+func (mc *mockChainForDisconnect) LatestCheckpoint() (uint64, string, error) {
+	return 0, "", nil
+}
+
+func (mc *mockChainForDisconnect) GetCheckpointByHeight(height uint64) (string, bool, error) {
+	return "", false, nil
+}
+
 // mockSyncPeer implements PeerInterface with a known ID for testing.
 type mockSyncPeer struct {
 	id string

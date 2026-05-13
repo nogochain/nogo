@@ -123,6 +123,11 @@ type SyncLoop struct {
 	blockFetcher  *blockFetcher // Block scheduler (handles mined block broadcasts)
 	candidatePool *core.CandidatePool
 
+	checkpointVoter    *core.CheckpointVoter
+	peerBroadcaster    func(height uint64, blockHash string)
+	receivedCheckpoint *core.CheckpointRecord
+	checkpointMu       sync.Mutex
+
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	syncProgress        float64
@@ -910,6 +915,59 @@ func (s *SyncLoop) DeliverSyncBlock(peerID string, block *core.Block) {
 	}
 }
 
+// DeliverCheckpoint receives a validated checkpoint record from a peer via P2P.
+// For new nodes, this provides the target checkpoint for fast sync.
+func (s *SyncLoop) DeliverCheckpoint(record *core.CheckpointRecord) {
+	if s == nil || record == nil {
+		return
+	}
+	s.checkpointMu.Lock()
+	if s.receivedCheckpoint == nil || record.Height > s.receivedCheckpoint.Height {
+		s.receivedCheckpoint = record
+	}
+	s.checkpointMu.Unlock()
+	log.Printf("[Sync] Received checkpoint h=%d sigs=%d, triggering sync check", record.Height, len(record.Signatures))
+
+	if s.blockKeeper != nil {
+		if s.blockKeeper.syncActive {
+			s.blockKeeper.TriggerSyncCheck()
+		}
+	}
+}
+
+// SetCheckpointVoter assigns the checkpoint voter and configures broadcast callback.
+func (s *SyncLoop) SetCheckpointVoter(voter *core.CheckpointVoter, broadcaster func(height uint64, blockHash string)) {
+	s.checkpointVoter = voter
+	s.peerBroadcaster = broadcaster
+}
+
+// BroadcastCheckpointVote sends a signed checkpoint vote to all connected peers.
+func (s *SyncLoop) BroadcastCheckpointVote(height uint64, blockHash string) {
+	if s.checkpointVoter == nil {
+		return
+	}
+	vote, err := s.checkpointVoter.SignCheckpoint(height, blockHash)
+	if err != nil {
+		log.Printf("[Sync] BroadcastCheckpointVote: sign failed h=%d: %v", height, err)
+		return
+	}
+	if s.peerBroadcaster != nil {
+		s.peerBroadcaster(height, blockHash)
+	}
+	_ = vote
+}
+
+// GetReceivedCheckpoint returns the most recent checkpoint received from a peer.
+func (s *SyncLoop) GetReceivedCheckpoint() *core.CheckpointRecord {
+	s.checkpointMu.Lock()
+	defer s.checkpointMu.Unlock()
+	if s.receivedCheckpoint != nil {
+		cp := *s.receivedCheckpoint
+		return &cp
+	}
+	return nil
+}
+
 // getLocalHeight returns the local blockchain height
 func (s *SyncLoop) getLocalHeight() uint64 {
 	if s.bc == nil {
@@ -1363,6 +1421,14 @@ func (s *SyncLoop) resolveCheckpoint(maxPeerHeight uint64) (uint64, []byte) {
 
 	checkpoint := config.NextCheckpoint(localHeight, config.ActiveCheckpoints())
 	if checkpoint == nil {
+		cp := s.GetReceivedCheckpoint()
+		if cp != nil && cp.Height > localHeight {
+			checkpointHash, decodeErr := hex.DecodeString(cp.BlockHash)
+			if decodeErr == nil {
+				log.Printf("[Sync] Using P2P received checkpoint: height=%d hash=%s", cp.Height, cp.BlockHash[:16])
+				return cp.Height, checkpointHash
+			}
+		}
 		log.Printf("[Sync] No trusted checkpoint available beyond local height %d, skipping fast sync", localHeight)
 		return 0, nil
 	}

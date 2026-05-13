@@ -22,11 +22,12 @@ const broadcastTimeout = 10 * time.Second
 // corresponding business operation, and (when responding) serializes and
 // sends wire messages back through the Switch.
 type ReactorHandlers struct {
-	chain         Chain
-	mempool       Mempool
-	sw            Switch
-	miner         Miner
-	candidatePool CandidatePoolRouter
+	chain          Chain
+	mempool        Mempool
+	sw             Switch
+	miner          Miner
+	candidatePool  CandidatePoolRouter
+	checkpointVoter *core.CheckpointVoter
 }
 
 // CandidatePoolRouter defines the minimal interface for routing blocks through the candidate pool
@@ -102,6 +103,16 @@ func (h *ReactorHandlers) SetCandidatePool(pool CandidatePoolRouter) {
 	h.candidatePool = pool
 }
 
+// SetCheckpointVoter assigns the checkpoint voter for multi-sig consensus.
+func (h *ReactorHandlers) SetCheckpointVoter(voter *core.CheckpointVoter) {
+	h.checkpointVoter = voter
+}
+
+// GetCheckpointVoter returns the checkpoint voter for sync queries.
+func (h *ReactorHandlers) GetCheckpointVoter() *core.CheckpointVoter {
+	return h.checkpointVoter
+}
+
 // =============================================================================
 // SyncReactorHandler - implements SyncHandler interface
 // =============================================================================
@@ -120,6 +131,7 @@ type SyncLoopInterface interface {
 	TriggerSyncCheck()
 	TriggerForkReorg(peerID string, forkBlock *core.Block)
 	DeliverSyncBlock(peerID string, block *core.Block)
+	DeliverCheckpoint(record *core.CheckpointRecord)
 }
 
 // SetSyncLoop sets the sync loop reference for the handler
@@ -634,6 +646,84 @@ func (h *SyncReactorHandler) OnMissingTxRequest(peerID string, req *MissingTxReq
 
 	log.Printf("[SyncHandler] Responded to missing tx request from %s for %d tx(s)",
 		peerID, len(req.TxIDs))
+	return nil
+}
+
+// === Checkpoint Handlers ===
+
+// OnCheckpointVote receives a checkpoint vote from a peer and submits it to
+// the checkpoint voter for quorum evaluation.
+func (h *SyncReactorHandler) OnCheckpointVote(peerID string, height uint64, blockHash string, validatorID string, pubKey []byte, signature []byte, timestamp int64) error {
+	if h.handlers == nil || h.handlers.checkpointVoter == nil {
+		return fmt.Errorf("sync handler: checkpoint voter not available")
+	}
+
+	vote := &core.CheckpointVote{
+		Height:      height,
+		BlockHash:   blockHash,
+		ValidatorID: validatorID,
+		PubKey:      pubKey,
+		Signature:   signature,
+		Timestamp:   timestamp,
+	}
+
+	finalized, _, err := h.handlers.checkpointVoter.ReceiveVote(vote)
+	if err != nil {
+		return fmt.Errorf("receive checkpoint vote from %s: %w", peerID, err)
+	}
+	if finalized {
+		log.Printf("[SyncHandler] Checkpoint quorum reached at height %d (peer %s)", height, peerID[:16])
+	}
+	return nil
+}
+
+// OnCheckpointQuery handles a checkpoint query from a peer requesting fast sync.
+func (h *SyncReactorHandler) OnCheckpointQuery(peerID string) error {
+	if h.handlers == nil || h.handlers.checkpointVoter == nil {
+		return fmt.Errorf("sync handler: checkpoint voter not available")
+	}
+
+	record := h.handlers.checkpointVoter.GetLatestCheckpoint()
+	if record == nil {
+		sw := h.handlers.sw
+		if sw == nil {
+			return fmt.Errorf("sync handler: switch not available")
+		}
+		msg := []byte{SyncMsgNotFound}
+		sw.Send(peerID, mconnection.ChannelSync, msg)
+		return nil
+	}
+
+	msg, err := BuildCheckpointResponseMsg(record)
+	if err != nil {
+		return fmt.Errorf("build checkpoint response: %w", err)
+	}
+
+	sw := h.handlers.sw
+	if sw == nil {
+		return fmt.Errorf("sync handler: switch not available")
+	}
+	sw.Send(peerID, mconnection.ChannelSync, msg)
+	log.Printf("[SyncHandler] Sent checkpoint h=%d to peer %s", record.Height, peerID[:16])
+	return nil
+}
+
+// OnCheckpointResponse receives a finalized checkpoint from a peer (used during
+// fast sync for new nodes).
+func (h *SyncReactorHandler) OnCheckpointResponse(peerID string, record *core.CheckpointRecord) error {
+	if h.handlers == nil || h.handlers.checkpointVoter == nil {
+		return fmt.Errorf("sync handler: checkpoint voter not available")
+	}
+
+	if err := core.VerifyCheckpointRecord(record); err != nil {
+		return fmt.Errorf("verify checkpoint from %s: %w", peerID, err)
+	}
+
+	if h.syncLoop != nil {
+		h.syncLoop.DeliverCheckpoint(record)
+	}
+
+	log.Printf("[SyncHandler] Received validated checkpoint h=%d from peer %s", record.Height, peerID[:16])
 	return nil
 }
 
