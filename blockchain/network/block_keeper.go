@@ -1139,20 +1139,19 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 	// Resolve real peer: checkSyncType may return a simplePeer wrapper.
 	// Regular sync needs the actual peer with active MConnection.
 	if _, isSimple := peer.(*simplePeer); isSimple {
-		if realPeer := bk.peers.bestPeer(SFFullNode); realPeer != nil && realPeer.ID() == peer.ID() {
-			peer = realPeer
+		if realPeer := bk.peers.bestPeer(SFFullNode); realPeer != nil {
+			if realPeer.ID() == peer.ID() {
+				peer = realPeer
+			} else {
+				// bestPeer chose a different peer (height/load-based vs work-based).
+				// Use bestPeer's result as fallback — the live fetch in dispatchRegularSync
+				// will ensure correct gap detection.
+				log.Printf("[BlockKeeper] dispatchRegularSync: work-optimal peer %s not found via bestPeer, using fallback %s (h=%d)",
+					peer.ID(), realPeer.ID(), realPeer.Height())
+				peer = realPeer
+			}
 		} else {
-			// The work-optimal peer is different from bestPeer's height-based pick.
-			// This means bestPeer chose a weak-fork peer (taller but less work).
-			// We should sync from the work-optimal peer, but bestPeer can't find it.
-			// Fallback: log and skip sync — our chain is actually winning.
-			log.Printf("[BlockKeeper] dispatchRegularSync: work-optimal peer %s not found via bestPeer (bestPeer=%s), local chain may be canonical",
-				peer.ID(), func() string {
-					if rp := bk.peers.bestPeer(SFFullNode); rp != nil {
-						return rp.ID()
-					}
-					return "none"
-				}())
+			log.Printf("[BlockKeeper] dispatchRegularSync: no eligible peers available via bestPeer, skipping sync round")
 			return false
 		}
 	}
@@ -1160,16 +1159,11 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 	bk.syncPeer = peer
 	bk.syncSessionSeq++
 
-	peerHeight := peer.Height()
-	if peerHeight == 0 {
-		h, _, _, err := bk.peers.GetPeerChainInfo(peer.ID())
-		if err == nil && h > 0 {
-			peerHeight = h
-			log.Printf("[BlockKeeper] dispatchRegularSync: peer %s Height()=0, resolved via GetPeerChainInfo to %d", peer.ID(), h)
-		} else {
-			log.Printf("[BlockKeeper] dispatchRegularSync: cannot determine peer height for %s (err=%v), skipping sync round", peer.ID(), err)
-			return false
-		}
+	peerHeight, _, _, err := bk.peers.GetPeerChainInfo(peer.ID())
+	if err != nil || peerHeight == 0 {
+		log.Printf("[BlockKeeper] dispatchRegularSync: cannot determine live peer height for %s (err=%v, liveH=%d), skipping sync round",
+			peer.ID(), err, peerHeight)
+		return false
 	}
 
 	gapSize := peerHeight - localHeight
@@ -1262,7 +1256,12 @@ func (bk *blockKeeper) dispatchForkDetection(peer PeerInterface, localHeight uin
 		return false
 	}
 
-	peerHeight := peer.Height()
+	peerHeight, _, _, err := bk.peers.GetPeerChainInfo(peer.ID())
+	if err != nil || peerHeight == 0 {
+		log.Printf("[BlockKeeper] dispatchForkDetection: cannot determine live peer height for %s (err=%v, liveH=%d), skipping",
+			peer.ID(), err, peerHeight)
+		return false
+	}
 	peerID := peer.ID()
 
 	cooldownKey := fmt.Sprintf("%s:%d", peerID, peerHeight)
@@ -1365,7 +1364,8 @@ func (bk *blockKeeper) handleChainMismatchInSync(peer PeerInterface) {
 	}
 
 	// Rollback below the fork point and trigger re-sync.
-	peerHeight := peer.Height()
+	// Use live height from peerTip (getPeerTipBlock fetches chain info live)
+	peerHeight := peerTip.GetHeight()
 	rollbackTarget := peerHeight
 	if rollbackTarget > 0 {
 		rollbackTarget = peerHeight - 1
