@@ -167,7 +167,7 @@ func DefaultConfig() *Config {
 			ConvergenceVariableDelayMs: 256,
 		},
 		Sync: SyncConfig{
-			BatchSize:                  100,
+			BatchSize:                  256,
 			MaxRollbackDepth:           100,
 			LongForkThreshold:          10,
 			MaxSyncRange:               1000,

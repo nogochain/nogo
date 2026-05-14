@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -25,14 +26,12 @@ const (
 	// MaxReorgDepth is maximum allowed reorganization depth
 	MaxReorgDepth = 100
 
-	// IrreversibleDepth is the maximum reorg depth allowed.
-	// Blocks deeper than this threshold are considered irreversible and
-	// reorganization will be refused to prevent chain instability.
-	IrreversibleDepth = 6
-
-	// IrreversibleTimeWindow is the minimum age threshold for irreversible blocks.
-	// If the ancestor block's timestamp is older than this window, reorg is refused.
-	IrreversibleTimeWindow = 60 * time.Second
+	// IrreversibleTimeWindow: if >0, refuse reorgs whose common ancestor's header
+	// timestamp is older than this duration relative to wall clock.
+	// A small wall-clock window compared to **block timestamps** incorrectly rejects
+	// almost all legitimate PoW reorgs (ancestor mining time is normally far in the past).
+	// Set to 0 to disable this heuristic; use checkpoints or explicit finality if needed.
+	IrreversibleTimeWindow = 0
 
 	// === PREVENTIVE FORK HANDLING STRATEGY ===
 	// The key insight: resolve forks EARLY before they accumulate into deep forks
@@ -244,16 +243,12 @@ func (fr *ForkResolver) DetectFork(localBlock, remoteBlock *core.Block, peerID s
 }
 
 // ShouldReorg determines if reorganization should be performed based on work comparison.
-// Core-main style: heaviest chain rule with safety checks.
+// Nakamoto rule: strictly more cumulative proof-of-work on the candidate tip wins.
+// Remote tip may have lower height than local but higher chain work; height must not override work.
 //
 // Uses remoteBlock.TotalWork when populated (caller already fetched work from peer chain info).
 // Falls back to chain.CalculateCumulativeWork for blocks that arrive via broadcast/fetch
 // with full header data but without pre-computed TotalWork.
-//
-// CRITICAL FIX: Never reorg to a block with LOWER height than local tip.
-// This prevents new nodes (height=0) from causing the bootstrap node to reorg.
-// A reorg should only happen when the remote chain has MORE cumulative work,
-// which implicitly means it has equal or greater height (in most cases).
 func (fr *ForkResolver) ShouldReorg(remoteBlock *core.Block) bool {
 	if remoteBlock == nil {
 		return false
@@ -265,17 +260,6 @@ func (fr *ForkResolver) ShouldReorg(remoteBlock *core.Block) bool {
 	}
 
 	if string(localTip.Hash) == string(remoteBlock.Hash) {
-		return false
-	}
-
-	// CRITICAL: Never reorg to a block with LOWER height.
-	// If heights are EQUAL, continue to work comparison below —
-	// a fork at the same height with more cumulative work is a valid reorg target.
-	// This prevents new nodes (height=0) from triggering reorg on bootstrap nodes
-	// while still allowing same-height higher-work forks to trigger reorg.
-	if remoteBlock.GetHeight() < localTip.GetHeight() {
-		log.Printf("[ForkResolver] ShouldReorg: remote height %d < local height %d, NOT triggering reorg",
-			remoteBlock.GetHeight(), localTip.GetHeight())
 		return false
 	}
 
@@ -537,8 +521,9 @@ func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgR
 	if err != nil {
 		// Cannot find common ancestor by hash walking. This happens for deep forks
 		// (depth > 1) where the remote tip's parent blocks are not in the local DB.
-		// Fall back to rollback + add approach.
-		log.Printf("[ForkResolver] findAncestorForReorg failed: %v, using fallback rollback", err)
+		// Fall back to a shallow rollback to allow recovery via re-sync from a
+		// DIFFERENT peer. The offending peer must be deprioritized by the caller.
+		log.Printf("[ForkResolver] findAncestorForReorg failed: %v, using shallow fallback rollback", err)
 
 		fallbackHeight := localTip.GetHeight()
 		if newBlock.GetHeight() < fallbackHeight {
@@ -555,57 +540,34 @@ func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgR
 			return result
 		}
 
-		ancestorAtRollback := fr.chain.LatestBlock()
-		reorgDepth := uint64(0)
-		if ancestorAtRollback != nil {
-			reorgDepth = localTip.GetHeight() - ancestorAtRollback.GetHeight()
-		}
+		reorgDepth := localTip.GetHeight() - fallbackHeight
 		result.ReorgDepth = reorgDepth
 
-		// Validate reorg depth against limits even in fallback path
-		if reorgDepth > MaxReorgDepth {
-			result.Error = fmt.Errorf("fallback reorg depth %d exceeds maximum %d", reorgDepth, MaxReorgDepth)
-			result.Success = false
-			fr.recordFailedReorg()
-			return result
-		}
-		if reorgDepth > IrreversibleDepth {
-			result.Error = fmt.Errorf("fallback reorg depth %d exceeds irreversible threshold %d",
-				reorgDepth, IrreversibleDepth)
-			result.Success = false
-			fr.recordFailedReorg()
-			return result
-		}
+		log.Printf("[ForkResolver] Fallback rollback: local_h=%d rollback_h=%d depth=%d source=%s — shallow recovery, resync from different peer required",
+			localTip.GetHeight(), fallbackHeight, reorgDepth, source)
 
-	log.Printf("[ForkResolver] Fallback reorg: local_h=%d rollback_h=%d target_h=%d depth=%d source=%s",
-			localTip.GetHeight(), fallbackHeight, newBlock.GetHeight(), reorgDepth, source)
-
-	accepted, addErr := fr.chain.AddBlock(newBlock)
-	if addErr != nil {
-		result.Error = fmt.Errorf("add block after fallback rollback: %w", addErr)
+		// Fallback rollback is a partial recovery, NOT a complete reorg.
+		// Return Success=false with a descriptive error so the caller can
+		// deprioritize the offending peer and trigger resync from others.
+		result.Error = fmt.Errorf("fallback rollback: no common ancestor with peer tip at h=%d, rolled back %d blocks to h=%d for recovery",
+			newBlock.GetHeight(), reorgDepth, fallbackHeight)
 		result.Success = false
-		fr.recordFailedReorg()
+		result.Switched = true
+		result.Duration = time.Since(startTime)
+
+		fr.recordSuccessfulReorg(reorgDepth, result.Duration)
+
+		oldTipHeight := uint64(0)
+		if localTip != nil {
+			oldTipHeight = localTip.GetHeight()
+		}
+		fr.recordReorgForOscillation(oldTipHeight, newBlock.GetHeight(), reorgDepth, source)
+
+		if fr.onReorgComplete != nil {
+			go fr.onReorgComplete(fallbackHeight)
+		}
+
 		return result
-	}
-
-	result.Switched = accepted
-	result.Success = true
-	result.Duration = time.Since(startTime)
-
-	fr.recordSuccessfulReorg(reorgDepth, result.Duration)
-
-	// OSCILLATION DETECTION: Record this reorg for oscillation detection
-	oldTipHeight := uint64(0)
-	if localTip != nil {
-		oldTipHeight = localTip.GetHeight()
-	}
-	fr.recordReorgForOscillation(oldTipHeight, newBlock.GetHeight(), reorgDepth, source)
-
-	if fr.onReorgComplete != nil && accepted {
-		go fr.onReorgComplete(newBlock.GetHeight())
-	}
-
-	return result
 	}
 
 	reorgDepth := localTip.GetHeight() - ancestor.GetHeight()
@@ -619,17 +581,8 @@ func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgR
 		return result
 	}
 
-	// Irreversible depth protection: refuse reorgs that would remove too many blocks
-	if reorgDepth > IrreversibleDepth {
-		result.Error = fmt.Errorf("reorg depth %d exceeds irreversible threshold %d",
-			reorgDepth, IrreversibleDepth)
-		result.Success = false
-		fr.recordFailedReorg()
-		return result
-	}
-
-	// Time-based irreversibility: refuse reorg if ancestor block is too old
-	if ancestor.GetHeight() > 0 && reorgDepth > 0 {
+	// Optional weak-subjectivity / finality: only when IrreversibleTimeWindow > 0.
+	if IrreversibleTimeWindow > 0 && ancestor.GetHeight() > 0 && reorgDepth > 0 {
 		ancestorBlock, exists := fr.chain.BlockByHeight(ancestor.GetHeight())
 		if exists && ancestorBlock != nil && ancestorBlock.Header.TimestampUnix > 0 {
 			blockTime := time.Unix(ancestorBlock.Header.TimestampUnix, 0)
@@ -646,7 +599,61 @@ func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgR
 	log.Printf("[ForkResolver] Starting reorg: local_h=%d ancestor_h=%d target_h=%d depth=%d source=%s",
 		localTip.GetHeight(), ancestor.GetHeight(), newBlock.GetHeight(), reorgDepth, source)
 
-	// Rollback chain to the ancestor height
+	// Prefer atomic chain reorganize when the full fork is already in the chain store (production *core.Chain).
+	type forkReorgBackend interface {
+		ReorganizeToKnownFork(ancestor, tip *core.Block) error
+	}
+
+	var (
+		reorgErr   error
+		usedAtomic bool
+	)
+	if backend, ok := fr.chain.(forkReorgBackend); ok {
+		usedAtomic = true
+		reorgErr = backend.ReorganizeToKnownFork(ancestor, newBlock)
+	}
+
+	if usedAtomic && reorgErr == nil {
+		result.Switched = true
+		result.Success = true
+		result.Duration = time.Since(startTime)
+		fr.recordSuccessfulReorg(reorgDepth, result.Duration)
+
+		oldTipHeight := uint64(0)
+		if localTip != nil {
+			oldTipHeight = localTip.GetHeight()
+		}
+		fr.recordReorgForOscillation(oldTipHeight, newBlock.GetHeight(), reorgDepth, source)
+
+		if lb := fr.chain.LatestBlock(); lb != nil {
+			result.NewTip = lb
+		}
+
+		log.Printf("[ForkResolver] Reorg completed (ReorganizeToKnownFork): success=%v depth=%v duration=%v",
+			result.Success, reorgDepth, result.Duration)
+
+		if fr.onReorgComplete != nil {
+			h := newBlock.GetHeight()
+			if result.NewTip != nil {
+				h = result.NewTip.GetHeight()
+			}
+			go fr.onReorgComplete(h)
+		}
+		return result
+	}
+
+	if usedAtomic && reorgErr != nil && !errors.Is(reorgErr, core.ErrOrphanBlock) {
+		result.Error = fmt.Errorf("reorganize fork: %w", reorgErr)
+		result.Success = false
+		fr.recordFailedReorg()
+		return result
+	}
+
+	if usedAtomic && reorgErr != nil {
+		log.Printf("[ForkResolver] ReorganizeToKnownFork: %v — using rollback+single-block fallback", reorgErr)
+	}
+
+	// Legacy path: rollback then append one block (mock chains or incomplete fork ancestry).
 	if reorgDepth > 0 {
 		if err := fr.chain.RollbackToHeight(ancestor.GetHeight()); err != nil {
 			result.Error = fmt.Errorf("rollback to height %d failed: %w", ancestor.GetHeight(), err)
@@ -656,7 +663,6 @@ func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgR
 		}
 	}
 
-	// Add the remote block after rollback; it should now connect to the ancestor
 	accepted, err := fr.chain.AddBlock(newBlock)
 	if err != nil {
 		result.Error = fmt.Errorf("add block after reorg failed: %w", err)
@@ -688,8 +694,42 @@ func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgR
 	return result
 }
 
+// isOnCanonicalPathToTip reports whether candidate is an ancestor block on the path from tip to genesis.
+func (fr *ForkResolver) isOnCanonicalPathToTip(tip, candidate *core.Block) bool {
+	if tip == nil || candidate == nil {
+		return false
+	}
+	for cur := tip; cur != nil; {
+		if cur.GetHeight() == candidate.GetHeight() && hex.EncodeToString(cur.Hash) == hex.EncodeToString(candidate.Hash) {
+			return true
+		}
+		if cur.GetHeight() == 0 {
+			break
+		}
+		parent, exists := fr.chain.BlockByHash(hex.EncodeToString(cur.Header.PrevHash))
+		if !exists || parent == nil {
+			break
+		}
+		cur = parent
+	}
+	return false
+}
+
 // findAncestorForReorg finds the common ancestor between the local chain and a remote block.
 func (fr *ForkResolver) findAncestorForReorg(localTip, remoteBlock *core.Block) (*core.Block, error) {
+	if localTip == nil || remoteBlock == nil {
+		return nil, fmt.Errorf("nil tip or remote block")
+	}
+
+	if len(remoteBlock.Header.PrevHash) > 0 {
+		ph := hex.EncodeToString(remoteBlock.Header.PrevHash)
+		if parent, ok := fr.chain.BlockByHash(ph); ok && parent != nil {
+			if fr.isOnCanonicalPathToTip(localTip, parent) {
+				return parent, nil
+			}
+		}
+	}
+
 	localAncestors := make(map[uint64]*core.Block)
 	current := localTip
 	for current != nil {

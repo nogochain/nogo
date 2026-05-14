@@ -124,7 +124,7 @@ type SyncLoop struct {
 	candidatePool *core.CandidatePool
 
 	checkpointVoter    *core.CheckpointVoter
-	peerBroadcaster    func(height uint64, blockHash string)
+	peerBroadcaster    func(height uint64, blockHash string, vote *core.CheckpointVote)
 	receivedCheckpoint *core.CheckpointRecord
 	checkpointMu       sync.Mutex
 
@@ -373,7 +373,7 @@ func (s *SyncLoop) startPeerSyncProgressMonitor() {
 		return
 	}
 
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -662,6 +662,10 @@ func (s *SyncLoop) OnChainReorganized(newTip *core.Block) {
 
 	log.Printf("[Sync] Chain reorganized to height %d, triggering sync re-evaluation", newTip.GetHeight())
 
+	if s.miner != nil {
+		s.miner.OnChainReorganized(newTip)
+	}
+
 	// Trigger sync check to re-evaluate chain state
 	// This will fetch blocks from peers if they have longer chain
 	s.TriggerSyncCheck()
@@ -936,7 +940,7 @@ func (s *SyncLoop) DeliverCheckpoint(record *core.CheckpointRecord) {
 }
 
 // SetCheckpointVoter assigns the checkpoint voter and configures broadcast callback.
-func (s *SyncLoop) SetCheckpointVoter(voter *core.CheckpointVoter, broadcaster func(height uint64, blockHash string)) {
+func (s *SyncLoop) SetCheckpointVoter(voter *core.CheckpointVoter, broadcaster func(height uint64, blockHash string, vote *core.CheckpointVote)) {
 	s.checkpointVoter = voter
 	s.peerBroadcaster = broadcaster
 }
@@ -951,10 +955,13 @@ func (s *SyncLoop) BroadcastCheckpointVote(height uint64, blockHash string) {
 		log.Printf("[Sync] BroadcastCheckpointVote: sign failed h=%d: %v", height, err)
 		return
 	}
-	if s.peerBroadcaster != nil {
-		s.peerBroadcaster(height, blockHash)
+	if vote == nil {
+		log.Printf("[Sync] BroadcastCheckpointVote: nil vote produced at h=%d", height)
+		return
 	}
-	_ = vote
+	if s.peerBroadcaster != nil {
+		s.peerBroadcaster(height, blockHash, vote)
+	}
 }
 
 // GetReceivedCheckpoint returns the most recent checkpoint received from a peer.
@@ -2500,6 +2507,20 @@ func (d *delegatingPeerManager) GetActivePeers() []string {
 func (d *delegatingPeerManager) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, error) {
 	if d.pm == nil {
 		return nil, fmt.Errorf("peer API not available")
+	}
+	return d.pm.FetchChainInfo(ctx, peer)
+}
+
+// FetchPeerChainMeta forwards to the underlying PeerAPI when it implements extended metadata.
+func (d *delegatingPeerManager) FetchPeerChainMeta(ctx context.Context, peer string) (*ChainInfo, error) {
+	if d.pm == nil {
+		return nil, fmt.Errorf("peer API not available")
+	}
+	type metaFetcher interface {
+		FetchPeerChainMeta(context.Context, string) (*ChainInfo, error)
+	}
+	if f, ok := d.pm.(metaFetcher); ok {
+		return f.FetchPeerChainMeta(ctx, peer)
 	}
 	return d.pm.FetchChainInfo(ctx, peer)
 }

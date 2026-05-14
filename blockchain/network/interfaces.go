@@ -105,6 +105,8 @@ type Miner interface {
 	ResumeMining()
 	IsVerifying() bool
 	OnBlockAdded()
+	// OnChainReorganized is invoked after the canonical tip changes due to rollback or reorg.
+	OnChainReorganized(tip *core.Block)
 
 	// Verification coordination - CRITICAL for P2P block processing
 	// StartVerification signals that block verification is starting (pauses mining)
@@ -176,6 +178,7 @@ type ChainInfo struct {
 	RulesHash            string   `json:"rulesHash"`
 	Height               uint64   `json:"height"`
 	LatestHash           string   `json:"latestHash"`
+	TipPrevHash          string   `json:"tipPrevHash,omitempty"`
 	GenesisHash          string   `json:"genesisHash"`
 	GenesisTimestampUnix int64    `json:"genesisTimestampUnix"`
 	PeersCount           int      `json:"peersCount"`
@@ -189,6 +192,7 @@ type chainInfoJSON struct {
 	RulesHash            string `json:"rulesHash"`
 	Height               uint64 `json:"height"`
 	LatestHash           string `json:"latestHash"`
+	TipPrevHash          string `json:"tipPrevHash,omitempty"`
 	GenesisHash          string `json:"genesisHash"`
 	GenesisTimestampUnix int64  `json:"genesisTimestampUnix"`
 	PeersCount           int    `json:"peersCount"`
@@ -207,6 +211,7 @@ func (c *ChainInfo) UnmarshalJSON(data []byte) error {
 	c.RulesHash = tmp.RulesHash
 	c.Height = tmp.Height
 	c.LatestHash = tmp.LatestHash
+	c.TipPrevHash = tmp.TipPrevHash
 	c.GenesisHash = tmp.GenesisHash
 	c.GenesisTimestampUnix = tmp.GenesisTimestampUnix
 	c.PeersCount = tmp.PeersCount
@@ -239,6 +244,7 @@ func (c *ChainInfo) MarshalJSON() ([]byte, error) {
 		RulesHash:            c.RulesHash,
 		Height:               c.Height,
 		LatestHash:           c.LatestHash,
+		TipPrevHash:          c.TipPrevHash,
 		GenesisHash:          c.GenesisHash,
 		GenesisTimestampUnix: c.GenesisTimestampUnix,
 		PeersCount:           c.PeersCount,

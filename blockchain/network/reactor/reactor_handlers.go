@@ -208,8 +208,10 @@ func (h *SyncReactorHandler) OnHeaders(peerID string, headers []byte, hasMore bo
 		return fmt.Errorf("sync handler: empty headers from peer %s", peerID)
 	}
 
-	log.Printf("[SyncHandler] Received %d headers from peer %s, hasMore=%v",
-		len(parsedHeaders), peerID, hasMore)
+	if handlersLogLimiter.allow("recv_headers_" + peerID) {
+		log.Printf("[SyncHandler] Received %d headers from peer %s, hasMore=%v",
+			len(parsedHeaders), peerID, hasMore)
+	}
 
 	// Headers are forwarded to the sync engine for validation and chain extension.
 	// The SyncLoop (fetchHeadersWithRetry) validates header chain continuity,
@@ -284,7 +286,9 @@ func (h *SyncReactorHandler) OnGetBlocks(peerID string, heights []uint64) error 
 			}
 		}
 
-		log.Printf("[SyncHandler] Served %d blocks (+%d missing) to peer %s [async]", len(blocks), len(missing), peerID[:min(12, len(peerID))])
+		if handlersLogLimiter.allow("served_blocks_" + peerID) {
+			log.Printf("[SyncHandler] Served %d blocks (+%d missing) to peer %s [async]", len(blocks), len(missing), peerID[:min(12, len(peerID))])
+		}
 	}()
 
 	return nil
@@ -365,8 +369,10 @@ func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
 		}
 	}
 
-	log.Printf("[SyncHandler] Processed %d blocks from peer %s, delivered %d",
-		len(rawBlocks), peerID, deliveredCount)
+	if handlersLogLimiter.allow("proc_blocks_" + peerID) {
+		log.Printf("[SyncHandler] Processed %d blocks from peer %s, delivered %d",
+			len(rawBlocks), peerID, deliveredCount)
+	}
 
 	return nil
 }
@@ -461,8 +467,10 @@ func (h *SyncReactorHandler) OnNotFound(peerID string, msgType byte, ids []strin
 // OnStatus handles a status broadcast from a peer (height, work, latest hash).
 // Used to track peer chain state for fork resolution and sync coordination.
 func (h *SyncReactorHandler) OnStatus(peerID string, height uint64, work string, latestHash string) error {
-	log.Printf("[SyncHandler] Status from peer %s: height=%d work=%s hash=%s",
-		peerID, height, work, latestHash[:16])
+	if handlersLogLimiter.allow("status_" + peerID) {
+		log.Printf("[SyncHandler] Status from peer %s: height=%d work=%s hash=%s",
+			peerID, height, work, latestHash[:16])
+	}
 
 	// CRITICAL: Trigger sync check when peer has higher chain
 	// This enables immediate sync initiation when connecting to peers with higher height/work
@@ -476,7 +484,9 @@ func (h *SyncReactorHandler) OnStatus(peerID string, height uint64, work string,
 
 	isSyncing := h.syncLoop.IsSyncing()
 	isSynced := h.syncLoop.IsSynced()
-	log.Printf("[SyncHandler] sync state: isSyncing=%v, isSynced=%v", isSyncing, isSynced)
+	if handlersLogLimiter.allow("sync_state") {
+		log.Printf("[SyncHandler] sync state: isSyncing=%v, isSynced=%v", isSyncing, isSynced)
+	}
 
 	// Only trigger sync check if not already syncing or synced
 	// This prevents redundant sync triggers while allowing re-trigger after sync completes
@@ -491,18 +501,26 @@ func (h *SyncReactorHandler) OnStatus(peerID string, height uint64, work string,
 			}
 			// Trigger sync if peer has higher height (including case where local chain is empty)
 			if height > localHeight {
-				log.Printf("[SyncHandler] Peer %s has higher height (%d > %d), triggering sync check",
-					peerID, height, localHeight)
+				if handlersLogLimiter.allow("sync_trigger_" + peerID) {
+					log.Printf("[SyncHandler] Peer %s has higher height (%d > %d), triggering sync check",
+						peerID, height, localHeight)
+				}
 				h.syncLoop.TriggerSyncCheck()
 			} else {
-				log.Printf("[SyncHandler] Peer %s height (%d) not higher than local (%d), no sync needed",
-					peerID, height, localHeight)
+				if handlersLogLimiter.allow("no_sync_" + peerID) {
+					log.Printf("[SyncHandler] Peer %s height (%d) not higher than local (%d), no sync needed",
+						peerID, height, localHeight)
+				}
 			}
 		} else {
-			log.Printf("[SyncHandler] handlers or chain is nil")
+			if handlersLogLimiter.allow("no_handlers") {
+				log.Printf("[SyncHandler] handlers or chain is nil")
+			}
 		}
 	} else {
-		log.Printf("[SyncHandler] skipping sync trigger: isSyncing=%v, isSynced=%v", isSyncing, isSynced)
+		if handlersLogLimiter.allow("skip_sync_trigger") {
+			log.Printf("[SyncHandler] skipping sync trigger: isSyncing=%v, isSynced=%v", isSyncing, isSynced)
+		}
 	}
 
 	return nil

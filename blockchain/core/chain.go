@@ -317,7 +317,7 @@ type Chain struct {
 	// Checkpoint voter for multi-sig checkpoint consensus
 	checkpointVoter   *CheckpointVoter
 	checkpointVoteMu  sync.RWMutex
-	onCheckpointBlock func(height uint64, blockHash string) // callback to broadcast vote
+	onCheckpointBlock func(height uint64, blockHash string, vote *CheckpointVote) // callback to broadcast vote
 }
 
 // ReorgExecutor interface for unified fork resolution
@@ -419,7 +419,7 @@ func (c *Chain) SetCheckpointVoter(voter *CheckpointVoter) {
 }
 
 // SetOnCheckpointBlock sets the callback for broadcasting checkpoint votes via P2P.
-func (c *Chain) SetOnCheckpointBlock(callback func(height uint64, blockHash string)) {
+func (c *Chain) SetOnCheckpointBlock(callback func(height uint64, blockHash string, vote *CheckpointVote)) {
 	c.checkpointVoteMu.Lock()
 	defer c.checkpointVoteMu.Unlock()
 	c.onCheckpointBlock = callback
@@ -1269,10 +1269,11 @@ func (c *Chain) AppendBlock(block *Block) error {
 			c.checkpointVoteMu.RUnlock()
 
 			if voter != nil {
-				if _, err := voter.SignCheckpoint(block.GetHeight(), blockHash); err != nil {
-					log.Printf("[Chain] WARNING: failed to sign checkpoint at h=%d: %v", block.GetHeight(), err)
-				} else if broadcast != nil {
-					broadcast(block.GetHeight(), blockHash)
+				vote, signErr := voter.SignCheckpoint(block.GetHeight(), blockHash)
+				if signErr != nil {
+					log.Printf("[Chain] WARNING: failed to sign checkpoint at h=%d: %v", block.GetHeight(), signErr)
+				} else if broadcast != nil && vote != nil {
+					broadcast(block.GetHeight(), blockHash, vote)
 				}
 			}
 		}
@@ -1987,6 +1988,19 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	}
 
 	return nil
+}
+
+// ReorganizeToKnownFork switches the canonical chain to newTip using the same logic as
+// internal fork handling (reorganizeChainLocked). All blocks from newTip back to ancestor
+// must be indexed in blocksByHash or forkBlocks. Caller must not hold c.mu.
+// Used by forkresolution.ForkResolver when the full competing branch is already materialised.
+func (c *Chain) ReorganizeToKnownFork(ancestor, newTip *Block) error {
+	if ancestor == nil || newTip == nil {
+		return fmt.Errorf("ReorganizeToKnownFork: nil ancestor or tip")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reorganizeChainLocked(ancestor, newTip)
 }
 
 // Reorganize performs chain reorganization (public wrapper)
@@ -3929,17 +3943,11 @@ func (c *Chain) calculateCumulativeWorkLocked(block *Block) *big.Int {
 	}
 
 	// Parent not found in any local storage — the fork chain is incomplete.
-	// Estimate cumulative work using canonical chain up to parent height.
-	// This enables accurate fork comparison even when only sporadic fork
-	// blocks have been received via broadcast (not full sync).
-	parentHeight := block.GetHeight() - 1
-	if parentHeight < uint64(len(c.blocks)) {
-		canonicalParent := c.blocks[parentHeight]
-		parentWork := c.calculateCumulativeWorkLocked(canonicalParent)
-		work.Add(work, parentWork)
-		return work
-	}
-
+	// Return only this block's individual work as a conservative lower bound.
+	// This prevents incorrect work overestimation that would occur if we
+	// substituted a canonical chain block (which belongs to a different fork)
+	// as the parent. When the remote block carries TotalWork metadata, the
+	// caller (ForkResolver.ShouldReorg) will use that instead of this estimate.
 	return work
 }
 

@@ -89,7 +89,6 @@ func (f *blockFetcher) add(msg *blockMsg) {
 		return
 	}
 
-	bestHeight := f.chain.BestBlockHeight()
 	blockHeight := msg.block.GetHeight()
 
 	f.mu.Lock()
@@ -108,7 +107,11 @@ func (f *blockFetcher) add(msg *blockMsg) {
 	// orphan/fork handling (addOrphanBlockLocked → requestMissingParentAsync
 	// → EnsureAncestors → shouldReorgToHeaviestLocked) correctly manages
 	// deep fork detection and reorganization.
-	if currentSetSize > maxMsgSetSize || bestHeight > blockHeight {
+	// Only limit by queue size; the chain's fork handling determines
+	// whether a block is accepted, rejected, or triggers a reorg.
+	// Dropping blocks below the local tip would prevent fork detection
+	// when a peer broadcasts a competing block at a slightly lower height.
+	if currentSetSize > maxMsgSetSize {
 		return
 	}
 

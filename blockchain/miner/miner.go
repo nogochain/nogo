@@ -266,6 +266,16 @@ func (m *Miner) SetCandidatePool(pool *core.CandidatePool) {
 	m.candidatePool = pool
 }
 
+// OnChainReorganized is called after rollback or reorg changes the canonical tip.
+func (m *Miner) OnChainReorganized(tip *core.Block) {
+	if tip == nil {
+		return
+	}
+	m.InterruptMining()
+	m.EndVerification()
+	m.Wake()
+}
+
 // OnBlockAdded is called when a block is added to the chain
 // This signals that block processing is complete, mining can resume
 // CRITICAL: This is called AFTER block validation completes
@@ -540,12 +550,18 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 			localWork := m.bc.CanonicalWork()
 			localHeight := m.bc.LatestBlock().GetHeight()
 			peerHeight := getPeerHeight(m.pm)
-			
+
 			// Only defer if peer is AHEAD in height AND has more work
 			// This prevents peers at LOWER height from stopping our mining
 			if localWork != nil && peerHeight > localHeight && peerWork.Cmp(localWork) > 0 {
-				logf(colorBrightYellow, "⏸️ ", "Mining tick: peer has more cumulative work (peer=%s local=%s) and higher height (peer=%d local=%d), waiting for fork resolution",
+				logf(colorBrightYellow, "⏸️ ", "Mining tick: peer has more cumulative work (peer=%s local=%s) and higher height (peer=%d local=%d), triggering active reorg",
 					peerWork.String(), localWork.String(), peerHeight, localHeight)
+				// Actively trigger sync/reorg instead of passively waiting.
+				// Without this trigger, the miner may be permanently stuck if
+				// no external block broadcast arrives to trigger fork resolution.
+				if m.syncLoop != nil {
+					m.syncLoop.TriggerSyncCheck()
+				}
 				return
 			}
 		}
@@ -640,10 +656,10 @@ func (m *Miner) broadcastBlockAsync(ctx context.Context, block *core.Block) {
 	}()
 }
 
-// checkNetworkWork checks if network has more work and triggers sync if needed
-// Production-grade: always resumes mining after check to prevent permanent stall
-// CRITICAL FIX: Previously, InterruptMining on line 538 had no matching ResumeMining,
-// causing permanent miner starvation when network consistently had more work.
+// checkNetworkWork checks if network has more work and triggers sync if needed.
+// When sync is triggered, does NOT immediately resume mining — the next mining
+// tick will check isSyncing() and auto-resume via the isMiningActive check.
+// A safety timeout goroutine prevents permanent stall if sync never starts.
 func (m *Miner) checkNetworkWork(ctx context.Context, block *core.Block) {
 	networkMaxWork := m.getNetworkMaxWork(ctx)
 	localWork := m.bc.CanonicalWork()
@@ -655,16 +671,26 @@ func (m *Miner) checkNetworkWork(ctx context.Context, block *core.Block) {
 		if m.syncLoop != nil {
 			m.syncLoop.TriggerSyncCheck()
 		}
-	} else {
-		logf(colorBrightGreen, "✅ ", "Local chain has most work, continuing mining")
+
+		// Safety: if sync doesn't start within timeout, resume mining.
+		// Without this, a failed TriggerSyncCheck could cause permanent stall.
+		go func() {
+			time.Sleep(forkResumeMaxTimeout)
+			if !m.isMiningActive() {
+				logf(colorBrightYellow, "⚠️ ", "Sync not started after 30s, resuming mining (safety)")
+				m.ResumeMining()
+			}
+		}()
+		return
 	}
 
+	logf(colorBrightGreen, "✅ ", "Local chain has most work, continuing mining")
 	m.ResumeMining()
 }
 
-// OnPeerBlockBroadcast is called when P2P receives a block broadcast from peers
-// Production-grade: enables real-time fork detection and mining coordination
-// CRITICAL FIX: Always resume mining after interruption to prevent permanent stall
+// OnPeerBlockBroadcast is called when P2P receives a block broadcast from peers.
+// When a fork or higher chain is detected, mining is interrupted and a sync check
+// is triggered. Mining resumes only after sync completes OR a safety timeout expires.
 func (m *Miner) OnPeerBlockBroadcast(block *core.Block) {
 	if block == nil || m.syncLoop == nil {
 		return
@@ -685,10 +711,10 @@ func (m *Miner) OnPeerBlockBroadcast(block *core.Block) {
 			m.InterruptMining()
 			m.syncLoop.TriggerSyncCheck()
 
-			go func() {
-				time.Sleep(10 * time.Second)
-				m.ResumeMining()
-			}()
+			// Wait for sync/fork-resolution to complete, then resume mining.
+			// If sync completes quickly, mining resumes without the full 10s delay.
+			// If sync is stuck, hit the safety timeout to prevent permanent stall.
+			go m.resumeAfterForkResolution()
 			return
 		}
 		return
@@ -699,12 +725,34 @@ func (m *Miner) OnPeerBlockBroadcast(block *core.Block) {
 		m.InterruptMining()
 		m.syncLoop.TriggerSyncCheck()
 
-		go func() {
-			time.Sleep(10 * time.Second)
-			m.ResumeMining()
-		}()
+		go m.resumeAfterForkResolution()
 		return
 	}
+}
+
+const (
+	forkResumeInitialDelay = 10 * time.Second
+	forkResumeMaxTimeout   = 30 * time.Second
+	forkResumePollInterval = 1 * time.Second
+)
+
+// resumeAfterForkResolution waits for sync/fork-resolution to complete after
+// a fork is detected, then resumes mining. Uses a polling approach:
+// after initialDelay, checks isSyncing every pollInterval and resumes
+// as soon as sync completes. A maxTimeout safety net prevents permanent stall.
+func (m *Miner) resumeAfterForkResolution() {
+	time.Sleep(forkResumeInitialDelay)
+	deadline := time.Now().Add(forkResumeMaxTimeout)
+	for time.Now().Before(deadline) {
+		if m.syncLoop == nil || !m.syncLoop.IsSyncing() {
+			logf(colorBrightGreen, "✅ ", "Fork resolution complete, resuming mining")
+			m.ResumeMining()
+			return
+		}
+		time.Sleep(forkResumePollInterval)
+	}
+	logf(colorBrightYellow, "⚠️ ", "Sync check timeout after fork detection, resuming mining anyway (safety)")
+	m.ResumeMining()
 }
 
 // getNetworkMaxWork gets the maximum work from all peers

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -87,6 +89,7 @@ type Node struct {
 	syncReactor         *reactor.SyncReactor
 	txReactor           *reactor.TxReactor
 	blockReactor        *reactor.BlockReactor
+	handlers            *reactor.ReactorHandlers
 
 	seedConsensus *forkresolution.SeedConsensusEngine
 
@@ -275,6 +278,7 @@ func (n *Node) initializeComponents() error {
 	if err != nil {
 		return fmt.Errorf("failed to create reactor handlers: %w", err)
 	}
+	n.handlers = handlers
 
 	if n.pool != nil {
 		handlers.SetCandidatePool(n.pool)
@@ -364,6 +368,12 @@ func (n *Node) initializeComponents() error {
 
 	n.syncReactorHandler.SetSyncLoop(n.syncLoop)
 	n.blockReactorHandler.SetSyncLoop(n.syncLoop)
+
+	// CHECKPOINT VOTING: Generate validator key pair and wire checkpoint voter.
+	// Each node signs checkpoints with its own ed25519 key. The vote is broadcast
+	// to all peers via P2P SyncMsgCheckpointVote. When 2/3 of validators have
+	// signed, the checkpoint is finalized and written to persistent storage.
+	n.initCheckpointVoter()
 
 	// CRITICAL: UNIFIED FORK RESOLUTION - Inject ForkResolver into Chain
 	// This ensures ALL reorg paths (Chain.AddBlock + Network.Sync) go through single entry point:
@@ -578,6 +588,41 @@ func (n *Node) startComponents() error {
 
 func (n *Node) createListener(addr string) (net.Listener, error) {
 	return net.Listen("tcp", addr)
+}
+
+// initCheckpointVoter initializes the checkpoint voting mechanism.
+// It generates an ed25519 key pair for the node, creates a CheckpointVoter,
+// and wires the broadcast callback so votes are sent to all peers via P2P.
+func (n *Node) initCheckpointVoter() {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		log.Printf("[Node] Failed to generate checkpoint key pair: %v", err)
+		return
+	}
+	validatorID := hex.EncodeToString(pub)[:16]
+
+	voter := core.NewCheckpointVoter(priv, pub, validatorID, n.store)
+	n.chain.SetCheckpointVoter(voter)
+	if n.handlers != nil {
+		n.handlers.SetCheckpointVoter(voter)
+	}
+
+	n.chain.SetOnCheckpointBlock(func(height uint64, blockHash string, vote *core.CheckpointVote) {
+		if n.syncReactor == nil {
+			return
+		}
+		msg, buildErr := reactor.BuildCheckpointVoteMsg(
+			height, blockHash,
+			vote.ValidatorID, vote.PubKey, vote.Signature, vote.Timestamp,
+		)
+		if buildErr != nil {
+			log.Printf("[Node] Failed to build checkpoint vote msg h=%d: %v", height, buildErr)
+			return
+		}
+		n.p2pSwitch.BroadcastSyncMsg(msg)
+	})
+
+	log.Printf("[Node] Checkpoint voter initialized (validator=%s)", validatorID)
 }
 
 func (n *Node) Shutdown() {

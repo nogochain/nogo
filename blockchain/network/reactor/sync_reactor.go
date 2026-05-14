@@ -80,6 +80,34 @@ const (
 // Minimum message size: 1 byte for message type.
 const syncMinMsgSize = 1
 
+var (
+	syncLogLimiter = newRateLimiter(30 * time.Second)
+	handlersLogLimiter = newRateLimiter(15 * time.Second)
+)
+
+type rateLimiter struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+	dur  time.Duration
+}
+
+func newRateLimiter(d time.Duration) *rateLimiter {
+	return &rateLimiter{
+		last: make(map[string]time.Time),
+		dur:  d,
+	}
+}
+
+func (rl *rateLimiter) allow(key string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if t, ok := rl.last[key]; ok && time.Since(t) < rl.dur {
+		return false
+	}
+	rl.last[key] = time.Now()
+	return true
+}
+
 // SyncHandler defines the interface for sync-related business logic.
 // This allows injecting the actual chain/sync implementation without
 // creating circular dependencies between the reactor and core packages.
@@ -300,7 +328,9 @@ func (sr *SyncReactor) Receive(chID byte, peerID string, msgBytes []byte) {
 	msgType := msgBytes[0]
 	payload := msgBytes[syncMinMsgSize:]
 
-	log.Printf("[SyncReactor] Receive: peer=%s, chID=%d, msgType=%d, payloadLen=%d", peerID, chID, msgType, len(payload))
+	if syncLogLimiter.allow(fmt.Sprintf("recv_%d", msgType)) {
+		log.Printf("[SyncReactor] Receive: peer=%s, chID=%d, msgType=%d, payloadLen=%d", peerID, chID, msgType, len(payload))
+	}
 
 	sr.mu.RLock()
 	handler := sr.handler
@@ -369,7 +399,9 @@ func (sr *SyncReactor) handleGetHeaders(peerID string, payload []byte, handler S
 		return
 	}
 
-	log.Printf("[SyncReactor] handleGetHeaders: peer=%s, from=%d, count=%d", peerID, req.From, req.Count)
+	if syncLogLimiter.allow("handleGetHeaders_" + peerID) {
+		log.Printf("[SyncReactor] handleGetHeaders: peer=%s, from=%d, count=%d", peerID, req.From, req.Count)
+	}
 
 	if err := handler.OnGetHeaders(peerID, req.From, req.Count); err != nil {
 		log.Printf("[SyncReactor] handleGetHeaders: OnGetHeaders failed for peer %s: %v", peerID, err)

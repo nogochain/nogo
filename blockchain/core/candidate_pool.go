@@ -450,6 +450,11 @@ func (p *CandidatePool) selectBest(height uint64) {
 	delete(p.pools, height)
 	p.mu.Unlock()
 
+	if best.Block == nil {
+		log.Printf("[CandidatePool] height %d | best candidate has nil block, cannot commit", height)
+		return
+	}
+
 	if p.chain != nil {
 		if accepted, err := p.chain.AddBlock(best.Block); err != nil {
 			log.Printf("[CandidatePool] ✗ height %d | failed to add best: %v", height, err)
@@ -461,7 +466,6 @@ func (p *CandidatePool) selectBest(height uint64) {
 			log.Printf("[CandidatePool] ✓ height %d | winner %s | %d candidates",
 				height, shortID, len(pool.Candidates))
 
-			// Trigger broadcast callback so network layer propagates the winning block
 			if p.OnBlockSelected != nil {
 				p.OnBlockSelected(best.Block)
 			}
@@ -469,6 +473,9 @@ func (p *CandidatePool) selectBest(height uint64) {
 
 		for i := 1; i < len(pool.Candidates); i++ {
 			c := pool.Candidates[i]
+			if c.Block == nil {
+				continue
+			}
 			if _, err := p.chain.AddBlock(c.Block); err != nil {
 				log.Printf("[CandidatePool] failed to add fork block %d from %s: %v",
 					i, c.SourceID, err)

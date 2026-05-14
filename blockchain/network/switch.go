@@ -488,7 +488,7 @@ func (sw *Switch) buildDHTSeedNodes(dhtPort uint16) []*dht.Node {
 			host = seed
 		}
 
-		ips, lookupErr := net.LookupIP(host)
+		ips, lookupErr := resolveHostWithTimeout(host, 10*time.Second)
 		if lookupErr != nil {
 			log.Printf("Switch: DNS lookup for DHT seed %s failed: %v", host, lookupErr)
 			continue
@@ -1195,6 +1195,36 @@ func (sw *Switch) acceptInboundPeer(conn net.Conn) {
 	}
 
 	sw.seedOutboundPeers(sw.peers.Get(stableID))
+}
+
+// resolveHostWithTimeout resolves a hostname to IP addresses with a timeout.
+// Uses net.Resolver with a custom Dial to enforce the timeout at the DNS
+// protocol level, preventing goroutine leaks even if the DNS server hangs.
+func resolveHostWithTimeout(host string, timeout time.Duration) ([]net.IP, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: timeout}
+			return d.DialContext(ctx, network, address)
+		},
+	}
+	addrs, err := resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	return lookupIPAddrToIPs(addrs), nil
+}
+
+// lookupIPAddrToIPs converts []net.IPAddr to []net.IP.
+func lookupIPAddrToIPs(addrs []net.IPAddr) []net.IP {
+	ips := make([]net.IP, len(addrs))
+	for i, addr := range addrs {
+		ips[i] = addr.IP
+	}
+	return ips
 }
 
 // normalizeSeedAddr ensures the seed address has a protocol prefix.
@@ -3464,6 +3494,9 @@ func (sw *Switch) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, 
 						chainInfo.Work = work
 					}
 				}
+				if len(block.Header.PrevHash) > 0 {
+					chainInfo.TipPrevHash = hex.EncodeToString(block.Header.PrevHash)
+				}
 				log.Printf("[ChainInfo] Height=%d from locator, work=%s from peer=%s",
 					chainInfo.Height, chainInfo.Work.String(), peer)
 			} else {
@@ -3484,6 +3517,9 @@ func (sw *Switch) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, 
 						chainInfo.Work = work
 					}
 				}
+				if len(block.Header.PrevHash) > 0 {
+					chainInfo.TipPrevHash = hex.EncodeToString(block.Header.PrevHash)
+				}
 				log.Printf("[ChainInfo] Retrieved height=%d work=%s from peer=%s",
 					chainInfo.Height, chainInfo.Work.String(), peer)
 			} else {
@@ -3493,6 +3529,11 @@ func (sw *Switch) FetchChainInfo(ctx context.Context, peer string) (*ChainInfo, 
 	}
 
 	return chainInfo, nil
+}
+
+// FetchPeerChainMeta returns chain metadata for a peer, including tipPrevHash when the tip block was fetched.
+func (sw *Switch) FetchPeerChainMeta(ctx context.Context, peerID string) (*ChainInfo, error) {
+	return sw.FetchChainInfo(ctx, peerID)
 }
 
 // FetchHeadersFrom requests block headers from a peer starting at a given height.
@@ -4258,8 +4299,6 @@ func (p *switchPeerAdapter) Height() uint64 {
 }
 
 func (p *switchPeerAdapter) getBlockByHeight(height uint64) bool {
-	log.Printf("[switchPeerAdapter] getBlockByHeight: requesting block %d from peer %s", height, p.id)
-
 	reqMsg, err := reactor.BuildGetBlocksMsg([]uint64{height})
 	if err != nil {
 		log.Printf("[switchPeerAdapter] getBlockByHeight: build msg error: %v", err)
@@ -4573,6 +4612,16 @@ func (sw *Switch) GetPeerChainInfo(peerID string) (height uint64, work *big.Int,
 		log.Printf("[Switch] GetPeerChainInfo: query failed for %s: %v (returning error to prevent incorrect sync decisions)", peerID, fetchErr)
 		return 0, nil, "", fmt.Errorf("GetPeerChainInfo: %w [CRITICAL: no reliable data, caller must handle this error properly]", fetchErr)
 	}
+
+	// Update height cache with fresh live data so that subsequent peer.Height()
+	// calls return the correct value without needing another expensive fetch.
+	sw.peerHeightCacheMu.Lock()
+	sw.peerHeightCache[peerID] = cachedPeerHeight{
+		Height:    chainInfo.Height,
+		UpdatedAt: time.Now(),
+	}
+	sw.peerHeightCacheMu.Unlock()
+
 	return chainInfo.Height, chainInfo.Work, chainInfo.LatestHash, nil
 }
 

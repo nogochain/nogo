@@ -291,6 +291,7 @@ func (s *Server) handleChainInfo(w http.ResponseWriter, r *http.Request) {
 		"rulesHash":                      s.bc.RulesHashHex(),
 		"height":                         latestHeight,
 		"latestHash":                     fmt.Sprintf("%x", latest.Hash),
+		"tipPrevHash":                    fmt.Sprintf("%x", latest.Header.PrevHash),
 		"genesisHash":                    fmt.Sprintf("%x", genesis.Hash),
 		"genesisTimestampUnix":           genesis.Header.TimestampUnix,
 		"genesisMinerAddress":            genesis.MinerAddress,

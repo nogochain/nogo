@@ -5,6 +5,8 @@
 
 NogoChain is a blockchain project based on the NogoPow consensus algorithm, using a PI controller for difficulty adjustment, supporting CPU-friendly mining.
 
+For consensus, sync, and P2P internals (including fork handling aligned with Bytom-style blockKeeper patterns), see [docs/ENGINEERING.md](docs/ENGINEERING.md).
+
 ## Features
 
 - **NogoPow Consensus**: Innovative proof-of-work algorithm with AI hash verification support

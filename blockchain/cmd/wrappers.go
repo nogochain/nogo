@@ -702,6 +702,8 @@ func (w *minerMempoolWrapper) IsVerifying() bool {
 	return false
 }
 
+func (w *minerMempoolWrapper) OnChainReorganized(tip *core.Block) {}
+
 // OnBlockAdded is called when a block is added (for network.Miner compatibility)
 func (w *minerMempoolWrapper) OnBlockAdded() {
 	// Mempool doesn't have block added callback, so this is a no-op
