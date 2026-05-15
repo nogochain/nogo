@@ -28,6 +28,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,6 +45,18 @@ const (
 
 	// MaxOrphanPoolAge is the maximum time an orphan can stay in the pool
 	MaxOrphanPoolAge = 60 * time.Minute
+
+	// MaxBlocksByHashSize limits the total number of blocks in blocksByHash map
+	MaxBlocksByHashSize = 100000
+
+	// MaxForkBlocksPerHeight limits the number of fork blocks per height
+	MaxForkBlocksPerHeight = 16
+
+	// MaxWorkCacheSize limits the number of cumulative work cache entries
+	MaxWorkCacheSize = 100000
+
+	// MaxForkBlocksTotal limits the total number of fork blocks across all heights
+	MaxForkBlocksTotal = 50000
 )
 
 // SyncNotifier defines the interface for notifying sync loop about chain events
@@ -238,6 +251,10 @@ type Chain struct {
 	// Fork management - store alternative blocks at same height
 	// Key: height, Value: list of blocks at that height (including canonical)
 	forkBlocks map[uint64][]*Block
+
+	// Cumulative work cache: block hash hex -> cumulative work
+	// Avoids O(N) recalculation for frequently accessed fork blocks
+	workCache map[string]*big.Int
 
 	// Orphan pool - store blocks whose parent is not yet known
 	orphanPool       map[string]*Block    // hash -> block
@@ -558,6 +575,7 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 		blocksByHash:     make(map[string]*Block),
 		blocks:           make([]*Block, 0),
 		forkBlocks:       make(map[uint64][]*Block),
+		workCache:        make(map[string]*big.Int),
 		txIndex:          make(map[string]TxLocation),
 		addressIndex:     make(map[string][]AddressTxEntry),
 		indexPath:        cfg.IndexPath,
@@ -1822,12 +1840,13 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 			for _, block := range newBlocks {
 				c.blocks = append(c.blocks, block)
 				c.blocksByHash[hex.EncodeToString(block.Hash)] = block
+				// Incremental index: only index new blocks instead of full chain reindex
+				c.updateIndexesForBlock(block, uint64(len(c.blocks)-1))
 			}
+			c.invalidateWorkCache()
 			if err := c.recomputeStateLocked(); err != nil {
 				return fmt.Errorf("recompute state after chain extension: %w", err)
 			}
-			c.reindexAllTxsLocked()
-			c.reindexAllAddressTxsLocked()
 			c.bestTipHash = hex.EncodeToString(newTip.Hash)
 			c.canonicalWork = big.NewInt(0)
 			for _, block := range c.blocks {
@@ -1916,14 +1935,13 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	c.reindexAllAddressTxsLocked()
 
 	c.bestTipHash = hex.EncodeToString(newTip.Hash)
-
+	c.invalidateWorkCache()
 	c.canonicalWork = big.NewInt(0)
 	for _, block := range c.blocks {
 		work := WorkForDifficultyBits(block.Header.DifficultyBits)
 		c.canonicalWork.Add(c.canonicalWork, work)
 		block.TotalWork = c.canonicalWork.String()
 	}
-
 	if err := c.store.RewriteCanonical(c.blocks); err != nil {
 		return fmt.Errorf("rewrite canonical: %w", err)
 	}
@@ -2347,6 +2365,7 @@ func (c *Chain) addToIndexLocked(block *Block) {
 		return
 	}
 	c.blocksByHash[hex.EncodeToString(block.Hash)] = block
+	c.enforceBlocksByHashSize()
 }
 
 // indexTxsForBlockLocked indexes transactions for a block
@@ -2692,25 +2711,13 @@ func (c *Chain) BlockByHeight(height uint64) (*Block, bool) {
 
 // BlockByHash returns block by hash (for network.BlockchainInterface)
 // Concurrency safety: thread-safe read-only operation
+// Performance: O(1) hash map lookup instead of O(N) linear scan
 func (c *Chain) BlockByHash(hashHex string) (*Block, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	for _, block := range c.blocks {
-		if hex.EncodeToString(block.Hash) == hashHex {
-			return block, true
-		}
-	}
-
-	for _, forkBlocks := range c.forkBlocks {
-		for _, forkBlock := range forkBlocks {
-			if hex.EncodeToString(forkBlock.Hash) == hashHex {
-				return forkBlock, true
-			}
-		}
-	}
-
-	return nil, false
+	block, exists := c.blocksByHash[hashHex]
+	return block, exists
 }
 
 // AuditChain performs a full chain audit
@@ -3739,6 +3746,34 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 
 	c.forkBlocks[height] = append(c.forkBlocks[height], block)
 
+	// Enforce per-height fork block limit to prevent unbounded memory growth
+	if len(c.forkBlocks[height]) > MaxForkBlocksPerHeight {
+		// Remove the oldest fork block at this height (keep the most recent)
+		c.forkBlocks[height] = c.forkBlocks[height][len(c.forkBlocks[height])-MaxForkBlocksPerHeight:]
+	}
+
+	// Enforce total fork blocks count to prevent memory exhaustion
+	totalForkBlocks := 0
+	for _, blocks := range c.forkBlocks {
+		totalForkBlocks += len(blocks)
+	}
+	if totalForkBlocks > MaxForkBlocksTotal {
+		// Remove entries from lowest heights first (oldest forks)
+		heights := make([]uint64, 0, len(c.forkBlocks))
+		for h := range c.forkBlocks {
+			heights = append(heights, h)
+		}
+		sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
+		for _, h := range heights {
+			if totalForkBlocks <= MaxForkBlocksTotal*3/4 {
+				break
+			}
+			removed := len(c.forkBlocks[h])
+			delete(c.forkBlocks, h)
+			totalForkBlocks -= removed
+		}
+	}
+
 	var canonicalHash string
 	if int(height) < len(c.blocks) && c.blocks[height] != nil {
 		canonicalHash = fmt.Sprintf("%x", c.blocks[height].Hash)
@@ -3911,50 +3946,121 @@ func (c *Chain) shouldSwitchBasedOnTieBreakerLocked(newBlock, currentTip *Block)
 }
 
 // calculateCumulativeWorkLocked calculates the cumulative work from genesis to the given block
-// Production-grade: follows the parent chain recursively, including fork blocks
+// Production-grade: follows the parent chain, including fork blocks
+// Performance: uses work cache for O(1) amortized lookup after first computation
 // Caller must hold c.mu lock
 func (c *Chain) calculateCumulativeWorkLocked(block *Block) *big.Int {
 	if block == nil {
 		return big.NewInt(0)
 	}
 
-	work := WorkForDifficultyBits(block.Header.DifficultyBits)
-
-	if len(block.Header.PrevHash) == 0 || block.GetHeight() == 0 {
-		return work
+	hashHex := hex.EncodeToString(block.Hash)
+	if cached, exists := c.workCache[hashHex]; exists {
+		return new(big.Int).Set(cached)
 	}
 
-	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
-
-	if parent, exists := c.blocksByHash[parentHashHex]; exists {
-		parentWork := c.calculateCumulativeWorkLocked(parent)
-		work.Add(work, parentWork)
-		return work
+	// Iterative computation: walk from block to genesis, collect path
+	type workNode struct {
+		block *Block
+		work  *big.Int
 	}
-
-	for _, forkBlocks := range c.forkBlocks {
-		for _, forkBlock := range forkBlocks {
-			if hex.EncodeToString(forkBlock.Hash) == parentHashHex {
-				parentWork := c.calculateCumulativeWorkLocked(forkBlock)
-				work.Add(work, parentWork)
-				return work
+	var path []workNode
+	current := block
+	for current != nil {
+		hashHex := hex.EncodeToString(current.Hash)
+		if cached, exists := c.workCache[hashHex]; exists {
+			// Seed with cached value and propagate forward
+			accumulated := new(big.Int).Set(cached)
+			for i := len(path) - 1; i >= 0; i-- {
+				accumulated.Add(accumulated, WorkForDifficultyBits(path[i].block.Header.DifficultyBits))
+				c.workCache[hex.EncodeToString(path[i].block.Hash)] = new(big.Int).Set(accumulated)
 			}
+			c.enforceWorkCacheSize()
+			return accumulated
 		}
+		path = append(path, workNode{block: current})
+		if len(current.Header.PrevHash) == 0 || current.GetHeight() == 0 {
+			break
+		}
+		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
+		parent, exists := c.blocksByHash[parentHashHex]
+		if !exists {
+			break
+		}
+		current = parent
 	}
 
-	// Parent not found in any local storage — the fork chain is incomplete.
-	// Return only this block's individual work as a conservative lower bound.
-	// This prevents incorrect work overestimation that would occur if we
-	// substituted a canonical chain block (which belongs to a different fork)
-	// as the parent. When the remote block carries TotalWork metadata, the
-	// caller (ForkResolver.ShouldReorg) will use that instead of this estimate.
-	return work
+	// Compute cumulative work from genesis forward
+	accumulated := big.NewInt(0)
+	for i := len(path) - 1; i >= 0; i-- {
+		accumulated.Add(accumulated, WorkForDifficultyBits(path[i].block.Header.DifficultyBits))
+		c.workCache[hex.EncodeToString(path[i].block.Hash)] = new(big.Int).Set(accumulated)
+	}
+	c.enforceWorkCacheSize()
+	return accumulated
 }
 
 func (c *Chain) CalculateCumulativeWork(block *Block) *big.Int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.calculateCumulativeWorkLocked(block)
+}
+
+// enforceWorkCacheSize ensures the work cache does not exceed MaxWorkCacheSize
+// by evicting random entries when the limit is reached.
+// Caller must hold c.mu lock.
+func (c *Chain) enforceWorkCacheSize() {
+	if len(c.workCache) <= MaxWorkCacheSize {
+		return
+	}
+	// Evict 10% of entries when over limit to avoid frequent evictions
+	evictCount := MaxWorkCacheSize / 10
+	evicted := 0
+	for k := range c.workCache {
+		delete(c.workCache, k)
+		evicted++
+		if evicted >= evictCount {
+			break
+		}
+	}
+}
+
+// invalidateWorkCache clears the cumulative work cache.
+// Called when the canonical chain changes (reorg, rollback, new block).
+// Caller must hold c.mu lock.
+func (c *Chain) invalidateWorkCache() {
+	c.workCache = make(map[string]*big.Int)
+}
+
+// enforceBlocksByHashSize ensures blocksByHash does not exceed MaxBlocksByHashSize.
+// Evicts entries from lowest heights first when over limit.
+// Caller must hold c.mu lock.
+func (c *Chain) enforceBlocksByHashSize() {
+	if len(c.blocksByHash) <= MaxBlocksByHashSize {
+		return
+	}
+	evictCount := len(c.blocksByHash) - MaxBlocksByHashSize
+	// Collect all heights and sort them
+	heightMap := make(map[uint64][]string)
+	for hashHex, block := range c.blocksByHash {
+		h := block.GetHeight()
+		heightMap[h] = append(heightMap[h], hashHex)
+	}
+	heights := make([]uint64, 0, len(heightMap))
+	for h := range heightMap {
+		heights = append(heights, h)
+	}
+	sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
+	evicted := 0
+	for _, h := range heights {
+		for _, hashHex := range heightMap[h] {
+			delete(c.blocksByHash, hashHex)
+			evicted++
+			if evicted >= evictCount {
+				return
+			}
+		}
+	}
 }
 
 // reorganizeToLocked performs chain reorganization to the new block
@@ -4456,6 +4562,7 @@ func (c *Chain) RollbackToHeight(height uint64) error {
 	}
 
 	c.blocks = c.blocks[:height+1]
+	c.invalidateWorkCache()
 	c.initCanonicalIndexesLocked()
 
 	// Clean up fork blocks above the new height

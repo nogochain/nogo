@@ -1065,6 +1065,22 @@ func (s *SyncLoop) updatePeerStateManagement(block *core.Block) {
 	// Update all active peers with current block information
 	if s.pm != nil {
 		activePeers := s.pm.GetActivePeers()
+		// Clean up states for peers that are no longer connected
+		s.peerStates.Lock()
+		for peerID := range s.peerStates.states {
+			stillActive := false
+			for _, active := range activePeers {
+				if active == peerID {
+					stillActive = true
+					break
+				}
+			}
+			if !stillActive {
+				delete(s.peerStates.states, peerID)
+			}
+		}
+		s.peerStates.Unlock()
+
 		if len(activePeers) > 0 {
 			for _, peer := range activePeers {
 				s.updatePeerState(peer, block)

@@ -18,8 +18,8 @@ package network
 
 import (
 	"bytes"
-	"context"
 	"container/list"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -144,6 +144,10 @@ type blockKeeper struct {
 	syncActive   bool
 	syncActiveMu sync.Mutex
 
+	// syncStateMu protects forkDetectionCooldown and failedSyncPeers maps
+	// from concurrent access by cleanupExpiredEntries and syncWorker goroutines
+	syncStateMu sync.Mutex
+
 	getReceivedCheckpoint func() *core.CheckpointRecord
 	triggerSyncCheck      func()
 
@@ -199,6 +203,7 @@ func newBlockKeeper(chain ChainInterface, peers PeerSetInterface, candidatePool 
 	}
 	bk.resetHeaderState()
 	go bk.syncWorker()
+	go bk.cleanupExpiredEntries()
 	return bk
 }
 
@@ -852,12 +857,15 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 	// SKIP peers that recently failed sync due to chain mismatch
 	// to prevent infinite rollback→resync→fail→rollback loops.
 	for _, peerID := range peerIDs {
+		bk.syncStateMu.Lock()
 		if lastFail, failed := bk.failedSyncPeers[peerID]; failed {
 			if time.Since(lastFail) < bk.failedSyncCooldownDur {
+				bk.syncStateMu.Unlock()
 				continue
 			}
 			delete(bk.failedSyncPeers, peerID)
 		}
+		bk.syncStateMu.Unlock()
 
 		peerHeight, peerWork, _, err := bk.peers.GetPeerChainInfo(peerID)
 		if err != nil || peerWork == nil {
@@ -1332,14 +1340,17 @@ func (bk *blockKeeper) dispatchForkDetection(peer PeerInterface, localHeight uin
 	peerID := peer.ID()
 
 	cooldownKey := fmt.Sprintf("%s:%d", peerID, peerHeight)
+	bk.syncStateMu.Lock()
 	if lastCheck, exists := bk.forkDetectionCooldown[cooldownKey]; exists {
 		if time.Since(lastCheck) < bk.forkDetectionCooldownDur {
+			bk.syncStateMu.Unlock()
 			log.Printf("[BlockKeeper] dispatchForkDetection: cooling down peer=%s height=%d (last attempt=%v ago)",
 				peerID, peerHeight, time.Since(lastCheck).Round(time.Millisecond))
 			return false
 		}
 	}
 	bk.forkDetectionCooldown[cooldownKey] = time.Now()
+	bk.syncStateMu.Unlock()
 
 	log.Printf("[BlockKeeper] dispatchForkDetection: fork candidate (local=%d peer=%d), evaluating work",
 		localHeight, peerHeight)
@@ -1347,7 +1358,9 @@ func (bk *blockKeeper) dispatchForkDetection(peer PeerInterface, localHeight uin
 	peerTip := bk.getPeerTipBlock(peer)
 	if peerTip == nil {
 		log.Printf("[BlockKeeper] dispatchForkDetection: cannot build peer tip block")
+		bk.syncStateMu.Lock()
 		delete(bk.forkDetectionCooldown, cooldownKey)
+		bk.syncStateMu.Unlock()
 		return false
 	}
 
@@ -1358,7 +1371,9 @@ func (bk *blockKeeper) dispatchForkDetection(peer PeerInterface, localHeight uin
 	}
 
 	log.Printf("[BlockKeeper] dispatchForkDetection: peer chain has more work, running height-aligned fork switch")
+	bk.syncStateMu.Lock()
 	delete(bk.forkDetectionCooldown, cooldownKey)
+	bk.syncStateMu.Unlock()
 	bk.reorgChainToHeaviestPeer(peer)
 	return true
 }
@@ -1391,14 +1406,17 @@ func (bk *blockKeeper) handleChainMismatchInSync(peer PeerInterface) {
 	}
 
 	cooldownKey := "chain_mismatch:" + peer.ID()
+	bk.syncStateMu.Lock()
 	if lastHandle, exists := bk.forkDetectionCooldown[cooldownKey]; exists {
 		if time.Since(lastHandle) < 5*time.Second {
+			bk.syncStateMu.Unlock()
 			log.Printf("[BlockKeeper] handleChainMismatchInSync: cooling down for peer %s (last attempt=%v ago)",
 				peer.ID(), time.Since(lastHandle).Round(time.Millisecond))
 			return
 		}
 	}
 	bk.forkDetectionCooldown[cooldownKey] = time.Now()
+	bk.syncStateMu.Unlock()
 
 	localTip := bk.chain.LatestBlock()
 	if localTip == nil {
@@ -1476,7 +1494,9 @@ func (bk *blockKeeper) handleChainMismatchInSync(peer PeerInterface) {
 
 	log.Printf("[BlockKeeper] Chain mismatch: exhausted search depth %d without finding common ancestor — peer %s deprioritized for %v",
 		maxReorgSearchDepth, peer.ID(), bk.failedSyncCooldownDur)
+	bk.syncStateMu.Lock()
 	bk.failedSyncPeers[peer.ID()] = time.Now()
+	bk.syncStateMu.Unlock()
 	bk.TriggerImmediateReSync()
 }
 
@@ -1789,6 +1809,35 @@ func (bk *blockKeeper) TriggerImmediateReSync() {
 func (bk *blockKeeper) Stop() {
 	close(bk.quit)
 	log.Printf("[BlockKeeper] BlockKeeper stopped")
+}
+
+// cleanupExpiredEntries periodically removes expired entries from forkDetectionCooldown
+// and failedSyncPeers maps to prevent unbounded memory growth.
+func (bk *blockKeeper) cleanupExpiredEntries() {
+	cleanupTicker := time.NewTicker(5 * time.Minute)
+	defer cleanupTicker.Stop()
+	for {
+		select {
+		case <-bk.quit:
+			return
+		case <-cleanupTicker.C:
+			now := time.Now()
+			bk.syncStateMu.Lock()
+			// Clean up expired fork detection cooldown entries
+			for key, expiry := range bk.forkDetectionCooldown {
+				if now.After(expiry) {
+					delete(bk.forkDetectionCooldown, key)
+				}
+			}
+			// Clean up expired failed sync peer entries
+			for peerID, lastFail := range bk.failedSyncPeers {
+				if now.After(lastFail.Add(bk.failedSyncCooldownDur * 2)) {
+					delete(bk.failedSyncPeers, peerID)
+				}
+			}
+			bk.syncStateMu.Unlock()
+		}
+	}
 }
 
 const (
