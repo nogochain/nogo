@@ -3745,10 +3745,17 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 	}
 
 	c.forkBlocks[height] = append(c.forkBlocks[height], block)
+	// Index fork block into blocksByHash for O(1) lookup by BlockByHash,
+	// calculateCumulativeWorkLocked parent traversal, and ForkResolver operations
+	c.addToIndexLocked(block)
 
 	// Enforce per-height fork block limit to prevent unbounded memory growth
 	if len(c.forkBlocks[height]) > MaxForkBlocksPerHeight {
-		// Remove the oldest fork block at this height (keep the most recent)
+		// Remove the oldest fork blocks and clean up their blocksByHash entries
+		removed := c.forkBlocks[height][:len(c.forkBlocks[height])-MaxForkBlocksPerHeight]
+		for _, rb := range removed {
+			delete(c.blocksByHash, hex.EncodeToString(rb.Hash))
+		}
 		c.forkBlocks[height] = c.forkBlocks[height][len(c.forkBlocks[height])-MaxForkBlocksPerHeight:]
 	}
 
@@ -3767,6 +3774,10 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 		for _, h := range heights {
 			if totalForkBlocks <= MaxForkBlocksTotal*3/4 {
 				break
+			}
+			// Clean up blocksByHash entries for evicted fork blocks
+			for _, fb := range c.forkBlocks[h] {
+				delete(c.blocksByHash, hex.EncodeToString(fb.Hash))
 			}
 			removed := len(c.forkBlocks[h])
 			delete(c.forkBlocks, h)
