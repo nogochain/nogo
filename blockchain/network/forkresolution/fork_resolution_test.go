@@ -21,6 +21,7 @@ import (
 type MockChainProvider struct {
 	mu             sync.RWMutex
 	blocks         map[uint64]*core.Block
+	forkBlocks     map[string]*core.Block
 	tip            *core.Block
 	canonicalWork  *big.Int
 	onForkResolved func(newHeight, rolledBack uint64)
@@ -29,6 +30,7 @@ type MockChainProvider struct {
 func NewMockChainProvider() *MockChainProvider {
 	return &MockChainProvider{
 		blocks:        make(map[uint64]*core.Block),
+		forkBlocks:    make(map[string]*core.Block),
 		canonicalWork: big.NewInt(0),
 	}
 }
@@ -110,7 +112,15 @@ func (m *MockChainProvider) BlockByHash(hash string) (*core.Block, bool) {
 			return block, true
 		}
 	}
-	return nil, false
+	block, exists := m.forkBlocks[hash]
+	return block, exists
+}
+
+func (m *MockChainProvider) AddForkBlock(block *core.Block) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	hash := hex.EncodeToString(block.Hash)
+	m.forkBlocks[hash] = block
 }
 
 func (m *MockChainProvider) CalculateCumulativeWork(block *core.Block) *big.Int {

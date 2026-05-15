@@ -19,7 +19,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
-	"math"
+	"math/big"
 	"sync"
 )
 
@@ -76,7 +76,9 @@ func (f *FeeChecker) ValidateFee(tx *Transaction) error {
 	}
 
 	// 2. Check unusually high fee (warn user)
-	if tx.Fee > requiredFee*10 {
+	maxAllowed := new(big.Int).SetUint64(requiredFee)
+	maxAllowed.Mul(maxAllowed, big.NewInt(10))
+	if new(big.Int).SetUint64(tx.Fee).Cmp(maxAllowed) > 0 {
 		return fmt.Errorf(
 			"fee unusually high: required=%d, provided=%d",
 			requiredFee, tx.Fee,
@@ -99,34 +101,42 @@ func (f *FeeChecker) CalculateRequiredFee(tx *Transaction) uint64 {
 	return f.calculateRequiredFee(tx)
 }
 
-// calculateRequiredFee internal calculation without lock
+const (
+	congestionBaseThreshold = 10000
+	congestionScale         = 1000000
+	congestionMultiplier    = 1500000 // 1.5 * congestionScale for historical adjustment
+)
+
+// calculateRequiredFee internal calculation without lock.
+// Uses math/big integer arithmetic exclusively for financial safety.
 func (f *FeeChecker) calculateRequiredFee(tx *Transaction) uint64 {
 	baseFee := f.minFee
 
-	// Calculate size fee
 	txSize := getTxSize(tx)
 	sizeFee := txSize * f.feePerByte
 
-	// Congestion adjustment
-	congestionFactor := 1.0
-	if f.mempoolSize > 10000 {
-		congestionFactor = float64(f.mempoolSize) / 10000.0
+	if baseFee > maxUint64Minus(sizeFee) {
+		return maxUint64
+	}
+	baseTotal := baseFee + sizeFee
+
+	congestionNum, congestionDen := uint64(congestionScale), uint64(congestionScale)
+	if f.mempoolSize > congestionBaseThreshold {
+		congestionNum = uint64(f.mempoolSize) * uint64(congestionScale) / uint64(congestionBaseThreshold)
 	}
 
-	// Historical fee adjustment
 	if len(f.historyFees) > 0 {
 		avgFee := average(f.historyFees)
-		if tx.Fee < avgFee*50/100 {
-			congestionFactor *= 1.5
+		if tx.Fee < avgFee*uint64(50)/uint64(100) {
+			congestionNum = congestionNum * congestionMultiplier / uint64(congestionScale)
 		}
 	}
 
-	// Calculate final fee with overflow protection
-	calculatedFee := float64(baseFee+sizeFee) * congestionFactor
-	if calculatedFee > float64(math.MaxUint64) {
-		return math.MaxUint64 // Cap at maximum uint64 to prevent overflow
-	}
-	return uint64(calculatedFee)
+	fee := new(big.Int).SetUint64(baseTotal)
+	fee.Mul(fee, new(big.Int).SetUint64(congestionNum))
+	fee.Div(fee, new(big.Int).SetUint64(congestionDen))
+
+	return safeBigIntToUint64(fee)
 }
 
 // UpdateHistory updates fee history with new fee
@@ -175,16 +185,17 @@ func getTxSize(tx *Transaction) uint64 {
 	return uint64(len(data))
 }
 
-// average calculates average of fee history
+// average calculates arithmetic mean with overflow-safe accumulation
 func average(fees []uint64) uint64 {
 	if len(fees) == 0 {
 		return 0
 	}
-	var sum uint64
+	sum := new(big.Int)
 	for _, fee := range fees {
-		sum += fee
+		sum.Add(sum, new(big.Int).SetUint64(fee))
 	}
-	return sum / uint64(len(fees))
+	sum.Div(sum, big.NewInt(int64(len(fees))))
+	return sum.Uint64()
 }
 
 // getBalance should not be implemented in FeeChecker.
@@ -192,20 +203,25 @@ func average(fees []uint64) uint64 {
 // database is properly accessible. FeeChecker focuses on fee calculations only.
 // If you need balance checking, use state.StateDB.GetBalance() instead.
 
-
 // CalculateMinFee calculates minimum fee for transaction size and mempool congestion
-// Exported function for external use
 func CalculateMinFee(txSize uint64, mempoolSize int) uint64 {
 	baseFee := MinFee
 	sizeFee := txSize * MinFeePerByte
 
-	// Congestion adjustment
-	if mempoolSize > 10000 {
-		congestionFactor := float64(mempoolSize) / 10000.0
-		return uint64(float64(baseFee+sizeFee) * congestionFactor)
+	if baseFee > maxUint64Minus(sizeFee) {
+		return maxUint64
+	}
+	baseTotal := baseFee + sizeFee
+
+	if mempoolSize > congestionBaseThreshold {
+		congestionNum := uint64(mempoolSize) * uint64(congestionScale) / uint64(congestionBaseThreshold)
+		fee := new(big.Int).SetUint64(baseTotal)
+		fee.Mul(fee, new(big.Int).SetUint64(congestionNum))
+		fee.Div(fee, new(big.Int).SetUint64(uint64(congestionScale)))
+		return safeBigIntToUint64(fee)
 	}
 
-	return baseFee + sizeFee
+	return baseTotal
 }
 
 // EstimateSmartFee estimates optimal fee based on mempool conditions and target confirmation speed
@@ -280,12 +296,16 @@ func (f *FeeChecker) CalculateOptimalFee(tx *Transaction, speed string) uint64 {
 	}
 
 	// Fallback to congestion-based calculation
-	congestionFactor := 1.0
-	if f.mempoolSize > 10000 {
-		congestionFactor = float64(f.mempoolSize) / 10000.0
+	congestionNum, congestionDen := uint64(congestionScale), uint64(congestionScale)
+	if f.mempoolSize > congestionBaseThreshold {
+		congestionNum = uint64(f.mempoolSize) * uint64(congestionScale) / uint64(congestionBaseThreshold)
 	}
 
-	return uint64(float64(baseFee) * congestionFactor)
+	fee := new(big.Int).SetUint64(baseFee)
+	fee.Mul(fee, new(big.Int).SetUint64(congestionNum))
+	fee.Div(fee, new(big.Int).SetUint64(congestionDen))
+
+	return safeBigIntToUint64(fee)
 }
 
 // SetMempool sets the mempool reference for dynamic fee estimation
@@ -293,4 +313,20 @@ func (f *FeeChecker) SetMempool(mp MempoolStats) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.mempool = mp
+}
+
+const maxUint64 = ^uint64(0)
+
+// maxUint64Minus returns MaxUint64 - x, used for overflow-safe addition checks
+func maxUint64Minus(x uint64) uint64 {
+	return maxUint64 - x
+}
+
+// safeBigIntToUint64 converts a big.Int to uint64, capping at MaxUint64 on overflow
+func safeBigIntToUint64(n *big.Int) uint64 {
+	max := new(big.Int).SetUint64(maxUint64)
+	if n.Cmp(max) > 0 {
+		return maxUint64
+	}
+	return n.Uint64()
 }

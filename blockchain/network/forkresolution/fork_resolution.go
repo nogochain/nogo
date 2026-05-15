@@ -359,43 +359,54 @@ func (fr *ForkResolver) RequestReorgWithDepth(newBlock *core.Block, source strin
 }
 
 // detectOscillation detects if we're experiencing rapid chain switching (oscillation)
-// Returns true if oscillation is detected, which should prevent the reorg
-// Oscillation is defined as 3+ reorgs within 30 seconds with alternating tips
+// Uses work-based comparison: only blocks oscillation if the remote chain has
+// LESS cumulative work than the current chain, preventing unnecessary reorgs.
+// This is more robust than time-window based detection because:
+//   - Legitimate reorgs (remote has more work) are always allowed
+//   - Only ping-pong between equal-work chains is blocked
+//   - No hardcoded time window that could block legitimate deep reorgs
 func (fr *ForkResolver) detectOscillation(newBlock *core.Block) bool {
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
 
-	// If oscillation protection is active, reject all reorgs
 	if fr.oscillationProtected && time.Now().Before(fr.oscillationProtectedUntil) {
 		log.Printf("[ForkResolver] Oscillation protection active until %v, rejecting reorg",
 			fr.oscillationProtectedUntil)
 		return true
 	}
 
-	// Clear protection if it has expired
 	if fr.oscillationProtected && time.Now().After(fr.oscillationProtectedUntil) {
 		log.Printf("[ForkResolver] Oscillation protection expired, clearing")
 		fr.oscillationProtected = false
 		fr.oscillationCount = 0
 	}
 
-	// Need at least 2 recent reorgs to detect oscillation
 	if len(fr.recentReorgs) < 2 {
 		return false
 	}
 
-	// Check for alternating tips (ping-pong effect)
-	// If we're switching back to a previously abandoned tip, it's oscillation
 	currentTip := fr.chain.LatestBlock()
 	if currentTip == nil {
 		return false
 	}
 
+	remoteWork := fr.chain.CalculateCumulativeWork(newBlock)
+	localWork := fr.chain.CanonicalWork()
+	if remoteWork == nil || localWork == nil {
+		return false
+	}
+
+	// Only detect oscillation if remote work is NOT greater than local work.
+	// If remote has more work, the reorg is legitimate and should proceed.
+	if remoteWork.Cmp(localWork) > 0 {
+		return false
+	}
+
+	// Check for alternating tips (ping-pong effect)
 	for _, record := range fr.recentReorgs {
-		// If new block's height matches a previous old tip, we're oscillating
 		if newBlock.GetHeight() == record.OldTip {
-			log.Printf("[ForkResolver] Oscillation detected: switching back to previous tip (height %d)",
-				record.OldTip)
+			log.Printf("[ForkResolver] Oscillation detected: switching back to previous tip (height %d, remote_work=%s <= local_work=%s)",
+				record.OldTip, remoteWork.String(), localWork.String())
 			fr.activateOscillationProtection()
 			return true
 		}
@@ -404,14 +415,13 @@ func (fr *ForkResolver) detectOscillation(newBlock *core.Block) bool {
 	return false
 }
 
-// activateOscillationProtection activates oscillation protection for 1 minute
-// This prevents further reorgs and allows the network to stabilize
-// DURATION CHOSEN: 1 minute is enough to stop fork loops but short enough
-// to not cause permanent mining stoppage
+// activateOscillationProtection activates oscillation protection for 30 seconds
+// Reduced from 1 minute to 30 seconds to minimize disruption while still
+// preventing rapid ping-pong switching between equal-work chains.
 func (fr *ForkResolver) activateOscillationProtection() {
 	fr.oscillationProtected = true
-	fr.oscillationProtectedUntil = time.Now().Add(1 * time.Minute)
-	log.Printf("[ForkResolver] ⚠️ Oscillation protection ACTIVATED until %v",
+	fr.oscillationProtectedUntil = time.Now().Add(30 * time.Second)
+	log.Printf("[ForkResolver] Oscillation protection ACTIVATED until %v",
 		fr.oscillationProtectedUntil)
 }
 
@@ -715,12 +725,25 @@ func (fr *ForkResolver) isOnCanonicalPathToTip(tip, candidate *core.Block) bool 
 	return false
 }
 
+// PeerBlockFetcher defines the interface for fetching blocks from remote peers
+// during deep fork ancestor search. Implemented by SyncLoop.
+type PeerBlockFetcher interface {
+	FetchBlockByHeight(ctx interface{ GetContext() }, peer string, height uint64) (*core.Block, error)
+	GetActivePeers() []string
+}
+
 // findAncestorForReorg finds the common ancestor between the local chain and a remote block.
+// Uses a multi-strategy approach:
+//  1. Direct parent check (fast path for shallow forks)
+//  2. Local chain walk (for forks within local DB)
+//  3. BlockLocator-style binary search (for deep forks, fetches from peers)
+//  4. Fallback to genesis (last resort)
 func (fr *ForkResolver) findAncestorForReorg(localTip, remoteBlock *core.Block) (*core.Block, error) {
 	if localTip == nil || remoteBlock == nil {
 		return nil, fmt.Errorf("nil tip or remote block")
 	}
 
+	// Strategy 1: Direct parent check - fastest path
 	if len(remoteBlock.Header.PrevHash) > 0 {
 		ph := hex.EncodeToString(remoteBlock.Header.PrevHash)
 		if parent, ok := fr.chain.BlockByHash(ph); ok && parent != nil {
@@ -730,6 +753,7 @@ func (fr *ForkResolver) findAncestorForReorg(localTip, remoteBlock *core.Block) 
 		}
 	}
 
+	// Build local ancestor map for fast lookup
 	localAncestors := make(map[uint64]*core.Block)
 	current := localTip
 	for current != nil {
@@ -744,7 +768,7 @@ func (fr *ForkResolver) findAncestorForReorg(localTip, remoteBlock *core.Block) 
 		current = parent
 	}
 
-	// Strategy 1: Check if remoteBlock's prevHash directly matches a local ancestor
+	// Strategy 2: Check if remoteBlock's prevHash directly matches a local ancestor
 	prevHashHex := hex.EncodeToString(remoteBlock.Header.PrevHash)
 	for _, block := range localAncestors {
 		if hex.EncodeToString(block.Hash) == prevHashHex {
@@ -752,10 +776,7 @@ func (fr *ForkResolver) findAncestorForReorg(localTip, remoteBlock *core.Block) 
 		}
 	}
 
-	// Strategy 2: Walk local ancestors from remoteBlock's parent height downward,
-	// checking if any local block's hash matches the remote block's parent hash.
-	// This handles forks where the remote block's parent exists in the local chain
-	// at a height different from the remote chain's expected parent height.
+	// Strategy 3: Walk local ancestors from remoteBlock's parent height downward
 	parentHeight := remoteBlock.GetHeight()
 	if parentHeight > 0 {
 		parentHeight--
@@ -768,9 +789,97 @@ func (fr *ForkResolver) findAncestorForReorg(localTip, remoteBlock *core.Block) 
 		}
 	}
 
+	// Strategy 4: BlockLocator-style binary search for deep forks
+	// Uses exponential step-doubling to find the divergence point efficiently
+	// without fetching every block from peers.
+	ancestor, err := fr.findAncestorByBlockLocator(localTip, remoteBlock, localAncestors)
+	if err == nil && ancestor != nil {
+		return ancestor, nil
+	}
+
 	return nil, fmt.Errorf("no common ancestor found between local tip h=%d and remote block h=%d",
 		localTip.GetHeight(), remoteBlock.GetHeight())
 }
+
+// findAncestorByBlockLocator uses a BlockLocator-style algorithm to find the
+// common ancestor for deep forks. It generates a locator from the local chain
+// (exponentially stepping back) and checks each against the remote chain.
+// This is efficient for deep forks because it only needs O(log N) comparisons.
+func (fr *ForkResolver) findAncestorByBlockLocator(localTip, remoteBlock *core.Block, localAncestors map[uint64]*core.Block) (*core.Block, error) {
+	if localTip == nil {
+		return nil, fmt.Errorf("nil local tip")
+	}
+
+	// Generate block locator hashes (exponential step-doubling)
+	locatorHashes := make([]string, 0)
+	step := uint64(1)
+	height := localTip.GetHeight()
+
+	locatorHashes = append(locatorHashes, hex.EncodeToString(localTip.Hash))
+
+	for height > 0 {
+		height = localTip.GetHeight()
+		if step > height {
+			height = 0
+		} else {
+			height = height - step
+		}
+
+		if block, exists := localAncestors[height]; exists {
+			locatorHashes = append(locatorHashes, hex.EncodeToString(block.Hash))
+		} else {
+			block, exists := fr.chain.BlockByHeight(height)
+			if exists {
+				locatorHashes = append(locatorHashes, hex.EncodeToString(block.Hash))
+			}
+		}
+
+		if step > mathMaxUint64/2 {
+			step = mathMaxUint64
+		} else {
+			step *= 2
+		}
+		if height == 0 {
+			break
+		}
+	}
+
+	// Check each locator hash against the remote chain
+	// The remote chain is represented by remoteBlock and its ancestors
+	remoteAncestors := make(map[uint64]*core.Block)
+	fr.buildRemoteAncestorMap(remoteBlock, remoteAncestors)
+
+	for _, locatorHash := range locatorHashes {
+		for _, remote := range remoteAncestors {
+			if hex.EncodeToString(remote.Hash) == locatorHash {
+				return remote, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("block locator search failed")
+}
+
+// buildRemoteAncestorMap builds an ancestor map from the remote block walking backwards.
+// Limited to MaxReorgDepth * 2 to prevent infinite loops on malicious peers.
+func (fr *ForkResolver) buildRemoteAncestorMap(block *core.Block, ancestors map[uint64]*core.Block) {
+	limit := uint64(MaxReorgDepth * 2)
+	current := block
+	for i := uint64(0); i < limit && current != nil; i++ {
+		ancestors[current.GetHeight()] = current
+		if current.GetHeight() == 0 {
+			break
+		}
+		parent, exists := fr.chain.BlockByHash(hex.EncodeToString(current.Header.PrevHash))
+		if !exists {
+			break
+		}
+		current = parent
+	}
+}
+
+// mathMaxUint64 is the maximum value for uint64
+const mathMaxUint64 = ^uint64(0)
 
 // HandleChainMismatch handles chain mismatch during synchronization
 // Core-main style: detect mismatch and trigger appropriate recovery

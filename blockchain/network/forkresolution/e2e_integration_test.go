@@ -72,6 +72,9 @@ func TestE2E_MiningForkRecovery(t *testing.T) {
 		work := int64(150 + i*12)
 		block := generateTestBlock(i, prevHash, work)
 		forkChain.AddBlock(block)
+		// Simulate receiving the fork block from a peer: add to main chain's
+		// fork block pool so the resolver can find the common ancestor.
+		mainChain.AddForkBlock(block)
 	}
 
 	mainTip := mainChain.LatestBlock()

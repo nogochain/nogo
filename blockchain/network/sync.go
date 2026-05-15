@@ -361,9 +361,10 @@ func (s *SyncLoop) Start(ctx context.Context) error {
 // It does not perform legacy SyncWithPeer logic; blockKeeper remains responsible for syncing.
 // This monitor only maintains an accurate IsSynced() signal for production safety.
 //
-// CRITICAL FIX: progress updates are suppressed while blockKeeper is actively syncing.
-// Previous bug: this monitor set syncProgress=1.0 when peers were unresponsive during sync,
-// causing IsSynced() to return true prematurely, triggering mining on an incomplete chain.
+// CRITICAL FIX: Progress updates are now performed even while blockKeeper is actively syncing.
+// Previous bug: this monitor skipped progress evaluation when blockKeeper was active,
+// causing syncProgress to never update during sync, which could lead to IsSynced()
+// returning stale values and the miner starting prematurely.
 func (s *SyncLoop) startPeerSyncProgressMonitor() {
 	s.mu.RLock()
 	ctx := s.ctx
@@ -381,12 +382,10 @@ func (s *SyncLoop) startPeerSyncProgressMonitor() {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// CRITICAL: Skip progress evaluation while blockKeeper is actively syncing.
-			// During regularBlockSync, the sync peer is busy serving blocks and may
-			// fail to respond to FetchChainInfo, causing a false "synced" signal.
-			if s.blockKeeper != nil && s.blockKeeper.isActive() {
-				continue
-			}
+			// CRITICAL FIX: Always update sync progress, even when blockKeeper is active.
+			// The updateSyncProgressFromPeers function handles the blockKeeper case
+			// by being conservative with progress calculation (never setting progress=1.0
+			// when peers have more work, regardless of blockKeeper state).
 			s.updateSyncProgressFromPeers(ctx)
 		}
 	}
@@ -1146,14 +1145,17 @@ func (s *SyncLoop) runSyncLoop() {
 }
 
 // performSyncStep executes one sync iteration
-// REFACTORED: Removed all isSyncing state management
-// Old behavior: Set isSyncing=true/false to control mining and prevent duplicate syncs
-// New behavior: Only manages syncProgress and syncRoundInProgress for coordination
-// Actual sync state is handled internally by blockKeeper.syncWorker()
+// REFACTORED: Fixed critical bug where function returned immediately when blockKeeper != nil.
+// Old behavior: Returned immediately when blockKeeper was active, bypassing ALL sync logic.
+// New behavior: Checks blockKeeper activity status and coordinates accordingly:
+//   - If blockKeeper is actively syncing: skip launching new SyncWithPeer, but still
+//     update syncProgress from peer heights to maintain accurate IsSynced() signal.
+//   - If blockKeeper is idle: proceed with normal sync logic including SyncWithPeer.
+//   - If blockKeeper is nil: use legacy sync path (degraded mode).
 func (s *SyncLoop) performSyncStep() {
-	if s.blockKeeper != nil {
-		return
-	}
+	// CRITICAL FIX: Do NOT return immediately when blockKeeper != nil.
+	// Instead, check if blockKeeper is actively syncing and coordinate accordingly.
+	blockKeeperActive := s.blockKeeper != nil && s.blockKeeper.isActive()
 
 	if s.pm == nil {
 		log.Printf("[Sync] performSyncStep: peer manager is nil")
@@ -1289,6 +1291,18 @@ func (s *SyncLoop) performSyncStep() {
 
 	log.Printf("[Sync] Sync needed: %s", syncReason)
 
+	// CRITICAL FIX: If blockKeeper is actively syncing, skip launching new SyncWithPeer.
+	// The blockKeeper's syncWorker is already handling the sync. We still update
+	// syncProgress to maintain accurate IsSynced() signal for the miner.
+	if blockKeeperActive {
+		log.Printf("[Sync] BlockKeeper is actively syncing, skipping SyncWithPeer launch")
+		s.mu.Lock()
+		s.syncProgress = maxSyncProgressWithPartialPeers
+		s.lastUpdateTime = time.Now()
+		s.mu.Unlock()
+		return
+	}
+
 	// CRITICAL: Check if a sync round is already in progress
 	// This prevents launching multiple concurrent SyncWithPeer goroutines
 	s.mu.Lock()
@@ -1298,9 +1312,6 @@ func (s *SyncLoop) performSyncStep() {
 		return
 	}
 	s.syncRoundInProgress = true
-	// NOTE: Removed isSyncing=true here!
-	// Old code set isSyncing=true to signal "sync in progress"
-	// New architecture: syncRoundInProgress prevents concurrent launches, no global flag needed
 	s.mu.Unlock()
 
 	if s.attemptFastSync(maxPeerHeight, bestPeer) {
@@ -2120,84 +2131,69 @@ func (s *SyncLoop) GetMultiNodeArbitrator() *forkresolution.MultiNodeArbitrator 
 	return s.multiNodeArbiter
 }
 
-// findCommonAncestorHeight finds the common ancestor height between local chain and peer chain
+// findCommonAncestorHeight finds the common ancestor height between local chain and peer chain.
+// Uses binary search for O(log N) efficiency instead of the previous O(N) one-by-one fetching.
+//
+// CRITICAL FIX: Previous implementation fetched blocks one-by-one from peers walking backwards,
+// which was extremely slow for deep forks (O(N) network round trips). New implementation uses
+// binary search, requiring only O(log N) block fetches from peers.
 func (s *SyncLoop) findCommonAncestorHeight(ctx context.Context, peer string, targetHeader *core.BlockHeader, targetHeight uint64) (uint64, error) {
 	log.Printf("[Sync] Finding common ancestor, target height=%d", targetHeight)
 
-	// Walk backwards from local tip to find common ancestor
 	localTip := s.bc.LatestBlock()
 	var localHeight uint64
 	if localTip != nil {
 		localHeight = localTip.GetHeight()
 	} else {
-		// Local chain is empty, common ancestor is 0
 		log.Printf("[Sync] Local chain is empty, common ancestor is 0")
 		return 0, nil
 	}
 
-	// Start from the height before target
-	var checkHeight uint64
-	if targetHeight > 0 {
-		checkHeight = targetHeight - 1
-	} else {
-		checkHeight = 0
-	}
-	if checkHeight > localHeight {
-		checkHeight = localHeight
-	}
-
-	maxSteps := s.syncConfig.MaxAncestorSearchSteps
-	if maxSteps <= 0 {
-		maxSteps = 100
-	}
-	steps := 0
-
-	for steps < maxSteps && checkHeight > 0 {
-		steps++
-
-		// Get local block at this height
-		localBlock, exists := s.bc.BlockByHeight(checkHeight)
-		if !exists {
-			log.Printf("[Sync] Local block at height %d not found", checkHeight)
-			if checkHeight == 0 {
-				break
-			}
-			checkHeight--
-			continue
-		}
-
-		// Fetch peer's block at this height
-		peerBlock, err := s.pm.FetchBlockByHeight(ctx, peer, checkHeight)
-		if err != nil {
-			log.Printf("[Sync] Failed to fetch peer block at height %d: %v", checkHeight, err)
-			if checkHeight == 0 {
-				break
-			}
-			checkHeight--
-			continue
-		}
-
-		// Compare hashes
-		if bytes.Equal(localBlock.Hash, peerBlock.Hash) {
-			log.Printf("[Sync] Found common ancestor at height %d (hash: %s)",
-				checkHeight, hex.EncodeToString(localBlock.Hash)[:16])
-			return checkHeight, nil
-		}
-
-		log.Printf("[Sync] Height %d: local=%s, peer=%s - different blocks",
-			checkHeight, hex.EncodeToString(localBlock.Hash)[:16], hex.EncodeToString(peerBlock.Hash)[:16])
-
-		// Move to previous height
-		if checkHeight == 0 {
-			break
-		}
-		checkHeight--
-	}
-
-	// If no common ancestor found, assume genesis block
-	log.Printf("[Sync] No common ancestor found, assuming genesis (height 0)")
-	return 0, nil
+	return s.findCommonAncestorBinary(ctx, peer, localHeight, targetHeight)
 }
+
+// findCommonAncestorBinary performs a binary search for the common ancestor
+// between local and peer chains. Requires only O(log N) block fetches from peers.
+func (s *SyncLoop) findCommonAncestorBinary(ctx context.Context, peer string, localHeight, targetHeight uint64) (uint64, error) {
+	if localHeight == 0 || targetHeight == 0 {
+		return 0, nil
+	}
+
+	low := uint64(0)
+	high := localHeight
+	if targetHeight < high {
+		high = targetHeight
+	}
+
+	for low < high {
+		mid := low + (high-low)/2 + 1
+
+		localBlock, exists := s.bc.BlockByHeight(mid)
+		if !exists {
+			high = mid - 1
+			continue
+		}
+
+		peerBlock, err := s.pm.FetchBlockByHeight(ctx, peer, mid)
+		if err != nil {
+			log.Printf("[Sync] Binary search: failed to fetch peer block at height %d: %v", mid, err)
+			high = mid - 1
+			continue
+		}
+
+		if bytes.Equal(localBlock.Hash, peerBlock.Hash) {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+
+	log.Printf("[Sync] Binary search found common ancestor at height %d", low)
+	return low, nil
+}
+
+// mathMaxUint64 is the maximum value for uint64
+const mathMaxUint64 = ^uint64(0)
 
 // fetchBlockByHeightWithRetry fetches a block by height with automatic retry
 func (s *SyncLoop) fetchBlockByHeightWithRetry(ctx context.Context, peer string, height uint64) (*core.Block, error) {

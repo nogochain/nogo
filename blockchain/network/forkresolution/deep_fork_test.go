@@ -239,27 +239,39 @@ func TestDeepFork_MultiNode_10Plus_Depth(t *testing.T) {
 	nodes := setupTestNodes(ctx, numNodes)
 	arbiter := NewMultiNodeArbitrator(ctx, nodes[0].resolver)
 
-	// Node 0 falls behind (simulates network partition or slow mining)
-	// Nodes 1-4 race ahead on a different fork
+	// Phase 1: All nodes share the same first 8 blocks (common chain)
+	// Generate one block per height and add to ALL nodes so they share identical chain
+	genesis := nodes[0].chain.LatestBlock()
+	prevHash := genesis.Hash
+	for height := uint64(1); height <= 8; height++ {
+		block := generateTestBlock(height, prevHash, int64(100+height*10))
+		for i := 0; i < numNodes; i++ {
+			nodes[i].chain.AddBlock(block)
+		}
+		prevHash = block.Hash
+		time.Sleep(35 * time.Millisecond)
+	}
 
+	t.Logf("Phase 1 complete: all nodes at height=%d with identical chain", nodes[0].chain.LatestBlock().GetHeight())
+
+	// Phase 2: Node 0 stops mining (simulates network partition or slow mining)
+	// Nodes 1-4 continue mining on different forks from height 8
 	var wg sync.WaitGroup
-	wg.Add(numNodes)
+	wg.Add(numNodes - 1)
 
-	// Node 0: Slow miner (only mines 8 blocks)
-	go func() {
-		defer wg.Done()
-		mineBlocks(nodes[0].chain, 8, 50*time.Millisecond, 100)
-		t.Logf("Node 0 (slow): height=%d", nodes[0].chain.LatestBlock().GetHeight())
-	}()
-
-	// Nodes 1-4: Fast miners on different fork (mine 18-22 blocks each)
 	for i := 1; i < numNodes; i++ {
 		go func(nodeID int) {
 			defer wg.Done()
-			blocksToMine := 18 + nodeID*2
-			mineBlocks(nodes[nodeID].chain, uint64(blocksToMine), 30*time.Millisecond, int64(200+nodeID*50))
+			blocksToMine := 10 + nodeID*2
+			prevHash := nodes[nodeID].chain.LatestBlock().Hash
+			for h := uint64(9); h <= 8+uint64(blocksToMine); h++ {
+				time.Sleep(30 * time.Millisecond)
+				work := int64(200) + int64(h)*10 + int64(nodeID)*50
+				block := generateTestBlock(h, prevHash, work)
+				nodes[nodeID].chain.AddBlock(block)
+				prevHash = block.Hash
+			}
 
-			// Update arbitrator with peer state
 			tip := nodes[nodeID].chain.LatestBlock()
 			arbiter.UpdatePeerState(
 				fmt.Sprintf("node-%d", nodeID),
@@ -274,9 +286,17 @@ func TestDeepFork_MultiNode_10Plus_Depth(t *testing.T) {
 
 	wg.Wait()
 
-	// Now simulate Node 0 detecting it's deeply forked
 	slowNodeTip := nodes[0].chain.LatestBlock()
 	fastNodeTip := nodes[1].chain.LatestBlock()
+
+	// Add fast node's blocks to slow node's database as fork blocks
+	// so the resolver can find the common ancestor during reorg.
+	for h := slowNodeTip.GetHeight() + 1; h <= fastNodeTip.GetHeight(); h++ {
+		block, exists := nodes[1].chain.BlockByHeight(h)
+		if exists {
+			nodes[0].chain.AddForkBlock(block)
+		}
+	}
 
 	t.Logf("\nFork scenario:")
 	t.Logf("  Slow node (0):   height=%d", slowNodeTip.GetHeight())

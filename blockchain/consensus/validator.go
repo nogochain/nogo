@@ -81,17 +81,19 @@ var (
 )
 
 type BlockValidator struct {
-	consensus ConsensusParams
-	chainID   uint64
-	metrics   MetricsCollector
-	mu        sync.RWMutex
+	consensus    ConsensusParams
+	chainID      uint64
+	metrics      MetricsCollector
+	mu           sync.RWMutex
+	diffAdjuster *nogopow.DifficultyAdjuster
 }
 
 func NewBlockValidator(consensus ConsensusParams, chainID uint64, metrics MetricsCollector) *BlockValidator {
 	return &BlockValidator{
-		consensus: consensus,
-		chainID:   chainID,
-		metrics:   metrics,
+		consensus:    consensus,
+		chainID:      chainID,
+		metrics:      metrics,
+		diffAdjuster: nogopow.NewDifficultyAdjuster(&consensus),
 	}
 }
 
@@ -99,6 +101,7 @@ func (v *BlockValidator) UpdateConsensus(consensus ConsensusParams) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.consensus = consensus
+	v.diffAdjuster = nogopow.NewDifficultyAdjuster(&consensus)
 }
 
 func (v *BlockValidator) ValidateBlock(block *Block, parent *Block, state map[string]Account) error {
@@ -111,6 +114,7 @@ func (v *BlockValidator) ValidateBlock(block *Block, parent *Block, state map[st
 
 	v.mu.RLock()
 	consensus := v.consensus
+	diffAdjuster := v.diffAdjuster
 	v.mu.RUnlock()
 
 	if err := v.validateBlockStructure(block); err != nil {
@@ -121,7 +125,7 @@ func (v *BlockValidator) ValidateBlock(block *Block, parent *Block, state map[st
 		return fmt.Errorf("POW validation failed: %w", err)
 	}
 
-	if err := v.validateDifficulty(block, parent); err != nil {
+	if err := v.validateDifficulty(block, parent, diffAdjuster); err != nil {
 		return fmt.Errorf("difficulty validation failed: %w", err)
 	}
 
@@ -173,7 +177,7 @@ func (v *BlockValidator) validateBlockStructure(block *Block) error {
 	return nil
 }
 
-func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
+func (v *BlockValidator) validateDifficulty(block *Block, parent *Block, diffAdjuster *nogopow.DifficultyAdjuster) error {
 	if block.GetHeight() == 0 {
 		if block.Header.DifficultyBits != v.consensus.GenesisDifficultyBits {
 			return fmt.Errorf("%w: expected %d got %d", ErrGenesisDifficultyMismatch, v.consensus.GenesisDifficultyBits, block.Header.DifficultyBits)
@@ -194,9 +198,6 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
 	}
 
 	if v.consensus.DifficultyEnable {
-		// Calculate expected difficulty using PI controller (same as mining)
-		// Use nogopow.NewDifficultyAdjuster for PI controller algorithm
-
 		var parentHash nogopow.Hash
 		if len(parent.Hash) > 0 {
 			copy(parentHash[:], parent.Hash)
@@ -211,9 +212,7 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block) error {
 			ParentHash: parentHash,
 		}
 
-		// Use PI controller difficulty calculation (same as mining)
-		adjuster := nogopow.NewDifficultyAdjuster(&v.consensus)
-		expectedDifficulty := adjuster.CalcDifficulty(uint64(block.Header.TimestampUnix), parentHeader)
+		expectedDifficulty := diffAdjuster.CalcDifficulty(uint64(block.Header.TimestampUnix), parentHeader)
 		actualDifficulty := big.NewInt(int64(block.Header.DifficultyBits))
 
 		// Use wider tolerance (50%) for initial blocks to allow difficulty to stabilize

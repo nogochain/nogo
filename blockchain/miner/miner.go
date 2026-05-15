@@ -529,7 +529,7 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 		cancel()
 
 		totalPeers := len(m.pm.Peers())
-		
+
 		// Track peer responsiveness for timeout safeguard
 		if peersResponded {
 			m.lastPeerResponseTime = time.Now()
@@ -1066,11 +1066,11 @@ func CreateCoinbaseTx(minerAddress string, height uint64, totalFees uint64, chai
 	// Transaction fees are burned (MinerFeeShare=0) to create deflationary pressure
 	minerReward := blockReward * uint64(consensus.MonetaryPolicy.MinerRewardShare) / 100
 	minerFee := consensus.MonetaryPolicy.MinerFeeAmount(totalFees)
-	totalAmount := minerReward + minerFee
 
-	if totalAmount > math.MaxUint64 {
+	if minerReward > math.MaxUint64-minerFee {
 		return nil, errors.New("coinbase amount overflow")
 	}
+	totalAmount := minerReward + minerFee
 
 	coinbase := &core.Transaction{
 		Type:      core.TxCoinbase,
