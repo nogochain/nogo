@@ -1,7 +1,7 @@
 # NogoChain API Documentation
 
-> Version: 1.3.0
-> Last Updated: 2026-04-26
+> Version: 1.4.0
+> Last Updated: 2026-05-15
 > Applicable Version: NogoChain Node v1.0.0+
 
 ## Document Overview
@@ -87,12 +87,17 @@ API Documentation/
 | `GET /version` | Version info | None |
 | `GET /chain/info` | Chain info | None |
 | `GET /balance/{address}` | Query balance | None |
-| `POST /tx` | Submit transaction | None |
-| `GET /tx/{txid}` | Query transaction | None |
+| `POST /tx` | Submit transaction (1MB limit) | None |
+| `POST /tx/batch` | Batch submit (2MB, max 50) | None |
+| `GET /tx/{id}` | Query transaction | None |
+| `GET /tx/status/{id}` | Transaction status | None |
+| `GET /tx/receipt/{id}` | Transaction receipt | None |
+| `GET /tx/fee/recommend` | Fee recommendations | None |
 | `POST /wallet/create` | Create wallet | None |
 | `GET /mempool` | Mempool | None |
 | `GET /p2p/getaddr` | Node list | None |
 | `GET /api/proposals` | Proposal list | None |
+| `GET /ws` | WebSocket connection | None |
 
 ### Authentication Method
 
@@ -106,7 +111,10 @@ curl -X POST http://localhost:8080/mine/once \
 ### Rate Limiting
 
 - **Default**: 10 requests/second, Burst 20
-- **API Key**: Can apply for 5-100x increase
+- **API Key**: 5x multiplier for API key holders
+- **Exchange mode**: 1000 RPS, Burst 5000
+- **Public node mode**: 100 RPS, Burst 200
+- **Bucket TTL**: 10 minutes, Cleanup interval: 1 minute
 - **Rate Limit Headers**: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `Retry-After`
 
 ### Error Handling
@@ -125,11 +133,21 @@ Error response format:
 ```
 
 Common error codes:
-- `VALIDATION_ERROR` (1000-1999): Parameter validation errors
-- `NOT_FOUND` (2000-2999): Resource not found
-- `INTERNAL_ERROR` (3000-3999): Internal errors
-- `RATE_LIMITED` (4000-4999): Rate limiting
-- `AUTH_ERROR` (5000-5999): Authentication/authorization errors
+- `INVALID_JSON` (1001): Invalid JSON format
+- `MISSING_FIELD` (1002): Missing required field
+- `INSUFFICIENT_BALANCE` (1020): Insufficient balance
+- `NONCE_TOO_LOW` (1021): Nonce too low
+- `TX_NOT_FOUND` (2001): Transaction not found
+- `BLOCK_NOT_FOUND` (2002): Block not found
+- `PROPOSAL_NOT_FOUND` (2004): Proposal not found
+- `BLOCKCHAIN_ERROR` (3005): Internal blockchain error
+- `CONSENSUS_ERROR` (3010): Consensus error
+- `FORK_ERROR` (3011): Fork detected
+- `IP_RATE_LIMITED` (4001): Per-IP rate limit exceeded
+- `GLOBAL_RATE_LIMITED` (4002): Global rate limit exceeded
+- `UNAUTHORIZED` (5001): Missing authentication
+- `FORBIDDEN` (5002): Insufficient permissions
+- `AI_REJECTED` (5007): AI audit rejected transaction
 
 ## Code Examples
 
@@ -232,11 +250,19 @@ Please provide the following information:
 
 ## Changelog
 
+### v1.4.0 (2026-05-15)
+
+- 🔧 Verified all API endpoints against code implementation (47 routes)
+- 📝 Updated error codes to match actual implementation
+- 🗑️ Removed documentation for endpoints that no longer exist (SPV, P2P Sync)
+- 🔄 Updated rate limiting documentation with Exchange/Public node modes
+- 📊 Added verified fee estimation tiers: slow(1.0x), standard(1.5x), fast(2.0x)
+- 📡 Updated WebSocket protocol documentation
+
 ### v1.3.0 (2026-04-26)
 
 - 🐛 Fixed incorrect file references (README_EN.md → README_cn.md, openapi_en.yaml → openapi.yaml)
 - 📝 Updated document structure to match actual files
-- 🔧 Verified all API endpoints against code implementation (56 endpoints)
 
 ### v1.2.0 (2026-04-07)
 

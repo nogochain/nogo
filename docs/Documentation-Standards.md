@@ -1,7 +1,7 @@
 # NogoChain Documentation Standards
 
-> **Version**: 1.1.0
-> **Last Updated**: 2026-04-26
+> **Version**: 2.0.0
+> **Last Updated**: 2026-05-15
 > **Status**: ✅ Production Ready
 > **Language**: English (Primary)
 > **Scope**: All NogoChain Technical Documentation
@@ -357,11 +357,11 @@ All example code must be executable:
 
 Example code should include comments:
 ```bash
-# 1. Download Go 1.21.5
-wget https://go.dev/dl/go1.21.5.linux-amd64.tar.gz
+# 1. Download Go 1.25.0
+wget https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
 
 # 2. Extract
-sudo tar -C /usr/local -xzf go1.21.5.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.25.0.linux-amd64.tar.gz
 ```
 
 ### 3. Security Warnings
@@ -550,11 +550,15 @@ docs/
 
 ---
 
-**Last Updated**: 2026-04-26
-**Version**: 1.1.0
+**Last Updated**: 2026-05-15
+**Version**: 2.0.0
 **Maintainer**: NogoChain Development Team
 
 ## Changelog
+
+### v2.0.0 (2026-05-15)
+- ✏️ Updated Go version examples to 1.25.0
+- 📅 Updated date to 2026-05-15
 
 ### v1.1.0 (2026-04-26)
 - 🌐 Converted to English as primary language (was Chinese)

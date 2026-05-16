@@ -1,7 +1,7 @@
 # NogoChain Glossary
 
-> **Version**: 1.0.0  
-> **Last Updated**: 2026-04-09  
+> **Version**: 2.0.0
+> **Last Updated**: 2026-05-15
 > **Status**: ✅ Production Ready
 
 This document contains professional terminology used in the NogoChain project, arranged in alphabetical order for easy reference.
@@ -21,9 +21,9 @@ An authentication token for accessing management APIs, minimum 16 characters, re
 **Code Reference**: [`blockchain/config/security.go`](file:///d:/NogoChain/nogo/blockchain/config/security.go)
 
 ### AI Auditor
-Optional feature using AI technology for intelligent auditing of transactions and blocks.
+Optional service using LLM-based AI technology for intelligent auditing of transactions and blocks. Deployed via Docker Compose profile `ai`.
 
-**Code Reference**: [`blockchain/config/ai_features.go`](file:///d:/NogoChain/nogo/blockchain/config/ai_features.go)
+**Code Reference**: [`ai-auditor/Dockerfile`](file:///d:/NogoChain/nogo/ai-auditor/Dockerfile)
 
 ---
 
@@ -40,9 +40,16 @@ Block metadata containing parent block hash, timestamp, difficulty, and other in
 **Code Reference**: [`blockchain/core/types.go`](file:///d:/NogoChain/nogo/blockchain/core/types.go#L31-L50)
 
 ### Block Reward
-The reward miners receive after successfully mining a block, including base reward and transaction fees.
+The reward miners receive after successfully mining a block, including base reward (5 NOGO initial, decreasing 10% annually) and transaction fees.
 
-**Code Reference**: [`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go#L89-L104)
+**Code Reference**: [`blockchain/metrics/metrics.go`](file:///d:/NogoChain/nogo/blockchain/metrics/metrics.go#L44-L61)
+
+### BoltDB
+Embedded key-value database used by NogoChain for persistent storage, replacing LevelDB. Based on `go.etcd.io/bbolt`.
+
+**Code Reference**: [`go.mod`](file:///d:/NogoChain/nogo/go.mod#L10)
+
+---
 
 ### Boot Nodes
 Initial node list used for network discovery when the node starts.
@@ -57,7 +64,7 @@ Initial node list used for network discovery when the node starts.
 A unique ID identifying different blockchain networks:
 - `1`: Mainnet
 - `2`: Testnet
-- `3`: Smoke test (development environment)
+- `3`: Development (local)
 
 **Code Reference**: [`blockchain/config/config.go`](file:///d:/NogoChain/nogo/blockchain/config/config.go#L66)
 
@@ -104,9 +111,9 @@ The digital signature algorithm used by NogoChain, providing high performance an
 ## F
 
 ### Fee
-The fee users pay for transactions, 100% goes to miners.
+The fee users pay for transactions, 100% distributed to miners.
 
-**Code Reference**: [`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go#L150)
+**Code Reference**: [`blockchain/metrics/metrics.go`](file:///d:/NogoChain/nogo/blockchain/metrics/metrics.go#L59-L61)
 
 ---
 
@@ -132,9 +139,9 @@ A wallet system that generates multiple keys from a single seed.
 **Code Reference**: [`blockchain/crypto/hdwallet.go`](file:///d:/NogoChain/nogo/blockchain/crypto/hdwallet.go)
 
 ### Halving
-The mechanism where block rewards decrease by 10% annually, with a minimum reduction to 0.1 NOGO.
+The mechanism where block rewards decrease by 10% annually, with a minimum reduction to 1 NOGO.
 
-**Code Reference**: [`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go#L89-L104)
+**Code Reference**: [`blockchain/metrics/metrics.go`](file:///d:/NogoChain/nogo/blockchain/metrics/metrics.go#L50-L57)
 
 ---
 
@@ -147,21 +154,17 @@ A reward pool accounting for 1% of block rewards, used to reward honest nodes.
 
 ---
 
-## L
-
-### LevelDB
-The embedded key-value database used by NogoChain.
-
-**Code Reference**: [`blockchain/storage/leveldb.go`](file:///d:/NogoChain/nogo/blockchain/storage/leveldb.go)
-
----
-
 ## M
 
 ### Max Peers
 The maximum number of P2P connections a node allows, default is 100.
 
 **Code Reference**: [`blockchain/config/config.go`](file:///d:/NogoChain/nogo/blockchain/config/config.go#L77)
+
+### Makefile
+Standardized build system providing reproducible builds, testing, linting, and deployment targets.
+
+**Code Reference**: [`Makefile`](file:///d:/NogoChain/nogo/Makefile)
 
 ### Median Time Past
 Algorithm for timestamp consensus, taking the median of the last 11 block timestamps.
@@ -197,10 +200,20 @@ NogoChain's proof-of-work consensus algorithm, based on matrix multiplication.
 
 **Code Reference**: [`blockchain/nogopow/nogopow.go`](file:///d:/NogoChain/nogo/blockchain/nogopow/nogopow.go)
 
+### Nginx
+Optional reverse proxy for production deployments with SSL termination and load balancing. Configuration files are located in the `nginx/` directory.
+
+**Code Reference**: [`nginx/nginx.conf`](file:///d:/NogoChain/nogo/nginx/nginx.conf)
+
 ### NTP (Network Time Protocol)
 Protocol for synchronizing node time, maximum allowed drift is 100 milliseconds.
 
 **Code Reference**: [`blockchain/config/config.go`](file:///d:/NogoChain/nogo/blockchain/config/config.go#L81)
+
+### n8n
+Workflow automation platform for blockchain operations, deployed via Docker Compose profile `orchestration` on port 5678.
+
+**Code Reference**: [`docker-compose.yml`](file:///d:/NogoChain/nogo/docker-compose.yml#L51-L66)
 
 ---
 
@@ -230,6 +243,11 @@ Mechanism for deleting old block data to save storage space.
 
 **Code Reference**: [`config/config.go`](file:///d:/NogoChain/nogo/config/config.go#L34)
 
+### Prometheus
+Monitoring system used to collect 40+ metrics from NogoChain nodes. A `prometheus.yml` configuration file is provided for scrape setup.
+
+**Code Reference**: [`prometheus.yml`](file:///d:/NogoChain/nogo/prometheus.yml)
+
 ---
 
 ## R
@@ -247,6 +265,11 @@ Mechanism to prevent API abuse, configurable requests per second and burst limit
 Stable nodes in the network used for new node discovery.
 
 **Code Reference**: [`blockchain/config/config.go`](file:///d:/NogoChain/nogo/blockchain/config/config.go#L66)
+
+### SDK (Software Development Kit)
+Official libraries for integrating with NogoChain. JavaScript SDK at `sdk/javascript/index.js`, Python SDK at `sdk/python/__init__.py`.
+
+**Code Reference**: [`sdk/javascript/index.js`](file:///d:/NogoChain/nogo/sdk/javascript/index.js)
 
 ### Social Recovery
 Feature allowing users to recover accounts through trusted contacts.
@@ -327,7 +350,7 @@ Protocol for real-time pushing of blockchain events.
 
 **Security Related**: Ed25519, TLS, Admin Token, Rate Limiting, Trust Proxy
 
-**Storage Related**: LevelDB, Pruning, Merkle Tree
+**Storage Related**: BoltDB, Pruning, Merkle Tree
 
 **Wallet Related**: HD Wallet, Social Recovery, Account
 
@@ -335,10 +358,14 @@ Protocol for real-time pushing of blockchain events.
 
 **Governance Related**: Governance, Community Fund
 
-**Development Related**: Chain ID, Genesis Block, Mempool, Transaction
+**Development Related**: Chain ID, Genesis Block, Mempool, Transaction, Makefile
+
+**Observability**: Prometheus, NTP
+
+**Integration**: SDK, n8n, Nginx, AI Auditor
 
 ---
 
-**Last Updated**: 2026-04-09  
-**Version**: 1.0.0  
+**Last Updated**: 2026-05-15
+**Version**: 2.0.0
 **Maintainer**: NogoChain Development Team

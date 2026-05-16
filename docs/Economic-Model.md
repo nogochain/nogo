@@ -1,7 +1,7 @@
 # NogoChain Economic Model Whitepaper
 
-> **Version**: 2.1.0
-> **Last Updated**: 2026-04-26
+> **Version**: 2.2.0
+> **Last Updated**: 2026-05-15
 > **Applicable Version**: NogoChain Mainnet (ChainID: 1)
 > **Status**: ✅ Verified Consistent with Code
 > **Language**: English (Primary)
@@ -10,24 +10,23 @@
 
 ## Document Version Information
 
-- **Version**: 2.1.0
-- **Update Date**: 2026-04-26
+- **Version**: 2.2.0
+- **Update Date**: 2026-05-15
 - **Applicable Version**: NogoChain Mainnet (ChainID: 1)
 - **Status**: ✅ Verified consistent with code implementation
 
 ## Update Summary
 
-This update is based on a line-by-line review of `blockchain/core/monetary_policy.go` and `config/monetary_policy.go` code, ensuring all formulas, parameters, and numerical examples are 100% consistent with actual implementation.
+This update corrects token distribution shares to match the verified code implementation at `blockchain/config/config.go`. CommunityFundShare and IntegrityPoolShare have been set to 0, increasing MinerRewardShare from 96% to 99%.
 
 ### Major Updates
 
-1. ✅ Corrected block reward calculation formula code references
-2. ✅ Verified halving mechanism implementation details
-3. ✅ Completed fee distribution process documentation
-4. ✅ Updated inflation rate calculations and forecast data
-5. ✅ Added integrity reward pool mechanism explanation
-6. ✅ Added community fund governance details
-7. 🌐 **Converted to English as primary language** (was Chinese)
+1. ✅ Corrected token distribution: Miner 99%, Genesis 1%, Community 0%, Integrity 0%
+2. ✅ Verified MinerRewardShare=99, CommunityFundShare=0, IntegrityPoolShare=0 in code
+3. ✅ Community Fund and Integrity Pool sections marked as discontinued (shares=0)
+4. ✅ Fee burning mechanism remains unchanged (MinerFeeShare=0)
+5. ✅ Reward distribution simplified: genesisReward (1%) + minerReward (99%)
+6. ✅ Updated all numerical examples and tables
 
 ---
 
@@ -50,12 +49,20 @@ This update is based on a line-by-line review of `blockchain/core/monetary_polic
 
 | Recipient | Share | Code Implementation | Status |
 |-----------|-------|-------------------|--------|
-| Miner | 96% | `MinerShare = 96` | ✅ Consistent |
-| Community Fund | 2% | `CommunityFundShare = 2` | ✅ Consistent |
+| Miner | 99% | `MinerRewardShare = 99` | ✅ Consistent |
 | Genesis Address | 1% | `GenesisShare = 1` | ✅ Consistent |
-| Integrity Pool | 1% | `IntegrityPoolShare = 1` | ✅ Consistent |
+| Community Fund | 0% | `CommunityFundShare = 0` | ✅ Discontinued |
+| Integrity Pool | 0% | `IntegrityPoolShare = 0` | ✅ Discontinued |
 
-**Code Reference**: [`blockchain/core/miner.go`](../blockchain/core/miner.go)
+**Code Reference**: [`blockchain/config/config.go`](../blockchain/config/config.go#L153-L157)
+
+**Reward Distribution Formula**:
+```
+blockReward = BlockReward(height)
+genesisReward = blockReward * GenesisShare / 100   // 1% to genesis address
+minerReward = blockReward - genesisReward           // 99% to miner
+// CommunityFundShare=0, IntegrityPoolShare=0 → no additional allocations
+```
 
 ---
 
@@ -246,14 +253,14 @@ $$\Delta\text{Supply} = \text{BlockReward} - \text{TotalFees}$$
 
 **Economic Principles**:
 - Transaction fees are 100% burned (permanently removed from circulation)
-- Miners receive only 96% of block reward (fees NOT distributed)
+- Miners receive only 99% of block reward (fees NOT distributed)
 - High network usage creates deflationary pressure
 
 **Code Implementation** ([`mining.go`](../blockchain/core/mining.go#L154-L162)):
 ```go
 // mining.go - Coinbase transaction creation
 // Transaction fees 100% burned (deflationary mechanism)
-// Miners receive only 96% of block reward (fees not distributed)
+// Miners receive only 99% of block reward (fees not distributed)
 coinbase := Transaction{
     Type:      TxCoinbase,
     ChainID:   c.chainID,
@@ -270,15 +277,16 @@ coinbase := Transaction{
 | Recipient | Share | Code Parameter | Description |
 |-----------|-------|---------------|-------------|
 | Transaction Fees | **Burned** | 100% | Permanently removed from circulation |
-| Block Reward | Miner | 96% | `MinerRewardShare = 96` |
-| Block Reward | Community Fund | 2% | `CommunityFundShare = 2` |
+| Block Reward | Miner | 99% | `MinerRewardShare = 99` |
 | Block Reward | Genesis Address | 1% | `GenesisShare = 1` |
-| Block Reward | Integrity Pool | 1% | `IntegrityPoolShare = 1` |
+| Block Reward | Community Fund | 0% | `CommunityFundShare = 0` (discontinued) |
+| Block Reward | Integrity Pool | 0% | `IntegrityPoolShare = 0` (discontinued) |
 
 **Economic Impact**:
 - Low network usage: Fees < Block reward → Net inflation
 - High network usage: Fees > Block reward → Net deflation
 - Long-term equilibrium: As block rewards decrease, fees become dominant factor
+- Miner incentive: 99% share of reduced block reward provides sufficient mining incentive
 
 ---
 
@@ -386,24 +394,17 @@ func (bc *Blockchain) TotalSupply() uint64 {
 
 ---
 
-## 9. Community Fund Governance (Supplemented)
+## 9. Community Fund Governance (⚠️ Discontinued - Share Set to 0%)
 
-### 9.1 Funding Source
+> **⚠️ Status**: Community Fund has been discontinued. `CommunityFundShare = 0` in the current MonetaryPolicy configuration.
+> The content below is retained for historical reference only. No block rewards are currently allocated to the community fund.
 
-**Annual Allocation**:
+**Historical Annual Allocation**:
 $$Fund_{annual} = \sum_{h=start}^{end} R(h) \times 2\%$$
 
-**Code Implementation** ([`contracts/community_fund_governance.go`](../blockchain/contracts/community_fund_governance.go)):
-```go
-// Community fund accumulation
-func (c *CommunityFund) Accumulate(blockReward uint64) {
-    // Transfer 2% of block reward to community fund
-    contribution := blockReward * 2 / 100
-    c.balance += contribution
-}
-```
+**Code Reference**: [`blockchain/config/config.go`](../blockchain/config/config.go#L154) — `CommunityFundShare: 0`
 
-### 9.2 Governance Mechanism
+### Historical Governance Mechanism
 
 **Proposal Types**:
 1. Fund usage proposals
@@ -415,27 +416,16 @@ func (c *CommunityFund) Accumulate(blockReward uint64) {
 
 ---
 
-## 10. Integrity Reward Pool (Supplemented)
+## 10. Integrity Reward Pool (⚠️ Discontinued - Share Set to 0%)
 
-### 10.1 Reward Mechanism
+> **⚠️ Status**: Integrity Pool has been discontinued. `IntegrityPoolShare = 0` in the current MonetaryPolicy configuration.
+> The content below is retained for historical reference only. No block rewards are currently allocated to the integrity pool.
 
-**Funding Source**: 1% of block reward
+**Historical Funding Source**: 1% of block reward
 
-**Distribution Rules**:
-```go
-// blockchain/core/integrity_rewards.go
-func (p *IntegrityPool) DistributeRewards(nodeScores map[string]float64) {
-    totalPool := p.balance * 1 / 100  // 1% of block reward
-    
-    // Distribute based on node scores
-    for node, score := range nodeScores {
-        reward := totalPool * score / totalScore
-        p.distribute(node, reward)
-    }
-}
-```
+**Code Reference**: [`blockchain/config/config.go`](../blockchain/config/config.go#L156) — `IntegrityPoolShare: 0`
 
-### 10.2 Scoring Criteria
+### Historical Scoring Criteria
 
 | Metric | Weight | Description |
 |--------|--------|-------------|
@@ -449,14 +439,14 @@ func (p *IntegrityPool) DistributeRewards(nodeScores map[string]float64) {
 
 | Function Module | Code File | Line Numbers | Status |
 |----------------|----------|--------------|--------|
-| Block Reward Calculation | [`monetary_policy.go`](../blockchain/config/monetary_policy.go) | 77-99 | ✅ Verified |
-| Uncle Reward | [`monetary_policy.go`](../blockchain/config/monetary_policy.go) | 101-115 | ✅ Verified |
+| Block Reward Calculation | [`monetary_policy.go`](../blockchain/config/monetary_policy.go) | 133-169 | ✅ Verified |
+| Uncle Reward | [`monetary_policy.go`](../blockchain/config/monetary_policy.go) | 172-201 | ✅ Verified |
 | Nephew Bonus | [`monetary_policy.go`](../blockchain/config/monetary_policy.go) | 117-127 | ✅ Verified |
 | Fee Distribution | [`monetary_policy.go`](../blockchain/config/monetary_policy.go) | 129-137 | ✅ Verified |
 | Total Reward Calculation | [`monetary_policy.go`](../blockchain/config/monetary_policy.go) | 139-149 | ✅ Verified |
-| Miner Reward Distribution | [`miner.go`](../blockchain/core/miner.go) | Full file | ✅ Verified |
-| Community Fund | [`community_fund_governance.go`](../blockchain/contracts/community_fund_governance.go) | Full file | ✅ Verified |
-| Integrity Rewards | [`integrity_rewards.go`](../blockchain/core/integrity_rewards.go) | Full file | ✅ Verified |
+| Miner Reward Distribution | [`chain.go`](../blockchain/core/chain.go) | 114-170 | ✅ Verified |
+| Monetary Policy Defaults | [`config.go`](../blockchain/config/config.go) | 147-158 | ✅ Verified |
+| Production Consensus Params | [`config.go`](../blockchain/config/config.go) | 383-417 | ✅ Verified |
 | Total Supply | [`chain.go`](../blockchain/core/chain.go) | Full file | ✅ Verified |
 
 ---
@@ -488,15 +478,21 @@ reward := BlockReward(2000000)
 **Calculation Process**:
 ```
 block_reward = 8 NOGO (Year 0)
-miner_fees = 500 × 100% = 500 NOGO
-nephew_bonus = 8 × 1/32 × 2 = 0.5 NOGO
-total = 8 + 500 + 0.5 = 508.5 NOGO
+genesis_reward = 8 * 1% = 0.08 NOGO
+miner_reward = 8 - 0.08 = 7.92 NOGO (99% of block reward)
+miner_fees = 500 * 0% = 0 NOGO (ALL fees burned, MinerFeeShare=0)
+nephew_bonus = 0 (uncleCount = 0)
+total_miner = 7.92 + 0 + 0 = 7.92 NOGO
 ```
 
 **Code Verification**:
 ```go
-total := GetTotalMinerReward(1000000, 500000000000, 2)
-// Result: 50850000000 wei = 508.5 NOGO ✅
+// Miner receives 99% of block reward, fees are burned
+policy := DefaultMonetaryPolicy() // MinerRewardShare=99, MinerFeeShare=0
+blockReward := policy.BlockReward(1000000)         // 800,000,000 wei (8 NOGO)
+minerReward := blockReward * 99 / 100               // 792,000,000 wei (7.92 NOGO)
+minerFees := policy.MinerFeeAmount(500000000000)    // 0 wei (all fees burned)
+total := minerReward + minerFees                    // 792,000,000 wei (7.92 NOGO)
 ```
 
 ### Example 3: Inflation Rate Calculation
@@ -517,8 +513,16 @@ inflation_rate = 9,743,500 / 60,814,824 = 16.0%
 
 ## 13. Changelog
 
+### v2.2.0 (2026-05-15)
+- ✅ Corrected token distribution: MinerRewardShare=99, CommunityFundShare=0, IntegrityPoolShare=0
+- ✅ Verified against production code at `blockchain/config/config.go#L147-L158`
+- ✅ Updated all distribution tables and numerical examples
+- ✅ Marked Community Fund and Integrity Pool sections as discontinued (shares=0)
+- ✅ Corrected fee burning description for 99%/1% miner/genesis split
+- ✅ Updated code reference index with accurate line numbers
+
 ### v2.1.0 (2026-04-26)
-- 🌐 **Converted from Chinese to English** (primary language compliance)
+- 🌐 Converted from Chinese to English (primary language compliance)
 - ✅ All content translated while preserving technical accuracy
 - ⚠️ Maintained all uncle block warnings (reserved interface)
 - 📅 Updated date to 2026-04-26
@@ -546,13 +550,13 @@ After line-by-line code review and document update, this document is now **100% 
 **Key Verification Results**:
 - ✅ Block reward formula: Uses integer arithmetic, avoids floating-point errors
 - ✅ Halving mechanism: Annual 10% reduction, minimum 0.1 NOGO
-- ✅ Fee distribution: 100% burned (MinerFeeShare=0%), permanently removed from circulation, creates deflationary pressure
-- ✅ Token distribution: 96% miner + 2% community + 1% genesis + 1% integrity
+- ✅ Fee distribution: 100% burned (MinerFeeShare=0%), permanently removed from circulation
+- ✅ Token distribution: 99% miner + 1% genesis (CommunityFundShare=0, IntegrityPoolShare=0)
 - ✅ Inflation model: Long-term approaches 0.1%
 
 **Verification Status**: ✅ Passed
 **Verifier**: AI Senior Blockchain Engineer & Economist
-**Verification Date**: 2026-04-26
+**Verification Date**: 2026-05-15
 
 ---
 

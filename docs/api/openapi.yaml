@@ -83,7 +83,7 @@ info:
     - **Official Website**: https://nogochain.org
     - **Technical Documentation**: https://docs.nogochain.org
     - **Email**: nogo@eiyaro.org
-  version: 1.2.0
+  version: 1.4.0
   contact:
     name: NogoChain Team
     url: https://nogochain.org
@@ -124,6 +124,18 @@ paths:
   # ============================================================================
   # System Endpoints
   # ============================================================================
+  /:
+    get:
+      tags:
+        - System
+      summary: Root redirect
+      description: |
+        Redirects to the block explorer at /explorer/.
+      operationId: getRoot
+      responses:
+        '302':
+          description: Redirect to /explorer/
+
   /health:
     get:
       tags:
@@ -265,6 +277,36 @@ paths:
             type: string
             pattern: '^[a-fA-F0-9]{64}$'
             example: bbba903f8a8c06e1f170d91aeab8eb11234a1ffa88a709d71323bfb41b31f3e2
+      responses:
+        '200':
+          description: Block details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Block'
+        '404':
+          description: Block not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /blocks/hash/{hash}:
+    get:
+      tags:
+        - Block
+      summary: Query block by hash (alias)
+      description: |
+        Get block details by block hash. Alias for /block/hash/{hash}.
+      operationId: getBlockByHashAlias
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          description: Block hash (64 character hexadecimal)
+          schema:
+            type: string
+            pattern: '^[a-fA-F0-9]{64}$'
       responses:
         '200':
           description: Block details
@@ -1008,6 +1050,22 @@ paths:
               schema:
                 $ref: '#/components/schemas/Mempool'
 
+  /pool/stats:
+    get:
+      tags:
+        - Mempool
+      summary: Pool statistics
+      description: |
+        Get transaction pool statistics.
+      operationId: getPoolStats
+      responses:
+        '200':
+          description: Pool statistics
+          content:
+            application/json:
+              schema:
+                type: object
+
   # ============================================================================
   # Mining Endpoints
   # ============================================================================
@@ -1368,9 +1426,17 @@ paths:
       description: |
         Establish WebSocket connection to subscribe to real-time events.
         
-        Supported event types:
-        - `new_block`: New block
-        - `new_tx`: New transaction
+        **Configuration**: Max 100 connections, Ping: 25s, Read timeout: 60s.
+        
+        **Subscription Protocol**:
+        ```json
+        {"type": "subscribe", "topic": "all"}
+        {"type": "subscribe", "topic": "address", "address": "NOGO..."}
+        {"type": "subscribe", "topic": "type"}
+        {"type": "unsubscribe", "topic": "all"}
+        ```
+        
+        **Supported Event Types**:
         - `mempool_added`: Transaction added to mempool
         - `mempool_removed`: Transaction removed from mempool
         
@@ -1379,14 +1445,15 @@ paths:
         const ws = new WebSocket('ws://localhost:8080/ws');
         ws.onmessage = (event) => {
           const data = JSON.parse(event.data);
-          console.log('Event:', data.type, data.data);
+          console.log('Event:', data);
         };
         
-        // Subscribe to specific events
-        ws.send(JSON.stringify({
-          action: 'subscribe',
-          events: ['new_block', 'new_tx']
-        }));
+        ws.onopen = () => {
+          ws.send(JSON.stringify({
+            type: 'subscribe',
+            topic: 'all'
+          }));
+        };
         ```
       operationId: websocketConnection
       responses:
@@ -1844,16 +1911,38 @@ components:
     FeeRecommendation:
       type: object
       properties:
-        fast:
-          type: integer
-          description: Fast confirmation fee
-        average:
-          type: integer
-          description: Standard fee
         slow:
-          type: integer
-          description: Slow fee
+          type: object
+          properties:
+            multiplier:
+              type: number
+            percentile:
+              type: string
+            estimatedConfirmationBlocks:
+              type: integer
+        standard:
+          type: object
+          properties:
+            multiplier:
+              type: number
+            percentile:
+              type: string
+            estimatedConfirmationBlocks:
+              type: integer
+        fast:
+          type: object
+          properties:
+            multiplier:
+              type: number
+            percentile:
+              type: string
+            estimatedConfirmationBlocks:
+              type: integer
         mempoolSize:
+          type: integer
+        congestionMultiplier:
+          type: number
+        timestamp:
           type: integer
 
     # -------------------------------------------------------------------------

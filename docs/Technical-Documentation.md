@@ -1,7 +1,7 @@
 # NogoChain Technical Documentation
 
-**Version:** 1.0.0  
-**Last Updated:** 2026-04-20  
+**Version:** 1.1.0  
+**Last Updated:** 2026-05-15  
 **License:** GNU Lesser General Public License v3.0
 
 ---
@@ -35,15 +35,16 @@ NogoChain is a production-grade blockchain implementation written in Go, designe
 - **Ed25519 Cryptography**: Secure digital signatures using Ed25519 elliptic curve
 - **Merkle Tree Support**: Version 2 blocks include Merkle root for transaction verification
 - **P2P Network**: Multiplexed connections with flow control and peer discovery
-- **Deflationary Economics**: Transaction fees are burned, creating deflationary pressure
-- **Integrity Rewards**: 1% of block rewards allocated to integrity node operators
+- **Deflationary Economics**: Transaction fees are burned (MinerFeeShare=0%), creating deflationary pressure
+- **Integrity Rewards**: CommunityFundShare=0%, IntegrityPoolShare=0% — block rewards go 99% to miner and 1% to genesis address
 
 ### 1.3 Technology Stack
 
 | Component | Technology |
 |-----------|------------|
-| Language | Go 1.21+ |
-| Cryptography | Ed25519, SHA-256, Keccak256 |
+| Language | Go 1.25.0 |
+| Module | github.com/nogochain/nogo |
+| Cryptography | Ed25519, SHA-256, SHA3-256 (Keccak256) |
 | Storage | BoltDB |
 | Networking | TCP with multiplexed channels |
 | Serialization | JSON, RLP (for consensus) |
@@ -255,6 +256,8 @@ type BlockHeader struct {
     Difficulty     uint32 `json:"difficulty"`
     Nonce          uint64 `json:"nonce"`
     MerkleRoot     []byte `json:"merkleRoot,omitempty"`
+    Height         uint64 `json:"height,omitempty"`
+    MinerAddress   string `json:"minerAddress,omitempty"`
 }
 ```
 
@@ -412,18 +415,26 @@ The PI (Proportional-Integral) controller adjusts difficulty based on block time
 **Mathematical Formula:**
 
 ```
-error = (actualTime - targetTime) / targetTime
-integral = integral + error (clamped to [-10, 10])
+timeRatio = clamp(actualTime / targetTime, 0.25, 4.0)
+error = timeRatio - 1
+error = clamp(error, -0.75, 3.0)
+integral = integral * integralDecay + error
+integral = clamp(integral, -3.0, 3.0)
 output = Kp * error + Ki * integral
 newDifficulty = parentDifficulty * (1 - output)
 ```
 
-**Parameters:**
-- `Kp` (Proportional Gain): `MaxDifficultyChangePercent / 100` (default 1.0)
-- `Ki` (Integral Gain): 0.1 (fixed)
-- Anti-windup: Integral clamped to [-10.0, 10.0]
+**PI Controller Parameters:**
+- `Kp` (Proportional Gain): 0.15
+- `Ki` (Integral Gain): 0.03
+- `integralDecay`: 0.97 (3% memory loss per block, prevents stale-error accumulation)
+- Anti-windup: Integral clamped to [-3.0, 3.0]
+- Sliding window size: 10 blocks
+- Max time ratio: 4.0, Min time ratio: 0.25
+- Block time target: 17 seconds
+- Conditional integral accumulation: suppressed when output is clamped
 
-**Source:** [nogopow/difficulty_adjustment.go:104-176](../blockchain/nogopow/difficulty_adjustment.go#L104-L176)
+**Source:** [nogopow/difficulty_adjustment.go](../blockchain/nogopow/difficulty_adjustment.go)
 
 ```go
 func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header) *big.Int {
@@ -447,32 +458,43 @@ func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header)
 ### 6.4 Boundary Conditions
 
 ```go
-func (da *DifficultyAdjuster) enforceBoundaryConditions(newDifficulty, parentDiff *big.Int) *big.Int {
-    // 1. Minimum difficulty floor
+func (da *DifficultyAdjuster) enforceBoundaryConditionsLocked(newDifficulty, parentDiff *big.Int) *big.Int {
+    minDiff := big.NewInt(int64(da.consensusParams.MinDifficulty))  // default 1
+    maxDiff := new(big.Int).Lsh(big.NewInt(1), 256)                // 2^256
+
     if newDifficulty.Cmp(minDiff) < 0 {
         newDifficulty.Set(minDiff)
     }
-    
-    // 2. Maximum difficulty (2^256)
     if newDifficulty.Cmp(maxDiff) > 0 {
         newDifficulty.Set(maxDiff)
     }
-    
-    // 3. Maximum increase: 2x parent
+
+    // Maximum increase: 2x parent difficulty per block
     maxAllowed := new(big.Int).Mul(parentDiff, big.NewInt(2))
     if newDifficulty.Cmp(maxAllowed) > 0 {
         newDifficulty.Set(maxAllowed)
     }
-    
-    // 4. Maximum decrease: 50%
+
+    // Maximum decrease: 50% per block for stability
     minAllowed := new(big.Int).Div(parentDiff, big.NewInt(2))
     if newDifficulty.Cmp(minAllowed) < 0 {
         newDifficulty.Set(minAllowed)
     }
-    
+
+    // Absolute minimum difficulty of 1
+    if newDifficulty.Cmp(big.NewInt(1)) < 0 {
+        newDifficulty.Set(big.NewInt(1))
+    }
     return newDifficulty
 }
 ```
+
+**Safety Limits:**
+- **Minimum Difficulty**: Configurable MinDifficulty (default 1)
+- **Maximum Difficulty**: 4,294,967,295 (uint32 max)
+- **Maximum Increase**: 100% per block (2× parent difficulty)
+- **Maximum Decrease**: 50% per block
+- **Absolute Minimum**: 1 (ensures network liveness)
 
 ### 6.5 Consensus Parameters
 
@@ -718,7 +740,7 @@ func (s *SyncProgressStore) CanResume() bool {
 
 ### 9.1 Monetary Policy
 
-**Source:** [config/monetary_policy.go:49-89](../blockchain/config/monetary_policy.go#L49-L89)
+**Source:** [config/monetary_policy.go](../blockchain/config/monetary_policy.go)
 
 ```go
 type MonetaryPolicy struct {
@@ -727,30 +749,30 @@ type MonetaryPolicy struct {
     MinimumBlockReward     uint64 `json:"minimumBlockReward"`     // 10,000,000 wei (0.1 NOGO)
     UncleRewardEnabled     bool   `json:"uncleRewardEnabled"`     // ⚠️ 预留接口（未启用）
     MaxUncleDepth          uint8  `json:"maxUncleDepth"`          // 6（预留接口，未使用）
-    MinerFeeShare          uint8  `json:"minerFeeShare"`          // 0% (burned)
-    MinerRewardShare       uint8  `json:"minerRewardShare"`       // 96%
-    CommunityFundShare     uint8  `json:"communityFundShare"`     // 2%
+    MinerFeeShare          uint8  `json:"minerFeeShare"`          // 0% (ALL fees burned)
+    MinerRewardShare       uint8  `json:"minerRewardShare"`       // 99%
+    CommunityFundShare     uint8  `json:"communityFundShare"`     // 0%
     GenesisShare           uint8  `json:"genesisShare"`           // 1%
-    IntegrityPoolShare     uint8  `json:"integrityPoolShare"`     // 1%
+    IntegrityPoolShare     uint8  `json:"integrityPoolShare"`     // 0%
 }
 ```
 
-> **⚠️ 注意**: `UncleRewardEnabled` 和 `MaxUncleDepth` 为预留接口字段，**当前生产环境未启用**。核心数据结构 [`core.Block`](../blockchain/core/types.go#L203-L213) 不包含 Uncles 字段。参见 [Economic-Model.md](./Economic-Model.md) 第 2.5 节。
+> **⚠️ 注意**: `UncleRewardEnabled` 和 `MaxUncleDepth` 为预留接口字段，**当前生产环境未启用**。核心数据结构 [`core.Block`](../blockchain/core/types.go) 不包含 Uncles 字段。
 
 ### 9.2 Block Reward Distribution
 
 | Recipient | Share | Purpose |
 |-----------|-------|---------|
-| Miner | 96% | Block production reward |
-| Community Fund | 2% | Governance-controlled development fund |
+| Miner | 99% | Block production reward |
 | Genesis Address | 1% | Preset genesis miner address |
-| Integrity Pool | 1% | Integrity node reward distribution |
+| Community Fund | 0% | Not yet activated |
+| Integrity Pool | 0% | Not yet activated |
 
 ### 9.3 Reward Calculation
 
 ```go
 func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
-    years := height / GetBlocksPerYear()  // ~1,847,058 blocks/year
+    years := height / GetBlocksPerYear()  // ~1,856,329 blocks/year
     
     reward := new(big.Int).SetUint64(p.InitialBlockReward)
     for i := uint64(0); i < years; i++ {
@@ -763,13 +785,6 @@ func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
     return reward.Uint64()
 }
 ```
-
-### 9.4 Token Denomination
-
-| Unit | Wei Equivalent |
-|------|----------------|
-| NogoWei | 1 |
-| NOGO | 100,000,000 |
 
 ### 9.5 Deflationary Mechanism
 
@@ -849,7 +864,7 @@ type RateLimiterConfig struct {
 
 ### 11.1 Prerequisites
 
-- Go 1.21 or later
+- Go 1.25.0 or later
 - Make (for build commands)
 - Docker (optional, for containerized deployment)
 
@@ -909,9 +924,34 @@ Configuration is loaded from:
 
 ---
 
-## 12. FAQ
+## 12. Latest Performance Improvements
 
-### 12.1 General Questions
+This section documents the performance optimizations introduced to improve chain scalability and network resilience.
+
+### 12.1 Chain Data Structures
+
+| Feature | Implementation | Details |
+|---------|---------------|---------|
+| **BlockByHash** | O(1) map lookup | Uses `blocksByHash` map instead of O(N) linear scan |
+| **forkBlocks** | Per-height limit | `MaxForkBlocksPerHeight = 16`, `MaxForkBlocksTotal = 50000` with height-sorted eviction |
+| **blocksByHash** | Size-limited | `MaxBlocksByHashSize = 100000` with height-sorted eviction |
+| **workCache** | Iterative cumulative work | `MaxWorkCacheSize = 100000`, avoids O(N) recalculation for fork blocks |
+| **Fork block indexing** | Dual index | Fork blocks indexed in both `forkBlocks` AND `blocksByHash` for O(1) parent traversal |
+| **Chain extension** | Incremental indexing | `reorganizeChainLocked` only indexes new blocks instead of full chain reindex |
+
+### 12.2 Network & Sync Optimizations
+
+| Feature | Implementation | Details |
+|---------|---------------|---------|
+| **Peer state manager** | Automatic cleanup | Stale peers are automatically detected and removed |
+| **blockKeeper cleanup** | Background goroutine | `cleanupExpiredEntries` runs every 5 minutes, clears `forkDetectionCooldown` and `failedSyncPeers` |
+| **syncStateMu** | Mutex protection | Dedicated mutex for concurrent access to fork detection cooldown and failed sync peers maps |
+
+---
+
+## 13. FAQ
+
+### 13.1 General Questions
 
 **Q: What is the target block time?**  
 A: 17 seconds, adjustable via consensus parameters.
@@ -922,7 +962,7 @@ A: Using a PI (Proportional-Integral) controller that responds to block time dev
 **Q: What cryptographic algorithm is used?**  
 A: Ed25519 for digital signatures, SHA-256 and Keccak-256 for hashing.
 
-### 12.2 Technical Questions
+### 13.2 Technical Questions
 
 **Q: How does fork resolution work?**  
 A: The chain follows the "heaviest chain" rule, comparing cumulative work. Ties are broken by:
@@ -937,7 +977,7 @@ A: All transaction fees are burned (MinerFeeShare = 0%), creating deflationary p
 **Q: How does sync progress persistence work?**  
 A: Progress is saved every 30 seconds to `sync_progress.json`. On restart, the node can resume from the last synced height if within 24 hours.
 
-### 12.3 Mining Questions
+### 13.3 Mining Questions
 
 **Q: What is NogoPow?**  
 A: A custom Proof-of-Work algorithm using matrix multiplication with a PI controller for difficulty adjustment.
@@ -946,9 +986,9 @@ A: A custom Proof-of-Work algorithm using matrix multiplication with a PI contro
 A: 1 (for genesis and early blocks). The PI controller will auto-adjust based on network hashrate.
 
 **Q: How are block rewards distributed?**  
-A: 96% to miner, 2% to community fund, 1% to genesis address, 1% to integrity pool.
+A: 99% to miner, 1% to genesis address. CommunityFundShare and IntegrityPoolShare are both 0% in the current configuration.
 
-### 12.4 Network Questions
+### 13.4 Network Questions
 
 **Q: What is the default P2P port?**  
 A: 9090 (TCP)
