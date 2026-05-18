@@ -871,9 +871,11 @@ func (s *Server) handleBlockByHeight(w http.ResponseWriter, r *http.Request) {
 	enrichedTxs := make([]map[string]any, len(b.Transactions))
 	for i, tx := range b.Transactions {
 		txHash, _ := core.TxIDHex(tx)
+		fromAddr, _ := tx.FromAddress()
 		enrichedTxs[i] = map[string]any{
 			"type":       tx.Type,
 			"chainId":    tx.ChainID,
+			"fromAddr":   fromAddr,
 			"fromPubKey": tx.FromPubKey,
 			"toAddress":  tx.ToAddress,
 			"amount":     tx.Amount,
@@ -949,9 +951,11 @@ func (s *Server) handleBlockByHashParam(w http.ResponseWriter, r *http.Request) 
 	enrichedTxs := make([]map[string]any, len(b.Transactions))
 	for i, tx := range b.Transactions {
 		txHash, _ := core.TxIDHex(tx)
+		fromAddr, _ := tx.FromAddress()
 		enrichedTxs[i] = map[string]any{
 			"type":       tx.Type,
 			"chainId":    tx.ChainID,
+			"fromAddr":   fromAddr,
 			"fromPubKey": tx.FromPubKey,
 			"toAddress":  tx.ToAddress,
 			"amount":     tx.Amount,

@@ -967,7 +967,7 @@ async function showTransactionDetails(txResult) {
   }
   
   const isCoinbase = tx.type === 'coinbase';
-  const fromAddr = isCoinbase ? 'COINBASE' : await generateAddressFromPubKey(tx.fromPubKey);
+  const fromAddr = isCoinbase ? 'COINBASE' : (tx.fromAddr || await generateAddressFromPubKey(tx.fromPubKey));
   const toAddr = tx.toAddress || '-';
   const amount = (tx.amount || 0) / 1e8;
   const fee = (tx.fee || 0) / 1e8;
@@ -1106,8 +1106,8 @@ async function showBlock(height) {
       
       // Generate from address based on transaction type
       let fromAddr = 'COINBASE';
-      if (!isCoinbase && tx.fromPubKey) {
-        fromAddr = await generateAddressFromPubKey(tx.fromPubKey);
+      if (!isCoinbase) {
+        fromAddr = tx.fromAddr || await generateAddressFromPubKey(tx.fromPubKey);
       }
       
       const toAddr = tx.toAddress || '-';
