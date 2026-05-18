@@ -1,7 +1,7 @@
 # NogoChain API Complete Reference
 
-> Version: 1.4.0  
-> Last Updated: 2026-05-15  
+> Version: 1.3.0  
+> Last Updated: 2026-04-20  
 > Applicable Version: NogoChain Node v1.0.0+
 
 ## Table of Contents
@@ -17,9 +17,11 @@
    - [Transaction Operations](#transaction-operations)
    - [Wallet Management](#wallet-management)
    - [Address Query](#address-query)
-   - [Mempool & Pool](#mempool--pool)
+   - [Mempool](#mempool)
    - [Mining](#mining)
    - [P2P Network](#p2p-network)
+   - [P2P Sync Protocol](#p2p-sync-protocol)
+   - [SPV/Light Client](#spvlight-client)
    - [Community Governance](#community-governance)
    - [WebSocket Subscription](#websocket-subscription)
 7. [Best Practices](#best-practices)
@@ -38,8 +40,7 @@ NogoChain API provides a complete interface for interacting with NogoChain block
 - **RESTful**: Follows REST architecture style, easy to understand and use
 - **Real-time**: WebSocket support for real-time event subscription
 - **Pagination Support**: Large datasets support paginated queries
-- **Batch Operations**: Supports batch transaction submission (max 50 txs, 2MB limit)
-- **Fee Estimation**: Three-tier fee recommendations (slow/standard/fast)
+- **Batch Operations**: Supports batch transaction submission, batch balance queries
 
 ### Base URL
 
@@ -203,14 +204,6 @@ API implements rate limiting to protect node resources.
 | TTL (bucket cleanup) | 10 minutes | - | - |
 | Cleanup Interval | 1 minute | - | - |
 
-### Operating Modes
-
-| Mode | RPS | Burst | Description |
-|------|-----|-------|-------------|
-| Standard | 10 | 20 | Default for all nodes |
-| Public Node | 100 | 200 | Public-facing nodes |
-| Exchange | 1000 | 5000 | High-throughput exchange nodes |
-
 ### Rate Limiting Algorithm
 
 The rate limiter uses a **Token Bucket** algorithm implementation:
@@ -218,11 +211,17 @@ The rate limiter uses a **Token Bucket** algorithm implementation:
 - **Tokens**: Each request consumes one token
 - **Refill Rate**: Tokens are refilled at the configured RPS rate
 - **Burst Capacity**: Maximum tokens that can accumulate (allows temporary bursts)
-- **Per-Endpoint**: Rate limits are applied per endpoint
+- **Per-Identifier**: Rate limits are applied per IP address or API key
 
 ### API Key Benefits
 
-API keys provide a 5x multiplier on base rate limits.
+API keys provide enhanced rate limits:
+
+| Tier | Multiplier | Description |
+|------|------------|-------------|
+| Basic | 5x | Default multiplier |
+| Premium | 10x-50x | Higher limits |
+| Enterprise | 50x-100x | Maximum limits |
 
 **Apply for API Key**:
 ```bash
@@ -303,16 +302,15 @@ Rate limiting can be configured via environment variables or configuration file:
     "requests_per_second": 10,
     "burst": 20
   },
+  "endpoints": {
+    "/tx": {
+      "requests_per_second": 5,
+      "burst": 10
+    }
+  },
   "api_key_multiplier": 5.0,
-  "exchange_mode": {
-    "requests_per_second": 1000,
-    "burst": 5000
-  },
-  "public_node_mode": {
-    "requests_per_second": 100,
-    "burst": 200
-  },
   "by_ip": true,
+  "by_user": false,
   "trust_proxy": false,
   "storage_type": "memory"
 }
@@ -344,31 +342,26 @@ All error responses follow a unified format:
 
 | Range | Category | Description |
 |-------|----------|-------------|
-| 1000-1999 | VALIDATION | Parameter validation errors |
+| 1000-1999 | VALIDATION_ERROR | Parameter validation errors |
 | 2000-2999 | NOT_FOUND | Resource not found |
-| 3000-3999 | INTERNAL | Internal errors |
+| 3000-3999 | INTERNAL_ERROR | Internal errors |
 | 4000-4999 | RATE_LIMITED | Rate limiting |
-| 5000-5999 | AUTH | Authentication/authorization errors |
+| 5000-5999 | AUTH_ERROR | Authentication/authorization errors |
 
-### Verified Error Codes
+### Common Error Codes
 
 | Error Code | HTTP Status | Description | Solution |
 |------------|-------------|-------------|----------|
-| `INVALID_JSON` (1001) | 400 | Invalid JSON format | Check request body JSON format |
-| `MISSING_FIELD` (1002) | 400 | Missing required field | Add missing field |
-| `INSUFFICIENT_BALANCE` (1020) | 400 | Insufficient balance | Recharge or reduce transaction amount |
-| `NONCE_TOO_LOW` (1021) | 400 | Nonce too low | Use correct Nonce value |
-| `TX_NOT_FOUND` (2001) | 404 | Transaction not found | Check if transaction ID is correct |
-| `BLOCK_NOT_FOUND` (2002) | 404 | Block not found | Check block height or hash |
-| `PROPOSAL_NOT_FOUND` (2004) | 404 | Proposal not found | Check proposal ID |
-| `BLOCKCHAIN_ERROR` (3005) | 500 | Blockchain operation failed | Check chain status |
-| `CONSENSUS_ERROR` (3010) | 500 | Consensus error | Check consensus rules |
-| `FORK_ERROR` (3011) | 500 | Fork detected | Wait for chain reorganization |
-| `IP_RATE_LIMITED` (4001) | 429 | Per-IP rate limit exceeded | Reduce request frequency |
-| `GLOBAL_RATE_LIMITED` (4002) | 429 | Global rate limit exceeded | Retry after waiting |
-| `UNAUTHORIZED` (5001) | 401 | Unauthorized | Provide correct Admin Token |
-| `FORBIDDEN` (5002) | 403 | Forbidden | Apply for higher permissions |
-| `AI_REJECTED` (5007) | 400 | AI audit rejected transaction | Check transaction content |
+| `INVALID_JSON` | 400 | Invalid JSON format | Check request body JSON format |
+| `MISSING_FIELD` | 400 | Missing required field | Add missing field |
+| `INVALID_ADDRESS` | 400 | Invalid address format | Check address format (NOGO prefix, 78 characters) |
+| `INVALID_TXID` | 400 | Invalid transaction ID format | Check transaction ID (64 character hex) |
+| `INSUFFICIENT_BALANCE` | 400 | Insufficient balance | Recharge or reduce transaction amount |
+| `NONCE_TOO_LOW` | 400 | Nonce too low | Use correct Nonce value |
+| `TX_NOT_FOUND` | 404 | Transaction not found | Check if transaction ID is correct |
+| `BLOCK_NOT_FOUND` | 404 | Block not found | Check block height or hash |
+| `RATE_LIMITED` | 429 | Request frequency exceeded | Reduce request frequency or apply for API Key |
+| `UNAUTHORIZED` | 401 | Unauthorized | Provide correct Admin Token |
 
 ### Error Handling Best Practices
 
@@ -591,20 +584,6 @@ curl http://localhost:8080/chain/special_addresses
 
 ---
 
-#### GET /
-
-Root path redirects to the block explorer.
-
-**Request**:
-```bash
-curl http://localhost:8080/
-```
-
-**Response (302)**:
-Redirects to `/explorer/`.
-
----
-
 ## Block Query
 
 ### GET /block/height/{height}
@@ -676,9 +655,6 @@ Batch get block headers from specified height.
 curl http://localhost:8080/headers/from/100?count=100
 ```
 
-**Parameters**:
-- `count`: Number of headers (default 20, max 100)
-
 ---
 
 ## Transaction Operations
@@ -686,8 +662,6 @@ curl http://localhost:8080/headers/from/100?count=100
 ### POST /tx
 
 Submit a signed transaction to the network.
-
-**Request size limit**: 1MB
 
 **Request**:
 ```bash
@@ -717,8 +691,6 @@ curl -X POST http://localhost:8080/tx \
 ### POST /tx/batch
 
 Batch submit multiple transactions.
-
-**Limits**: Max 50 transactions, 2MB total request size.
 
 **Request**:
 ```bash
@@ -869,7 +841,7 @@ curl "http://localhost:8080/tx/estimate_fee?speed=average&size=350"
 
 ### GET /tx/fee/recommend
 
-Get recommended transaction fee rates based on mempool analysis.
+Get recommended transaction fee rates.
 
 **Request**:
 ```bash
@@ -882,32 +854,41 @@ curl "http://localhost:8080/tx/fee/recommend?size=350"
 **Response (200)**:
 ```json
 {
-  "slow": {
-    "multiplier": 1.0,
-    "percentile": "P25",
-    "estimatedConfirmationBlocks": 6
-  },
-  "standard": {
-    "multiplier": 1.5,
-    "percentile": "P50", 
-    "estimatedConfirmationBlocks": 3
-  },
-  "fast": {
-    "multiplier": 2.0,
-    "percentile": "P75",
-    "estimatedConfirmationBlocks": 1
-  },
+  "recommendedFees": [
+    {
+      "tier": "slow",
+      "feePerByte": 1,
+      "totalFee": 350,
+      "estimatedConfirmationTime": "1 minute",
+      "estimatedConfirmationBlocks": 6,
+      "priority": 1
+    },
+    {
+      "tier": "standard",
+      "feePerByte": 2,
+      "totalFee": 700,
+      "estimatedConfirmationTime": "30 seconds",
+      "estimatedConfirmationBlocks": 3,
+      "priority": 2
+    },
+    {
+      "tier": "fast",
+      "feePerByte": 4,
+      "totalFee": 1400,
+      "estimatedConfirmationTime": "10 seconds",
+      "estimatedConfirmationBlocks": 1,
+      "priority": 3
+    }
+  ],
   "mempoolSize": 50,
-  "congestionMultiplier": 1.0,
+  "mempoolTotalSize": 17500,
+  "averageFeePerByte": 2,
+  "medianFeePerByte": 2,
+  "minFeePerByte": 1,
+  "maxFeePerByte": 10,
   "timestamp": 1712000000
 }
 ```
-
-**Fee Tiers**:
-- `slow`: P25 percentile of mempool fees, 1.0x multiplier
-- `standard`: P50 percentile of mempool fees, 1.5x multiplier  
-- `fast`: P75 percentile of mempool fees, 2.0x multiplier
-- Congestion multiplier increases with mempool size (> 100 tx, > 500 tx, > 1000 tx)
 
 ---
 
@@ -1186,15 +1167,12 @@ Get transaction history for address.
 
 **Request**:
 ```bash
-curl "http://localhost:8080/address/NOGO.../txs?page=1&limit=50&sort=desc&start_time=1712000000&end_time=1714600000"
+curl http://localhost:8080/address/NOGO.../txs?limit=50&cursor=0
 ```
 
 **Parameters**:
-- `page`: Page number (default 1)
-- `limit`: Items per page (50 or 100)
-- `sort`: Sort direction (asc/desc)
-- `start_time`: Start timestamp (Unix, optional)
-- `end_time`: End timestamp (Unix, optional)
+- `limit`: Items per page (default 50, max 200)
+- `cursor`: Pagination cursor
 
 **Response**:
 ```json
@@ -1208,7 +1186,7 @@ curl "http://localhost:8080/address/NOGO.../txs?page=1&limit=50&sort=desc&start_
 
 ---
 
-## Mempool & Pool
+## Mempool
 
 ### GET /mempool
 
@@ -1234,15 +1212,6 @@ curl http://localhost:8080/mempool
     }
   ]
 }
-```
-
-### GET /pool/stats
-
-Get transaction pool statistics.
-
-**Request**:
-```bash
-curl http://localhost:8080/pool/stats
 ```
 
 ---
@@ -1355,7 +1324,7 @@ curl -X POST http://localhost:8080/mine/once \
 
 Submit complete block (administrative interface).
 
-**Requires Admin Token authentication**. **Request size limit**: 4MB.
+**Requires Admin Token authentication**.
 
 **Request**:
 ```bash
@@ -1443,6 +1412,150 @@ curl -X POST http://localhost:8080/p2p/addr \
 ```json
 {
   "status": "ok"
+}
+```
+
+---
+
+## P2P Sync Protocol
+
+### POST /sync/getblocks
+
+Request blocks from a peer (P2P internal endpoint).
+
+**Request**:
+```bash
+curl -X POST http://localhost:8080/sync/getblocks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "parent_hash": "abc123...",
+    "limit": 500,
+    "headers_only": false
+  }'
+```
+
+**Parameters**:
+- `parent_hash`: Parent block hash (empty for latest)
+- `limit`: Maximum blocks to return (default 500, max 500)
+- `headers_only`: Return only headers if true
+
+**Response**:
+```json
+{
+  "blocks": [...],
+  "headers": [],
+  "from_height": 100,
+  "to_height": 599,
+  "count": 500
+}
+```
+
+**Error Response**:
+```json
+{
+  "hashes": [],
+  "reason": "parent block not found: abc123..."
+}
+```
+
+---
+
+## SPV/Light Client
+
+### GET /spv/balance/{address}
+
+Get balance for address (SPV mode).
+
+**Request**:
+```bash
+curl http://localhost:8080/spv/balance/NOGO...
+```
+
+**Response**:
+```json
+{
+  "address": "NOGO...",
+  "balance": 1000000000
+}
+```
+
+### POST /spv/sync/{address}
+
+Sync address transaction history.
+
+**Request**:
+```bash
+curl -X POST http://localhost:8080/spv/sync/NOGO...
+```
+
+**Response**:
+```json
+{
+  "status": "synced"
+}
+```
+
+### GET /spv/tx/{txHash}
+
+Get transaction by hash (SPV mode).
+
+**Request**:
+```bash
+curl http://localhost:8080/spv/tx/abc123...
+```
+
+**Response**:
+```json
+{
+  "type": "transfer",
+  "chainId": 1,
+  "fromPubKey": "base64_pubkey",
+  "toAddress": "NOGO...",
+  "amount": 100000000,
+  "fee": 1000,
+  "nonce": 1,
+  "signature": "base64_signature"
+}
+```
+
+### GET /spv/headers
+
+Get block headers chain.
+
+**Request**:
+```bash
+curl http://localhost:8080/spv/headers
+```
+
+**Response**:
+```json
+[
+  {
+    "timestampUnix": 1712000000,
+    "prevHash": "...",
+    "difficultyBits": 11,
+    "nonce": 12345,
+    "merkleRoot": "..."
+  },
+  ...
+]
+```
+
+### GET /spv/proof/{txHash}/{blockHash}
+
+Get Merkle proof for transaction.
+
+**Request**:
+```bash
+curl http://localhost:8080/spv/proof/abc123.../def456...
+```
+
+**Response**:
+```json
+{
+  "txHash": "abc123...",
+  "blockHash": "def456...",
+  "merkleProof": ["hash1", "hash2", ...]
 }
 ```
 
@@ -1607,51 +1720,43 @@ curl -X POST http://localhost:8080/api/proposals/deposit \
 
 Establish WebSocket connection for real-time event subscription.
 
-**Configuration**:
-- Max connections: 100
-- Ping interval: 25 seconds
-- Read timeout: 60 seconds
-
-**Subscription Protocol**:
-
-Subscribe to topics:
-```json
-{"type": "subscribe", "topic": "all"}
-{"type": "subscribe", "topic": "address", "address": "NOGO..."}
-{"type": "subscribe", "topic": "type"}
-```
-
-Unsubscribe:
-```json
-{"type": "unsubscribe", "topic": "all"}
-```
-
-**Supported Topics**:
-- `all`: Subscribe to all events
-- `address`: Subscribe to events for a specific address
-- `type`: Subscribe to events by type
-
 **Supported Event Types**:
+- `new_block`: New block mined
+- `new_tx`: New transaction confirmed
 - `mempool_added`: Transaction added to mempool
 - `mempool_removed`: Transaction removed from mempool
 
-**Example (JavaScript)**:
+**Example**:
 ```javascript
 const ws = new WebSocket('ws://localhost:8080/ws');
 ws.onmessage = (event) => {
   const data = JSON.parse(event.data);
-  console.log('Event:', data);
+  console.log('Event:', data.type, data.data);
 };
 
-ws.onopen = () => {
-  ws.send(JSON.stringify({
-    type: 'subscribe',
-    topic: 'all'
-  }));
-};
+// Subscribe to specific events
+ws.send(JSON.stringify({
+  action: 'subscribe',
+  events: ['new_block', 'new_tx']
+}));
 ```
 
-**Mempool Event Example**:
+**Event Examples**:
+
+**New Block Event**:
+```json
+{
+  "type": "new_block",
+  "data": {
+    "height": 101,
+    "hash": "abc123...",
+    "txCount": 5,
+    "minerAddress": "NOGO..."
+  }
+}
+```
+
+**Mempool Added Event**:
 ```json
 {
   "type": "mempool_added",

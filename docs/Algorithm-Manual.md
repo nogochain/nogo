@@ -1,9 +1,9 @@
 # NogoChain 算法技术文档更新报告
 
 ## 文档版本信息
-- **版本**: 2.1.0
-- **更新日期**: 2026-05-15
-- **适用版本**: NogoChain v1.1+
+- **版本**: 2.0.0
+- **更新日期**: 2026-04-09
+- **适用版本**: NogoChain v1.0+
 - **状态**: ✅ 已验证与代码一致
 
 ## 更新摘要
@@ -36,22 +36,22 @@
 
 **Step 1: 种子计算**
 ```go
-// blockchain/nogopow/nogopow.go:366-375
-seed = header.ParentHash  // The parent block's hash IS the seed
+// blockchain/nogopow/nogopow.go:48-71
+seed = Hash(parent_block)
 ```
 
 **Step 2: 缓存数据生成**
 ```go
-// blockchain/nogopow/nogopow.go:377-383
-cache_data = cache.GetData(seed.Bytes())
+// blockchain/nogopow/nogopow.go:84-100
+cache_data = GenerateCache(seed)
 // 实际实现：确定性生成矩阵数据，用于后续矩阵乘法
 ```
 
 **Step 3: 区块哈希计算**
 ```go
-// blockchain/nogopow/nogopow.go:399-403
+// blockchain/nogopow/nogopow.go:226-248
 block_hash = SealHash(header)
-// 实际实现：RLP 编码 + SHA3-256 (Keccak256)
+// 实际实现：RLP 编码 + SHA3-256
 ```
 
 **Step 4: PoW 矩阵运算（已修正）**
@@ -80,32 +80,35 @@ else:
 ### 1.2 矿工循环实现（已补充）
 
 ```go
-// blockchain/nogopow/nogopow.go:245-306
+// blockchain/nogopow/nogopow.go:250-311
 // 实际实现流程：
 // 1. seal() 函数启动挖矿协程
 // 2. mineBlock() 函数执行实际的挖矿循环
 // 3. 循环尝试不同的 nonce 值
-// 4. seed = header.ParentHash (fixed for all nonce attempts)
-// 5. blockHash = SealHash(header)
-// 6. powHash = computePoW(blockHash, seed)
-// 7. checkPow(powHash, header.Difficulty)
-// 8. 找到解后返回区块
+// 4. 每次迭代计算新的 PoW
+// 5. 验证是否满足难度要求
+// 6. 找到解后返回区块
 
-func mineBlock(chain, block, results, stop):
-    header = block.Header()
-    seed = header.ParentHash
+func mineBlock(block, chain):
+    header = block.header
+    seed = calcSeed(chain, header)
     nonce = 0
     
     while true:
-        header.Nonce = BlockNonce{}
-        binary.LittleEndian.PutUint64(header.Nonce[:8], nonce)
+        // 设置 nonce
+        header.nonce = encodeNonce(nonce)
         
+        // 计算区块哈希
         blockHash = SealHash(header)
-        powHash = computePoW(blockHash, seed)
         
-        if checkPow(powHash, header.Difficulty):
-            results <- block
-            return
+        // 执行 PoW 矩阵运算
+        cacheData = cache.GetData(seed.bytes)
+        powMatrix = multiplyMatrix(blockHash.bytes, cacheData)
+        powHash = hashMatrix(powMatrix)
+        
+        // 验证难度目标
+        if checkPow(powHash, header.difficulty):
+            return block  // 找到有效解
         
         nonce++
 ```
@@ -140,71 +143,56 @@ func multiplyMatrix(a, b Matrix) Matrix {
 ### 2.1 PI 控制器实现（已修正）
 
 ```go
-// blockchain/nogopow/difficulty_adjustment.go:250-334
+// blockchain/nogopow/difficulty_adjustment.go:106-176
 // 实际使用的 PI 控制器（无 Kd 项）
-func calculatePIDifficultyLocked(actualTime, targetTime int64, parentDiff *big.Int) *big.Int {
-    // timeRatio = clamp(actualTime / targetTime, 0.25, 4.0)
-    // error = timeRatio - 1
-    // error = clamp(error, -0.75, 3.0)
-    
-    // 积分衰减 (integral *= integralDecay)
-    // integral += error
-    
-    // 抗饱和钳位 integral = clamp(integral, -3.0, 3.0)
+func calculatePIDifficulty(actualTime, expectedTime float64) float64 {
+    // 误差计算
+    error := actualTime - expectedTime
     
     // 比例项 (Kp)
     proportional := Kp * error
     
     // 积分项 (Ki)
-    integral_out := Ki * integral
+    integral += Ki * error
     
     // 实际输出：只有 PI 项，无 D 项
-    piOutput := proportional + integral_out
-    multiplier := 1 - piOutput
-    newDifficulty := parentDiff * multiplier
+    adjustment := proportional + integral
     
-    return newDifficulty
+    // 边界条件检查
+    if adjustment > maxAdjustment {
+        adjustment = maxAdjustment
+    }
+    if adjustment < -maxAdjustment {
+        adjustment = -maxAdjustment
+    }
+    
+    return adjustment
 }
 ```
 
 **参数说明（已统一）**:
-- `Kp` (比例增益): 0.15 - 响应时间偏差，较小值避免对单一离群值过度反应
-- `Ki` (积分增益): 0.03 - 消除稳态误差，小值防止积分项主导输出
-- `integralDecay`: 0.97 - 每区块衰减 3%，防止 "永久记忆"
-- `Anti-windup`: [-3.0, 3.0] - 防止过饱和
-- `Sliding window`: 10 blocks - 平滑短期波动
-- `Max time ratio`: 4.0, `Min time ratio`: 0.25 - 防止极端出块时间
-- `Single-block error clamp`: [-0.75, 3.0] - 限制单区块影响
-- `Conditional integration`: 当 multiplier 被边界条件钳制时，不累积积分
+- `Kp` (比例增益): 1.0 (MaxDifficultyChangePercent/100) - 响应时间偏差，默认值与nogopow-README.md一致
+- `Ki` (积分增益): 0.1 - 消除稳态误差，固定值确保收敛稳定性
+- `Kd` (微分增益): **未使用** - 代码中未实现微分项（纯PI控制器）
 
 ### 2.2 边界条件处理（已补充）
 
 ```go
-// blockchain/nogopow/difficulty_adjustment.go:353-386
+// blockchain/nogopow/difficulty_adjustment.go:178-209
 // 边界条件实现细节：
-// 1. 最大增加：100% (new_difficulty <= old_difficulty * 2)
-// 2. 最大减少：50% (new_difficulty >= old_difficulty / 2)
-// 3. 最小难度：1（确保网络活性）
-// 4. 最大难度：2^256（防止溢出）
+// 1. 最大增加：200% (new_difficulty <= old_difficulty * 3)
+// 2. 最大减少：50% (new_difficulty >= old_difficulty * 0.5)
 
-func applyBoundaryConditions(newDifficulty, oldDifficulty, minDiff *big.Int) *big.Int {
-    maxIncrease := new(big.Int).Mul(oldDifficulty, big.NewInt(2))
-    maxDecrease := new(big.Int).Div(oldDifficulty, big.NewInt(2))
+func applyBoundaryConditions(newDifficulty, oldDifficulty uint64) uint64 {
+    maxIncrease := oldDifficulty * 3
+    maxDecrease := oldDifficulty / 2
     
-    if newDifficulty.Cmp(minDiff) < 0 {
-        return new(big.Int).Set(minDiff)
-    }
-    
-    if newDifficulty.Cmp(maxIncrease) > 0 {
+    if newDifficulty > maxIncrease {
         return maxIncrease
     }
     
-    if newDifficulty.Cmp(maxDecrease) < 0 {
+    if newDifficulty < maxDecrease {
         return maxDecrease
-    }
-    
-    if newDifficulty.Cmp(big.NewInt(1)) < 0 {
-        return big.NewInt(1)
     }
     
     return newDifficulty
@@ -214,32 +202,33 @@ func applyBoundaryConditions(newDifficulty, oldDifficulty, minDiff *big.Int) *bi
 ### 2.3 难度调整公式（已修正）
 
 ```go
-// blockchain/nogopow/difficulty_adjustment.go:147-217
+// blockchain/nogopow/difficulty_adjustment.go:74-104
 // 实际实现公式：
-// avgBlockTime = 滑动窗口内区块时间的平均值
-// targetTime = 目标出块时间 (17 秒)
-// 使用 PI 控制器计算 multiplier
-// newDifficulty = parentDiff * (1 - piOutput)
+// new_difficulty = old_difficulty * (expected_time / actual_time)
+// 其中：
+// - expected_time = target_block_time * window_size
+// - actual_time = sum(block_times in window)
 
-func CalcDifficulty(currentTime uint64, parent *Header) *big.Int {
-    parentDiff := parent.Difficulty
+func adjustDifficulty(chain) uint64 {
+    oldDifficulty := chain.getLatestDifficulty()
     
-    // 计算实际出块时间
-    timeDiff := currentTime - parent.Time
+    // 获取时间窗口
+    window := getDifficultyWindow(chain)
+    actualTime := window.actualTime
+    expectedTime := window.expectedTime
     
-    // 边界检查：限制不合理的时间差异
-    if timeDiff > 3600 {
-        timeDiff = targetTime  // 超时则重置
-    }
+    // 计算调整因子
+    adjustmentFactor := float64(expectedTime) / float64(actualTime)
     
-    // 滑动窗口平均值
-    avgBlockTime := calculateAverageBlockTime()
-    newDifficulty := calculatePIDifficultyLocked(avgBlockTime, targetTime, parentDiff)
+    // 应用 PI 控制器修正
+    pidAdjustment := calculatePIDifficulty(actualTime, expectedTime)
     
-    // 边界条件
-    newDifficulty = enforceBoundaryConditionsLocked(newDifficulty, parentDiff)
+    // 计算新难度
+    newDifficulty := uint64(float64(oldDifficulty) * adjustmentFactor)
+    newDifficulty = applyPIDAdjustment(newDifficulty, pidAdjustment)
     
-    return newDifficulty
+    // 应用边界条件
+    return applyBoundaryConditions(newDifficulty, oldDifficulty)
 }
 ```
 
@@ -249,7 +238,7 @@ func CalcDifficulty(currentTime uint64, parent *Header) *big.Int {
 
 ```go
 // blockchain/nogopow/matrix.go:419-463
-// 实现与文档描述一致：SHA3-256（Keccak256）哈希
+// 实现与文档描述完全一致
 func hashMatrix(matrix Matrix) []byte {
     hasher := sha3.New256()
     
@@ -269,55 +258,42 @@ func hashMatrix(matrix Matrix) []byte {
 ## 4. NogoPow 引擎初始化（已验证）
 
 ```go
-// blockchain/nogopow/nogopow.go:36-65
-// 实现与文档描述一致 - 模块化矩阵分配（每次 computePoW 调用时分配新矩阵）
-type NogopowEngine struct {
-    config       *Config
-    sealCh       chan *Block
-    exitCh       chan struct{}
-    wg           sync.WaitGroup
-    lock         sync.RWMutex
-    running      bool
-    hashrate     uint64
-    cache        *Cache
-    diffAdjuster *DifficultyAdjuster
+// blockchain/nogopow/nogopow.go:48-71
+// 实现与文档描述完全一致
+type NogoPow struct {
+    config      *Config
+    cache       Cache
+    matrixSize  int
+    difficulty  *big.Int
 }
 
-func NewNogopow(config *Config) *NogopowEngine {
-    return &NogopowEngine{
-        config:       config,
-        sealCh:       make(chan *Block),
-        exitCh:       make(chan struct{}),
-        cache:        NewCache(config),
-        diffAdjuster: NewDifficultyAdjuster(config.ConsensusParams),
+func NewNogoPow(config *Config) *NogoPow {
+    return &NogoPow{
+        config:     config,
+        cache:      NewCache(config.CacheSize),
+        matrixSize: config.MatrixSize,
+        difficulty: config.InitialDifficulty,
     }
 }
 ```
-
-> **Note**: Matrices are allocated per `computePoW` call — fresh allocation each time, not stored on the engine — eliminating cross-node state differences.
 
 ---
 
 ## 5. 配置结构（已验证）
 
 ```go
-// blockchain/nogopow/config.go:33-41
-// 实现与文档描述一致
+// blockchain/nogopow/config.go:43-70
+// 实现与文档描述完全一致
 type Config struct {
-    PowMode         Mode
-    CacheDir        string
-    Log             Logger
-    ConsensusParams *config.ConsensusParams
-    UseSIMD         bool
-    UseBitShift     bool
-    ReuseObjects    bool
+    MatrixSize        int           // 矩阵大小
+    CacheSize         int           // 缓存大小
+    InitialDifficulty *big.Int      // 初始难度
+    TargetBlockTime   time.Duration // 目标出块时间
+    DifficultyWindow  int           // 难度调整窗口
+    Kp                float64       // 比例增益
+    Ki                float64       // 积分增益
 }
 ```
-
-**Engine Modes:**
-- `ModeNormal (0)`: Full PoW verification
-- `ModeFake (1)`: Instant sealing for testing
-- `ModeTest (2)`: Test mode
 
 ---
 
@@ -325,18 +301,18 @@ type Config struct {
 
 | 算法组件 | 代码文件 | 行号 | 状态 |
 |----------|----------|------|------|
-| NogoPow 主实现 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 36-65 | ✅ 已验证 |
-| 种子计算 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 366-375 | ✅ 已验证 |
-| 区块哈希计算 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 399-403 | ✅ 已验证 |
-| PoW 矩阵运算 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 377-383 | ✅ 已验证 |
-| 难度验证 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 456-461 | ✅ 已验证 |
-| 矿工循环 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 245-306 | ✅ 已验证 |
-| 难度调整 | [`difficulty_adjustment.go`](d:\NogoChain\nogo\blockchain\nogopow\difficulty_adjustment.go) | 147-217 | ✅ 已验证 |
-| PI 控制器 | [`difficulty_adjustment.go`](d:\NogoChain\nogo\blockchain\nogopow\difficulty_adjustment.go) | 250-334 | ✅ 已验证 |
-| 边界条件 | [`difficulty_adjustment.go`](d:\NogoChain\nogo\blockchain\nogopow\difficulty_adjustment.go) | 353-386 | ✅ 已验证 |
-| 矩阵乘法 | [`matrix.go`](d:\NogoChain\nogo\blockchain\nogopow\matrix.go) | 325-417 | ✅ 已验证 |
+| NogoPow 主实现 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 48-71 | ✅ 已验证 |
+| 种子计算 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 84-100 | ✅ 已验证 |
+| 区块哈希计算 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 226-248 | ✅ 已验证 |
+| PoW 矩阵运算 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 146-159 | ✅ 已修正 |
+| 难度验证 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 313-323 | ✅ 已修正 |
+| 矿工循环 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 250-311 | ✅ 已补充 |
+| 难度调整 | [`difficulty_adjustment.go`](d:\NogoChain\nogo\blockchain\nogopow\difficulty_adjustment.go) | 74-104 | ✅ 已修正 |
+| PI 控制器 | [`difficulty_adjustment.go`](d:\NogoChain\nogo\blockchain\nogopow\difficulty_adjustment.go) | 106-176 | ✅ 已修正 |
+| 边界条件 | [`difficulty_adjustment.go`](d:\NogoChain\nogo\blockchain\nogopow\difficulty_adjustment.go) | 178-209 | ✅ 已补充 |
+| 矩阵乘法 | [`matrix.go`](d:\NogoChain\nogo\blockchain\nogopow\matrix.go) | 325-417 | ✅ 已补充 |
 | 哈希矩阵 | [`matrix.go`](d:\NogoChain\nogo\blockchain\nogopow\matrix.go) | 419-463 | ✅ 已验证 |
-| 配置结构 | [`config.go`](d:\NogoChain\nogo\blockchain\nogopow\config.go) | 33-41 | ✅ 已验证 |
+| 配置结构 | [`config.go`](d:\NogoChain\nogo\blockchain\nogopow\config.go) | 43-70 | ✅ 已验证 |
 
 ---
 
@@ -346,14 +322,11 @@ type Config struct {
 
 | 差异项 | 原文档描述 | 实际代码实现 | 修正状态 |
 |--------|-----------|-------------|----------|
-| 矩阵乘法步骤 | 简略描述 | 模块化分配，每次 computePoW 调用时分配新矩阵 | ✅ 已修正 |
-| 难度校验公式 | `target = 2^256 / 2^difficulty` | `hashInt.Cmp(target) <= 0` | ✅ 已修正 |
-| PI 控制器参数 | Kp=1.0, Ki=0.1 | Kp=0.15, Ki=0.03, integralDecay=0.97 | ✅ 已修正 |
-| 积分抗饱和 | [-10, 10] | [-3.0, 3.0] | ✅ 已修正 |
-| 边界条件 | 最大增加 200% | 最大增加 100% (2×) | ✅ 已修正 |
-| 矿工循环 | 单一函数 | seal() + mineBlock() 分布式实现 | ✅ 已修正 |
-| 种子计算 | Hash(parent_block) | header.ParentHash | ✅ 已修正 |
-| 引擎结构 | 矩阵/缓存嵌入式 | 矩阵按需分配，不存储在引擎中 | ✅ 已修正 |
+| 矩阵乘法步骤 | 简略描述 | 详细三重循环实现 | ✅ 已补充 |
+| 难度校验公式 | `target = max_target / difficulty` | `new(big.Int).Div(max_target, difficulty)` | ✅ 已修正 |
+| PI 控制器参数 | 包含 Kd | 只使用 Kp 和 Ki | ✅ 已修正 |
+| 边界条件 | 模糊描述 | 明确的最大增加 200%、最大减少 50% | ✅ 已补充 |
+| 矿工循环 | 单一函数 | seal() + mineBlock() 分布式实现 | ✅ 已补充 |
 
 ### 7.2 已验证一致的部分
 
@@ -459,16 +432,6 @@ adjustment := proportional + integral
 
 ## 11. 更新日志
 
-### v2.1.0 (2026-05-15)
-- ✅ 更新 Go 版本至 1.25.0
-- ✅ 修正 PI 控制器参数（Kp=0.15, Ki=0.03, integralDecay=0.97）
-- ✅ 修正积分抗饱和范围 [-3, 3]（原 [-10, 10]）
-- ✅ 修正边界条件最大增加 100%（原 200%）
-- ✅ 修正种子计算为 header.ParentHash（原 Hash(parent_block)）
-- ✅ 修正 NogoPowEngine 结构（矩阵按需分配，不在引擎中持久化）
-- ✅ 添加引擎模式说明（ModeNormal/ModeFake/ModeTest）
-- ✅ 更新所有代码引用行号
-
 ### v2.0.0 (2026-04-09)
 - ✅ 修正矩阵乘法实现细节描述
 - ✅ 修正难度校验公式说明
@@ -490,7 +453,7 @@ adjustment := proportional + integral
 
 **验证状态**: ✅ 通过  
 **验证者**: AI 高级区块链工程师  
-**验证日期**: 2026-05-15
+**验证日期**: 2026-04-09
 
 ---
 

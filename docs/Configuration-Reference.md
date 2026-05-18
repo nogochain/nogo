@@ -125,8 +125,8 @@ Defines all consensus-related parameters for block validation and difficulty adj
 | `ChainID` | `uint64` | `chainId` | `1` | Blockchain identifier |
 | `DifficultyEnable` | `bool` | `difficultyEnable` | `true` | Enable difficulty adjustment |
 | `BlockTimeTargetSeconds` | `int64` | `blockTimeTargetSeconds` | `17` | Target seconds between blocks |
-| `DifficultyAdjustmentInterval` | `uint64` | `difficultyAdjustmentInterval` | `1` | Blocks between adjustments (every block for PI controller) |
-| `MaxBlockTimeDriftSeconds` | `int64` | `maxBlockTimeDriftSeconds` | `900` | Maximum timestamp drift (15 minutes) |
+| `DifficultyAdjustmentInterval` | `uint64` | `difficultyAdjustmentInterval` | `100` | Blocks between adjustments |
+| `MaxBlockTimeDriftSeconds` | `int64` | `maxBlockTimeDriftSeconds` | `7200` | Maximum timestamp drift (2 hours) |
 | `MinDifficulty` | `uint32` | `minDifficulty` | `1` | Minimum difficulty value |
 | `MaxDifficulty` | `uint32` | `maxDifficulty` | `4294967295` | Maximum difficulty value |
 | `MinDifficultyBits` | `uint32` | `minDifficultyBits` | `1` | Minimum difficulty bits |
@@ -174,10 +174,10 @@ Defines the economic model for block rewards and token distribution.
 | `HalvingInterval` | `uint64` | `halvingInterval` | `0` | Legacy field for compatibility |
 | `MaxSupply` | `uint64` | `maxSupply` | `0` | Maximum total supply |
 | `MinerFeeShare` | `uint8` | `minerFeeShare` | `0` | Percentage of fees to miner (0-100) |
-| `MinerRewardShare` | `uint8` | `minerRewardShare` | `99` | Percentage of reward to miner |
-| `CommunityFundShare` | `uint8` | `communityFundShare` | `0` | Percentage to community fund (discontinued) |
+| `MinerRewardShare` | `uint8` | `minerRewardShare` | `96` | Percentage of reward to miner |
+| `CommunityFundShare` | `uint8` | `communityFundShare` | `2` | Percentage to community fund |
 | `GenesisShare` | `uint8` | `genesisShare` | `1` | Percentage to genesis address |
-| `IntegrityPoolShare` | `uint8` | `integrityPoolShare` | `0` | Percentage to integrity pool (discontinued) |
+| `IntegrityPoolShare` | `uint8` | `integrityPoolShare` | `1` | Percentage to integrity pool |
 | `TailEmission` | `uint64` | `tailEmission` | `0` | Legacy field for compatibility |
 
 **Validation Rules:**
@@ -198,46 +198,6 @@ NogoNOGO = 100_000_000  // 1 NOGO = 100 million wei
 - `GetNephewBonus(blockReward uint64, uncleCount int) uint64` - Calculates nephew bonus
 - `GetTotalMinerReward(height uint64, uncleCount int) uint64` - Total miner reward including bonuses
 - `MinerFeeAmount(totalFees uint64) uint64` - Calculates miner's fee portion
-
----
-
-### NogoPowConfig (PI Controller Difficulty Adjustment)
-
-The NogoPow consensus uses a PI (Proportional-Integral) controller for difficulty adjustment, providing real-time difficulty updates on every block. This replaces traditional fixed-window averaging approaches.
-
-**Code Reference**: [`nogopow/difficulty_adjustment.go`](../blockchain/nogopow/difficulty_adjustment.go)
-
-#### PI Controller Constants
-
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `defaultKp` | `0.15` | Proportional gain coefficient |
-| `defaultKi` | `0.03` | Integral gain coefficient |
-| `integralDecay` | `0.97` | Integral decay factor per block (loses 3% per block) |
-| `integralClampMin` | `-3.0` | Anti-windup minimum integral clamp |
-| `integralClampMax` | `3.0` | Anti-windup maximum integral clamp |
-| `maxTimeRatio` | `4.0` | Maximum timeRatio clamp (blocks at most 4x slower than target) |
-| `minTimeRatio` | `0.25` | Minimum timeRatio clamp (blocks at most 4x faster than target) |
-| `defaultWindowSize` | `10` | Default sliding window size for block time analysis |
-| `maxReasonableTimeDiff` | `3600` | Maximum reasonable time difference (1 hour, seconds) |
-
-#### PI Controller Formula
-
-```
-timeRatio = clamp(actualTime / targetTime, 0.25, 4.0)
-rawError = clamp(timeRatio - 1.0, -0.75, 3.0)
-integral = integral * 0.97 + rawError
-integral = clamp(integral, -3.0, 3.0)
-output = 0.15 * rawError + 0.03 * integral
-newDifficulty = parentDifficulty * (1 - output)
-```
-
-**Key Properties**:
-- Difficulty adjusts every block (`DifficultyAdjustmentInterval = 1`)
-- Anti-windup prevents integral term from dominating
-- Decay factor (0.97) prevents past extremes from permanently skewing output
-- Error clipping (-0.75 to 3.0) prevents single outlier blocks from over-correcting
-- TimeRatio clamping (0.25 to 4.0) bounds the error range
 
 ---
 
@@ -545,13 +505,13 @@ func DefaultConfig() *Config {
             ChainID:                        1,
             DifficultyEnable:               true,
             BlockTimeTargetSeconds:         17,
-            DifficultyAdjustmentInterval:   1,
-            MaxBlockTimeDriftSeconds:       900,
+            DifficultyAdjustmentInterval:   100,
+            MaxBlockTimeDriftSeconds:       7200,
             MinDifficulty:                  1,
             MaxDifficulty:                  4294967295,
             MinDifficultyBits:              1,
             MaxDifficultyBits:              255,
-            MaxDifficultyChangePercent:     20,
+            MaxDifficultyChangePercent:     100,
             MedianTimePastWindow:           11,
             MerkleEnable:                   true,
             MerkleActivationHeight:         0,
@@ -564,10 +524,10 @@ func DefaultConfig() *Config {
                 MinimumBlockReward:     10000000,
                 UncleRewardEnabled:     true,
                 MaxUncleDepth:          6,
-                MinerRewardShare:       99,
-                CommunityFundShare:     0,
+                MinerRewardShare:       96,
+                CommunityFundShare:     2,
                 GenesisShare:           1,
-                IntegrityPoolShare:     0,
+                IntegrityPoolShare:     1,
                 MinerFeeShare:          0,
             },
         },
@@ -635,22 +595,6 @@ func DefaultConfig() *Config {
 
 ## Environment Variables
 
-### Core Node Configuration (NOGO_ Prefix)
-
-| Environment Variable | Config Field | Type | Default | Example |
-|---------------------|--------------|------|---------|---------|
-| `NOGO_CHAIN_ID` | `Network.ChainID` | uint64 | `1` | `1` |
-| `NOGO_NETWORK` | `Network.Name` | string | `mainnet` | `mainnet` |
-| `NOGO_DATA_DIR` | `DataDir` | string | `./data` | `/var/lib/nogo/data` |
-| `NOGO_P2P_PORT` | `Network.P2PPort` | uint16 | `9090` | `9090` |
-| `NOGO_API_PORT` | `Network.HTTPPort` | uint16 | `8080` | `8080` |
-| `NOGO_SEED_NODES` | `Network.BootNodes` | []string | `[]` | `node1:9090,node2:9090` |
-| `NOGO_BOOTSTRAP_PEERS` | `Network.BootNodes` | []string | `[]` | `peer1:9090` |
-| `NOGO_ENABLE_MINING` | `Mining.Enabled` | bool | `false` | `true` |
-| `NOGO_MINER_ADDRESS` | `Mining.MinerAddress` | string | `""` | `NOGO00...` |
-| `AUDIT_LOG_ENABLED` | `HTTPAPIConfig.AuditLogEnabled` | bool | `true` | `true` |
-| `AUDIT_LOG_DIR` | `HTTPAPIConfig.AuditLogDir` | string | `logs/audit` | `/var/log/nogo/audit` |
-
 ### Network Configuration
 
 | Environment Variable | Config Field | Type | Example |
@@ -672,8 +616,8 @@ func DefaultConfig() *Config {
 |---------------------|--------------|------|---------|
 | `DIFFICULTY_ENABLE` | `Consensus.DifficultyEnable` | bool | `true` |
 | `BLOCK_TIME_SECONDS` | `Consensus.BlockTimeTargetSeconds` | int64 | `17` |
-| `DIFFICULTY_WINDOW` | `Consensus.DifficultyAdjustmentInterval` | uint64 | `1` |
-| `MAX_TIME_DRIFT` | `Consensus.MaxBlockTimeDriftSeconds` | int64 | `900` |
+| `DIFFICULTY_WINDOW` | `Consensus.DifficultyAdjustmentInterval` | uint64 | `100` |
+| `MAX_TIME_DRIFT` | `Consensus.MaxBlockTimeDriftSeconds` | int64 | `7200` |
 | `DIFFICULTY_MIN` | `Consensus.MinDifficulty` | uint32 | `1` |
 | `DIFFICULTY_MAX` | `Consensus.MaxDifficulty` | uint32 | `4294967295` |
 | `DIFFICULTY_MIN_BITS` | `Consensus.MinDifficultyBits` | uint32 | `1` |
@@ -853,13 +797,13 @@ func DefaultConfig() *Config {
     "chainId": 1,
     "difficultyEnable": true,
     "blockTimeTargetSeconds": 17,
-    "difficultyAdjustmentInterval": 1,
-    "maxBlockTimeDriftSeconds": 900,
+    "difficultyAdjustmentInterval": 100,
+    "maxBlockTimeDriftSeconds": 7200,
     "minDifficulty": 1,
     "maxDifficulty": 4294967295,
     "minDifficultyBits": 1,
     "maxDifficultyBits": 255,
-    "maxDifficultyChangePercent": 20,
+    "maxDifficultyChangePercent": 100,
     "medianTimePastWindow": 11,
     "merkleEnable": true,
     "merkleActivationHeight": 0,
@@ -872,10 +816,10 @@ func DefaultConfig() *Config {
       "minimumBlockReward": 10000000,
       "uncleRewardEnabled": true,
       "maxUncleDepth": 6,
-      "minerRewardShare": 99,
-      "communityFundShare": 0,
+      "minerRewardShare": 96,
+      "communityFundShare": 2,
       "genesisShare": 1,
-      "integrityPoolShare": 0,
+      "integrityPoolShare": 1,
       "minerFeeShare": 0
     }
   },
@@ -987,7 +931,7 @@ func DefaultConfig() *Config {
 {
   "network": {
     "name": "testnet",
-    "chainId": 0,
+    "chainId": 2,
     "p2pPort": 9091,
     "httpPort": 8081,
     "wsPort": 8082,
@@ -996,7 +940,7 @@ func DefaultConfig() *Config {
     "maxConnections": 25
   },
   "consensus": {
-    "chainId": 0,
+    "chainId": 2,
     "difficultyEnable": true,
     "blockTimeTargetSeconds": 17,
     "difficultyAdjustmentInterval": 50,

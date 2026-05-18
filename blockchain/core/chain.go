@@ -3167,23 +3167,27 @@ func (c *Chain) findBestChainTipLocked() *Block {
 			forkChainComplete := c.isForkChainCompleteLocked(block)
 
 			isBetter := false
-			if forkHeight > bestHeight {
+			workCmp := forkWork.Cmp(bestWork)
+
+			if workCmp > 0 {
+				// Nakamoto consensus: chain with most cumulative work is canonical.
+				// Reference: Bitcoin whitepaper 3, core-geth totalDifficulty check,
+				// bytom WorkSum comparison, sedrad GHOSTDAG blue score selection.
 				isBetter = true
-			} else if forkHeight == bestHeight {
-				if forkChainComplete != bestChainComplete {
-					isBetter = forkChainComplete
-				} else if forkWork.Cmp(bestWork) > 0 {
+			} else if workCmp == 0 {
+				// Equal work: use height as tiebreaker (more confirmations = better).
+				// Only when work is equal does height matter.
+				if forkHeight > bestHeight {
 					isBetter = true
-				} else if forkWork.Cmp(bestWork) == 0 {
-					// CRITICAL FIX: Equal work - use tiebreaker rules
-					// Without this, competing blocks at the same height with equal work
-					// would never trigger a reorg, making the second miner's blocks
-					// permanently stuck as forks regardless of timing or hash value.
-					if c.shouldSwitchBasedOnTieBreakerLocked(block, bestTip) {
+				} else if forkHeight == bestHeight {
+					if forkChainComplete != bestChainComplete {
+						isBetter = forkChainComplete
+					} else if c.shouldSwitchBasedOnTieBreakerLocked(block, bestTip) {
 						isBetter = true
 					}
 				}
 			}
+			// workCmp < 0: fork has less work, never select it
 
 			if isBetter {
 				bestTip = block
@@ -3745,17 +3749,10 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 	}
 
 	c.forkBlocks[height] = append(c.forkBlocks[height], block)
-	// Index fork block into blocksByHash for O(1) lookup by BlockByHash,
-	// calculateCumulativeWorkLocked parent traversal, and ForkResolver operations
-	c.addToIndexLocked(block)
 
 	// Enforce per-height fork block limit to prevent unbounded memory growth
 	if len(c.forkBlocks[height]) > MaxForkBlocksPerHeight {
-		// Remove the oldest fork blocks and clean up their blocksByHash entries
-		removed := c.forkBlocks[height][:len(c.forkBlocks[height])-MaxForkBlocksPerHeight]
-		for _, rb := range removed {
-			delete(c.blocksByHash, hex.EncodeToString(rb.Hash))
-		}
+		// Remove the oldest fork block at this height (keep the most recent)
 		c.forkBlocks[height] = c.forkBlocks[height][len(c.forkBlocks[height])-MaxForkBlocksPerHeight:]
 	}
 
@@ -3774,10 +3771,6 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 		for _, h := range heights {
 			if totalForkBlocks <= MaxForkBlocksTotal*3/4 {
 				break
-			}
-			// Clean up blocksByHash entries for evicted fork blocks
-			for _, fb := range c.forkBlocks[h] {
-				delete(c.blocksByHash, hex.EncodeToString(fb.Hash))
 			}
 			removed := len(c.forkBlocks[h])
 			delete(c.forkBlocks, h)

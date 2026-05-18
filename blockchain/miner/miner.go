@@ -139,6 +139,14 @@ type Miner struct {
 
 	// Peer responsiveness tracking for mining timeout safeguard
 	lastPeerResponseTime time.Time
+
+	// Two-layer mining decision infrastructure
+	syncStatusCh        <-chan SyncStatusEvent
+	miningPermittedUntil time.Time
+	lastSyncEventTime   time.Time
+	lastSyncEvent       SyncStatusEvent
+	peerWorkCache       map[string]*peerWorkCacheEntry
+	peerWorkCacheMu     sync.RWMutex
 }
 
 // Blockchain defines the blockchain interface for mining
@@ -170,6 +178,9 @@ type PeerAPI interface {
 // ChainInfo represents peer chain information (alias to network.ChainInfo)
 type ChainInfo = network.ChainInfo
 
+// SyncStatusEvent represents sync status event from the sync subsystem (alias to network.SyncStatusEvent)
+type SyncStatusEvent = network.SyncStatusEvent
+
 // SyncLoop defines the sync loop interface
 type SyncLoop interface {
 	IsSyncing() bool
@@ -177,6 +188,7 @@ type SyncLoop interface {
 	SyncProgress() float64
 	TriggerSyncCheck()
 	GetMaxPeerHeight(ctx context.Context) (uint64, int)
+	SyncStatusChannel() <-chan SyncStatusEvent
 }
 
 // EventSink defines the event sink interface
@@ -219,6 +231,14 @@ type MempoolEntry interface {
 	Received() time.Time
 }
 
+// peerWorkCacheEntry holds cached peer work query results for the
+// parallel peer query layer, avoiding redundant FetchChainInfo calls.
+type peerWorkCacheEntry struct {
+	work      *big.Int
+	height    uint64
+	timestamp time.Time
+}
+
 // NewMiner creates a new miner instance
 // Production-grade: initializes all fields with proper defaults
 func NewMiner(
@@ -247,6 +267,7 @@ func NewMiner(
 		verifyDoneCh:     make(chan struct{}, 1),
 		minerAddress:     minerAddress,
 		chainID:          chainID,
+		peerWorkCache:    make(map[string]*peerWorkCacheEntry),
 	}
 
 	return miner
@@ -264,6 +285,17 @@ func (m *Miner) SetCandidatePool(pool *core.CandidatePool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.candidatePool = pool
+}
+
+// SetSyncLoop establishes the bidirectional sync→miner reference and
+// connects the SyncStatusEvent channel from the sync subsystem.
+func (m *Miner) SetSyncLoop(sl SyncLoop) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.syncLoop = sl
+	if sl != nil {
+		m.syncStatusCh = sl.SyncStatusChannel()
+	}
 }
 
 // OnChainReorganized is called after rollback or reorg changes the canonical tip.
@@ -504,79 +536,62 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 		}
 	}
 
-	// CRITICAL FIX: Check peer cumulative work before mining.
-	// In a fork scenario, a miner on its own fork has the same local height as
-	// peers on other forks (or even higher). The IsSynced() check only compares
-	// height, not cumulative work. If a peer has more cumulative work at the same
-	// or higher height, we should NOT mine because we're on a stale fork.
-	// This prevents miners from mining on a minority fork and deepening the split.
-	//
-	// SAFEGUARD: Skip peer work check if sync is currently in progress —
-	// the sync/reorg mechanism is already handling the fork resolution.
-	// Without this, the miner permanently pauses while waiting for sync
-	// that may itself be blocked, causing deadlock.
-	//
-	// TIMEOUT SAFEGUARD: If peers consistently fail to respond for >5 minutes,
-	// assume network partition and allow mining to prevent permanent stall.
-	// This is conservative: 5 minutes is enough time for transient failures
-	// to resolve, but not so long that the miner stalls indefinitely.
-	//
-	// RELAXED CHECK: Only defer mining if peer is AHEAD in height AND has more work.
-	// This prevents new nodes (lower height) from stopping mining on established nodes.
-	if m.pm != nil && !m.isSyncingOrReorging() {
-		peerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		peerWork, peersResponded := getPeerWorkWithCtxExtended(peerCtx, m.pm)
-		cancel()
+	// Two-layer mining decision: Layer 1 consumes sync subsystem events,
+	// Layer 2 is an independent parallel peer query fallback.
+	// Mining is deferred only when both layers confirm a fork.
+	m.drainSyncEvents()
 
-		totalPeers := len(m.pm.Peers())
+	if m.isMiningPermitted() {
+		logf(colorBrightGreen, "⛏️ ", "Mining tick: layer 1 permitted, attempting to mine...")
+	} else if m.pm != nil {
+		localWork := m.bc.CanonicalWork()
+		localTip := m.bc.LatestBlock()
+		if localTip == nil {
+			logf(colorBrightYellow, "⏸️ ", "Mining tick: no local tip, deferring mining")
+			return
+		}
+		localHeight := localTip.GetHeight()
+		peerWork, peerHeight, peersResponded := m.getPeerWorkParallel()
 
-		// Track peer responsiveness for timeout safeguard
 		if peersResponded {
+			m.mu.Lock()
 			m.lastPeerResponseTime = time.Now()
-		} else {
-			// Initialize on first call
-			if m.lastPeerResponseTime.IsZero() {
-				m.lastPeerResponseTime = time.Now()
-			}
+			m.mu.Unlock()
+		} else if m.lastPeerResponseTime.IsZero() {
+			m.mu.Lock()
+			m.lastPeerResponseTime = time.Now()
+			m.mu.Unlock()
 		}
 
-		// TIMEOUT CHECK: If peers haven't responded for >5 minutes, allow mining
-		const peerTimeout = 5 * time.Minute
-		peerTimeoutExceeded := !peersResponded && time.Since(m.lastPeerResponseTime) > peerTimeout
-
-		// ONLY defer if peers responded and actually have more work
-		// If peers didn't respond, use timeout safeguard instead of deferring forever
-		if peersResponded && peerWork != nil && peerWork.Sign() > 0 {
-			localWork := m.bc.CanonicalWork()
-			localHeight := m.bc.LatestBlock().GetHeight()
-			peerHeight := getPeerHeight(m.pm)
-
-			// Only defer if peer is AHEAD in height AND has more work
-			// This prevents peers at LOWER height from stopping our mining
-			if localWork != nil && peerHeight > localHeight && peerWork.Cmp(localWork) > 0 {
-				logf(colorBrightYellow, "⏸️ ", "Mining tick: peer has more cumulative work (peer=%s local=%s) and higher height (peer=%d local=%d), triggering active reorg",
-					peerWork.String(), localWork.String(), peerHeight, localHeight)
-				// Actively trigger sync/reorg instead of passively waiting.
-				// Without this trigger, the miner may be permanently stuck if
-				// no external block broadcast arrives to trigger fork resolution.
+		if peersResponded && peerWork != nil {
+			if peerHeight > localHeight && peerWork.Cmp(localWork) > 0 {
+				logf(colorBrightYellow, "⏸️ ", "Mining tick: layer 2 fork (peer_h=%d work=%s > local=%s), deferring",
+					peerHeight, peerWork.String(), localWork.String())
 				if m.syncLoop != nil {
 					m.syncLoop.TriggerSyncCheck()
 				}
+				m.prunePeerWorkCache()
 				return
 			}
-		}
-
-		if !peersResponded && !peerTimeoutExceeded {
-			logf(colorBrightYellow, "⏸️ ", "Mining tick: %d peers alive but none responded to work query (likely busy syncing), deferring mining",
-				totalPeers)
-			return
-		}
-
-		if peerTimeoutExceeded {
-			logf(colorBrightYellow, "⚠️ ", "Mining tick: peers unresponsive for %.1f minutes, mining anyway (possible network partition)",
+			m.mu.Lock()
+			m.miningPermittedUntil = time.Now().Add(miningCooldownDuration)
+			m.mu.Unlock()
+			logf(colorBrightGreen, "✅ ", "Mining tick: layer 2 confirmed safe, granting %v permission", miningCooldownDuration)
+		} else {
+			peerTimeoutExceeded := time.Since(m.lastPeerResponseTime) > syncEventMaxGap
+			if !peerTimeoutExceeded {
+				logf(colorBrightYellow, "⏸️ ", "Mining tick: no peer responses, deferring mining")
+				m.prunePeerWorkCache()
+				return
+			}
+			logf(colorBrightYellow, "⚠️ ", "Mining tick: peers unresponsive for %.1f min, partition safeguard, mining anyway",
 				time.Since(m.lastPeerResponseTime).Minutes())
 		}
+	} else {
+		logf(colorBrightYellow, "⚠️ ", "Mining tick: no peer API available, mining as solitary node")
 	}
+
+	m.prunePeerWorkCache()
 
 	logf(colorBrightGreen, "⛏️ ", "Mining tick: attempting to mine...")
 	block, err := m.MineOnce(ctx)
@@ -734,6 +749,20 @@ const (
 	forkResumeInitialDelay = 10 * time.Second
 	forkResumeMaxTimeout   = 30 * time.Second
 	forkResumePollInterval = 1 * time.Second
+)
+
+// Two-layer mining decision constants
+const (
+	miningCooldownDuration = 30 * time.Second
+	syncEventMaxGap        = 5 * time.Minute
+	forkEventStaleSeconds  = 15 * time.Second
+	syncEventStartupGrace  = 30 * time.Second
+	syncDataStaleDuration  = 30 * time.Second
+
+	maxParallelPeerQueries = 2
+	peerWorkCacheTTL       = 10 * time.Second
+	peerQueryTimeout       = 20 * time.Second
+	minerPeerWorkTimeout   = 25 * time.Second
 )
 
 // resumeAfterForkResolution waits for sync/fork-resolution to complete after
@@ -1214,4 +1243,264 @@ func computeMerkleTree(leaves [][]byte) []byte {
 	}
 
 	return leaves[0]
+}
+
+// drainSyncEvents consumes all pending SyncStatusEvent messages from the
+// sync subsystem without blocking. Only the most recent event is kept for
+// decision-making. Stale fork events (>forkEventStaleSeconds old) are discarded.
+func (m *Miner) drainSyncEvents() {
+	if m.syncStatusCh == nil {
+		return
+	}
+
+	var latest *SyncStatusEvent
+	var latestTime time.Time
+
+	for {
+		select {
+		case evt := <-m.syncStatusCh:
+			latest = &evt
+			latestTime = evt.Timestamp
+		default:
+			goto done
+		}
+	}
+
+done:
+	if latest == nil {
+		return
+	}
+
+	if time.Since(latestTime) > forkEventStaleSeconds {
+		m.mu.Lock()
+		if latest.ForkDetected {
+			m.miningPermittedUntil = time.Time{}
+			m.lastSyncEventTime = latestTime
+			m.lastSyncEvent = *latest
+		}
+		m.mu.Unlock()
+		return
+	}
+
+	m.mu.Lock()
+	m.lastSyncEventTime = latestTime
+	m.lastSyncEvent = *latest
+	if latest.ForkDetected {
+		m.miningPermittedUntil = time.Time{}
+	} else if latest.SyncCompleted {
+		m.miningPermittedUntil = time.Now().Add(miningCooldownDuration)
+	}
+	m.mu.Unlock()
+
+	if latest.ForkDetected {
+		if m.syncLoop != nil && latest.HeavierPeerWork != nil {
+			localWork := m.bc.CanonicalWork()
+			localTip := m.bc.LatestBlock()
+			localHeight := uint64(0)
+			if localTip != nil {
+				localHeight = localTip.GetHeight()
+			}
+			if latest.HeavierPeerHeight > localHeight || latest.HeavierPeerWork.Cmp(localWork) > 0 {
+				m.syncLoop.TriggerSyncCheck()
+			}
+		}
+		m.fillCacheFromSyncEvent(latest)
+	}
+}
+
+// isMiningPermitted evaluates whether mining should proceed based on the
+// three-phase strategy: cold start grace → sync-driven → partition safeguard.
+func (m *Miner) isMiningPermitted() bool {
+	m.mu.RLock()
+	permittedUntil := m.miningPermittedUntil
+	lastEventTime := m.lastSyncEventTime
+	m.mu.RUnlock()
+
+	now := time.Now()
+
+	if now.Before(permittedUntil) {
+		return true
+	}
+
+	if permittedUntil.IsZero() && lastEventTime.IsZero() {
+		m.mu.Lock()
+		m.miningPermittedUntil = now.Add(syncEventStartupGrace)
+		m.mu.Unlock()
+		return true
+	}
+
+	if time.Since(lastEventTime) > syncEventMaxGap {
+		return true
+	}
+
+	if lastEventTime.After(now.Add(-syncDataStaleDuration)) {
+		m.mu.RLock()
+		lastEvent := m.lastSyncEvent
+		m.mu.RUnlock()
+		if lastEvent.SyncCompleted {
+			m.mu.Lock()
+			m.miningPermittedUntil = now.Add(miningCooldownDuration)
+			m.mu.Unlock()
+			return true
+		}
+	}
+
+	return false
+}
+
+// fillCacheFromSyncEvent populates the peer work cache from a sync event,
+// enabling layer 2 cache hits without redundant FetchChainInfo calls.
+func (m *Miner) fillCacheFromSyncEvent(evt *SyncStatusEvent) {
+	if evt == nil || evt.HeavierPeerID == "" || evt.HeavierPeerWork == nil {
+		return
+	}
+	m.peerWorkCacheMu.Lock()
+	m.peerWorkCache[evt.HeavierPeerID] = &peerWorkCacheEntry{
+		work:      new(big.Int).Set(evt.HeavierPeerWork),
+		height:    evt.HeavierPeerHeight,
+		timestamp: time.Now(),
+	}
+	m.peerWorkCacheMu.Unlock()
+}
+
+// getPeerWorkParallel queries peers in parallel with independent timeouts,
+// returning the maximum peer work observed. Cached results within TTL are
+// reused without new network calls.
+func (m *Miner) getPeerWorkParallel() (maxWork *big.Int, maxHeight uint64, peersResponded bool) {
+	peers := m.pm.Peers()
+	if len(peers) == 0 {
+		return nil, 0, false
+	}
+
+	maxWork = big.NewInt(0)
+	peersResponded = false
+	now := time.Now()
+
+	m.peerWorkCacheMu.RLock()
+	cacheHitCount := 0
+	for _, peer := range peers {
+		entry, ok := m.peerWorkCache[peer]
+		if ok && now.Sub(entry.timestamp) <= peerWorkCacheTTL {
+			cacheHitCount++
+			peersResponded = true
+			if entry.work != nil && entry.work.Cmp(maxWork) > 0 {
+				maxWork.Set(entry.work)
+			}
+			if entry.height > maxHeight {
+				maxHeight = entry.height
+			}
+		}
+	}
+	m.peerWorkCacheMu.RUnlock()
+
+	if cacheHitCount >= len(peers) {
+		return maxWork, maxHeight, peersResponded
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), minerPeerWorkTimeout)
+	defer cancel()
+
+	type peerResult struct {
+		peerID string
+		work   *big.Int
+		height uint64
+		err    error
+	}
+	resultCh := make(chan peerResult, len(peers))
+
+	sem := make(chan struct{}, maxParallelPeerQueries)
+	activeQueries := 0
+
+	for _, peer := range peers {
+		m.peerWorkCacheMu.RLock()
+		entry, ok := m.peerWorkCache[peer]
+		m.peerWorkCacheMu.RUnlock()
+		if ok && now.Sub(entry.timestamp) <= peerWorkCacheTTL {
+			continue
+		}
+
+		sem <- struct{}{}
+		activeQueries++
+		peerID := peer
+
+		go func() {
+			defer func() {
+				<-sem
+				if r := recover(); r != nil {
+					log.Printf("[Miner] getPeerWorkParallel goroutine panic: %v", r)
+					select {
+					case resultCh <- peerResult{peerID: peerID, err: fmt.Errorf("goroutine panic: %v", r)}:
+					case <-ctx.Done():
+					}
+				}
+			}()
+
+			peerCtx, peerCancel := context.WithTimeout(ctx, peerQueryTimeout)
+			defer peerCancel()
+
+			info, err := m.pm.FetchChainInfo(peerCtx, peerID)
+			if err != nil || info == nil {
+				select {
+				case resultCh <- peerResult{peerID: peerID, err: err}:
+				case <-ctx.Done():
+				}
+				return
+			}
+
+			res := peerResult{peerID: peerID, work: info.Work, height: info.Height}
+			select {
+			case resultCh <- res:
+			case <-ctx.Done():
+			}
+		}()
+	}
+
+	if activeQueries == 0 {
+		return maxWork, maxHeight, peersResponded
+	}
+
+	remaining := activeQueries
+	for remaining > 0 {
+		select {
+		case res := <-resultCh:
+			remaining--
+			if res.err != nil {
+				continue
+			}
+			peersResponded = true
+			if res.work != nil {
+				m.peerWorkCacheMu.Lock()
+				m.peerWorkCache[res.peerID] = &peerWorkCacheEntry{
+					work:      new(big.Int).Set(res.work),
+					height:    res.height,
+					timestamp: time.Now(),
+				}
+				m.peerWorkCacheMu.Unlock()
+
+				if res.work.Cmp(maxWork) > 0 {
+					maxWork.Set(res.work)
+				}
+			}
+			if res.height > maxHeight {
+				maxHeight = res.height
+			}
+		case <-ctx.Done():
+			return maxWork, maxHeight, peersResponded
+		}
+	}
+
+	return maxWork, maxHeight, peersResponded
+}
+
+// prunePeerWorkCache removes cache entries older than peerWorkCacheTTL*3
+// to prevent unbounded memory growth from disconnected peers.
+func (m *Miner) prunePeerWorkCache() {
+	cutoff := time.Now().Add(-peerWorkCacheTTL * 3)
+	m.peerWorkCacheMu.Lock()
+	for peerID, entry := range m.peerWorkCache {
+		if entry.timestamp.Before(cutoff) {
+			delete(m.peerWorkCache, peerID)
+		}
+	}
+	m.peerWorkCacheMu.Unlock()
 }

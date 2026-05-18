@@ -43,6 +43,10 @@ const (
 
 	logCooldownDur = 30 * time.Second
 
+	// Mining safety valve: after consecutiveSyncNoneThreshold no-op sync rounds
+	// (all peers at same height/work), declare sync idle so mining can proceed.
+	consecutiveSyncNoneThreshold = 3
+
 	// NogoChain-style sync type classification for intelligent strategy selection
 	syncTypeNone          = iota // no peer available or already synced
 	syncTypeFast                 // fast sync via checkpoint skeleton download
@@ -151,8 +155,10 @@ type blockKeeper struct {
 	getReceivedCheckpoint func() *core.CheckpointRecord
 	triggerSyncCheck      func()
 
-	lastSyncAttempt time.Time
-	syncCooldown    time.Duration
+	lastSyncAttempt          time.Time
+	syncCooldown             time.Duration
+	syncIdleConfirmed        bool // true when sync is confirmed complete, mining can proceed
+	consecutiveSyncNoneCount int  // safety valve: tracks consecutive syncTypeNone rounds
 
 	logLimiter *rateLimitedLogger
 
@@ -162,6 +168,9 @@ type blockKeeper struct {
 func (bk *blockKeeper) isActive() bool {
 	bk.syncActiveMu.Lock()
 	defer bk.syncActiveMu.Unlock()
+	if bk.syncIdleConfirmed {
+		return false
+	}
 	if bk.syncActive {
 		return true
 	}
@@ -847,35 +856,56 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 		return syncTypeNone, nil
 	}
 
-	var bestByWork PeerInterface
-	var bestWork *big.Int
-	var bestWorkHeight uint64
+	type peerResult struct {
+		peerID string
+		height uint64
+		work   *big.Int
+	}
 
-	// Scan ALL peers and find the one with most cumulative work.
-	// This is the canonical chain leader — sync from THIS peer,
-	// not the tallest-height peer on a weak fork.
-	// SKIP peers that recently failed sync due to chain mismatch
-	// to prevent infinite rollback→resync→fail→rollback loops.
-	for _, peerID := range peerIDs {
+	resultCh := make(chan peerResult, len(peerIDs))
+	var wg sync.WaitGroup
+	peerCtx, peerCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer peerCancel()
+
+	for _, pid := range peerIDs {
 		bk.syncStateMu.Lock()
-		if lastFail, failed := bk.failedSyncPeers[peerID]; failed {
+		if lastFail, failed := bk.failedSyncPeers[pid]; failed {
 			if time.Since(lastFail) < bk.failedSyncCooldownDur {
 				bk.syncStateMu.Unlock()
 				continue
 			}
-			delete(bk.failedSyncPeers, peerID)
+			delete(bk.failedSyncPeers, pid)
 		}
 		bk.syncStateMu.Unlock()
 
-		peerHeight, peerWork, _, err := bk.peers.GetPeerChainInfo(peerID)
-		if err != nil || peerWork == nil {
-			continue
-		}
+		wg.Add(1)
+		go func(peerID string) {
+			defer wg.Done()
+			ph, pw, _, err := bk.peers.GetPeerChainInfo(peerID)
+			if err != nil || pw == nil {
+				return
+			}
+			select {
+			case resultCh <- peerResult{peerID: peerID, height: ph, work: pw}:
+			case <-peerCtx.Done():
+			}
+		}(pid)
+	}
 
-		if bestWork == nil || peerWork.Cmp(bestWork) > 0 {
-			bestWork = peerWork
-			bestWorkHeight = peerHeight
-			bestByWork = bk.wrapPeer(peerID, peerHeight)
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	var bestByWork PeerInterface
+	var bestWork *big.Int
+	var bestWorkHeight uint64
+
+	for r := range resultCh {
+		if bestWork == nil || r.work.Cmp(bestWork) > 0 {
+			bestWork = r.work
+			bestWorkHeight = r.height
+			bestByWork = bk.wrapPeer(r.peerID, r.height)
 		}
 	}
 
@@ -1185,16 +1215,31 @@ func (bk *blockKeeper) nextCheckpointHeight(maxHeight uint64) (uint64, string) {
 // dispatchRegularSync handles standard block synchronization from a peer.
 
 func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint64) bool {
-	// Resolve real peer: checkSyncType may return a simplePeer wrapper.
-	// Regular sync needs the actual peer with active MConnection.
 	if _, isSimple := peer.(*simplePeer); isSimple {
+		resolved := false
+
 		if realPeer := bk.peers.bestPeer(SFFullNode); realPeer != nil {
 			if realPeer.ID() == peer.ID() {
 				peer = realPeer
-			} else {
-				// bestPeer chose a different peer (height/load-based vs work-based).
-				// Use bestPeer's result as fallback, but verify this peer has more
-				// cumulative work than local to prevent syncing from a weak fork.
+				resolved = true
+			}
+		}
+
+		if !resolved {
+			if realPeer := bk.peers.PeerByID(peer.ID()); realPeer != nil {
+				peerWork := bk.getPeerWork(realPeer)
+				localWork := bk.chain.CanonicalWork()
+				if peerWork != nil && localWork != nil && peerWork.Cmp(localWork) > 0 {
+					peer = realPeer
+					resolved = true
+					log.Printf("[BlockKeeper] dispatchRegularSync: resolved work-optimal peer %s via PeerByID (h=%d)",
+						realPeer.ID(), realPeer.Height())
+				}
+			}
+		}
+
+		if !resolved {
+			if realPeer := bk.peers.bestPeer(SFFullNode); realPeer != nil {
 				fallbackWork := bk.getPeerWork(realPeer)
 				localWork := bk.chain.CanonicalWork()
 				if fallbackWork == nil || localWork == nil || fallbackWork.Cmp(localWork) <= 0 {
@@ -1202,12 +1247,16 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 						realPeer.ID(), localWork.String())
 					return false
 				}
-				log.Printf("[BlockKeeper] dispatchRegularSync: work-optimal peer %s not found via bestPeer, using fallback %s (h=%d)",
-					peer.ID(), realPeer.ID(), realPeer.Height())
+				log.Printf("[BlockKeeper] dispatchRegularSync: work-optimal peer %s not found directly, using fallback %s (h=%d, w=%s)",
+					peer.ID(), realPeer.ID(), realPeer.Height(), fallbackWork.String())
 				peer = realPeer
+				resolved = true
 			}
-		} else {
-			log.Printf("[BlockKeeper] dispatchRegularSync: no eligible peers available via bestPeer, skipping sync round")
+		}
+
+		if !resolved {
+			log.Printf("[BlockKeeper] dispatchRegularSync: no eligible peers available for work-optimal peer %s, skipping sync round",
+				peer.ID())
 			return false
 		}
 	}
@@ -1441,16 +1490,22 @@ func (bk *blockKeeper) handleChainMismatchInSync(peer PeerInterface) {
 		bk.syncPeer = origSyncPeer
 	}()
 
-	for depth := uint64(1); depth <= maxReorgSearchDepth; depth++ {
+	originalHeight := localTip.GetHeight()
+	maxRollbackDepth := uint64(100)
+	if originalHeight < maxRollbackDepth {
+		maxRollbackDepth = originalHeight - 1
+	}
+	if maxRollbackDepth > maxReorgSearchDepth {
+		maxRollbackDepth = maxReorgSearchDepth
+	}
+
+	for depth := uint64(1); depth <= maxRollbackDepth; depth++ {
 		if time.Since(startTime) > maxReorgSearchTimeout {
 			log.Printf("[BlockKeeper] Chain mismatch: progressive rollback timed out after %v (depth=%d)",
 				maxReorgSearchTimeout, depth)
 			break
 		}
-		if localTip.GetHeight() < depth {
-			break
-		}
-		rollbackTarget := localTip.GetHeight() - depth
+		rollbackTarget := originalHeight - depth
 
 		if err := bk.chain.RollbackToHeight(rollbackTarget); err != nil {
 			log.Printf("[BlockKeeper] Chain mismatch: rollback to h=%d failed: %v", rollbackTarget, err)
@@ -1490,6 +1545,13 @@ func (bk *blockKeeper) handleChainMismatchInSync(peer PeerInterface) {
 			log.Printf("[BlockKeeper] Chain mismatch: progressive rollback at depth=%d, still searching for common ancestor...",
 				depth)
 		}
+	}
+
+	currentHeight := bk.chain.LatestBlock().GetHeight()
+	if currentHeight < originalHeight {
+		log.Printf("[BlockKeeper] Chain mismatch: search FAILED, chain rolled back from h=%d to h=%d "+
+			"(%d blocks lost, bounded). Relying on syncWorker to restore via normal resync.",
+			originalHeight, currentHeight, originalHeight-currentHeight)
 	}
 
 	log.Printf("[BlockKeeper] Chain mismatch: exhausted search depth %d without finding common ancestor — peer %s deprioritized for %v",
@@ -1656,6 +1718,10 @@ func (bk *blockKeeper) syncWorker() {
 		select {
 		case <-syncTicker.C:
 			bk.syncActiveMu.Lock()
+			if bk.syncIdleConfirmed {
+				bk.syncActiveMu.Unlock()
+				continue
+			}
 			bk.syncActive = true
 			bk.syncActiveMu.Unlock()
 
@@ -1664,19 +1730,32 @@ func (bk *blockKeeper) syncWorker() {
 			bk.syncActiveMu.Lock()
 			bk.syncActive = false
 			bk.lastSyncAttempt = time.Now()
+			if bk.consecutiveSyncNoneCount >= consecutiveSyncNoneThreshold {
+				bk.syncIdleConfirmed = true
+				bk.syncCooldown = 0
+				log.Printf("[BlockKeeper] Sync idle confirmed after %d no-op rounds — mining may now proceed", consecutiveSyncNoneThreshold)
+			}
 			bk.syncActiveMu.Unlock()
 
 		case <-bk.forkResolvedCh:
 			log.Printf("[BlockKeeper] Fork resolved, triggering immediate re-sync")
 			bk.syncActiveMu.Lock()
 			bk.syncActive = true
+			bk.syncIdleConfirmed = false
+			bk.consecutiveSyncNoneCount = 0
+			bk.syncCooldown = 0
 			bk.syncActiveMu.Unlock()
 
-			bk.startSync()
+			synced := bk.startSync()
 
 			bk.syncActiveMu.Lock()
 			bk.syncActive = false
 			bk.lastSyncAttempt = time.Now()
+			if !synced {
+				bk.consecutiveSyncNoneCount = consecutiveSyncNoneThreshold
+				bk.syncIdleConfirmed = true
+				log.Printf("[BlockKeeper] Fork resolved, no sync needed — mining may resume immediately")
+			}
 			bk.syncActiveMu.Unlock()
 
 		case <-bk.quit:
@@ -1696,6 +1775,9 @@ func (bk *blockKeeper) SetCheckpointCallbacks(getCp func() *core.CheckpointRecor
 func (bk *blockKeeper) TriggerSyncCheck() {
 	bk.syncActiveMu.Lock()
 	bk.syncActive = true
+	bk.syncIdleConfirmed = false
+	bk.consecutiveSyncNoneCount = 0
+	bk.syncCooldown = 0
 	bk.syncActiveMu.Unlock()
 	bk.lastSyncAttempt = time.Time{}
 }
@@ -1708,12 +1790,20 @@ func (bk *blockKeeper) safeStartSync(genesisBlock *core.Block) {
 			log.Printf("[BlockKeeper] PANIC in startSync/broadcast: %v - continuing sync loop", r)
 		}
 	}()
-	if bk.startSync() {
+	synced := bk.startSync()
+	if synced {
 		bk.broadcastAfterSync(genesisBlock)
+		bk.consecutiveSyncNoneCount = 0
 	} else {
 		localHeight := bk.chain.LatestBlock().GetHeight()
 		if localHeight > 0 {
-			bk.syncLaggingPeers(localHeight)
+			bk.consecutiveSyncNoneCount++
+			if bk.consecutiveSyncNoneCount < consecutiveSyncNoneThreshold {
+				bk.syncLaggingPeers(localHeight)
+			} else if bk.consecutiveSyncNoneCount == consecutiveSyncNoneThreshold {
+				log.Printf("[BlockKeeper] %d consecutive syncTypeNone rounds — entering mining-friendly cooldown, skipping syncLaggingPeers",
+					bk.consecutiveSyncNoneCount)
+			}
 		}
 	}
 }

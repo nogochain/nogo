@@ -2,7 +2,7 @@
 
 This document provides complete deployment instructions for the NogoChain blockchain, covering development, testnet, and production environments.
 
-**Last Updated**: 2026-05-15
+**Last Updated**: 2026-04-26
 **Audit Status**: ✅ Configuration options verified against code
 **Language**: English (Primary)
 **Code References:**
@@ -10,8 +10,6 @@ This document provides complete deployment instructions for the NogoChain blockc
 - Environment Variables: [`blockchain/config/env.go`](https://github.com/nogochain/nogo/blob/main/nogo/blockchain/config/env.go)
 - Types: [`blockchain/config/types.go`](https://github.com/nogochain/nogo/blob/main/nogo/blockchain/config/types.go)
 - Node Startup: [`blockchain/cmd/node.go`](https://github.com/nogochain/nogo/blob/main/nogo/blockchain/cmd/node.go)
-- Build System: [`Makefile`](https://github.com/nogochain/nogo/blob/main/nogo/Makefile)
-- Docker Compose: [`docker-compose.yml`](https://github.com/nogochain/nogo/blob/main/nogo/docker-compose.yml)
 
 ---
 
@@ -30,11 +28,8 @@ This document provides complete deployment instructions for the NogoChain blockc
    - [Development Environment](#development-environment)
    - [Testnet Deployment](#testnet-deployment)
    - [Mainnet Deployment](#mainnet-deployment)
-   - [Auxiliary Services](#auxiliary-services)
 5. [Production Best Practices](#production-best-practices)
 6. [Monitoring and Maintenance](#monitoring-and-maintenance)
-   - [Prometheus Metrics](#prometheus-metrics)
-   - [Prometheus Setup](#prometheus-setup)
 7. [Troubleshooting](#troubleshooting)
 8. [Backup and Recovery](#backup-and-recovery)
 
@@ -44,20 +39,19 @@ This document provides complete deployment instructions for the NogoChain blockc
 
 ### Minimum Requirements
 - **CPU**: 2 cores
-- **RAM**: 4 GB
-- **Storage**: 20 GB available space
+- **RAM**: 2 GB
+- **Storage**: 10 GB available space
 - **Network**: 10 Mbps bandwidth
 
 ### Recommended Requirements (Production)
 - **CPU**: 4+ cores
-- **RAM**: 8 GB minimum, 16 GB recommended
+- **RAM**: 8+ GB RAM
 - **Storage**: 100+ GB SSD
-- **Network**: 100+ Mbps bandwidth, stable connection
+- **Network**: 100+ Mbps bandwidth
 - **Operating System**: Linux (Ubuntu 20.04+, CentOS 8+)
-- **Open Ports**: P2P port (default 9090) must be accessible from the internet
 
 ### Software Dependencies
-- **Go Version**: 1.25.0 (exact version)
+- **Go Version**: 1.21.5 (exact version)
 - **Docker**: 20.10+ (if using Docker deployment)
 - **Docker Compose**: 2.0+ (if using Docker Compose)
 
@@ -69,9 +63,9 @@ This document provides complete deployment instructions for the NogoChain blockc
 
 #### 1. Install Go
 ```bash
-# Download Go 1.25.0
-wget https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
-sudo tar -C /usr/local -xzf go1.25.0.linux-amd64.tar.gz
+# Download Go 1.21.5
+wget https://go.dev/dl/go1.21.5.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.21.5.linux-amd64.tar.gz
 export PATH=$PATH:/usr/local/go/bin
 export GOPATH=$HOME/go
 export PATH=$PATH:$GOPATH/bin
@@ -86,32 +80,23 @@ cd NogoChain/nogo
 #### 3. Download Dependencies
 ```bash
 go mod download
-make install-deps
 ```
 
 #### 4. Build
-
 ```bash
-# Production build (CGO disabled, stripped, recommended)
-make build
+# Standard build
+go build -o nogo ./blockchain/cmd
 
-# Equivalent manual command:
-# CGO_ENABLED=0 go build -ldflags="-s -w" -o nogo ./blockchain/cmd
+# Production build (remove debug symbols, enable optimization)
+go build -ldflags="-s -w" -trimpath -o nogo ./blockchain/cmd
 
-# Reproducible build (deterministic, embeds version info)
-make build-reproducible
-
-# Build with debug symbols (no stripping)
-make build-debug
-
-# Build with race detector (development/testing only)
-make build-no-race
+# With race detector (for development/testing only)
+go build -race -o nogo ./blockchain/cmd
 ```
 
 #### 5. Verify Build
 ```bash
 ./nogo --help
-make test
 ```
 
 ### Binary Installation
@@ -143,35 +128,26 @@ sudo mv nogo-darwin-amd64 /usr/local/bin/nogo
 
 ### Docker Deployment
 
-#### Dockerfiles
-
-| File | Purpose |
-|------|---------|
-| `blockchain/Dockerfile` | Multi-stage build using `golang:1.25-alpine`, `CGO_ENABLED=0` |
-| `blockchain/Dockerfile.genesis` | Genesis node variant with pre-configured miner |
-| `blockchain/Dockerfile.reproducible` | Deterministic reproducible build with version labels |
-
 #### 1. Build Image
 ```bash
 cd nogo
 
 # Standard build
-make docker-build
+docker build -t nogochain/blockchain:latest -f blockchain/Dockerfile .
 
 # Reproducible build (recommended for production)
-make docker-build-reproducible
-
-# Or manually:
-# docker build --build-arg VERSION=1.0.0 --build-arg BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S') \
-#   -t nogochain/blockchain:latest -f docker/Dockerfile.reproducible .
+docker build --build-arg VERSION=1.0.0 --build-arg BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S') \
+  -t nogochain/blockchain:latest -f blockchain/Dockerfile.reproducible .
 ```
 
-#### 2. Run Container (Single Node)
+#### 2. Run Container
 ```bash
+# Single node
 docker run -d \
   --name nogochain-node \
   -p 127.0.0.1:8080:8080 \
-  -v $(pwd)/blockchain/data:/app/data \
+  -p 127.0.0.1:9090:9090 \
+  -v $(pwd)/data:/app/data \
   -v $(pwd)/genesis:/app/genesis:ro \
   -e CHAIN_ID=1 \
   -e MINER_ADDRESS=NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048 \
@@ -180,33 +156,18 @@ docker run -d \
 ```
 
 #### 3. Using Docker Compose
-
-The production `docker-compose.yml` includes:
-- **blockchain**: Core node service (HTTP API, P2P sync)
-- **ai-auditor**: AI-powered transaction auditing (profile: `ai`)
-- **n8n**: Workflow automation platform (profile: `orchestration`)
-
 ```bash
 # Single node mode
-make docker-up
+docker compose up -d
 
-# Or manually:
-# docker compose up -d
-
-# Enable AI auditor
-docker compose --profile ai up -d
-
-# Enable n8n workflow automation
-docker compose --profile orchestration up -d
-
-# Enable all services
-docker compose --profile ai --profile orchestration up -d
+# Testnet multi-node mode
+docker compose -f docker-compose.testnet.yml up -d
 
 # View logs
 docker compose logs -f blockchain
 
 # Stop services
-make docker-down
+docker compose down
 ```
 
 ---
@@ -225,14 +186,34 @@ make docker-down
 | `LOG_DIR` | Log storage directory | `./logs` | `/var/log/nogochain` |
 | `MINER_ADDRESS` | Miner address (NOGO prefix) | Empty | `NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048` |
 | `ADMIN_TOKEN` | Admin authentication token (min 16 chars) | Empty | `your_secure_token_123` |
-| `GENESIS_PATH` | Path to genesis file | `genesis/mainnet.json` | `genesis/mainnet.json` |
-| `AI_AUDITOR_URL` | AI auditor service URL | Empty | `http://localhost:8000` |
+
+#### Network Configuration
+
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `P2P_PORT` | P2P network port | `9090` | `9090` |
+| `HTTP_PORT` | HTTP API port | `8080` | `8080` |
+| `WS_PORT` | WebSocket port | `8081` | `8081` |
+| `P2P_MAX_PEERS` | Maximum P2P connections | `100` | `200` |
+| `P2P_MAX_CONNECTIONS` | Maximum connection pool connections | `50` | `100` |
+| `BOOT_NODES` | Bootstrap node addresses | Empty | `node1.nogochain.org:9090,node2.nogochain.org:9090` |
+| `DNS_DISCOVERY` | DNS discovery domains | Empty | `dns1.nogochain.org,dns2.nogochain.org` |
+
+#### HTTP Service Configuration
+
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `HTTP_ADDR` | HTTP listen address | `0.0.0.0:8080` | `0.0.0.0:8080` |
+| `WS_ENABLE` | Enable WebSocket | `false` | `true` |
+| `RATE_LIMIT_REQUESTS` | Requests per second limit | `100` | `100` |
+| `RATE_LIMIT_BURST` | Request burst limit | `50` | `50` |
+| `TRUST_PROXY` | Trust X-Forwarded-For headers | `false` | `true` |
 
 #### Mining Configuration
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `AUTO_MINE` | Enable auto mining | `false` | `true` |
+| `MINING_ENABLE` | Enable mining | `false` | `true` |
 | `MINER_ADDRESS` | Miner address (NOGO prefix) | Empty | `NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048` |
 | `MINE_INTERVAL_MS` | Mining interval (milliseconds) | `1000` | `17000` |
 | `MAX_TX_PER_BLOCK` | Maximum transactions per block | `1000` | `1000` |
@@ -280,36 +261,21 @@ make docker-down
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `NOGO_LOG_LEVEL` | Log level (`debug`, `info`, `warn`, `error`) | `info` | `debug` |
+| `LOG_LEVEL` | Log level | `info` | `debug` |
 | `METRICS_ENABLED` | Enable metrics collection | `true` | `true` |
-| `METRICS_PORT` | Metrics endpoint port | `8080` | `8080` |
+| `METRICS_PORT` | Metrics port | `9090` | `9100` |
 
-#### P2P Configuration
-
-| Variable | Description | Default | Example |
-|----------|-------------|---------|---------|
-| `NOGO_P2P_PORT` | P2P network port | `9090` | `9090` |
-| `NOGO_P2P_PEERS` | Bootstrap/seed peer addresses | Empty | `main.nogochain.org:9090,wallet.nogochain.org:9090,node.nogochain.org:9090` |
-| `P2P_ENABLE` | Enable P2P networking | `false` | `true` |
-| `P2P_LISTEN_ADDR` | P2P listen address | `:9090` | `:9090` |
-| `TX_GOSSIP_ENABLE` | Enable transaction gossip | `false` | `true` |
-| `TX_GOSSIP_HOPS` | Transaction gossip hop count | `2` | `2` |
-| `SYNC_ENABLE` | Enable block sync | `false` | `true` |
-| `SYNC_INTERVAL_MS` | Sync interval (milliseconds) | `3000` | `3000` |
-| `NOGO_ENCRYPTION_MODE` | Encryption mode (`none`/`tls`/`both`) | `both` | `both` |
-
-#### HTTP Service Configuration
+#### Security Configuration
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `HTTP_ADDR` | HTTP listen address | `127.0.0.1:8080` | `0.0.0.0:8080` |
-| `HTTP_TIMEOUT_SECONDS` | HTTP request timeout | `10` | `30` |
-| `HTTP_MAX_HEADER_BYTES` | Max HTTP header size | `8192` | `8192` |
-| `WS_ENABLE` | Enable WebSocket | `true` | `true` |
-| `WS_MAX_CONNECTIONS` | Max WebSocket connections | `100` | `100` |
-| `RATE_LIMIT_REQUESTS` | Requests per second limit | `100` | `100` |
-| `RATE_LIMIT_BURST` | Request burst limit | `20` | `50` |
-| `TRUST_PROXY` | Trust X-Forwarded-For headers | `false` | `true` |
+| `ADMIN_TOKEN` | Admin authentication token | Empty | `your_secure_token` |
+| `TLS_ENABLE` | Enable TLS | `true` | `true` |
+| `TLS_CERT_FILE` | TLS certificate file path | Empty | `/etc/ssl/nogochain.crt` |
+| `TLS_KEY_FILE` | TLS key file path | Empty | `/etc/ssl/nogochain.key` |
+| `RATE_LIMIT_REQUESTS` | Rate limit requests | `100` | `100` |
+| `RATE_LIMIT_BURST` | Rate limit burst | `50` | `50` |
+| `TRUST_PROXY` | Trust proxy headers | `false` | `true` |
 
 #### NTP Configuration
 
@@ -471,68 +437,45 @@ Start with configuration file:
 
 ### Development Environment
 
-#### Method 1: Quick Start with Makefile
+#### Method 1: Quick Start Scripts
 
+**Windows:**
+```batch
+cd nogo
+start.bat
+```
+
+**Linux/Mac:**
 ```bash
 cd nogo
-
-# Build
-make build
-
-# Run tests
-make test
-
-# Start development server
-CGO_ENABLED=0 go build -ldflags="-s -w" -o nogo ./blockchain/cmd
-./nogo server
+./run.sh
 ```
 
-#### Method 2: Deployment Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `scripts/join-network.sh` | Join an existing network by providing a seed node URL |
-| `scripts/run_public_node.sh` | Run as a public node with optional mining |
-| `scripts/test_all.sh` | Run all tests (unit, benchmarks, fuzzing) |
-
-```bash
-# Join existing network
-./scripts/join-network.sh http://seed-node-ip:8080
-
-# Run as public node
-./scripts/run_public_node.sh [MINER_ADDRESS]
-```
-
-#### Method 3: Manual Start
+#### Method 2: Manual Start
 
 ```bash
 # 1. Build
 cd nogo
-make build
+go build -o nogo ./blockchain/cmd
 
 # 2. Set environment variables
 export CHAIN_ID=2
 export DATA_DIR=./data
-export AUTO_MINE=true
+export MINING_ENABLE=true
 export MINER_ADDRESS=NOGO0049c3cf477a9fce2622d18245d04f011f788f7b2e248bdeb38d4ef459c37857be3d0293c3
 export P2P_MAX_PEERS=100
 export WS_ENABLE=true
-export NOGO_LOG_LEVEL=debug
+export LOG_LEVEL=debug
 
 # 3. Start node
 ./nogo server
 ```
 
-#### Method 4: Docker Compose
+#### Method 3: Docker Compose
 
 ```bash
 cd nogo
-
-# Start blockchain node
-make docker-up
-
-# Or with all services
-docker compose --profile ai --profile orchestration up -d
+docker compose up -d
 
 # View logs
 docker compose logs -f blockchain
@@ -544,24 +487,6 @@ docker compose logs -f blockchain
 
 ### Testnet Deployment
 
-#### Using Bootstrap Script
-
-The `scripts/testnet_bootstrap.sh` script generates a genesis configuration and environment file for a 3-node testnet:
-
-```bash
-./scripts/testnet_bootstrap.sh
-```
-
-This generates:
-- `.env.testnet`: Environment variables with per-node miner addresses
-- `genesis/testnet.json`: Genesis block configuration
-
-Start the testnet:
-```bash
-make testnet
-# Or: docker compose --env-file .env.testnet -f docker-compose.testnet.yml up -d
-```
-
 #### Single Node Testnet
 
 ```bash
@@ -570,57 +495,48 @@ export CHAIN_ID=2
 export DATA_DIR=./data-testnet
 export MINER_ADDRESS=NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048
 export ADMIN_TOKEN=your_testnet_admin_token
-export NOGO_P2P_PEERS=test.nogochain.org:9090
-export AUTO_MINE=true
+export BOOT_NODES=test.nogochain.org:9090
+export MINING_ENABLE=true
 export MINE_INTERVAL_MS=15000
-export NOGO_LOG_LEVEL=info
+export LOG_LEVEL=info
 
 # 2. Start node
-./nogo server
+./nogo server mine
 ```
 
 #### Multi-Node Testnet (Docker Compose)
-
-The `docker-compose.testnet.yml` deploys 3 nodes:
-- `blockchain-node0`: Mining node (ports 8080, 9090)
-- `blockchain-node1`: Sync node (ports 8081, 9091)
-- `blockchain-node2`: Sync node (ports 8082, 9092)
 
 ```bash
 cd nogo
 
 # Start 3-node testnet
-make testnet
-
-# Or with custom env file
-docker compose --env-file .env.testnet -f docker-compose.testnet.yml up -d
+docker compose -f docker-compose.testnet.yml up -d
 
 # View node status
 docker compose ps
 
 # View node 0 logs
 docker compose logs blockchain-node0
+
+# Access nodes
+# Node 0: http://localhost:8080
+# Node 1: http://localhost:8081
+# Node 2: http://localhost:8082
+```
+
+#### Using Start Scripts
+
+**Linux:**
+```bash
+./start-linux.sh NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048 mine test
+```
+
+**Windows:**
+```batch
+start-local.bat
 ```
 
 ### Mainnet Deployment
-
-#### Using Bootstrap Script
-
-The `scripts/mainnet_bootstrap.sh` script generates a genesis configuration and environment file:
-
-```bash
-./scripts/mainnet_bootstrap.sh
-```
-
-This generates:
-- `.env.mainnet`: Environment variables
-- `genesis/mainnet.json`: Genesis block configuration
-
-Start the mainnet:
-```bash
-make mainnet
-# Or: docker compose --env-file .env.mainnet up -d
-```
 
 #### Single Node Mainnet
 
@@ -633,12 +549,12 @@ DATA_DIR=/var/lib/nogochain
 LOG_DIR=/var/log/nogochain
 MINER_ADDRESS=NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048
 ADMIN_TOKEN=your_very_secure_admin_token_minimum_16_chars
-NOGO_P2P_PEERS=main.nogochain.org:9090
-AUTO_MINE=true
+BOOT_NODES=main.nogochain.org:9090
+MINING_ENABLE=true
 MINE_INTERVAL_MS=17000
-NOGO_LOG_LEVEL=info
+LOG_LEVEL=info
 RATE_LIMIT_REQUESTS=100
-RATE_LIMIT_BURST=20
+RATE_LIMIT_BURST=50
 TLS_ENABLE=true
 TLS_CERT_FILE=/etc/ssl/nogochain.crt
 TLS_KEY_FILE=/etc/ssl/nogochain.key
@@ -648,7 +564,7 @@ EOF
 source .env.mainnet
 
 # 3. Start node
-./nogo server
+./nogo server mine
 ```
 
 #### Production Docker Deployment
@@ -657,14 +573,15 @@ source .env.mainnet
 cd nogo
 
 # 1. Create .env file
-./scripts/mainnet_bootstrap.sh
+cp env.mainnet.example .env.mainnet
 # Edit .env.mainnet file with your configuration
 
 # 2. Build production image
-make docker-build-reproducible
+docker build --build-arg VERSION=1.0.0 --build-arg BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S') \
+  -t nogochain/blockchain:latest -f blockchain/Dockerfile.reproducible .
 
 # 3. Start services
-make mainnet
+docker compose --env-file .env.mainnet up -d
 
 # 4. View status
 docker compose ps
@@ -687,7 +604,7 @@ User=nogochain
 Group=nogochain
 WorkingDirectory=/opt/nogochain
 EnvironmentFile=/etc/nogochain/.env
-ExecStart=/opt/nogochain/nogo server
+ExecStart=/opt/nogochain/nogo server mine
 Restart=always
 RestartSec=10
 LimitNOFILE=65535
@@ -704,9 +621,9 @@ ReadWritePaths=/var/lib/nogochain /var/log/nogochain
 Environment="CHAIN_ID=1"
 Environment="MINER_ADDRESS=NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048"
 Environment="ADMIN_TOKEN=your_secure_admin_token"
-Environment="NOGO_P2P_PEERS=main.nogochain.org:9090"
-Environment="AUTO_MINE=true"
-Environment="NOGO_LOG_LEVEL=info"
+Environment="BOOT_NODES=main.nogochain.org:9090"
+Environment="MINING_ENABLE=true"
+Environment="LOG_LEVEL=info"
 Environment="TLS_ENABLE=true"
 
 [Install]
@@ -729,82 +646,6 @@ sudo systemctl status nogochain
 
 # View logs
 sudo journalctl -u nogochain -f
-```
-
----
-
-### Auxiliary Services
-
-NogoChain supports optional auxiliary services deployed alongside the blockchain node.
-
-#### AI Auditor
-
-AI-powered transaction and block auditing service:
-
-```bash
-# Start with AI auditor
-docker compose --profile ai up -d
-
-# Access AI auditor API
-# http://localhost:8000
-```
-
-Environment variables for AI auditor:
-- `LLM_API_KEY`: API key for LLM provider
-- `LLM_PROVIDER`: Provider (`gemini`, `openai`)
-
-#### n8n Workflow Automation
-
-Automated workflow orchestration for blockchain operations:
-
-```bash
-# Start with n8n
-docker compose --profile orchestration up -d
-
-# Access n8n dashboard
-# http://localhost:5678
-```
-
-#### Nginx Reverse Proxy
-
-Optional reverse proxy for production deployments, located in `nginx/`:
-
-| File | Purpose |
-|------|---------|
-| `nginx/nginx.conf` | Main Nginx configuration |
-| `nginx/Dockerfile` | Nginx container image |
-| `nginx/docker-compose.nginx.yml` | Nginx Docker Compose service |
-| `nginx/conf.d/custom.conf` | Custom server blocks |
-
-Start Nginx reverse proxy:
-```bash
-cd nginx
-docker compose -f docker-compose.nginx.yml up -d
-```
-
-#### Nginx Reverse Proxy
-
-Use Nginx as reverse proxy:
-
-```nginx
-upstream nogochain {
-    server node1:8080;
-    server node2:8080;
-    server node3:8080;
-}
-
-server {
-    listen 80;
-    server_name api.nogochain.org;
-
-    location / {
-        proxy_pass http://nogochain;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
 ```
 
 ---
@@ -925,7 +766,32 @@ docker compose -f docker-compose.testnet.yml up -d
 watch 'docker compose ps'
 ```
 
-#### 2. Automatic Failover
+#### 2. Load Balancing
+
+Use Nginx as reverse proxy:
+
+```nginx
+upstream nogochain {
+    server node1:8080;
+    server node2:8080;
+    server node3:8080;
+}
+
+server {
+    listen 80;
+    server_name api.nogochain.org;
+
+    location / {
+        proxy_pass http://nogochain;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+#### 3. Automatic Failover
 
 ```bash
 # systemd auto-restart (already configured in service file)
@@ -940,103 +806,11 @@ docker run --restart=always ...
 
 ## Monitoring and Maintenance
 
-### Prometheus Metrics
-
-NogoChain exposes comprehensive Prometheus metrics at the HTTP API port (default 8080). Over 40 metrics are registered, categorized as follows:
-
-#### Core Chain Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `nogo_chain_height` | Gauge | Current canonical block height |
-| `nogo_blocks_canonical` | Gauge | Total canonical blocks count |
-| `nogo_txs_canonical` | Gauge | Total canonical transactions count |
-| `nogo_difficulty_bits` | Gauge | Current difficulty bits |
-| `nogo_chain_switches_total` | Counter | Total chain reorganizations |
-| `nogo_fork_detected_total` | Counter | Total fork detections |
-| `nogo_block_events_total` | Counter | Total block events processed |
-| `nogo_header_events_total` | Counter | Total header events processed |
-| `nogo_block_interval_seconds` | Histogram | Time between consecutive blocks |
-
-#### Mining Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `nogo_blocks_mined_total` | Counter | Total blocks mined by this node |
-| `nogo_mining_hashes_total` | Counter | Total mining hashes computed |
-| `nogo_mining_difficulty` | Gauge | Current mining difficulty |
-| `nogo_mining_efficiency` | Gauge | Mining efficiency percentage |
-| `nogo_block_production_rate` | Gauge | Blocks produced per minute |
-| `nogo_mining_paused` | Gauge | Whether mining is paused (1=paused) |
-
-#### Network & Peer Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `nogo_peers_count` | Gauge | Number of connected peers |
-| `nogo_peer_success_rate` | Gauge | Average peer success rate |
-| `nogo_peer_latency_avg` | Gauge | Average peer latency (ms) |
-| `nogo_peer_score_distribution` | Histogram | Peer score distribution |
-| `nogo_p2p_bytes_sent_total` | Counter | Total bytes sent to peers |
-| `nogo_p2p_bytes_received_total` | Counter | Total bytes received from peers |
-| `nogo_blocks_propagated_total` | Counter | Total blocks propagated |
-| `nogo_txs_propagated_total` | Counter | Total transactions propagated |
-| `nogo_peer_connection_errors_total` | Counter | Total peer connection errors |
-
-#### Sync Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `nogo_is_syncing` | Gauge | Whether node is syncing (1=syncing) |
-| `nogo_sync_progress_percent` | Gauge | Sync progress percentage |
-| `nogo_orphan_pool_size` | Gauge | Orphan blocks in pool |
-| `nogo_sync_workers_active` | Gauge | Active sync workers |
-| `nogo_orphan_parent_requests_total` | Counter | Parent block requests for orphans |
-| `nogo_orphan_parent_found_total` | Counter | Parent blocks found for orphans |
-
-#### Mempool Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `nogo_mempool_size` | Gauge | Transactions in mempool |
-| `nogo_mempool_bytes` | Gauge | Mempool size in bytes |
-| `nogo_mempool_tx_received_total` | Counter | Total transactions received |
-| `nogo_mempool_tx_accepted_total` | Counter | Transactions accepted |
-| `nogo_mempool_tx_rejected_total` | Counter | Transactions rejected |
-| `nogo_mempool_tx_expired_total` | Counter | Transactions expired |
-
-#### HTTP & Rate Limiting Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `nogo_http_requests_total` | CounterVec | HTTP requests (method, endpoint, status) |
-| `nogo_http_request_duration_seconds` | HistogramVec | HTTP request duration |
-| `nogo_websocket_connections` | Gauge | Active WebSocket connections |
-| `nogo_rate_limit_requests_total` | CounterVec | Rate limit decisions (allowed/denied/bypassed) |
-| `nogo_rate_limit_events` | CounterVec | Rate limiting events |
-| `nogo_cache_hits_total` | CounterVec | Cache hits by type |
-| `nogo_cache_misses_total` | CounterVec | Cache misses by type |
-
-#### System & Economic Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `nogo_inflation_rate` | Gauge | Current inflation rate percentage |
-| `nogo_block_reward` | Gauge | Current block reward in NOGO |
-| `nogo_annual_reduction_rate` | Gauge | Annual reduction rate percentage |
-| `nogo_tps` | Gauge | Transactions per second |
-| `nogo_uptime_seconds` | Gauge | Node uptime in seconds |
-| `nogo_go_routines` | Gauge | Number of active goroutines |
-| `nogo_memstats_alloc_bytes` | Gauge | Allocated memory in bytes |
-| `nogo_memstats_sys_bytes` | Gauge | OS-obtained memory in bytes |
-| `nogo_ntp_offset_seconds` | Gauge | NTP time offset in seconds |
-| `nogo_ntp_synchronized` | Gauge | NTP sync status (1=synced) |
-
-### Prometheus Setup
+### Prometheus Monitoring
 
 #### 1. Configure Prometheus
 
-Use the provided `prometheus.yml`:
+Use provided `prometheus.yml`:
 
 ```yaml
 global:
@@ -1168,8 +942,8 @@ sudo lsof -i :9090
 sudo kill -9 <PID>
 
 # Or change ports
-export HTTP_ADDR=0.0.0.0:8081
-export NOGO_P2P_PORT=9091
+export NODE_PORT=8081
+export P2P_PORT=9091
 ```
 
 #### 2. Database Corruption
@@ -1204,7 +978,7 @@ ping -c 4 main.nogochain.org
 sudo ufw status
 
 # Update seed nodes
-export NOGO_P2P_PEERS=seed1.nogochain.org:9090,seed2.nogochain.org:9090
+export P2P_SEEDS=seed1.nogochain.org:9090,seed2.nogochain.org:9090
 
 # Reset sync state
 sudo systemctl stop nogochain
@@ -1258,22 +1032,26 @@ sudo journalctl -u nogochain | grep -i mining
 #### Enable Verbose Logging
 
 ```bash
-export NOGO_LOG_LEVEL=debug
+export LOG_LEVEL=debug
 ./nogo server
 ```
 
 #### Use Race Detector
 
 ```bash
-make test
-# Or: make build-no-race && ./nogo server
+go build -race -o nogo ./blockchain/cmd
+./nogo server
 ```
 
 #### Profiling
 
 ```bash
-# Metrics are available on the HTTP API port
-curl http://localhost:8080/metrics
+# Enable metrics
+export METRICS_ENABLED=true
+export METRICS_PORT=9100
+
+# Access metrics endpoint
+curl http://localhost:9100/metrics
 ```
 
 ---
@@ -1432,24 +1210,17 @@ watch 'curl -s http://localhost:8080/chain/info | jq .height'
 ### A. Quick Reference Commands
 
 ```bash
-# Build
-make build
-CGO_ENABLED=0 go build -ldflags="-s -w" -o nogo ./blockchain/cmd
-
 # Start node
-./nogo server
+./nogo server <miner_address> [mine] [test]
 
-# Run tests
-make test
-
-# Create wallet (if wallet subcommand available)
+# Create wallet
 ./nogo wallet create
 
 # Check balance
-curl http://localhost:8080/balance/<address>
+curl http://localhost:8080/account/balance/<address>
 
-# Check chain info
-curl http://localhost:8080/chain/info
+# Check block height
+curl http://localhost:8080/chain/info | jq '.height'
 
 # View node info
 curl http://localhost:8080/node/info
@@ -1457,11 +1228,8 @@ curl http://localhost:8080/node/info
 # View connected peers
 curl http://localhost:8080/peers
 
-# View metrics
-curl http://localhost:8080/metrics
-
 # Submit transaction
-curl -X POST http://localhost:8080/tx \
+curl -X POST http://localhost:8080/tx/submit \
   -H "Content-Type: application/json" \
   -d '{"from":"...","to":"...","amount":100}'
 ```
@@ -1470,19 +1238,18 @@ curl -X POST http://localhost:8080/tx \
 
 | Port | Protocol | Purpose | Open to Public |
 |------|----------|---------|----------------|
-| 8080 | HTTP/TCP | API & Metrics | Optional |
+| 8080 | HTTP/TCP | API Service | Optional |
 | 9090 | TCP | P2P Network | Yes |
-| 8000 | HTTP/TCP | AI Auditor | No |
-| 5678 | HTTP/TCP | n8n Workflow | No |
+| 9100 | TCP | Prometheus Metrics | No |
 
 ### C. Important File Paths
 
 | Path | Purpose |
 |------|---------|
-| `blockchain/data/chain.db` | Blockchain database (BoltDB) |
-| `genesis/mainnet.json` | Mainnet genesis configuration |
-| `genesis/testnet.json` | Testnet genesis configuration |
-| `prometheus.yml` | Prometheus scrape configuration |
+| `/var/lib/nogochain/data/chain.db` | Blockchain database |
+| `/var/lib/nogochain/keystore/` | Keystore files |
+| `/etc/nogochain/config.yaml` | Configuration file |
+| `/var/log/nogochain/nogochain.log` | Log file |
 
 ### D. Related Resources
 
@@ -1492,14 +1259,7 @@ curl -X POST http://localhost:8080/tx \
 - **Discord**: https://discord.gg/HxEFPqJMEV
 - **Twitter**: https://twitter.com/nogochain
 
-### E. SDKs
-
-| Language | Path |
-|----------|------|
-| JavaScript | `sdk/javascript/index.js` |
-| Python | `sdk/python/__init__.py` |
-
 ---
 
-**Last Updated**: 2026-05-15
+**Last Updated**: 2026-04-10
 **Version**: 1.0.0

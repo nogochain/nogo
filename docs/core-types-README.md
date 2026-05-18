@@ -1,8 +1,8 @@
 # NogoChain Core Data Structures
 
 **File Path**: `blockchain/core/types.go`  
-**Last Updated**: 2026-05-15  
-**Version**: 1.2.0
+**Last Updated**: 2026-04-15  
+**Version**: 1.1.0
 
 ---
 
@@ -175,12 +175,10 @@ type BlockHeader struct {
     Difficulty     uint32 `json:"difficulty"`
     Nonce          uint64 `json:"nonce"`
     MerkleRoot     []byte `json:"merkleRoot,omitempty"`
-    Height         uint64 `json:"height,omitempty"`
-    MinerAddress   string `json:"minerAddress,omitempty"`
 }
 ```
 
-**Note**: BlockHeader includes Height and MinerAddress fields for convenience. These are also stored at the Block level. The Header also carries a StateRoot field used in nogopow consensus context.
+**Note**: BlockHeader does not store Height, Coinbase, or ChainID directly. These are stored in the Block struct for efficiency.
 
 ### 3.2 Field Descriptions
 
@@ -529,18 +527,14 @@ func ValidateAddress(addr string) error {
 
 ### 8.1 Structure Definition
 
-**Code**: [`monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go)
+**Code**: [`types.go:L741-L750`](file:///d:/NogoChain/nogo/blockchain/core/types.go#L741-L750)
 
 ```go
 type MonetaryPolicy struct {
-    InitialBlockReward     uint64 `json:"initialBlockReward"`     // 800,000,000 wei (8 NOGO)
-    MinimumBlockReward     uint64 `json:"minimumBlockReward"`     // 10,000,000 wei (0.1 NOGO)
-    AnnualReductionPercent uint8  `json:"annualReductionPercent"` // 10%
-    MinerFeeShare          uint8  `json:"minerFeeShare"`          // 0% (fees burned)
-    MinerRewardShare       uint8  `json:"minerRewardShare"`       // 99%
-    CommunityFundShare     uint8  `json:"communityFundShare"`     // 0%
-    GenesisShare           uint8  `json:"genesisShare"`           // 1%
-    IntegrityPoolShare     uint8  `json:"integrityPoolShare"`     // 0%
+    InitialBlockReward     uint64 `json:"initialBlockReward"`     // Initial block reward
+    MinimumBlockReward     uint64 `json:"minimumBlockReward"`     // Minimum block reward
+    AnnualReductionPercent uint8  `json:"annualReductionPercent"` // Annual reduction percentage
+    MinerFeeShare          uint8  `json:"minerFeeShare"`          // Miner fee share percentage
     UncleRewardEnabled     bool   `json:"uncleRewardEnabled"`     // ⚠️ 预留接口：Enable uncle reward (未启用)
     MaxUncleDepth          uint8  `json:"maxUncleDepth"`          // ⚠️ 预留接口：Maximum uncle depth (未使用)
 }
@@ -548,9 +542,9 @@ type MonetaryPolicy struct {
 
 > **⚠️ 重要说明**: 
 > - `UncleRewardEnabled` 和 `MaxUncleDepth` 字段为**预留接口**（以太坊兼容性）
-> - 矿工获得 **99%** 区块奖励，1% 分配给创世地址
-> - CommunityFundShare = 0%, IntegrityPoolShare = 0%
-> - MinerFeeShare = 0%（100% 手续费销毁，通缩机制）
+> - **当前生产环境未启用**，因为核心数据结构 [`core.Block`](../blockchain/core/types.go#L203-L213) **不包含 Uncles 字段**
+> - 这些字段仅存在于配置定义中，实际运行时不会被使用
+> - 参见 [Economic-Model.md](./Economic-Model.md) 第 2.5 节详细说明
 
 ### 8.2 Block Reward Calculation
 
@@ -629,70 +623,9 @@ func (p MonetaryPolicy) MinerFeeAmount(totalFees uint64) uint64 {
 
 ---
 
-## 9. Chain Structure (Performance Optimizations)
+## 9. Examples
 
-### 9.1 Key Constants
-
-**Code**: [`chain.go:L42-L59`](file:///d:/NogoChain/nogo/blockchain/core/chain.go#L42-L59)
-
-```go
-const (
-    MaxOrphanPoolSize     = 2048
-    MaxOrphanPoolAge      = 60 * time.Minute
-    MaxBlocksByHashSize   = 100000
-    MaxForkBlocksPerHeight = 16
-    MaxWorkCacheSize      = 100000
-    MaxForkBlocksTotal    = 50000
-)
-```
-
-### 9.2 Chain Fields
-
-```go
-type Chain struct {
-    mu sync.RWMutex
-
-    // Chain metadata
-    chainID          uint64
-    minerAddress     string
-    genesisAddress   string
-    genesisTimestamp int64
-    consensus        ConsensusParams
-    monetaryPolicy   MonetaryPolicy
-    rulesHash        [32]byte
-
-    // Chain state
-    blocks        []*Block           // Canonical chain
-    blocksByHash  map[string]*Block  // O(1) block lookup
-    state         map[string]Account
-    bestTipHash   string
-    canonicalWork *big.Int
-
-    // Fork management
-    forkBlocks map[uint64][]*Block   // Per-height fork blocks
-    workCache  map[string]*big.Int   // Cumulative work cache
-
-    // Orphan pool
-    orphanPool     map[string]*Block
-    orphanByParent map[string][]string
-}
-```
-
-### 9.3 Performance Improvements
-
-| Feature | Complexity | Details |
-|---------|-----------|---------|
-| BlockByHash | O(1) | Map lookup via `blocksByHash` instead of O(N) linear scan |
-| Fork lookup | O(1) | Fork blocks indexed in `blocksByHash` for parent traversal |
-| Work calculation | O(1) amortized | `workCache` with iterative computation, max 100000 entries |
-| Chain extension | Incremental | Only indexes new blocks instead of full reindex |
-| Memory bounds | Bounded | `MaxBlocksByHashSize=100000`, `MaxForkBlocksTotal=50000`, height-sorted eviction |
-
----
-
-## 10. Examples
-
-### 10.1 Creating a Transaction
+### 9.1 Creating a Transaction
 
 ```go
 // Create transfer transaction
@@ -718,7 +651,7 @@ tx.Signature = signature
 err := tx.Verify()
 ```
 
-### 10.2 Account Operations
+### 9.2 Account Operations
 
 ```go
 account := &Account{
@@ -745,7 +678,7 @@ if err != nil {
 }
 ```
 
-### 10.3 Address Generation
+### 9.3 Address Generation
 
 ```go
 // Generate key pair
@@ -764,7 +697,7 @@ if err != nil {
 
 ---
 
-## 11. Security Considerations
+## 10. Security Considerations
 
 ### 10.1 Concurrency Safety
 
@@ -787,7 +720,7 @@ All balance and nonce operations have overflow checks:
 
 ---
 
-## 12. Related Documentation
+## 11. Related Documentation
 
 - [NogoPow Consensus Engine](https://github.com/nogochain/nogo/tree/main/nogo/docs/nogopow-README.md)
 - [Validator Documentation](https://github.com/nogochain/nogo/tree/main/nogo/docs/validator-README.md)
@@ -797,4 +730,4 @@ All balance and nonce operations have overflow checks:
 ---
 
 *This document is based on actual code implementation*  
-*Last updated: 2026-05-15*
+*Last updated: 2026-04-15*

@@ -513,6 +513,9 @@ func (n *Node) startComponents() error {
 
 	if n.config.SyncEnable {
 		n.syncLoop.SetMiner(n.miner)
+		if n.miner != nil {
+			n.miner.SetSyncLoop(n.syncLoop)
+		}
 		if err := n.syncLoop.Start(n.ctx); err != nil {
 			return fmt.Errorf("start sync loop: %w", err)
 		}

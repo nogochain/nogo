@@ -1,8 +1,8 @@
 # NogoPow Consensus Engine
 
-**File Path**: `blockchain/nogopow/`  
-**Last Updated**: 2026-05-15  
-**Version**: 1.2.0
+**File Path**: `blockchain/nogopow/nogopow.go`  
+**Last Updated**: 2026-04-15  
+**Version**: 1.1.0
 
 ---
 
@@ -52,6 +52,9 @@ type NogopowEngine struct {
     hashrate     uint64
     cache        *Cache
     diffAdjuster *DifficultyAdjuster
+    matA         *denseMatrix
+    matB         *denseMatrix
+    matRes       *denseMatrix
 }
 ```
 
@@ -65,38 +68,42 @@ type NogopowEngine struct {
 | wg | sync.WaitGroup | Goroutine wait group |
 | lock | sync.RWMutex | Concurrency control |
 | running | bool | Engine running status |
-| hashrate | uint64 | Current hashrate (atomic) |
-| cache | *Cache | Data cache with LRU + singleflight |
-| diffAdjuster | *DifficultyAdjuster | PI controller difficulty adjuster |
-
-> **Note**: Matrices are allocated per `computePoW` call — fresh allocation each time, not stored on the engine — eliminating cross-node state differences.
+| hashrate | uint64 | Current hashrate |
+| cache | *Cache | Data cache |
+| diffAdjuster | *DifficultyAdjuster | Difficulty adjuster |
+| matA | *denseMatrix | Matrix A (reusable) |
+| matB | *denseMatrix | Matrix B (reusable) |
+| matRes | *denseMatrix | Result matrix (reusable) |
 
 ### 2.2 Engine Creation
 
-**Code**: [`nogopow.go:L48-L65`](file:///d:/NogoChain/nogo/blockchain/nogopow/nogopow.go#L48-L65)
+**Code**: [`nogopow.go:L48-L71`](file:///d:/NogoChain/nogo/blockchain/nogopow/nogopow.go#L48-L71)
 
 ```go
 func New(config *Config) *NogopowEngine {
     if config == nil {
         config = DefaultConfig()
     }
-
+    
     engine := &NogopowEngine{
         config:       config,
         sealCh:       make(chan *Block),
         exitCh:       make(chan struct{}),
+        running:      false,
+        hashrate:     0,
         cache:        NewCache(config),
-        diffAdjuster: NewDifficultyAdjuster(config.ConsensusParams),
+        diffAdjuster: NewDifficultyAdjuster(config.Difficulty),
     }
-
+    
+    if config.ReuseObjects {
+        engine.matA = GetMatrix(matSize, matSize)
+        engine.matB = GetMatrix(matSize, matSize)
+        engine.matRes = GetMatrix(matSize, matSize)
+    }
+    
     return engine
 }
 ```
-
-**Engine Modes:**
-- `ModeNormal (0)`: Full PoW verification, real mining
-- `ModeFake (1)`: Instant sealing for testing (skips PoW)
-- `ModeTest (2)`: Test mode
 
 **Initialization Steps**:
 1. Use default config if not provided
@@ -224,26 +231,29 @@ func (t *NogopowEngine) mineBlock(header *Header, stop <-chan struct{}, start ui
 
 ### 3.4 Solution Verification
 
-**Code**: [`nogopow.go:L455-L461`](file:///d:/NogoChain/nogo/blockchain/nogopow/nogopow.go#L455-L461)
+**Code**: [`nogopow.go:L313-L323`](file:///d:/NogoChain/nogo/blockchain/nogopow/nogopow.go#L313-L323)
 
 ```go
-func (t *NogopowEngine) checkPow(hash Hash, difficulty *big.Int) bool {
-    target := difficultyToTarget(difficulty)
+func (t *NogopowEngine) checkSolution(header *Header) bool {
+    // Compute PoW hash
+    hash := t.computePoW(header.Hash(), header.ParentHash)
+    
+    // Convert to big.Int
     hashInt := new(big.Int).SetBytes(hash.Bytes())
-    return hashInt.Cmp(target) <= 0
-}
-
-func difficultyToTarget(difficulty *big.Int) *big.Int {
-    maxTarget := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
-    return new(big.Int).Div(maxTarget, difficulty)
+    
+    // Calculate target from difficulty
+    target := new(big.Int).Div(common.Big256, new(big.Int).Exp(common.Big2, big.NewInt(int64(header.Difficulty)), nil))
+    
+    // Check if hash < target
+    return hashInt.Cmp(target) < 0
 }
 ```
 
 **Verification Logic**:
 - Compute PoW hash for current nonce
 - Convert hash to big integer
-- Calculate target: `target = (2^256 - 1) / difficulty`
-- Check if `hash <= target`
+- Calculate target: `2^256 / 2^difficulty`
+- Check if `hash < target`
 
 ### 3.5 Seal Interface
 
@@ -278,73 +288,79 @@ func (t *NogopowEngine) Seal(chain ChainHeaderReader, block *Block, results chan
 
 **PI Controller Mathematical Foundation**:
 
-NogoChain uses a Proportional-Integral (PI) controller with integral decay for precise block time stabilization.
+NogoChain uses a Proportional-Integral (PI) controller for precise block time stabilization.
 
 **Control Theory**:
-- **Proportional term (Kp=0.15)**: Responds to current error (deviation from target)
-- **Integral term (Ki=0.03)**: Accumulates past errors to eliminate steady-state offset
-- **Integral decay (0.97)**: 3% memory loss per block prevents stale-error accumulation
+- **Proportional term (Kp)**: Responds to current error (deviation from target)
+- **Integral term (Ki)**: Accumulates past errors to eliminate steady-state offset
 - **Formula**: `output = Kp × error + Ki × integral`
-- **Anti-windup**: Integral clamped to [-3.0, 3.0] (reduced from previous [-10, 10])
+- **Anti-windup**: Integral clamped to [-10, 10] to prevent overshoot
 
 **Calculation Flow**:
 
 ```go
-func (da *DifficultyAdjuster) calculatePIDifficultyLocked(actualTime, targetTime int64, parentDiff *big.Int) *big.Int {
-    // Step 1: Compute timeRatio, clamped [0.25, 4.0]
-    timeRatio = clamp(actualTime / targetTime, 0.25, 4.0)
-
-    // Step 2: Raw error = timeRatio - 1
-    //   blocks too slow: error > 0 (want lower difficulty)
-    //   blocks too fast: error < 0 (want higher difficulty)
-    rawError = timeRatio - 1
-
-    // Step 3: Single-block error clamp [-0.75, 3.0]
-    clamp(rawError, -0.75, 3.0)
-
-    // Step 4: Integral with decay (3% loss per block)
-    integral *= integralDecay  // 0.97
-
-    // Step 5: Add current error to integral
-    integral += rawError
-
-    // Step 6: Anti-windup clamp [-3.0, 3.0]
-    clamp(integral, -3.0, 3.0)
-
-    // Step 7: PI output
-    proportionalTerm = Kp * rawError
-    integralTerm = Ki * integral
+func (da *DifficultyAdjuster) calculatePIDifficulty(timeDiff, targetTime int64, parentDiff *big.Int) *big.Int {
+    // Calculate normalized error: error = (targetTime - actualTime) / targetTime
+    // Positive error: blocks too slow (need to decrease difficulty)
+    // Negative error: blocks too fast (need to increase difficulty)
+    error = (targetTime - timeDiff) / targetTime
+    
+    // Update integral accumulator with anti-windup protection
+    da.integralAccumulator += error
+    // Clamp integral to [-10.0, 10.0]
+    
+    // Proportional term: Kp × error
+    // Kp = MaxDifficultyChangePercent / 100 (default 0.2)
+    proportionalTerm = error × Kp
+    
+    // Integral term: Ki × integral
+    // Ki = 0.1 (fixed for stable convergence)
+    integralTerm = da.integralAccumulator × Ki
+    
+    // Combined PI output
     piOutput = proportionalTerm + integralTerm
-    multiplier = 1 - piOutput
-
-    // Step 8: Conditional integral accumulation
-    // If multiplier would be clamped, undo integral accumulation (anti-windup)
-    if multiplier > 2.0 || multiplier < 0.5 {
-        integral -= rawError  // rollback
-    }
-    clamp(multiplier, 0.5, 2.0)
-
-    newDifficulty = parentDiff * multiplier
+    
+    // Calculate new difficulty
+    multiplier = 1 + piOutput
+    newDifficulty = parentDiff × multiplier
+    
+    return newDifficulty
 }
 ```
 
-**PI Controller Parameters**:
-- **Kp (Proportional Gain)**: 0.15 (reduced from 0.5 — was too aggressive)
-- **Ki (Integral Gain)**: 0.03 (reduced from 0.1 — was dominating output)
-- **integralDecay**: 0.97 (3% per-block memory loss, ~33 blocks to fade)
+**PI Controller Formula**:
+```
+error = (targetTime - actualTime) / targetTime
+integral = integral + error (clamped to [-10, 10])
+adjustment = Kp × error + Ki × integral
+newDifficulty = parentDifficulty × (1 + adjustment)
+```
+
+**Parameters**:
+- **Kp (Proportional Gain)**: MaxDifficultyChangePercent / 100 (default 1.0 when MaxDifficultyChangePercent=100)
+- **Ki (Integral Gain)**: 0.1 (fixed for stable convergence)
 - **TargetBlockTime**: 17 seconds
-- **Integral Anti-windup**: [-3.0, 3.0] (was [-10, 10])
-- **Window size**: 10 blocks sliding window
-- **Max time ratio**: 4.0, Min time ratio: 0.25
-- **Single-block error clamp**: [-0.75, 3.0]
+- **Integral Anti-windup**: [-10.0, 10.0] (prevents saturation)
 
 **Economic Properties**:
 1. **Proportional term**: Immediate response to block time deviation
 2. **Integral term**: Eliminates long-term bias, ensures target convergence
-3. **Integral decay**: Prevents "memory of forever ago" — stale extremes fade
-4. **Anti-windup**: Prevents integral saturation during extreme conditions
-5. **Conditional integration**: Suppresses integral accumulation when output clamped
-6. **Sliding window**: Smooths short-term fluctuations for stability
+3. **Anti-windup**: Prevents integral saturation during extreme conditions
+4. **Minimum difficulty floor**: Ensures network liveness
+
+**Example Scenarios**:
+- **Blocks too slow** (30s vs 15s target): 
+  - error = (15-30)/15 = -1.0 
+  - adjustment = 0.2 × (-1.0) + 0.1 × integral 
+  - difficulty decreases
+- **Blocks too fast** (5s vs 15s target): 
+  - error = (15-5)/15 = 0.67 
+  - adjustment = 0.2 × 0.67 + 0.1 × integral 
+  - difficulty increases
+- **Blocks on target** (15s): 
+  - error = 0 
+  - adjustment = 0 (if integral = 0) 
+  - no change
 
 ### 4.2 Boundary Enforcement
 
@@ -581,59 +597,50 @@ func hashMatrix(mat *denseMatrix) Hash {
 
 ### 7.1 Config Structure
 
-**Code**: [`config.go:L33-L41`](file:///d:/NogoChain/nogo/blockchain/nogopow/config.go#L33-L41)
+**Code**: [`config.go:L43-L70`](file:///d:/NogoChain/nogo/blockchain/nogopow/config.go#L43-L70)
 
 ```go
 type Config struct {
-    PowMode         Mode
-    CacheDir        string
-    Log             Logger
-    ConsensusParams *config.ConsensusParams
-    UseSIMD         bool
-    UseBitShift     bool
-    ReuseObjects    bool
+    PowMode        Mode
+    ReuseObjects   bool
+    Difficulty     DifficultyConfig
+    CacheSize      int
+    Logger         Logger
 }
 ```
 
 **Fields**:
-- **PowMode**: Normal(0), Fake(1), or Test(2) mode
-- **CacheDir**: Directory for cache persistence
-- **Log**: Logger interface
-- **ConsensusParams**: Consensus parameters (chain ID, difficulty, block time, etc.)
-- **UseSIMD**: Enable SIMD optimization (not yet used)
-- **UseBitShift**: Enable bit shift optimization (not yet used)
-- **ReuseObjects**: Enable object reuse for reduced GC pressure
+- **PowMode**: Normal or fake mode (for testing)
+- **ReuseObjects**: Enable object pool optimization
+- **Difficulty**: Difficulty adjustment parameters
+- **CacheSize**: LRU cache size
+- **Logger**: Logging interface
 
 ### 7.2 Default Configuration
 
-**Code**: [`config.go:L43-L69`](file:///d:/NogoChain/nogo/blockchain/nogopow/config.go#L43-L69)
+**Code**: [`config.go:L89-L110`](file:///d:/NogoChain/nogo/blockchain/nogopow/config.go#L89-L110)
 
 ```go
 func DefaultConfig() *Config {
     return &Config{
-        PowMode:  ModeNormal,
-        CacheDir: "",
-        Log:      &defaultLogger{},
-        ConsensusParams: &config.ConsensusParams{
-            ChainID:                      1,
-            DifficultyEnable:             true,
-            BlockTimeTargetSeconds:       17,
-            DifficultyAdjustmentInterval: 1,
-            MaxBlockTimeDriftSeconds:     900,
-            MinDifficulty:                1,
-            MaxDifficulty:                4294967295,
-            MinDifficultyBits:            1,
-            MaxDifficultyBits:            255,
-            MaxDifficultyChangePercent:   100,
-            MedianTimePastWindow:         11,
-            GenesisDifficultyBits:        100,
-        },
-        UseSIMD:      false,
-        UseBitShift:  false,
+        PowMode:      ModeNormal,
         ReuseObjects: true,
+        Difficulty: DifficultyConfig{
+            MinimumDifficulty:  big.NewInt(100),
+            TargetBlockTime:    17 * time.Second,
+            AdjustmentSensitivity: 1.0,
+            Kp: 1.0,
+            Ki: 0.1,
+        },
+        CacheSize: 1000,
+        Logger:    &defaultLogger{},
     }
 }
-```
+
+**Recommended Settings**:
+- **CacheSize**: 1000 entries (adjust based on memory)
+- **ReuseObjects**: true (for production)
+- **TargetBlockTime**: 17 seconds
 
 ---
 
@@ -796,4 +803,4 @@ hitRate := cache.HitRate()
 ---
 
 *This document is based on actual code implementation*  
-*Last updated: 2026-05-15*
+*Last updated: 2026-04-15*

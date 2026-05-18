@@ -2325,6 +2325,19 @@ func (sw *Switch) forwardGossipMessage(fromPeerID string, seedItems []PeerSeedAd
 	}
 }
 
+// tryHandlePendingResponse checks if an incoming message is a response to a
+// pending sendAndWait request. Uses msgType+peerID fuzzy match with a critical
+// safety guard: only routes when there is exactly ONE pending request matching
+// this (msgType, peerID) tuple. If multiple pending requests match, we cannot
+// safely determine the target consumer, so we return false and let the message
+// fall through to reactor.Receive() for normal dispatch.
+//
+// This is safe because Fix 2 removes the dual SyncWithPeer goroutine, so
+// sendAndWait is rarely used. The blockKeeper path uses raw Send + syncBlockCh
+// and is not affected by this function.
+//
+// Reference: core-geth uses per-request requestID headers for precise matching.
+// We adopt the simpler "single match only" guard as a minimal defensive measure.
 func (sw *Switch) tryHandlePendingResponse(peerID string, msg []byte) bool {
 	if len(msg) == 0 {
 		return false
@@ -2334,27 +2347,47 @@ func (sw *Switch) tryHandlePendingResponse(peerID string, msg []byte) bool {
 	sw.syncPendingReqMtx.Lock()
 	defer sw.syncPendingReqMtx.Unlock()
 
+	var matchedReqID string
+	matchCount := 0
+
 	for reqID, req := range sw.syncPendingReqs {
-		if req.msgType == msgType && time.Now().Before(req.deadline) {
-			lastSep := strings.LastIndex(reqID, "|")
-			if lastSep > 0 {
-				secondLastSep := strings.LastIndex(reqID[:lastSep], "|")
-				if secondLastSep > 0 {
-					reqPeerID := reqID[:secondLastSep]
-					if reqPeerID == peerID {
-						msgCopy := make([]byte, len(msg))
-						copy(msgCopy, msg)
-						select {
-						case req.respCh <- msgCopy:
-						default:
-						}
-						delete(sw.syncPendingReqs, reqID)
-						return true
-					}
-				}
+		if req.msgType != msgType || !time.Now().Before(req.deadline) {
+			continue
+		}
+		lastSep := strings.LastIndex(reqID, "|")
+		if lastSep <= 0 {
+			continue
+		}
+		secondLastSep := strings.LastIndex(reqID[:lastSep], "|")
+		if secondLastSep <= 0 {
+			continue
+		}
+		reqPeerID := reqID[:secondLastSep]
+		if reqPeerID == peerID {
+			matchedReqID = reqID
+			matchCount++
+			if matchCount > 1 {
+				break
 			}
 		}
 	}
+
+	// Only route when exactly ONE pending request matches.
+	// Multiple matches = ambiguous target = unsafe to route.
+	if matchCount == 1 {
+		req := sw.syncPendingReqs[matchedReqID]
+		msgCopy := make([]byte, len(msg))
+		copy(msgCopy, msg)
+		select {
+		case req.respCh <- msgCopy:
+		default:
+		}
+		delete(sw.syncPendingReqs, matchedReqID)
+		return true
+	}
+
+	// matchCount == 0: no matching pending request, normal dispatch
+	// matchCount > 1: ambiguous routing, fall through to reactor
 	return false
 }
 

@@ -1,7 +1,7 @@
 # NogoChain API Rate Limiting Guide
 
-> Version: 1.3.0  
-> Last Updated: 2026-05-15
+> Version: 1.2.0  
+> Last Updated: 2026-04-07
 
 ## Overview
 
@@ -71,14 +71,13 @@ Initial state: 20 tokens in bucket
 
 ### Applying for API Key
 
-API keys provide a 5x multiplier on base rate limits:
+Rate limits can be increased by applying for an API Key:
 
-| Mode | Multiplier | RPS | Burst | Use Case |
-|------|------------|-----|-------|----------|
-| **Standard** | 1x | 10 RPS | 20 | Default for all nodes |
-| **API Key** | 5x | 50 RPS | 100 | Applications with API key |
-| **Public Node** | 10x | 100 RPS | 200 | Public-facing nodes |
-| **Exchange** | 100x | 1000 RPS | 5000 | High-throughput exchange nodes |
+| Tier | Multiplier | Limits | Use Case |
+|------|------------|--------|----------|
+| **Basic** | 5x | 50 requests/sec, Burst 100 | Small applications |
+| **Premium** | 10x | 100 requests/sec, Burst 200 | Medium applications |
+| **Enterprise** | 50x-100x | 500-1000 requests/sec | Large exchanges/pools |
 
 ### Application Process
 
@@ -96,20 +95,48 @@ curl http://localhost:8080/chain/info \
   -H "X-API-Key: your_api_key_here"
 ```
 
+Or in query parameters:
+
+```bash
+curl "http://localhost:8080/chain/info?api_key=your_api_key_here"
+```
+
+### API Key Management
+
+**Check Usage**:
+```bash
+curl http://localhost:8080/api/key/usage \
+  -H "X-API-Key: your_api_key_here"
+```
+
+Response:
+```json
+{
+  "apiKey": "your_api_key_here",
+  "tier": "Premium",
+  "multiplier": 10,
+  "usage": {
+    "requestsToday": 50000,
+    "requestsThisMonth": 1500000,
+    "limit": 10000000
+  },
+  "expiresAt": "2027-01-01T00:00:00Z"
+}
+```
+
 ---
 
 ## Endpoint-Specific Limits
 
-Rate limiting is applied per-endpoint using an enhanced rate limiter with token buckets:
+Certain endpoints have independent rate limits:
 
-| Endpoint | Description |
-|----------|-------------|
-| All endpoints | Default 10 RPS, Burst 20 |
-| With API Key | 5x multiplier (50 RPS, Burst 100) |
-| Exchange Mode | 1000 RPS, Burst 5000 |
-| Public Node Mode | 100 RPS, Burst 200 |
-
-Bucket TTL: 10 minutes. Cleanup interval: 1 minute. Rate limits are calculated per IP address.
+| Endpoint | Limit | Description |
+|----------|-------|-------------|
+| `/tx` | 50 requests/sec | Transaction submission (high-frequency operation) |
+| `/tx/batch` | 10 requests/sec | Batch transaction submission |
+| `/ws` | 100 connections/IP | WebSocket connections |
+| `/mine/once` | 1 request/sec | Mining operation (Admin required) |
+| `/audit/chain` | 1 request/minute | Chain audit (high load) |
 
 ---
 
@@ -483,16 +510,20 @@ try {
 
 ### 5. Monitor Usage
 
-Regularly check your rate limit headers in responses:
+Regularly check API usage:
 
 ```javascript
-async function checkRateLimit(response) {
-  const limit = response.headers.get('X-RateLimit-Limit');
-  const remaining = response.headers.get('X-RateLimit-Remaining');
-  const usagePercent = ((limit - remaining) / limit) * 100;
+async function checkUsage() {
+  const response = await fetch('/api/key/usage', {
+    headers: { 'X-API-Key': API_KEY }
+  });
+  const usage = await response.json();
+  
+  const usagePercent = (usage.usage.requestsToday / usage.limit) * 100;
+  console.log(`API Usage: ${usagePercent.toFixed(2)}%`);
   
   if (usagePercent > 80) {
-    console.warn('Warning: Rate limit usage exceeds 80%');
+    console.warn('Warning: API usage exceeds 80%');
   }
 }
 ```

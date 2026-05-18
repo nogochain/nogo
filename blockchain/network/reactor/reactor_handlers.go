@@ -238,6 +238,8 @@ func (h *SyncReactorHandler) OnGetBlocks(peerID string, heights []uint64) error 
 		return fmt.Errorf("sync handler: OnGetBlocks heights must not be empty")
 	}
 
+	const maxBlocksPerResponse = 100
+
 	go func() {
 		blocks := make([]*core.Block, 0, len(heights))
 		missing := make([]string, 0)
@@ -263,16 +265,28 @@ func (h *SyncReactorHandler) OnGetBlocks(peerID string, heights []uint64) error 
 			return
 		}
 
-		blocksJSON := marshalBlocksToJSONRaw(blocks)
-		msg, err := BuildBlocksMsg(blocksJSON)
-		if err != nil {
-			log.Printf("[SyncHandler] build blocks msg for peer %s: %v", peerID, err)
-			return
-		}
+		sentCount := 0
+		for i := 0; i < len(blocks); i += maxBlocksPerResponse {
+			end := i + maxBlocksPerResponse
+			if end > len(blocks) {
+				end = len(blocks)
+			}
+			batch := blocks[i:end]
 
-		if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, msg) {
-			log.Printf("[SyncHandler] failed to send %d blocks to peer %s", len(blocks), peerID)
-			return
+			blocksJSON := marshalBlocksToJSONRaw(batch)
+			msg, err := BuildBlocksMsg(blocksJSON)
+			if err != nil {
+				log.Printf("[SyncHandler] build blocks msg batch %d-%d for peer %s: %v",
+					i, end, peerID, err)
+				return
+			}
+
+			if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, msg) {
+				log.Printf("[SyncHandler] failed to send batch %d-%d (%d blocks) to peer %s",
+					i, end, len(batch), peerID)
+				return
+			}
+			sentCount += len(batch)
 		}
 
 		if len(missing) > 0 {
@@ -287,7 +301,8 @@ func (h *SyncReactorHandler) OnGetBlocks(peerID string, heights []uint64) error 
 		}
 
 		if handlersLogLimiter.allow("served_blocks_" + peerID) {
-			log.Printf("[SyncHandler] Served %d blocks (+%d missing) to peer %s [async]", len(blocks), len(missing), peerID[:min(12, len(peerID))])
+			log.Printf("[SyncHandler] Served %d blocks in %d batches (+%d missing) to peer %s [async]",
+				sentCount, (len(blocks)+maxBlocksPerResponse-1)/maxBlocksPerResponse, len(missing), peerID[:min(12, len(peerID))])
 		}
 	}()
 

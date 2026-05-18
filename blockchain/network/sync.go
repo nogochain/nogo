@@ -74,7 +74,24 @@ const (
 	// of connected peers responded to chain info queries.
 	// Prevents IsSynced() returning true when high-height peers are slow/unresponsive.
 	maxSyncProgressWithPartialPeers = 0.99
+
+	// syncStatusChBufferSize is the buffer size for the sync→miner event channel.
+	// Covers ~80 seconds of 5s-interval events before the miner must start consuming.
+	syncStatusChBufferSize = 16
 )
+
+// SyncStatusEvent carries sync subsystem state updates to the miner for
+// two-layer mining permission decisions. Published every 5 seconds by
+// updateSyncProgressFromPeers with non-blocking send semantics.
+type SyncStatusEvent struct {
+	ForkDetected      bool
+	HeavierPeerWork   *big.Int
+	HeavierPeerHeight uint64
+	HeavierPeerID     string
+	Timestamp         time.Time
+	SyncCompleted     bool
+	NoPeersResponded  bool
+}
 
 // =============================================================================
 // PEER STATE MANAGEMENT STRUCTURES
@@ -134,6 +151,8 @@ type SyncLoop struct {
 	syncRoundInProgress bool       // CRITICAL: Prevent concurrent SyncWithPeer execution
 	reorgMu             sync.Mutex // CRITICAL: Prevent concurrent fork reorg operations (P0)
 	lastUpdateTime      time.Time
+
+	syncStatusCh chan SyncStatusEvent // sync→miner event channel for two-layer mining decision
 }
 
 // NewSyncLoop creates a new sync loop instance with advanced peer scoring and retry
@@ -164,18 +183,19 @@ func NewSyncLoop(pm PeerAPI, bc BlockchainInterface, miner Miner,
 	downloader := NewBlockDownloader(pm, bc, validator, metrics, syncConfig)
 
 	sm := &SyncLoop{
-		pm:             pm,
-		bc:             bc,
-		miner:          miner,
-		metrics:        metrics,
-		orphanPool:     orphanPool,
-		validator:      validator,
-		scorer:         scorer,
-		retryExec:      retryExec,
-		downloader:     downloader,
-		syncConfig:     syncConfig,
-		securityMgr:    secMgr,
-		fastSyncEngine: NewFastSyncEngine(bc, syncConfig.BatchSize),
+		pm:              pm,
+		bc:              bc,
+		miner:           miner,
+		metrics:         metrics,
+		orphanPool:      orphanPool,
+		validator:       validator,
+		scorer:          scorer,
+		retryExec:       retryExec,
+		downloader:      downloader,
+		syncConfig:      syncConfig,
+		securityMgr:     secMgr,
+		fastSyncEngine:  NewFastSyncEngine(bc, syncConfig.BatchSize),
+		syncStatusCh:    make(chan SyncStatusEvent, syncStatusChBufferSize),
 	}
 
 	// NEW: Create stateless sync components
@@ -244,6 +264,13 @@ func (s *SyncLoop) SetMiner(miner Miner) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.miner = miner
+}
+
+// SyncStatusChannel returns a receive-only channel delivering sync status
+// events to the miner. Non-blocking send semantics ensure the sync loop
+// is never blocked by a slow or absent miner consumer.
+func (s *SyncLoop) SyncStatusChannel() <-chan SyncStatusEvent {
+	return s.syncStatusCh
 }
 
 // SetProgressStore sets the sync progress store for persistence
@@ -443,6 +470,10 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	}
 
 	if responsivePeers == 0 {
+		select {
+		case s.syncStatusCh <- SyncStatusEvent{NoPeersResponded: true, Timestamp: time.Now()}:
+		default:
+		}
 		return
 	}
 
@@ -486,12 +517,33 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	s.lastUpdateTime = time.Now()
 	s.mu.Unlock()
 
-	// Trigger fork reorg if the work-optimal peer has more cumulative work.
-	// This converges the network to the single heaviest (canonical) chain.
+	// Trigger fork reorg only when the work-optimal peer has more cumulative work
+	// AND the height gap is small enough to indicate a real fork (not a normal sync gap).
+	// A peer that is far ahead in height simply has a longer chain — blockKeeper handles
+	// that via regularBlockSync. Fork reorg is reserved for peers at comparable height
+	// whose chain has diverged (same or nearby height, but more work = different chain).
+	const maxForkHeightDiff = 12
 	if bestByWork != nil && localWork.Cmp(bestByWork) < 0 && bestByWorkPeerID != "" {
-		log.Printf("[Sync] Peer %s has more cumulative work (%s > %s), triggering fork reorg",
-			bestByWorkPeerID, bestByWork.String(), localWork.String())
-		s.TriggerForkReorgForPeer(bestByWorkPeerID)
+		if maxPeerHeight <= localHeight+maxForkHeightDiff {
+			log.Printf("[Sync] Peer %s has more cumulative work (%s > %s) at comparable height (local=%d, peer=%d, diff=%d), triggering fork reorg",
+				bestByWorkPeerID, bestByWork.String(), localWork.String(),
+				localHeight, maxPeerHeight, maxPeerHeight-localHeight)
+			s.TriggerForkReorgForPeer(bestByWorkPeerID)
+		}
+	}
+
+	event := SyncStatusEvent{Timestamp: time.Now()}
+	if bestByWork != nil && localWork.Cmp(bestByWork) < 0 {
+		event.ForkDetected = true
+		event.HeavierPeerWork = new(big.Int).Set(bestByWork)
+		event.HeavierPeerHeight = maxPeerHeight
+		event.HeavierPeerID = bestByWorkPeerID
+	} else {
+		event.SyncCompleted = true
+	}
+	select {
+	case s.syncStatusCh <- event:
+	default:
 	}
 }
 
@@ -873,19 +925,23 @@ func (s *SyncLoop) TriggerForkReorgForPeer(peerID string) {
 			peerID, localWork.String(), peerWork.String(), localHeight, chainInfo.Height)
 
 		if forkResolver != nil && bk != nil {
-			rollbackTarget := chainInfo.Height
-			if rollbackTarget > 0 {
-				rollbackTarget--
-			}
-			if localHeight > 0 && rollbackTarget >= localHeight {
-				rollbackTarget = localHeight - 1
-			}
-			if rbErr := forkResolver.RollbackToHeight(rollbackTarget); rbErr != nil {
-				log.Printf("[Sync] TriggerForkReorgForPeer: rollback to height %d failed: %v, falling back to resync",
-					rollbackTarget, rbErr)
+			if localHeight > 0 {
+				rollbackTarget := chainInfo.Height
+				if rollbackTarget > 0 {
+					rollbackTarget--
+				}
+				if rollbackTarget >= localHeight {
+					rollbackTarget = localHeight - 1
+				}
+				if rbErr := forkResolver.RollbackToHeight(rollbackTarget); rbErr != nil {
+					log.Printf("[Sync] TriggerForkReorgForPeer: rollback to height %d failed: %v, falling back to resync",
+						rollbackTarget, rbErr)
+				} else {
+					log.Printf("[Sync] TriggerForkReorgForPeer: rolled back to height %d, triggering re-sync",
+						rollbackTarget)
+				}
 			} else {
-				log.Printf("[Sync] TriggerForkReorgForPeer: rolled back to height %d, triggering re-sync",
-					rollbackTarget)
+				log.Printf("[Sync] TriggerForkReorgForPeer: localHeight=0 (genesis only), no rollback needed — triggering re-sync")
 			}
 			bk.TriggerImmediateReSync()
 		} else if bk != nil {
@@ -1332,51 +1388,38 @@ func (s *SyncLoop) performSyncStep() {
 
 	if s.attemptFastSync(maxPeerHeight, bestPeer) {
 		log.Printf("[Sync] Fast sync attempted")
+		s.mu.Lock()
+		s.syncRoundInProgress = false
+		s.mu.Unlock()
 		return
 	}
 
-	if bestPeer != "" {
-		log.Printf("[Sync] Starting sync with peer %s (height=%d, local=%d)", bestPeer, maxPeerHeight, currentHeight)
-		// CRITICAL: Run SyncWithPeer in goroutine to prevent blocking peer message handling
-		// This prevents deadlocks where SyncWithPeer waits for peer response while blocking
-		// the very goroutines that process peer responses
-		go func() {
-			syncResult := s.SyncWithPeer(s.ctx, bestPeer)
-			if syncResult != nil {
-				log.Printf("[Sync] SyncWithPeer failed: %v", syncResult)
-			} else {
-				log.Printf("[Sync] SyncWithPeer completed successfully")
-			}
+	// CRITICAL FIX: Removed the dual sync mechanism (go SyncWithPeer goroutine).
+	// Previously, SyncWithPeer used sendAndWait() while blockKeeper used raw Send()
+	// + syncBlockCh. Both paths competed for the same peer's response messages,
+	// and tryHandlePendingResponse's msgType+peerID fuzzy match caused responses
+	// to be routed to the wrong consumer. This resulted in blockKeeper's requireBlock
+	// permanently timing out, preventing new nodes from syncing.
+	//
+	// Fix: All block synchronization is now exclusively handled by blockKeeper.syncWorker
+	// (3s ticker), which uses a single sync path with raw Send + syncBlockCh.
+	// This matches the architecture of all three reference projects:
+	// - bytom-classic: single blockKeeper with requireBlock -> syncBlockCh
+	// - sedrad: single IBD goroutine with TrySetIBDRunning CAS
+	// - core-geth: single chainSyncer with downloader
 
-			// CRITICAL: Reset sync round flag before re-evaluating sync state
-			// This allows performSyncStep() to actually execute and properly
-			// update syncProgress state based on current peer heights.
-			// Without this reset, performSyncStep() would return early at the
-			// syncRoundInProgress check, leaving the node stuck.
-			s.mu.Lock()
-			s.syncRoundInProgress = false
-			// NOTE: Removed isSyncing=false here!
-			// Old code reset isSyncing to allow mining and new sync checks
-			// New architecture: IsSynced() only checks syncProgress, no global flag
-			// This prevents the stuck state where isSyncing was never properly reset
-			s.mu.Unlock()
-
-			// CRITICAL: After sync completes, immediately re-check sync state
-			// Don't wait for next ticker - remote may have grown during sync
-			// This prevents falling behind by 1-2 blocks
-			log.Printf("[Sync] Immediately re-evaluating sync state after completion")
-
-			// CRITICAL: Small delay to allow peer state updates to propagate
-			// Without this, we may re-check before peer info is updated
-			time.Sleep(500 * time.Millisecond)
-
-			s.performSyncStep() // Recursive call to check immediately
-		}()
-		return
+	if s.blockKeeper != nil && bestPeer != "" {
+		// Wake up blockKeeper immediately instead of waiting up to 3s for ticker
+		s.blockKeeper.TriggerImmediateReSync()
+		log.Printf("[Sync] Sync needed (%s), triggered blockKeeper immediate re-sync via peer %s",
+			syncReason, bestPeer)
 	}
 
-	// CRITICAL: No peer to sync with or no sync needed
-	// NOTE: Removed isSyncing=false here - not needed in stateless architecture
+	// Reset sync round flag since SyncWithPeer goroutine is removed.
+	// syncRoundInProgress was only meaningful for the old dual-sync architecture.
+	s.mu.Lock()
+	s.syncRoundInProgress = false
+	s.mu.Unlock()
 }
 
 func (s *SyncLoop) attemptFastSync(maxPeerHeight uint64, bestPeer string) bool {

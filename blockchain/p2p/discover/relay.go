@@ -33,9 +33,10 @@ const (
 )
 
 const (
-	relayDialTimeout  = 30 * time.Second
-	relayPingInterval = 30 * time.Second
-	relayPingTimeout  = 10 * time.Second
+	relayDialTimeout    = 30 * time.Second
+	relayPingInterval   = 30 * time.Second
+	relayPingTimeout    = 10 * time.Second
+	relayRequestTimeout = 10 * time.Second // write timeout for request-type messages
 	relayReadDeadline = 60 * time.Second
 )
 
@@ -432,7 +433,14 @@ func (rc *RelayClient) RequestPeers() error {
 		return errors.New("not connected to relay server")
 	}
 
-	return rc.sendMsg(conn, relayMsgGetPeers, nil)
+	conn.SetWriteDeadline(time.Now().Add(relayRequestTimeout))
+	err := rc.sendMsg(conn, relayMsgGetPeers, nil)
+	conn.SetWriteDeadline(time.Time{})
+	if err != nil {
+		rc.handleDisconnect()
+		return fmt.Errorf("send GetPeers: %w", err)
+	}
+	return nil
 }
 
 // RequestConnect asks the relay server to establish a relay tunnel to another peer.
