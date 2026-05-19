@@ -1796,14 +1796,12 @@ func (bk *blockKeeper) safeStartSync(genesisBlock *core.Block) {
 		bk.consecutiveSyncNoneCount = 0
 	} else {
 		localHeight := bk.chain.LatestBlock().GetHeight()
-		if localHeight > 0 {
-			bk.consecutiveSyncNoneCount++
-			if bk.consecutiveSyncNoneCount < consecutiveSyncNoneThreshold {
-				bk.syncLaggingPeers(localHeight)
-			} else if bk.consecutiveSyncNoneCount == consecutiveSyncNoneThreshold {
-				log.Printf("[BlockKeeper] %d consecutive syncTypeNone rounds — entering mining-friendly cooldown, skipping syncLaggingPeers",
-					bk.consecutiveSyncNoneCount)
-			}
+		bk.consecutiveSyncNoneCount++
+		if bk.consecutiveSyncNoneCount < consecutiveSyncNoneThreshold {
+			bk.syncLaggingPeers(localHeight)
+		} else if bk.consecutiveSyncNoneCount == consecutiveSyncNoneThreshold {
+			log.Printf("[BlockKeeper] %d consecutive syncTypeNone rounds (localH=%d) — entering mining-friendly cooldown, skipping syncLaggingPeers",
+				bk.consecutiveSyncNoneCount, localHeight)
 		}
 	}
 }

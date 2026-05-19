@@ -745,7 +745,7 @@ func (s *BoltStore) LoadBlock(hash []byte) (*core.Block, error) {
 	if len(hash) == 0 {
 		return nil, errors.New("empty block hash")
 	}
-	
+
 	var block *core.Block
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(blocksBucket))
@@ -753,7 +753,7 @@ func (s *BoltStore) LoadBlock(hash []byte) (*core.Block, error) {
 		if val == nil {
 			return errors.New("block not found")
 		}
-		
+
 		var decoded core.Block
 		if err := gob.NewDecoder(bytes.NewReader(val)).Decode(&decoded); err != nil {
 			return fmt.Errorf("decode block: %w", err)
@@ -761,7 +761,7 @@ func (s *BoltStore) LoadBlock(hash []byte) (*core.Block, error) {
 		block = &decoded
 		return nil
 	})
-	
+
 	return block, err
 }
 
@@ -1024,11 +1024,13 @@ func (s *BoltStore) Snapshot(height uint64, stateRoot []byte, state map[string]c
 
 // LoadSnapshot loads the most recent state snapshot at or before the specified height.
 // Returns the snapshot height, state root, state map, and any error.
+// CRITICAL FIX: Iterates all snapshot entries to find the LATEST (not first) match,
+// then loads account states from the matched snapshot.
 func (s *BoltStore) LoadSnapshot(height uint64) (uint64, []byte, map[string]core.Account, error) {
 	var (
 		snapshotHeight uint64
-		stateRoot     []byte
-		state         map[string]core.Account
+		stateRoot      []byte
+		state          map[string]core.Account
 	)
 
 	err := s.db.View(func(tx *bolt.Tx) error {
@@ -1037,50 +1039,47 @@ func (s *BoltStore) LoadSnapshot(height uint64) (uint64, []byte, map[string]core
 			return fmt.Errorf("load snapshot: snapshots bucket not found")
 		}
 
-		// Find the most recent snapshot at or before the specified height
+		const snapshotMetaKeyLen = 8
+
 		c := snapB.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
+		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+			if len(k) != snapshotMetaKeyLen {
+				continue
+			}
 			h := binary.BigEndian.Uint64(k)
-			if h <= height {
+			if h <= height && h > snapshotHeight {
 				snapshotHeight = h
-
-				// Decode metadata
-				var meta struct {
-					Height    uint64
-					Timestamp int64
-				}
-				if err := gob.NewDecoder(bytes.NewReader(v)).Decode(&meta); err != nil {
-					return fmt.Errorf("decode snapshot metadata: %w", err)
-				}
-
-				// Load state root
-				rootKey := append(k, []byte(":root")...)
-				stateRoot = snapB.Get(rootKey)
-				if stateRoot == nil {
-					return fmt.Errorf("load snapshot: state root not found for height %d", h)
-				}
-
-				// Load account states
-				accountBucketName := append(k, []byte(":accounts")...)
-				accountB := tx.Bucket(accountBucketName)
-				if accountB == nil {
-					state = make(map[string]core.Account)
-					return nil
-				}
-
-				state = make(map[string]core.Account)
-				return accountB.ForEach(func(k, v []byte) error {
-					var account core.Account
-					if err := gob.NewDecoder(bytes.NewReader(v)).Decode(&account); err != nil {
-						return fmt.Errorf("decode account: %w", err)
-					}
-					state[string(k)] = account
-					return nil
-				})
 			}
 		}
 
-		return fmt.Errorf("load snapshot: no snapshot found at or before height %d", height)
+		if snapshotHeight == 0 {
+			return fmt.Errorf("load snapshot: no snapshot found at or before height %d", height)
+		}
+
+		heightKey := u64be(snapshotHeight)
+
+		rootKey := append(heightKey, []byte(":root")...)
+		stateRoot = snapB.Get(rootKey)
+		if stateRoot == nil {
+			return fmt.Errorf("load snapshot: state root not found for height %d", snapshotHeight)
+		}
+
+		accountBucketName := append(heightKey, []byte(":accounts")...)
+		accountB := tx.Bucket(accountBucketName)
+		if accountB == nil {
+			state = make(map[string]core.Account)
+			return nil
+		}
+
+		state = make(map[string]core.Account)
+		return accountB.ForEach(func(k, v []byte) error {
+			var account core.Account
+			if err := gob.NewDecoder(bytes.NewReader(v)).Decode(&account); err != nil {
+				return fmt.Errorf("decode account: %w", err)
+			}
+			state[string(k)] = account
+			return nil
+		})
 	})
 
 	if err != nil {

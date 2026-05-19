@@ -385,6 +385,14 @@ func (m *Mempool) PendingForSender(fromAddr string) []mempoolEntry {
 	return out
 }
 
+// HasSenderNonce checks if a transaction with the given sender and nonce exists.
+func (m *Mempool) HasSenderNonce(fromAddr string, nonce uint64) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.bySenderNonce[fromAddr][nonce]
+	return ok
+}
+
 // TxForSenderNonce retrieves a specific transaction by sender and nonce
 func (m *Mempool) TxForSenderNonce(fromAddr string, nonce uint64) (mempoolEntry, bool) {
 	m.mu.RLock()

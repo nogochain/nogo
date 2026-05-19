@@ -131,6 +131,7 @@ type PeerBanChecker interface {
 type Mempool interface {
 	// Transaction queries
 	Contains(txID string) bool
+	HasSenderNonce(fromAddr string, nonce uint64) bool
 	GetTx(txID string) (*core.Transaction, bool)
 	GetTxIDs() []string
 

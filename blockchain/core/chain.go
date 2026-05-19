@@ -638,9 +638,29 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 	if chain.store != nil {
 		snapshotHeight, stateRoot, snapshotState, err := chain.store.LoadSnapshot(chain.currentHeight())
 		if err == nil && snapshotState != nil && len(snapshotState) > 0 {
-			// Loaded snapshot successfully - O(1) operation
 			chain.state = snapshotState
-			log.Printf("[Chain] Loaded state snapshot at height %d (root=%x)", snapshotHeight, stateRoot[:8])
+			log.Printf("[Chain] Loaded state snapshot at height %d (root=%x, accounts=%d)", snapshotHeight, stateRoot[:8], len(snapshotState))
+
+			currentH := chain.currentHeight()
+			if snapshotHeight < currentH {
+				blocksToApply := currentH - snapshotHeight
+				for i := snapshotHeight + 1; i <= currentH; i++ {
+					block := chain.blocks[i]
+					if err := applyBlockToState(chain.consensus, chain.monetaryPolicy, chain.state, block, chain.genesisAddress, chain.genesisTimestamp); err != nil {
+						return nil, fmt.Errorf("apply post-snapshot block %d: %w", block.GetHeight(), err)
+					}
+				}
+				log.Printf("[Chain] Applied %d blocks after snapshot (heights %d -> %d, final accounts=%d)", blocksToApply, snapshotHeight+1, currentH, len(chain.state))
+
+				updatedRoot, sErr := chain.store.CalculateStateRoot(chain.state)
+				if sErr == nil {
+					if snapErr := chain.store.Snapshot(currentH, updatedRoot, chain.state); snapErr != nil {
+						log.Printf("[Chain] WARNING: failed to save updated snapshot at height %d: %v", currentH, snapErr)
+					} else {
+						log.Printf("[Chain] Saved updated state snapshot at height %d (root=%x)", currentH, updatedRoot[:8])
+					}
+				}
+			}
 		} else {
 			// Snapshot not found or failed, recompute from blocks - O(n)
 			if err := chain.recomputeStateLocked(); err != nil {

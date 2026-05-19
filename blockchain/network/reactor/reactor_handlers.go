@@ -47,12 +47,14 @@ type Chain interface {
 	HeadersFrom(from uint64, count uint64) []*core.BlockHeader
 	BlocksFrom(from uint64, count uint64) []*core.Block
 	AddBlock(block *core.Block) (bool, error)
+	Balance(address string) (core.Account, bool)
 }
 
 // Mempool defines the subset of mempool methods required by the reactor
 // handlers.
 type Mempool interface {
 	Contains(txID string) bool
+	HasSenderNonce(fromAddr string, nonce uint64) bool
 	GetTx(txID string) (*core.Transaction, bool)
 	GetTxIDs() []string
 	Add(tx core.Transaction) (string, error)
@@ -878,6 +880,11 @@ func (h *TxReactorHandler) OnGetTx(peerID string, txIDs []string) error {
 // OnTx handles received full transactions from a peer. Each transaction
 // is validated and added to the local mempool. Already-known transactions
 // are silently skipped.
+//
+// FIXED: Nonce gap detection prevents permanently unmineable transactions
+// from entering the mempool via P2P gossip. If a transaction has nonce=N
+// but the chain nonce is M (M+1 < N) and the mempool has no intermediate
+// nonces, the gap can never be filled — the transaction is rejected.
 func (h *TxReactorHandler) OnTx(peerID string, txs []core.Transaction) error {
 	if h.handlers == nil || h.handlers.mempool == nil {
 		return fmt.Errorf("tx handler: mempool not available")
@@ -888,6 +895,7 @@ func (h *TxReactorHandler) OnTx(peerID string, txs []core.Transaction) error {
 
 	addedCount := 0
 	skippedCount := 0
+	gapRejected := 0
 
 	for i := range txs {
 		tx := &txs[i]
@@ -896,6 +904,32 @@ func (h *TxReactorHandler) OnTx(peerID string, txs []core.Transaction) error {
 		if h.handlers.mempool.Contains(txID) {
 			skippedCount++
 			continue
+		}
+
+		// Nonce gap detection: reject transactions that can never be mined.
+		// This happens when a peer node has pending transactions we don't,
+		// and the tx nonce is ahead of our chain nonce with no fillable path.
+		if h.handlers.chain != nil {
+			fromAddr, addrErr := tx.FromAddress()
+			if addrErr == nil {
+				acct, _ := h.handlers.chain.Balance(fromAddr)
+				expectedNonce := acct.Nonce + 1
+				if tx.Nonce > expectedNonce {
+					hasIntermediate := false
+					for n := expectedNonce; n < tx.Nonce; n++ {
+						if h.handlers.mempool.HasSenderNonce(fromAddr, n) {
+							hasIntermediate = true
+							break
+						}
+					}
+					if !hasIntermediate {
+						log.Printf("[TxHandler] REJECTED tx %s from peer %s: unmineable nonce gap (chain=%d, tx=%d, address=%s)",
+							txID, peerID, acct.Nonce, tx.Nonce, fromAddr[:16]+"...")
+						gapRejected++
+						continue
+					}
+				}
+			}
 		}
 
 		_, addErr := h.handlers.mempool.Add(*tx)
@@ -907,8 +941,8 @@ func (h *TxReactorHandler) OnTx(peerID string, txs []core.Transaction) error {
 		addedCount++
 	}
 
-	log.Printf("[TxHandler] Processed %d transactions from peer %s: added=%d, skipped=%d",
-		len(txs), peerID, addedCount, skippedCount)
+	log.Printf("[TxHandler] Processed %d transactions from peer %s: added=%d, skipped=%d, gap_rejected=%d",
+		len(txs), peerID, addedCount, skippedCount, gapRejected)
 
 	return nil
 }

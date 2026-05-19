@@ -41,6 +41,25 @@ func (w *chainWrapper) SelectMempoolTxs(mp miner.Mempool, maxTxPerBlock int) ([]
 	entries := mp.EntriesSortedByFeeDesc()
 	var picked []core.Transaction
 	var pickedIDs []string
+	var evictIDs []string
+
+	// Pre-scan: detect nonce-gap transactions that can never be mined.
+	// A transaction has an unmineable nonce gap if:
+	//   chain nonce = M, tx nonce = N, N > M+1
+	//   AND mempool has NO entries with nonces in [M+1, N-1]
+	// In that case the gap can never be filled → evict to prevent mempool bloat.
+	senderNonces := make(map[string]map[uint64]bool)
+	for _, e := range entries {
+		tx := e.Tx()
+		fromAddr, addrErr := tx.FromAddress()
+		if addrErr != nil {
+			continue
+		}
+		if senderNonces[fromAddr] == nil {
+			senderNonces[fromAddr] = make(map[uint64]bool)
+		}
+		senderNonces[fromAddr][tx.Nonce] = true
+	}
 
 	// Track expected nonces for each address based on already-picked transactions
 	expectedNonces := make(map[string]uint64)
@@ -57,10 +76,16 @@ func (w *chainWrapper) SelectMempoolTxs(mp miner.Mempool, maxTxPerBlock int) ([]
 			tx.ChainID = w.chain.GetChainID()
 		}
 		if err := tx.VerifyForConsensus(w.chain.GetConsensus(), w.chain.LatestBlock().GetHeight()+1); err != nil {
+			log.Printf("[Miner] SelectMempoolTxs: tx %s VerifyForConsensus failed: %v — skipping", e.TxID(), err)
 			continue
 		}
 
-		fromAddr, _ := tx.FromAddress()
+		fromAddr, addrErr := tx.FromAddress()
+		if addrErr != nil {
+			log.Printf("[Miner] SelectMempoolTxs: failed to derive fromAddr for tx %s fromPubKey=%x: %v — skipping",
+				e.TxID(), tx.FromPubKey[:min(len(tx.FromPubKey), 8)], addrErr)
+			continue
+		}
 
 		// Get current nonce from chain state
 		acct, exists := w.chain.Balance(fromAddr)
@@ -71,13 +96,34 @@ func (w *chainWrapper) SelectMempoolTxs(mp miner.Mempool, maxTxPerBlock int) ([]
 		// Check if we've already picked a transaction from this address
 		expectedNonce, hasPending := expectedNonces[fromAddr]
 		if hasPending {
-			// Use the next expected nonce for this address
 			if tx.Nonce != expectedNonce {
+				log.Printf("[Miner] SelectMempoolTxs: tx %s nonce=%d (expected=%d from pending) — skipping",
+					e.TxID(), tx.Nonce, expectedNonce)
 				continue
 			}
 		} else {
-			// First transaction from this address should use chain nonce + 1
-			if tx.Nonce != acct.Nonce+1 {
+			chainExpected := acct.Nonce + 1
+			if tx.Nonce != chainExpected {
+				log.Printf("[Miner] SelectMempoolTxs: tx %s nonce=%d (chain nonce=%d expected=%d) — skipping",
+					e.TxID(), tx.Nonce, acct.Nonce, chainExpected)
+
+				// Nonce gap detection: if tx.Nonce > chainExpected AND
+				// mempool has no intermediate nonces, this tx is permanently
+				// unmineable — evict it from mempool after 3 skipped cycles.
+				if tx.Nonce > chainExpected {
+					hasIntermediate := false
+					for n := chainExpected; n < tx.Nonce; n++ {
+						if senderNonces[fromAddr] != nil && senderNonces[fromAddr][n] {
+							hasIntermediate = true
+							break
+						}
+					}
+					if !hasIntermediate {
+						log.Printf("[Miner] SelectMempoolTxs: tx %s has permanent nonce gap (chain=%d, tx=%d, no intermediate nonces in mempool) — evicting",
+							e.TxID(), acct.Nonce, tx.Nonce)
+						evictIDs = append(evictIDs, e.TxID())
+					}
+				}
 				continue
 			}
 		}
@@ -94,6 +140,12 @@ func (w *chainWrapper) SelectMempoolTxs(mp miner.Mempool, maxTxPerBlock int) ([]
 
 		picked = append(picked, tx)
 		pickedIDs = append(pickedIDs, e.TxID())
+	}
+
+	// Evict unmineable transactions (permanent nonce gaps).
+	if len(evictIDs) > 0 {
+		mp.RemoveMany(evictIDs)
+		log.Printf("[Miner] SelectMempoolTxs: evicted %d unmineable transactions from mempool", len(evictIDs))
 	}
 
 	return picked, pickedIDs, nil

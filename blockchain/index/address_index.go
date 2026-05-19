@@ -20,9 +20,15 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -37,6 +43,14 @@ const (
 	DefaultBatchSize = 100
 	// MaxPageSize is the maximum page size for queries
 	MaxPageSize = 1000
+)
+
+const (
+	indexBoltOpenTimeout   = 30 * time.Second
+	indexBoltMaxRetries    = 3
+	indexBoltRetryInterval = 2 * time.Second
+	indexFilePerm          = 0600
+	indexDirPerm           = 0755
 )
 
 // SortOrder defines the sort order for query results
@@ -88,19 +102,19 @@ type AddressStats struct {
 
 // QueryOptions defines options for querying address transactions
 type QueryOptions struct {
-	Limit   int       `json:"limit"`
-	Offset  int       `json:"offset"`
-	Sort    SortOrder `json:"sort"`
-	MinHeight uint64  `json:"minHeight"`
-	MaxHeight uint64  `json:"maxHeight"`
+	Limit     int       `json:"limit"`
+	Offset    int       `json:"offset"`
+	Sort      SortOrder `json:"sort"`
+	MinHeight uint64    `json:"minHeight"`
+	MaxHeight uint64    `json:"maxHeight"`
 }
 
 // DefaultQueryOptions returns default query options
 func DefaultQueryOptions() QueryOptions {
 	return QueryOptions{
-		Limit:   20,
-		Offset:  0,
-		Sort:    SortDesc,
+		Limit:     20,
+		Offset:    0,
+		Sort:      SortDesc,
 		MinHeight: 0,
 		MaxHeight: math.MaxUint64,
 	}
@@ -115,34 +129,204 @@ type AddressIndex struct {
 	path string
 }
 
+// isIndexCorruptionError checks if the error indicates database corruption
+func isIndexCorruptionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := strings.ToLower(err.Error())
+	corruptionIndicators := []string{
+		"invalid magic",
+		"invalid version",
+		"invalid page size",
+		"checksum mismatch",
+		"page allocation out of bounds",
+		"freelist empty",
+		"database file is not a bolt database",
+		"corrupted",
+		"invalid database",
+	}
+	for _, indicator := range corruptionIndicators {
+		if strings.Contains(errMsg, indicator) {
+			return true
+		}
+	}
+	return false
+}
+
+// isIndexRecoverableError checks if the error is recoverable (not corruption)
+func isIndexRecoverableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := strings.ToLower(err.Error())
+	recoverableIndicators := []string{
+		"database is locked",
+		"permission denied",
+		"timeout",
+		"mmap",
+		"no space left",
+		"input/output error",
+		"resource temporarily unavailable",
+	}
+	for _, indicator := range recoverableIndicators {
+		if strings.Contains(errMsg, indicator) {
+			return true
+		}
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return true
+	}
+	var sysErr *syscall.Errno
+	if errors.As(err, &sysErr) {
+		return true
+	}
+	return false
+}
+
+// fixIndexFilePermissions fixes file and directory permissions for the index database
+func fixIndexFilePermissions(path string) error {
+	stat, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat file: %w", err)
+	}
+	currentPerm := stat.Mode().Perm()
+	if currentPerm != indexFilePerm {
+		log.Printf("address index: fixing file permissions from %o to %o for %s", currentPerm, indexFilePerm, path)
+		if chmodErr := os.Chmod(path, indexFilePerm); chmodErr != nil {
+			return fmt.Errorf("chmod failed: %w", chmodErr)
+		}
+	}
+	dirPath := filepath.Dir(path)
+	dirStat, dirErr := os.Stat(dirPath)
+	if dirErr != nil {
+		return fmt.Errorf("stat directory: %w", dirErr)
+	}
+	currentDirPerm := dirStat.Mode().Perm()
+	if currentDirPerm&0o777 != indexDirPerm {
+		log.Printf("address index: fixing directory permissions from %o to %o for %s", currentDirPerm, indexDirPerm, dirPath)
+		if chmodErr := os.Chmod(dirPath, indexDirPerm); chmodErr != nil {
+			return fmt.Errorf("chmod directory failed: %w", chmodErr)
+		}
+	}
+	return nil
+}
+
+// initAddressIndex initializes the address index after successful database open
+func initAddressIndex(db *bbolt.DB, path string) (*AddressIndex, error) {
+	index := &AddressIndex{
+		db:   db,
+		path: path,
+	}
+	if err := index.initializeBuckets(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("initialize buckets: %w", err)
+	}
+	return index, nil
+}
+
 // NewAddressIndex creates a new address index instance
-// Production-grade: initializes BoltDB database with proper configuration
-// Error handling: returns error on database initialization failure
+// CRITICAL FIX: Replicated OpenBoltStore's production-grade error handling:
+//   - 30-second timeout (was 1 second, causing spurious startup failures)
+//   - 3 retries with backoff for recoverable errors (lock contention, etc.)
+//   - Permission auto-fix on permission denied errors
+//   - Corruption detection with automatic backup and recovery
+//   - Panic recovery via defer/recover
 func NewAddressIndex(dbPath string) (*AddressIndex, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("database path is required")
 	}
 
-	db, err := bbolt.Open(dbPath, 0600, &bbolt.Options{
-		Timeout:      1 * time.Second,
-		NoGrowSync:   false,
-		FreelistType: bbolt.FreelistArrayType,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("open bolt db: %w", err)
+	if err := os.MkdirAll(filepath.Dir(dbPath), indexDirPerm); err != nil {
+		return nil, fmt.Errorf("create index directory: %w", err)
 	}
 
-	index := &AddressIndex{
-		db:   db,
-		path: dbPath,
+	var db *bbolt.DB
+	var openErr error
+
+	openFunc := func() error {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					openErr = fmt.Errorf("bolt database panic during open: %v (path=%s)", r, dbPath)
+				}
+			}()
+			db, openErr = bbolt.Open(dbPath, indexFilePerm, &bbolt.Options{
+				Timeout:      indexBoltOpenTimeout,
+				NoGrowSync:   false,
+				FreelistType: bbolt.FreelistArrayType,
+			})
+		}()
+		return openErr
 	}
 
-	if err := index.initializeBuckets(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("initialize buckets: %w", err)
+	openErr = openFunc()
+	if openErr == nil {
+		return initAddressIndex(db, dbPath)
 	}
 
-	return index, nil
+	fileExists := false
+	if stat, statErr := os.Stat(dbPath); statErr == nil && stat.Size() > 0 {
+		fileExists = true
+	}
+
+	if !fileExists {
+		return nil, fmt.Errorf("open address index database (new file): %w", openErr)
+	}
+
+	log.Printf("address index: database open failed on existing file: path=%s, err=%v", dbPath, openErr)
+
+	if isIndexRecoverableError(openErr) {
+		log.Printf("address index: detected recoverable error (not corruption), attempting fixes...")
+
+		if strings.Contains(strings.ToLower(openErr.Error()), "permission") {
+			if permErr := fixIndexFilePermissions(dbPath); permErr != nil {
+				log.Printf("address index: permission fix failed: %v", permErr)
+			} else {
+				log.Printf("address index: permissions fixed, retrying open...")
+				openErr = openFunc()
+				if openErr == nil {
+					log.Printf("address index: successfully opened after permission fix")
+					return initAddressIndex(db, dbPath)
+				}
+			}
+		}
+
+		for retry := 1; retry <= indexBoltMaxRetries; retry++ {
+			log.Printf("address index: retry %d/%d after %v...", retry, indexBoltMaxRetries, indexBoltRetryInterval)
+			time.Sleep(indexBoltRetryInterval)
+			openErr = openFunc()
+			if openErr == nil {
+				log.Printf("address index: successfully opened on retry %d", retry)
+				return initAddressIndex(db, dbPath)
+			}
+			log.Printf("address index: retry %d failed: %v", retry, openErr)
+		}
+
+		return nil, fmt.Errorf("open address index database failed after %d retries (recoverable error): %w",
+			indexBoltMaxRetries, openErr)
+	}
+
+	if !isIndexCorruptionError(openErr) {
+		log.Printf("address index: unknown error type, treating as corruption for safety: %v", openErr)
+	}
+
+	log.Printf("address index: confirmed or suspected database corruption, starting recovery: path=%s", dbPath)
+
+	backupPath := dbPath + ".corrupted." + fmt.Sprintf("%d", time.Now().Unix())
+	if renameErr := os.Rename(dbPath, backupPath); renameErr != nil {
+		return nil, fmt.Errorf("open address index database failed (corrupted), backup rename also failed: original=%v, rename=%v", openErr, renameErr)
+	}
+	log.Printf("address index: corrupted database backed up to %s, creating new database", backupPath)
+
+	openErr = openFunc()
+	if openErr != nil {
+		return nil, fmt.Errorf("open address index database failed even after corruption recovery: %w", openErr)
+	}
+	log.Printf("address index: successfully recovered with new database at %s", backupPath)
+
+	return initAddressIndex(db, dbPath)
 }
 
 // initializeBuckets creates the necessary BoltDB buckets
