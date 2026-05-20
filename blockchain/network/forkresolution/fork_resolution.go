@@ -33,6 +33,13 @@ const (
 	// Set to 0 to disable this heuristic; use checkpoints or explicit finality if needed.
 	IrreversibleTimeWindow = 0
 
+	// MinWorkDiffThreshold prevents reorg loops from tiny work differences
+	// This is critical to prevent infinite reorg loops when work difference is negligible
+	// Value: 1e-15 = 0.0000000000001% of total work
+	// Example: For work=2.5e27, minimum diff = 2.5e12 (2.5 trillion)
+	// This allows legitimate reorgs while preventing loops from micro-differences (e.g., 128)
+	MinWorkDiffThreshold = 1e-15
+
 	// === PREVENTIVE FORK HANDLING STRATEGY ===
 	// The key insight: resolve forks EARLY before they accumulate into deep forks
 
@@ -117,10 +124,10 @@ type ReorgResult struct {
 // Used for oscillation detection to prevent rapid chain switching
 type ReorgRecord struct {
 	Timestamp time.Time
-	OldTip     uint64
-	NewTip     uint64
-	Depth      uint64
-	Source     string
+	OldTip    uint64
+	NewTip    uint64
+	Depth     uint64
+	Source    string
 }
 
 // ForkResolver is the unified fork resolution engine
@@ -137,10 +144,10 @@ type ForkResolver struct {
 	reorgMu         sync.Mutex
 
 	// Oscillation detection
-	recentReorgs    []ReorgRecord // Recent reorg history for oscillation detection
-	oscillationCount int           // Number of rapid reorgs detected
-	oscillationProtected bool         // Whether oscillation protection is active
-	oscillationProtectedUntil time.Time // End time of oscillation protection
+	recentReorgs              []ReorgRecord // Recent reorg history for oscillation detection
+	oscillationCount          int           // Number of rapid reorgs detected
+	oscillationProtected      bool          // Whether oscillation protection is active
+	oscillationProtectedUntil time.Time     // End time of oscillation protection
 
 	// Callbacks
 	onReorgComplete func(newHeight uint64)
@@ -279,15 +286,39 @@ func (fr *ForkResolver) ShouldReorg(remoteBlock *core.Block) bool {
 	}
 
 	// CRITICAL: Only reorg if remote work is STRICTLY greater than local work
-	if remoteWork != nil && remoteWork.Cmp(localWork) > 0 {
-		log.Printf("[ForkResolver] ShouldReorg: remote work %s > local work %s (remote_h=%d local_h=%d), triggering reorg",
+	if remoteWork.Cmp(localWork) <= 0 {
+		log.Printf("[ForkResolver] ShouldReorg: remote work %s <= local work %s (remote_h=%d local_h=%d), NOT triggering reorg",
 			remoteWork.String(), localWork.String(), remoteBlock.GetHeight(), localTip.GetHeight())
-		return true
+		return false
 	}
 
-	log.Printf("[ForkResolver] ShouldReorg: remote work %s <= local work %s (remote_h=%d local_h=%d), NOT triggering reorg",
-		remoteWork.String(), localWork.String(), remoteBlock.GetHeight(), localTip.GetHeight())
-	return false
+	// CRITICAL FIX: Check if work difference is significant enough to justify reorg
+	// This prevents infinite reorg loops due to tiny work differences (e.g., 128 / 2.5e27 = 5e-23)
+	// Such micro-differences can occur from:
+	//   1. Block propagation delays
+	//   2. Work calculation precision differences
+	//   3. Network timing issues
+	//
+	// We set threshold to 1e-15 (0.0000000000001%) which:
+	//   - Allows legitimate reorgs (typically > 1% work difference)
+	//   - Prevents loops from micro-differences (< 1e-20)
+	//   - For work=2.5e27, minimum diff = 2.5e12 (2.5 trillion work units)
+	workDiff := new(big.Int).Sub(remoteWork, localWork)
+	workDiffRatio := new(big.Float).Quo(
+		new(big.Float).SetInt(workDiff),
+		new(big.Float).SetInt(localWork),
+	)
+
+	diffRatio, _ := workDiffRatio.Float64()
+	if diffRatio < MinWorkDiffThreshold {
+		log.Printf("[ForkResolver] ShouldReorg: work difference too small (%.6e < %.6e), skipping reorg to prevent loop (remote_h=%d local_h=%d)",
+			diffRatio, MinWorkDiffThreshold, remoteBlock.GetHeight(), localTip.GetHeight())
+		return false
+	}
+
+	log.Printf("[ForkResolver] ShouldReorg: remote work %s > local work %s (diff=%.6e, threshold=%.6e), triggering reorg",
+		remoteWork.String(), localWork.String(), diffRatio, MinWorkDiffThreshold)
+	return true
 }
 
 // RequestReorg is the UNIFIED ENTRY POINT for all reorganization requests
@@ -433,10 +464,10 @@ func (fr *ForkResolver) recordReorgForOscillation(oldTip, newTip uint64, depth u
 
 	record := ReorgRecord{
 		Timestamp: time.Now(),
-		OldTip:     oldTip,
-		NewTip:     newTip,
-		Depth:      depth,
-		Source:     source,
+		OldTip:    oldTip,
+		NewTip:    newTip,
+		Depth:     depth,
+		Source:    source,
 	}
 
 	// Append to recent reorgs (keep last 10)

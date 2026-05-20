@@ -183,19 +183,19 @@ func NewSyncLoop(pm PeerAPI, bc BlockchainInterface, miner Miner,
 	downloader := NewBlockDownloader(pm, bc, validator, metrics, syncConfig)
 
 	sm := &SyncLoop{
-		pm:              pm,
-		bc:              bc,
-		miner:           miner,
-		metrics:         metrics,
-		orphanPool:      orphanPool,
-		validator:       validator,
-		scorer:          scorer,
-		retryExec:       retryExec,
-		downloader:      downloader,
-		syncConfig:      syncConfig,
-		securityMgr:     secMgr,
-		fastSyncEngine:  NewFastSyncEngine(bc, syncConfig.BatchSize),
-		syncStatusCh:    make(chan SyncStatusEvent, syncStatusChBufferSize),
+		pm:             pm,
+		bc:             bc,
+		miner:          miner,
+		metrics:        metrics,
+		orphanPool:     orphanPool,
+		validator:      validator,
+		scorer:         scorer,
+		retryExec:      retryExec,
+		downloader:     downloader,
+		syncConfig:     syncConfig,
+		securityMgr:    secMgr,
+		fastSyncEngine: NewFastSyncEngine(bc, syncConfig.BatchSize),
+		syncStatusCh:   make(chan SyncStatusEvent, syncStatusChBufferSize),
 	}
 
 	// NEW: Create stateless sync components
@@ -663,6 +663,24 @@ func (s *SyncLoop) IsSynced() bool {
 	// This is safe because performSyncStep runs every 2 seconds and updates this value
 	if s.syncProgress >= 1.0 {
 		return true
+	}
+
+	// IMPROVED: If syncProgress is very close to 1.0 (99.9%+) and we haven't received
+	// new blocks for a while, consider ourselves synced to prevent "99% limbo"
+	// This handles the case where minor work differences prevent final sync completion
+	const nearSyncedThreshold = 0.999
+	const noNewBlockDuration = 30 * time.Second
+
+	if s.syncProgress >= nearSyncedThreshold {
+		latestBlock := s.bc.LatestBlock()
+		if latestBlock != nil {
+			timeSinceLastBlock := time.Unix(int64(latestBlock.Header.TimestampUnix), 0)
+			if time.Since(timeSinceLastBlock) > noNewBlockDuration {
+				log.Printf("[Sync] IsSynced: near-synced (%.2f%%) with no new blocks for %v, considering synced",
+					s.syncProgress*100, time.Since(timeSinceLastBlock))
+				return true
+			}
+		}
 	}
 
 	// If syncProgress < 1.0, we're either syncing or need to check peers
