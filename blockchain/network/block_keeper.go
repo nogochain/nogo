@@ -1054,6 +1054,22 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 		return syncTypeForkDetection, bestByWork
 	}
 
+	// CRITICAL ADDITION: When work is EQUAL, do NOT trigger fork detection
+	// This prevents infinite sync loops when local and peer have identical chains
+	if peerWork.Cmp(localWork) == 0 {
+		if peerHeight == blockHeight {
+			// Same height + same work = fully synced
+			log.Printf("[BlockKeeper] checkSyncType: same height and work (H=%d, W=%s), considering synced",
+				blockHeight, localWork.String())
+			return syncTypeNone, bestByWork
+		}
+		// Peer has same work but different height - should not happen in normal operation
+		// Treat as synced and let mining proceed
+		log.Printf("[BlockKeeper] checkSyncType: same work but different height (local=%d, peer=%d), considering synced",
+			blockHeight, peerHeight)
+		return syncTypeNone, bestByWork
+	}
+
 	// peerWork <= localWork: we are winning or equal.
 	// Do NOT sync from a peer that has less work, even if it has higher height.
 	if peerHeight > blockHeight && peerWork.Cmp(localWork) <= 0 {
@@ -1414,8 +1430,7 @@ func (bk *blockKeeper) dispatchForkDetection(peer PeerInterface, localHeight uin
 	}
 
 	if !bk.forkResolver.ShouldReorg(peerTip) {
-		log.Printf("[BlockKeeper] dispatchForkDetection: peer chain does not have more work, keeping local chain — will retry after cooldown")
-		// Cooldown is set above, prevents hot loop but allows retry after cooldownDur
+		log.Printf("[BlockKeeper] dispatchForkDetection: peer chain does not have more work, keeping local chain")
 		return false
 	}
 

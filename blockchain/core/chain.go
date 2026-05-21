@@ -2950,7 +2950,7 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 			canonicalBlock := c.blocks[block.GetHeight()]
 			if canonicalBlock != nil && hex.EncodeToString(canonicalBlock.Hash) == hashHex {
 				log.Printf("[Chain] Block %d already on canonical chain, skipping", block.GetHeight())
-				return false, nil
+				return true, nil  // ✅ Return true to indicate block is already part of canonical chain
 			}
 			log.Printf("[Chain] Block %d (hash=%s) exists but differs from canonical at same height, treating as fork",
 				block.GetHeight(), hashHex[:16])
