@@ -286,6 +286,10 @@ type Chain struct {
 	onMissingBlock func(parentHash []byte, height uint64)
 	onMissingMu    sync.RWMutex
 
+	// skipLogCooldown suppresses duplicate "already on canonical chain" log spam
+	skipLogCooldown   time.Time
+	skipLogCooldownMu sync.Mutex
+
 	// Integrity reward system
 	integrityManager     *NodeIntegrityManager
 	integrityDistributor *IntegrityRewardDistributor
@@ -2949,8 +2953,13 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 		if block.GetHeight() < expectedHeight {
 			canonicalBlock := c.blocks[block.GetHeight()]
 			if canonicalBlock != nil && hex.EncodeToString(canonicalBlock.Hash) == hashHex {
-				log.Printf("[Chain] Block %d already on canonical chain, skipping", block.GetHeight())
-				return true, nil  // ✅ Return true to indicate block is already part of canonical chain
+				c.skipLogCooldownMu.Lock()
+				if time.Since(c.skipLogCooldown) > 5*time.Second {
+					log.Printf("[Chain] Block %d already on canonical chain, skipping (further duplicates suppressed for 5s)", block.GetHeight())
+					c.skipLogCooldown = time.Now()
+				}
+				c.skipLogCooldownMu.Unlock()
+				return false, nil
 			}
 			log.Printf("[Chain] Block %d (hash=%s) exists but differs from canonical at same height, treating as fork",
 				block.GetHeight(), hashHex[:16])
@@ -3270,6 +3279,15 @@ func (c *Chain) isForkChainCompleteLocked(tip *Block) bool {
 // addOrphanBlockLocked stores an orphan block for later processing
 // Caller must hold c.mu lock
 func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error) {
+	// Skip if block is already in orphan pool to avoid redundant parent requests
+	if c.orphanPool != nil {
+		if _, exists := c.orphanPool[hashHex]; exists {
+			log.Printf("[Chain] Block %d (hash=%s) already in orphan pool, skipping re-request",
+				block.GetHeight(), hashHex[:16])
+			return true, nil
+		}
+	}
+
 	// Initialize orphan pool if needed
 	if c.orphanPool == nil {
 		c.orphanPool = make(map[string]*Block)

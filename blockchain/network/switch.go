@@ -298,6 +298,14 @@ type Switch struct {
 	peerActivity   map[string]time.Time
 	peerActivityMu sync.Mutex
 
+	// ancestorFetchCooldown prevents rapid re-fetching of the same missing ancestor
+	ancestorFetchCooldown   map[string]time.Time
+	ancestorFetchCooldownMu sync.Mutex
+
+	// slowPeers tracks peers with full outbound queues to skip retry-spamming
+	slowPeers   map[string]time.Time
+	slowPeersMu sync.Mutex
+
 	// PeerDisconnectNotifier for components that need to react to peer disconnections.
 	// blockKeeper uses this to clear syncPeer when the sync target disconnects.
 	peerDisconnectNotifier PeerDisconnectNotifier
@@ -387,6 +395,10 @@ func NewSwitch(cfg SwitchConfig) *Switch {
 
 		reconnectQueue: make(map[string]*reconnectEntry),
 		peerActivity:   make(map[string]time.Time),
+
+		ancestorFetchCooldown: make(map[string]time.Time),
+
+		slowPeers: make(map[string]time.Time),
 	}
 
 	privKey, err := sw.loadOrGenerateNodeKey()
@@ -2102,12 +2114,12 @@ func (sw *Switch) AddPeerConnection(conn net.Conn, isOutbound bool) error {
 
 // receiveMessage dispatches an inbound message to the appropriate reactor.
 func (sw *Switch) receiveMessage(chID byte, peerID string, msgBytes []byte) {
-	if !sw.allowMessage(peerID) {
-		log.Printf("[Switch] rate limit exceeded for peer %s, dropping message", peerID)
-		return
-	}
-
+	// Only rate-limit gossip channel; sync/block channels carry critical data
 	if chID == mconnection.ChannelGossip {
+		if !sw.allowMessage(peerID) {
+			log.Printf("[Switch] rate limit exceeded for peer %s on gossip, dropping message", peerID)
+			return
+		}
 		sw.handleGossipMessage(peerID, msgBytes)
 		return
 	}
@@ -3200,7 +3212,53 @@ func (sw *Switch) BroadcastTransaction(ctx context.Context, tx core.Transaction,
 	}
 }
 
+// isSlowPeer checks if a peer is currently marked as having a full outbound queue.
+// Slow peers are excluded from synchronous broadcasts for a cooldown period.
+func (sw *Switch) isSlowPeer(peerID string) bool {
+	sw.slowPeersMu.Lock()
+	defer sw.slowPeersMu.Unlock()
+	markedAt, exists := sw.slowPeers[peerID]
+	if !exists {
+		return false
+	}
+	const slowPeerCooldown = 30 * time.Second
+	if time.Since(markedAt) > slowPeerCooldown {
+		delete(sw.slowPeers, peerID)
+		return false
+	}
+	return true
+}
+
+// markSlowPeer records a peer as having a full outbound queue.
+func (sw *Switch) markSlowPeer(peerID string) {
+	sw.slowPeersMu.Lock()
+	sw.slowPeers[peerID] = time.Now()
+	sw.slowPeersMu.Unlock()
+}
+
+// retryBlockSendAsync attempts to send a block to a slow peer asynchronously.
+// Uses limited retries to avoid goroutine leaks while giving the peer's queue time to drain.
+func (sw *Switch) retryBlockSendAsync(peerID string, mconn *mconnection.MConnection, blockBytes []byte) {
+	const asyncRetries = 5
+	const asyncInterval = 100 * time.Millisecond
+
+	for i := 0; i < asyncRetries; i++ {
+		select {
+		case <-time.After(asyncInterval):
+		case <-sw.quit:
+			return
+		}
+		if mconn.TrySend(mconnection.ChannelBlock, blockBytes) {
+			return
+		}
+	}
+	// After all async retries fail, log once per peer per broadcast round
+	log.Printf("[Switch] block broadcast to slow peer %s failed after %d async retries",
+		peerID[:16], asyncRetries)
+}
+
 // BroadcastBlock serializes a block using reactor.BuildBlockMsg and broadcasts to all peers on block channel.
+// Slow peers (queue full) are retried asynchronously to avoid blocking the broadcast to fast peers.
 func (sw *Switch) BroadcastBlock(ctx context.Context, block *core.Block) error {
 	if sw.ctx == nil {
 		return errors.New("switch: not started")
@@ -3241,27 +3299,16 @@ func (sw *Switch) BroadcastBlock(ctx context.Context, block *core.Block) error {
 		if mconn.TrySend(mconnection.ChannelBlock, blockBytes) {
 			successCount++
 		} else {
-			log.Printf("[Switch] Block broadcast to %s queue full, retrying (%d×%v)",
-				peer.ID(), blockSendMaxRetries, blockSendRetryInterval)
-			sent := false
-			for retry := 0; retry < blockSendMaxRetries; retry++ {
-				select {
-				case <-ctx.Done():
-					failedCount++
-					return fmt.Errorf("switch: broadcast block cancelled: %w", ctx.Err())
-				case <-time.After(blockSendRetryInterval):
-				}
-				if mconn.TrySend(mconnection.ChannelBlock, blockBytes) {
-					sent = true
-					break
-				}
-			}
-			if sent {
-				successCount++
-			} else {
+			// Check if this peer is persistently slow; if so, skip immediately
+			if sw.isSlowPeer(peer.ID()) {
 				failedCount++
-				broadcastErr = fmt.Errorf("switch: failed to send block to peer %s after %d retries", peer.ID(), blockSendMaxRetries)
+				continue
 			}
+			sw.markSlowPeer(peer.ID())
+			// Retry asynchronously to avoid blocking broadcast to fast peers
+			peerID := peer.ID()
+			go sw.retryBlockSendAsync(peerID, mconn, blockBytes)
+			failedCount++
 		}
 	}
 
@@ -3319,27 +3366,14 @@ func (sw *Switch) BroadcastBlockExcluding(ctx context.Context, block *core.Block
 		if mconn.TrySend(mconnection.ChannelBlock, blockBytes) {
 			successCount++
 		} else {
-			log.Printf("[Switch] Block broadcast(excl) to %s queue full, retrying (%d×%v)",
-				peer.ID(), blockSendMaxRetries, blockSendRetryInterval)
-			sent := false
-			for retry := 0; retry < blockSendMaxRetries; retry++ {
-				select {
-				case <-ctx.Done():
-					failedCount++
-					return fmt.Errorf("switch: broadcast block cancelled: %w", ctx.Err())
-				case <-time.After(blockSendRetryInterval):
-				}
-				if mconn.TrySend(mconnection.ChannelBlock, blockBytes) {
-					sent = true
-					break
-				}
-			}
-			if sent {
-				successCount++
-			} else {
+			if sw.isSlowPeer(peer.ID()) {
 				failedCount++
-				broadcastErr = fmt.Errorf("switch: failed to send block to peer %s after %d retries", peer.ID(), blockSendMaxRetries)
+				continue
 			}
+			sw.markSlowPeer(peer.ID())
+			peerID := peer.ID()
+			go sw.retryBlockSendAsync(peerID, mconn, blockBytes)
+			failedCount++
 		}
 	}
 
@@ -3976,6 +4010,28 @@ func (sw *Switch) GetNodePubKey() ed25519.PublicKey {
 // OPTIMIZED: Uses breadth-first approach to collect all missing hashes first,
 // then fetches them in batch for better efficiency.
 func (sw *Switch) EnsureAncestors(ctx context.Context, bc BlockchainInterface, missingHashHex string) error {
+	// Cooldown check: prevent rapid re-fetching of the same missing ancestor
+	const ancestorFetchCooldownDuration = 10 * time.Second
+	sw.ancestorFetchCooldownMu.Lock()
+	lastAttempt, exists := sw.ancestorFetchCooldown[missingHashHex]
+	if exists && time.Since(lastAttempt) < ancestorFetchCooldownDuration {
+		sw.ancestorFetchCooldownMu.Unlock()
+		return fmt.Errorf("switch: ancestor fetch for %s cooling down (last attempt %v ago)",
+			missingHashHex[:16], time.Since(lastAttempt).Round(time.Second))
+	}
+	sw.ancestorFetchCooldown[missingHashHex] = time.Now()
+	sw.ancestorFetchCooldownMu.Unlock()
+
+	// Periodic cleanup of stale cooldown entries
+	go func() {
+		time.Sleep(ancestorFetchCooldownDuration * 2)
+		sw.ancestorFetchCooldownMu.Lock()
+		if ts, ok := sw.ancestorFetchCooldown[missingHashHex]; ok && time.Since(ts) > ancestorFetchCooldownDuration {
+			delete(sw.ancestorFetchCooldown, missingHashHex)
+		}
+		sw.ancestorFetchCooldownMu.Unlock()
+	}()
+
 	log.Printf("[Switch] EnsureAncestors called for hash=%s", missingHashHex[:16])
 
 	// Create a dedicated context with longer timeout for ancestor fetching

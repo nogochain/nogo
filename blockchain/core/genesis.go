@@ -848,7 +848,10 @@ func CreateGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, 
 func GetGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, error) {
 	genesisMu.RLock()
 	if genesisBlockCache != nil && genesisConfigCache != nil {
-		if genesisConfigCache.ChainID == cfg.ChainID {
+		// CRITICAL: Check both ChainID AND Timestamp to ensure cache validity
+		// If timestamp changes, we need to regenerate the genesis block
+		if genesisConfigCache.ChainID == cfg.ChainID &&
+			genesisConfigCache.Timestamp == cfg.Timestamp {
 			genesisMu.RUnlock()
 			return genesisBlockCache, nil
 		}
@@ -858,8 +861,10 @@ func GetGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, err
 	genesisMu.Lock()
 	defer genesisMu.Unlock()
 
+	// Double-check pattern with write lock
 	if genesisBlockCache != nil && genesisConfigCache != nil {
-		if genesisConfigCache.ChainID == cfg.ChainID {
+		if genesisConfigCache.ChainID == cfg.ChainID &&
+			genesisConfigCache.Timestamp == cfg.Timestamp {
 			return genesisBlockCache, nil
 		}
 	}

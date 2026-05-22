@@ -1131,8 +1131,10 @@ func (h *BlockReactorHandler) OnBlock(peerID string, blocks []*core.Block) error
 		}
 	}
 
-	log.Printf("[BlockHandler] Processed %d blocks from peer %s, accepted %d (flood broadcast enabled)",
-		len(blocks), peerID, addedCount)
+	if addedCount > 0 {
+		log.Printf("[BlockHandler] Processed %d blocks from peer %s, accepted %d (flood broadcast enabled)",
+			len(blocks), peerID, addedCount)
+	}
 
 	return nil
 }

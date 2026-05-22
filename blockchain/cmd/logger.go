@@ -13,6 +13,7 @@ type LogStyle struct {
 	Prefix      string
 	Color       string
 	Icon        string
+	Level       LogLevel
 	IsHeader    bool
 	IsSubHeader bool
 	IsInfo      bool
@@ -50,110 +51,184 @@ const (
 var (
 	styleHeader = LogStyle{
 		Icon:     "╔═══════════════════════════════════════════════════════════╗",
+		Level:    LevelInfo,
 		IsHeader: true,
 	}
 	styleSubHeader = LogStyle{
 		Icon:        "───────────────────────────────────────────────────────",
+		Level:       LevelInfo,
 		IsSubHeader: true,
 	}
 	styleNetwork = LogStyle{
 		Icon:   "🌐",
 		Color:  ColorBrightCyan,
+		Level:  LevelInfo,
 		Prefix: "NETWORK",
 	}
 	styleConsensus = LogStyle{
 		Icon:   "⛏️",
 		Color:  ColorBrightMagenta,
+		Level:  LevelInfo,
 		Prefix: "CONSENSUS",
 	}
 	styleMining = LogStyle{
 		Icon:   "🔨",
 		Color:  ColorBrightYellow,
+		Level:  LevelInfo,
 		Prefix: "MINING",
 	}
 	styleBlockProduced = LogStyle{
 		Icon:   "✅",
 		Color:  ColorBrightGreen,
+		Level:  LevelInfo,
 		Prefix: "BLOCK PRODUCED",
 	}
 	styleValidation = LogStyle{
 		Icon:   "🔍",
 		Color:  ColorBrightCyan,
+		Level:  LevelInfo,
 		Prefix: "VALIDATION",
 	}
 	styleSync = LogStyle{
 		Icon:   "🔄",
 		Color:  ColorBlue,
+		Level:  LevelDebug,
 		Prefix: "SYNC",
 	}
 	styleConnection = LogStyle{
 		Icon:   "🔗",
 		Color:  ColorGreen,
+		Level:  LevelDebug,
 		Prefix: "CONNECTION",
 	}
 	styleP2P = LogStyle{
 		Icon:   "📡",
 		Color:  ColorCyan,
+		Level:  LevelDebug,
 		Prefix: "P2P",
 	}
 	styleHTTP = LogStyle{
 		Icon:   "🌍",
 		Color:  ColorGreen,
+		Level:  LevelInfo,
 		Prefix: "HTTP",
 	}
 	styleMetrics = LogStyle{
 		Icon:   "📊",
 		Color:  ColorMagenta,
+		Level:  LevelInfo,
 		Prefix: "METRICS",
 	}
 	styleSecurity = LogStyle{
 		Icon:   "🔒",
 		Color:  ColorBrightGreen,
+		Level:  LevelInfo,
 		Prefix: "SECURITY",
 	}
 	styleConfig = LogStyle{
 		Icon:   "⚙️",
 		Color:  ColorWhite,
+		Level:  LevelInfo,
 		Prefix: "CONFIG",
 	}
 	styleInfo = LogStyle{
-		Icon:   "ℹ️",
-		Color:  ColorCyan,
-		Prefix: "INFO",
-		IsInfo: true,
+		Icon:    "ℹ️",
+		Color:   ColorCyan,
+		Level:   LevelInfo,
+		Prefix:  "INFO",
+		IsInfo:  true,
 	}
 	styleSuccess = LogStyle{
 		Icon:      "✅",
 		Color:     ColorBrightGreen,
+		Level:     LevelInfo,
 		Prefix:    "SUCCESS",
 		IsSuccess: true,
 	}
 	styleWarning = LogStyle{
 		Icon:      "⚠️",
 		Color:     ColorBrightYellow,
+		Level:     LevelWarn,
 		Prefix:    "WARNING",
 		IsWarning: true,
 	}
 	styleError = LogStyle{
 		Icon:    "❌",
 		Color:   ColorRed,
+		Level:   LevelError,
 		Prefix:  "ERROR",
 		IsError: true,
 	}
 )
 
+// LogLevel represents the severity of a log message
+type LogLevel int
+
+const (
+	LevelDebug LogLevel = iota
+	LevelInfo
+	LevelWarn
+	LevelError
+)
+
+func (l LogLevel) String() string {
+	switch l {
+	case LevelDebug:
+		return "DEBUG"
+	case LevelInfo:
+		return "INFO"
+	case LevelWarn:
+		return "WARN"
+	case LevelError:
+		return "ERROR"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+func parseLogLevel(s string) LogLevel {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return LevelDebug
+	case "info":
+		return LevelInfo
+	case "warn", "warning":
+		return LevelWarn
+	case "error":
+		return LevelError
+	default:
+		return LevelInfo
+	}
+}
+
 // LogFormatter provides structured logging with visual formatting
 type LogFormatter struct {
 	useColors bool
+	level     LogLevel
 	logger    *log.Logger
 }
 
 // NewLogFormatter creates a new log formatter
 func NewLogFormatter(useColors bool) *LogFormatter {
+	levelStr := strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL")))
+	if levelStr == "" {
+		levelStr = "info"
+	}
 	return &LogFormatter{
 		useColors: useColors,
+		level:     parseLogLevel(levelStr),
 		logger:    log.New(os.Stdout, "", 0),
 	}
+}
+
+// SetLevel changes the minimum log level dynamically
+func (f *LogFormatter) SetLevel(level LogLevel) {
+	f.level = level
+}
+
+// Level returns the current log level
+func (f *LogFormatter) Level() LogLevel {
+	return f.level
 }
 
 // colorize applies color to text if colors are enabled
@@ -162,6 +237,25 @@ func (f *LogFormatter) colorize(text string, color string) string {
 		return text
 	}
 	return color + text + ColorReset
+}
+
+// log writes a message at the given level, respecting the configured log level
+func (f *LogFormatter) log(level LogLevel, format string, args ...interface{}) {
+	if level < f.level {
+		return
+	}
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	message := fmt.Sprintf(format, args...)
+	switch level {
+	case LevelDebug:
+		f.logger.Printf("%s %s[DEBUG] %s\n", timestamp, f.colorize("🔍", ColorGray), f.colorize(message, ColorGray))
+	case LevelWarn:
+		f.logger.Printf("%s %s[WARN] %s\n", timestamp, f.colorize("⚠️", ColorBrightYellow), f.colorize(message, ColorBrightYellow))
+	case LevelError:
+		f.logger.Printf("%s %s[ERROR] %s\n", timestamp, f.colorize("❌", ColorRed), f.colorize(message, ColorRed))
+	default:
+		f.logger.Printf("%s %s[INFO] %s\n", timestamp, f.colorize("ℹ️", ColorCyan), message)
+	}
 }
 
 // PrintHeader prints a main header
@@ -183,25 +277,26 @@ func (f *LogFormatter) PrintSubHeader(section string) {
 	f.logger.Printf("%s %s\n", timestamp, f.colorize(section, ColorBrightBlue))
 }
 
-// PrintStyled prints a styled log message
+// PrintStyled prints a styled log message, respecting the configured log level
 func (f *LogFormatter) PrintStyled(style LogStyle, format string, args ...interface{}) {
+	// Skip if below current log level
+	if style.Level < f.level {
+		return
+	}
+
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	message := fmt.Sprintf(format, args...)
 
-	// Build the log line
 	var logLine strings.Builder
 
-	// Timestamp
 	logLine.WriteString(timestamp)
 	logLine.WriteString(" ")
 
-	// Icon
 	if style.Icon != "" {
 		logLine.WriteString(style.Icon)
 		logLine.WriteString(" ")
 	}
 
-	// Prefix
 	if style.Prefix != "" {
 		logLine.WriteString(f.colorize("[", style.Color))
 		logLine.WriteString(f.colorize(style.Prefix, style.Color))
@@ -209,7 +304,6 @@ func (f *LogFormatter) PrintStyled(style LogStyle, format string, args ...interf
 		logLine.WriteString(" ")
 	}
 
-	// Message
 	if style.Color != "" {
 		logLine.WriteString(f.colorize(message, style.Color))
 	} else {
@@ -220,6 +314,10 @@ func (f *LogFormatter) PrintStyled(style LogStyle, format string, args ...interf
 }
 
 // Convenience methods
+func (f *LogFormatter) Debug(format string, args ...interface{}) {
+	f.log(LevelDebug, format, args...)
+}
+
 func (f *LogFormatter) Network(format string, args ...interface{}) {
 	f.PrintStyled(styleNetwork, format, args...)
 }
