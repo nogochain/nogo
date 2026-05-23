@@ -113,6 +113,16 @@ func (rl *rateLimitedLogger) shouldLog(key string) bool {
 	return true
 }
 
+// peerSyncInfo caches the best peer's chain info from updateSyncProgressFromPeers.
+// Eliminates duplicate peer queries between sync reactor and blockKeeper.
+type peerSyncInfo struct {
+	peerID    string
+	height    uint64
+	work      *big.Int
+	tipHash   string
+	updatedAt time.Time
+}
+
 type blockKeeper struct {
 	chain          ChainInterface
 	peers          PeerSetInterface
@@ -163,6 +173,9 @@ type blockKeeper struct {
 	logLimiter *rateLimitedLogger
 
 	lastSyncedLogHeight uint64
+
+	peerSyncInfo   peerSyncInfo
+	peerSyncInfoMu sync.RWMutex
 }
 
 func (bk *blockKeeper) isActive() bool {
@@ -178,6 +191,29 @@ func (bk *blockKeeper) isActive() bool {
 		return true
 	}
 	return false
+}
+
+// setPeerSyncInfo is called by updateSyncProgressFromPeers to populate the shared cache.
+// This eliminates duplicate peer queries between the sync reactor and blockKeeper.
+func (bk *blockKeeper) setPeerSyncInfo(peerID string, height uint64, work *big.Int, tipHash string) {
+	bk.peerSyncInfoMu.Lock()
+	defer bk.peerSyncInfoMu.Unlock()
+	bk.peerSyncInfo.peerID = peerID
+	bk.peerSyncInfo.height = height
+	bk.peerSyncInfo.work = new(big.Int).Set(work)
+	bk.peerSyncInfo.tipHash = tipHash
+	bk.peerSyncInfo.updatedAt = time.Now()
+}
+
+// getPeerSyncInfo returns cached peer chain info if fresh enough.
+// This is the single source of truth shared between updateSyncProgressFromPeers and checkSyncType.
+func (bk *blockKeeper) getPeerSyncInfo(maxAge time.Duration) (peerID string, height uint64, work *big.Int, tipHash string, ok bool) {
+	bk.peerSyncInfoMu.RLock()
+	defer bk.peerSyncInfoMu.RUnlock()
+	if bk.peerSyncInfo.work == nil || time.Since(bk.peerSyncInfo.updatedAt) > maxAge {
+		return "", 0, nil, "", false
+	}
+	return bk.peerSyncInfo.peerID, bk.peerSyncInfo.height, new(big.Int).Set(bk.peerSyncInfo.work), bk.peerSyncInfo.tipHash, true
 }
 
 // OnPeerDisconnected is called by Switch when a peer is removed.
@@ -837,6 +873,13 @@ func (bk *blockKeeper) resetHeaderState() {
 // and chain state to classify the scenario as fast sync, regular sync,
 // fork detection, or no-sync-needed.
 //
+// ARCHITECTURE: Single-source-of-truth via shared peerSyncInfo cache.
+// updateSyncProgressFromPeers (sync reactor) populates the cache every 5s.
+// checkSyncType (blockKeeper) reads the cache as primary source, with
+// independent peer query as stale-cache fallback. Both paths share the same
+// tip hash for precision-error detection, eliminating the conflict where
+// sync reactor says "synced" but blockKeeper says "sync needed".
+//
 // CRITICAL FIX: Work-prioritized peer selection.
 // Previously, bestPeer() selected the peer with the highest BLOCK HEIGHT,
 // ignoring cumulative WORK. This caused a minority-fork node with many
@@ -844,121 +887,156 @@ func (bk *blockKeeper) resetHeaderState() {
 //  1. ABCDE (most work, lower height) tries to sync from F (higher
 //     height, less work) → F's blocks fail validation → retry loop
 //  2. All ABCDE nodes stall, unable to mine or sync
-//
-// Now: compares cumulative work FIRST, then height.
 func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 	blockHeight := bk.chain.LatestBlock().GetHeight()
 	localWork := bk.chain.CanonicalWork()
 	checkpoint := bk.nextCheckpoint()
 
-	peerIDs := bk.peers.GetAllPeerIDs()
-	if len(peerIDs) == 0 {
-		return syncTypeNone, nil
-	}
-
-	type peerResult struct {
-		peerID string
-		height uint64
-		work   *big.Int
-	}
-
-	resultCh := make(chan peerResult, len(peerIDs))
-	var wg sync.WaitGroup
-	peerCtx, peerCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer peerCancel()
-
-	for _, pid := range peerIDs {
-		bk.syncStateMu.Lock()
-		if lastFail, failed := bk.failedSyncPeers[pid]; failed {
-			if time.Since(lastFail) < bk.failedSyncCooldownDur {
-				bk.syncStateMu.Unlock()
-				continue
-			}
-			delete(bk.failedSyncPeers, pid)
-		}
-		bk.syncStateMu.Unlock()
-
-		wg.Add(1)
-		go func(peerID string) {
-			defer wg.Done()
-			ph, pw, _, err := bk.peers.GetPeerChainInfo(peerID)
-			if err != nil || pw == nil {
-				return
-			}
-			select {
-			case resultCh <- peerResult{peerID: peerID, height: ph, work: pw}:
-			case <-peerCtx.Done():
-			}
-		}(pid)
-	}
-
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
-
-	var bestByWork PeerInterface
-	var bestWork *big.Int
-	var bestWorkHeight uint64
-
-	for r := range resultCh {
-		if bestWork == nil || r.work.Cmp(bestWork) > 0 {
-			bestWork = r.work
-			bestWorkHeight = r.height
-			bestByWork = bk.wrapPeer(r.peerID, r.height)
-		}
-	}
-
-	if bestByWork == nil {
-		log.Printf("[BlockKeeper] checkSyncType: no peer has valid work info (localH=%d)", blockHeight)
-		return syncTypeNone, nil
-	}
-
-	peerWork := bestWork
-	peerHeight := bestWorkHeight
-
-	// Compare cumulative work: the heaviest chain wins.
 	if localWork == nil {
 		localWork = big.NewInt(0)
 	}
 
-	if bk.logLimiter.shouldLog("checkSyncType") {
-		log.Printf("[BlockKeeper] checkSyncType: local(H=%d,W=%s) vs bestPeer(H=%d,W=%s,ID=%s)",
-			blockHeight, localWork.String(), peerHeight, peerWork.String(), bestByWork.ID())
+	var peerWork *big.Int
+	var peerHeight uint64
+	var bestByWork PeerInterface
+	var bestTipHash string
+
+	// PRIMARY: use shared cache populated by updateSyncProgressFromPeers.
+	// Eliminates duplicate peer queries and ensures hash comparison consistency.
+	const maxCacheAge = 10 * time.Second
+	cachedPID, cachedH, cachedW, cachedHash, cacheOK := bk.getPeerSyncInfo(maxCacheAge)
+
+	if cacheOK {
+		peerHeight = cachedH
+		peerWork = cachedW
+		bestByWork = bk.wrapPeer(cachedPID, cachedH)
+		bestTipHash = cachedHash
+
+		if bk.logLimiter.shouldLog("checkSyncType") {
+			log.Printf("[BlockKeeper] checkSyncType: local(H=%d,W=%s) vs cachedPeer(H=%d,W=%s,ID=%s)",
+				blockHeight, localWork.String(), peerHeight, peerWork.String(), bestByWork.ID())
+		}
+	} else {
+		// FALLBACK: cache miss or stale — independent peer query.
+		peerIDs := bk.peers.GetAllPeerIDs()
+		if len(peerIDs) == 0 {
+			return syncTypeNone, nil
+		}
+
+		type peerResult struct {
+			peerID  string
+			height  uint64
+			work    *big.Int
+			tipHash string
+		}
+
+		resultCh := make(chan peerResult, len(peerIDs))
+		var wg sync.WaitGroup
+		peerCtx, peerCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer peerCancel()
+
+		for _, pid := range peerIDs {
+			bk.syncStateMu.Lock()
+			if lastFail, failed := bk.failedSyncPeers[pid]; failed {
+				if time.Since(lastFail) < bk.failedSyncCooldownDur {
+					bk.syncStateMu.Unlock()
+					continue
+				}
+				delete(bk.failedSyncPeers, pid)
+			}
+			bk.syncStateMu.Unlock()
+
+			wg.Add(1)
+			go func(peerID string) {
+				defer wg.Done()
+				ph, pw, tipHash, err := bk.peers.GetPeerChainInfo(peerID)
+				if err != nil || pw == nil {
+					return
+				}
+				select {
+				case resultCh <- peerResult{peerID: peerID, height: ph, work: pw, tipHash: tipHash}:
+				case <-peerCtx.Done():
+				}
+			}(pid)
+		}
+
+		go func() {
+			wg.Wait()
+			close(resultCh)
+		}()
+
+		var bestWork *big.Int
+		for r := range resultCh {
+			if bestWork == nil || r.work.Cmp(bestWork) > 0 {
+				bestWork = r.work
+				peerHeight = r.height
+				bestByWork = bk.wrapPeer(r.peerID, r.height)
+				bestTipHash = r.tipHash
+			}
+		}
+
+		if bestByWork == nil {
+			log.Printf("[BlockKeeper] checkSyncType: no peer has valid work info (localH=%d)", blockHeight)
+			return syncTypeNone, nil
+		}
+
+		peerWork = bestWork
+
+		if bk.logLimiter.shouldLog("checkSyncType") {
+			log.Printf("[BlockKeeper] checkSyncType: local(H=%d,W=%s) vs bestPeer(H=%d,W=%s,ID=%s)",
+				blockHeight, localWork.String(), peerHeight, peerWork.String(), bestByWork.ID())
+		}
+
+		// Checkpoint-aware peer filtering (fallback path only).
+		// When cache is fresh, updateSyncProgressFromPeers already found the best peer.
+		if (blockHeight == 0 || blockHeight < 128) && bk.getReceivedCheckpoint != nil {
+			if p2pCP := bk.getReceivedCheckpoint(); p2pCP != nil && p2pCP.Height > 0 {
+				if peerHeight < p2pCP.Height {
+					log.Printf("[BlockKeeper] checkSyncType: bestPeer(H=%d) doesn't reach checkpoint(H=%d), searching for checkpoint-compatible peer",
+						peerHeight, p2pCP.Height)
+					var cpPeer PeerInterface
+					var cpWork *big.Int
+					var cpHeight uint64
+					for _, peerID := range peerIDs {
+						ph, pw, _, err := bk.peers.GetPeerChainInfo(peerID)
+						if err != nil || pw == nil {
+							continue
+						}
+						if ph < p2pCP.Height {
+							continue
+						}
+						if cpWork == nil || pw.Cmp(cpWork) > 0 {
+							cpWork = pw
+							cpHeight = ph
+							cpPeer = bk.wrapPeer(peerID, ph)
+						}
+					}
+					if cpPeer != nil {
+						log.Printf("[BlockKeeper] checkSyncType: switched to checkpoint-compatible peer H=%d (checkpoint H=%d)",
+							cpHeight, p2pCP.Height)
+						bestByWork = cpPeer
+						peerWork = cpWork
+						peerHeight = cpHeight
+					}
+				}
+			}
+		}
 	}
 
-	// Checkpoint-aware peer filtering for new nodes:
-	// When a P2P checkpoint record exists, filter out peers that cannot verify
-	// the checkpoint. This prevents new nodes from syncing to wrong/malicious peers.
-	if (blockHeight == 0 || blockHeight < 128) && bk.getReceivedCheckpoint != nil {
-		if p2pCP := bk.getReceivedCheckpoint(); p2pCP != nil && p2pCP.Height > 0 {
-			if peerHeight < p2pCP.Height {
-				log.Printf("[BlockKeeper] checkSyncType: bestPeer(H=%d) doesn't reach checkpoint(H=%d), searching for checkpoint-compatible peer",
-					peerHeight, p2pCP.Height)
-				var cpPeer PeerInterface
-				var cpWork *big.Int
-				var cpHeight uint64
-				for _, peerID := range peerIDs {
-					ph, pw, _, err := bk.peers.GetPeerChainInfo(peerID)
-					if err != nil || pw == nil {
-						continue
-					}
-					if ph < p2pCP.Height {
-						continue
-					}
-					if cpWork == nil || pw.Cmp(cpWork) > 0 {
-						cpWork = pw
-						cpHeight = ph
-						cpPeer = bk.wrapPeer(peerID, ph)
-					}
+	// UNIFIED HASH COMPARISON: check tip hash BEFORE work comparison.
+	// When local and peer tip hashes match at the same height, the work difference
+	// is a precision artifact from big.Int→string→big.Int serialization round-trip,
+	// not a real fork. Both primary (cache) and fallback paths use this check.
+	if peerHeight == blockHeight && bestTipHash != "" {
+		localTip := bk.chain.LatestBlock()
+		if localTip != nil {
+			localHashHex := hex.EncodeToString(localTip.Hash)
+			if localHashHex == bestTipHash {
+				if bk.logLimiter.shouldLog("checkSyncType") {
+					log.Printf("[BlockKeeper] checkSyncType: tip hash matches at H=%d, work diff is precision error, considering synced",
+						blockHeight)
 				}
-				if cpPeer != nil {
-					log.Printf("[BlockKeeper] checkSyncType: switched to checkpoint-compatible peer H=%d (checkpoint H=%d)",
-						cpHeight, p2pCP.Height)
-					bestByWork = cpPeer
-					peerWork = cpWork
-					peerHeight = cpHeight
-				}
+				return syncTypeNone, nil
 			}
 		}
 	}
@@ -983,7 +1061,6 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 	}
 
 	// Priority 3: fast sync for very large gaps without checkpoints.
-	// When gap is huge, skeleton download is still more efficient than sequential.
 	if checkpoint == nil && peerHeight > blockHeight {
 		const largeGap = uint64(5000)
 		if peerHeight-blockHeight >= largeGap {
@@ -997,7 +1074,6 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 	}
 
 	// Priority 4: fast sync via P2P received checkpoint (new node).
-	// When local has no checkpoints, use checkpoint received from peer via P2P.
 	if checkpoint == nil && peerHeight > blockHeight {
 		if bk.getReceivedCheckpoint != nil {
 			if cp := bk.getReceivedCheckpoint(); cp != nil && cp.Height > blockHeight {
@@ -1011,9 +1087,7 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 		}
 	}
 
-	// CRITICAL FIX: Work comparison must come BEFORE height comparison.
-	// A peer with higher height but LESS work is on a minority fork.
-	// We should NOT sync from it.
+	// Work comparison: heaviest chain wins.
 	if peerWork.Cmp(localWork) > 0 {
 		if peerHeight > blockHeight {
 			log.Printf("[BlockKeeper] checkSyncType: regular sync (peer has more work + higher height, gap=%d)",
@@ -1030,16 +1104,16 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 			return syncTypeRegular, bestByWork
 		}
 		if peerHeight == blockHeight {
-			minForkHeight := uint64(128)
+			const minForkHeight = uint64(128)
 			if blockHeight < minForkHeight {
-				log.Printf("[BlockKeeper] checkSyncType: regular sync (peer has more work at same low height=%d < min=%d)",
+				log.Printf("[BlockKeeper] checkSyncType: fork reorg (peer has more work at same low height=%d < min=%d, hash differs)",
 					blockHeight, minForkHeight)
 				if realPeer := bk.peers.PeerByID(bestByWork.ID()); realPeer != nil && realPeer.Height() > 0 {
 					return syncTypeRegular, realPeer
 				}
 				return syncTypeRegular, bestByWork
 			}
-			log.Printf("[BlockKeeper] checkSyncType: fork detection (peer has more work at same height=%d)",
+			log.Printf("[BlockKeeper] checkSyncType: fork detection (peer has more work at same height=%d, hash differs)",
 				blockHeight)
 			if realPeer := bk.peers.PeerByID(bestByWork.ID()); realPeer != nil && realPeer.Height() > 0 {
 				return syncTypeForkDetection, realPeer
@@ -1054,24 +1128,20 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 		return syncTypeForkDetection, bestByWork
 	}
 
-	// CRITICAL ADDITION: When work is EQUAL, do NOT trigger fork detection
-	// This prevents infinite sync loops when local and peer have identical chains
+	// When work is EQUAL, do NOT trigger fork detection.
+	// This prevents infinite sync loops when local and peer have identical chains.
 	if peerWork.Cmp(localWork) == 0 {
 		if peerHeight == blockHeight {
-			// Same height + same work = fully synced
 			log.Printf("[BlockKeeper] checkSyncType: same height and work (H=%d, W=%s), considering synced",
 				blockHeight, localWork.String())
 			return syncTypeNone, bestByWork
 		}
-		// Peer has same work but different height - should not happen in normal operation
-		// Treat as synced and let mining proceed
 		log.Printf("[BlockKeeper] checkSyncType: same work but different height (local=%d, peer=%d), considering synced",
 			blockHeight, peerHeight)
 		return syncTypeNone, bestByWork
 	}
 
-	// peerWork <= localWork: we are winning or equal.
-	// Do NOT sync from a peer that has less work, even if it has higher height.
+	// peerWork < localWork: we are winning.
 	if peerHeight > blockHeight && peerWork.Cmp(localWork) <= 0 {
 		log.Printf("[BlockKeeper] checkSyncType: peer has higher height (%d > %d) but LESS work (%s <= %s), rejecting weak fork",
 			peerHeight, blockHeight, peerWork.String(), localWork.String())

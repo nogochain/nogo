@@ -44,13 +44,17 @@ const (
 	MaxOrphanPoolSize = 2048
 
 	// MaxOrphanPoolAge is the maximum time an orphan can stay in the pool
-	MaxOrphanPoolAge = 60 * time.Minute
+	MaxOrphanPoolAge = 10 * time.Minute
 
 	// MaxBlocksByHashSize limits the total number of blocks in blocksByHash map
 	MaxBlocksByHashSize = 100000
 
 	// MaxForkBlocksPerHeight limits the number of fork blocks per height
 	MaxForkBlocksPerHeight = 16
+
+	// SnapshotInterval is the block interval for state snapshot creation.
+	// Aligned to power-of-2 for efficient modulo and consistent disk I/O scheduling.
+	SnapshotInterval = 256
 
 	// MaxWorkCacheSize limits the number of cumulative work cache entries
 	MaxWorkCacheSize = 100000
@@ -1282,8 +1286,8 @@ func (c *Chain) AppendBlock(block *Block) error {
 		}
 	}
 
-	// Create state snapshot periodically (every 1000 blocks)
-	if c.store != nil && block.GetHeight()%1000 == 0 {
+	// Create state snapshot periodically (every SnapshotInterval blocks)
+	if c.store != nil && block.GetHeight()%SnapshotInterval == 0 {
 		stateRoot, err := c.store.CalculateStateRoot(c.state)
 		if err != nil {
 			log.Printf("[Chain] WARNING: failed to calculate state root at height %d: %v", block.GetHeight(), err)
@@ -2941,6 +2945,8 @@ func (c *Chain) GetBlockByHeight(height uint64) (*Block, bool) {
 func (c *Chain) AddBlock(block *Block) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	c.cleanupExpiredOrphansLocked()
 
 	if err := c.validateBlockConsensusLocked(block); err != nil {
 		return false, fmt.Errorf("block consensus validation failed: %w", err)
