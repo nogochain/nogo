@@ -54,6 +54,9 @@ const (
 	blockSendMaxRetries    = 60
 )
 
+// ErrPeerAlreadyConnected is returned when attempting to add a peer that is already connected.
+var ErrPeerAlreadyConnected = errors.New("peer already connected")
+
 // PeerInfo holds pre-configured peer connection information.
 type PeerInfo struct {
 	Addr    string `json:"addr"`
@@ -1201,7 +1204,9 @@ func (sw *Switch) acceptInboundPeer(conn net.Conn) {
 	log.Printf("Switch: inbound peer connected %s -> %s (moniker=%s)", addr, stableID, peerNI.Moniker)
 
 	if addErr := sw.AddPeerConnectionWithNodeInfo(conn, false, peerNI); addErr != nil {
-		log.Printf("Switch: failed to add inbound peer %s (%s): %v", stableID, addr, addErr)
+		if !errors.Is(addErr, ErrPeerAlreadyConnected) {
+			log.Printf("Switch: failed to add inbound peer %s (%s): %v", stableID, addr, addErr)
+		}
 		conn.Close()
 		return
 	}
@@ -1976,10 +1981,15 @@ func (sw *Switch) AddPeerConnectionWithNodeInfo(conn net.Conn, isOutbound bool, 
 		oldMConn := existingPeer.MConnection()
 		if oldMConn != nil && oldMConn.IsRunning() {
 			oldAddr := existingPeer.Addr()
+			if oldAddr == addr {
+				// Same address, same peer — silently ignore duplicate connection attempt
+				conn.Close()
+				return ErrPeerAlreadyConnected
+			}
 			log.Printf("[Switch] peer %s already connected (existing addr=%s, new addr=%s), closing duplicate",
 				stableID, oldAddr, addr)
 			conn.Close()
-			return nil
+			return ErrPeerAlreadyConnected
 		}
 
 		log.Printf("[Switch] Replacing dead peer %s (addr=%s) with new connection (addr=%s)", stableID, existingPeer.Addr(), addr)
@@ -3051,6 +3061,9 @@ func (sw *Switch) DialPeerWithAddress(addr string) error {
 	log.Printf("Switch: attempting to add peer %s (moniker=%s)", addr, peerNI.Moniker)
 	peerRemoteAddr := conn.RemoteAddr().String()
 	if addErr := sw.AddPeerConnectionWithNodeInfo(conn, true, peerNI); addErr != nil {
+		if errors.Is(addErr, ErrPeerAlreadyConnected) {
+			return nil
+		}
 		log.Printf("Switch: failed to add peer %s: %v", addr, addErr)
 		conn.Close()
 		return fmt.Errorf("dial peer: add peer %s: %w", addr, addErr)
@@ -3111,7 +3124,9 @@ func (sw *Switch) addInboundRelayPeer(conn net.Conn) {
 	conn.SetReadDeadline(time.Time{})
 
 	if addErr := sw.AddPeerConnectionWithNodeInfo(conn, false, peerNI); addErr != nil {
-		log.Printf("Switch: failed to add inbound relay peer: %v", addErr)
+		if !errors.Is(addErr, ErrPeerAlreadyConnected) {
+			log.Printf("Switch: failed to add inbound relay peer: %v", addErr)
+		}
 		return
 	}
 	log.Printf("Switch: inbound relay peer added (moniker=%s)", peerNI.Moniker)

@@ -75,6 +75,12 @@ const (
 	// Prevents IsSynced() returning true when high-height peers are slow/unresponsive.
 	maxSyncProgressWithPartialPeers = 0.99
 
+	// minWorkDiffRatioForForkSync is the minimum relative work difference to justify
+	// triggering a fork re-sync when local and peer heights are the same.
+	// Must match ForkResolver.MinWorkDiffThreshold to prevent infinite fork-reorg loops.
+	// For total work ~2.5e27, minimum absolute diff = ~2.5e12 work units.
+	minWorkDiffRatioForForkSync = 1e-15
+
 	// syncStatusChBufferSize is the buffer size for the sync→miner event channel.
 	// Covers ~80 seconds of 5s-interval events before the miner must start consuming.
 	syncStatusChBufferSize = 16
@@ -1358,8 +1364,19 @@ func (s *SyncLoop) performSyncStep() {
 		shouldSync = true
 		syncReason = fmt.Sprintf("peer has higher height (%d > %d)", maxPeerHeight, currentHeight)
 	} else if maxPeerHeight == currentHeight && bestPeerWork.Cmp(localWork) > 0 {
-		shouldSync = true
-		syncReason = fmt.Sprintf("peer has same height but more work (%s > %s)", bestPeerWork.String(), localWork.String())
+		// Check if work difference is significant enough to justify fork re-sync
+		workDiff := new(big.Int).Sub(bestPeerWork, localWork)
+		workDiffRatio, _ := new(big.Float).Quo(
+			new(big.Float).SetInt(workDiff),
+			new(big.Float).SetInt(localWork),
+		).Float64()
+		if workDiffRatio >= minWorkDiffRatioForForkSync {
+			shouldSync = true
+			syncReason = fmt.Sprintf("peer has same height but significantly more work (diff=%.2e > %.2e)", workDiffRatio, minWorkDiffRatioForForkSync)
+		} else {
+			log.Printf("[Sync] Peer has same height but work difference too small (%.6e < %.6e), treating as synced",
+				workDiffRatio, minWorkDiffRatioForForkSync)
+		}
 	} else if maxPeerHeight < currentHeight {
 		// Peer has lower height - we are ahead, no sync needed
 		log.Printf("[Sync] Peer has lower height (%d < %d) - no sync needed, local chain is longer", maxPeerHeight, currentHeight)
