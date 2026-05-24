@@ -456,14 +456,31 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	var bestByWorkHeight uint64
 	localHeight := s.getLocalHeight()
 
-	// Single-pass scan: find the peer with the most cumulative work
-	// AND track the maximum peer height for height-gap safety check.
+	// Pre-compute local tip hash for multi-node consensus check.
+	// When two or more peer chains exist at the same height (classic Nakamoto fork),
+	// a single peer with slightly more work (due to serialization precision) must not
+	// block progress. If ANY peer at the same height confirms our tip hash, the network
+	// majority is on our chain and we are synced.
+	var localHashHex string
+	sameHeightSameHashFound := false
+	if localTip != nil {
+		localHashHex = hex.EncodeToString(localTip.Hash)
+	}
+
+	// Single-pass scan: find the peer with the most cumulative work,
+	// track the maximum peer height for height-gap safety check,
+	// AND detect whether any peer at our height confirms our tip hash.
 	for _, peer := range peers {
 		info, err := s.pm.FetchChainInfo(ctx, peer)
 		if err != nil || info == nil {
 			continue
 		}
 		responsivePeers++
+
+		// Multi-node consensus: does any peer at our height share our tip hash?
+		if !sameHeightSameHashFound && localHashHex != "" && info.Height == localHeight && info.LatestHash == localHashHex {
+			sameHeightSameHashFound = true
+		}
 
 		if info.Height > maxPeerHeight {
 			maxPeerHeight = info.Height
@@ -508,6 +525,14 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 		progress = 1.0
 		log.Printf("[Sync] Progress check: localWork >= bestByWork, progress=1.0 localH=%d bestByWorkH=%d maxPeerH=%d",
 			localHeight, bestByWorkHeight, maxPeerHeight)
+	} else if sameHeightSameHashFound {
+		// Multi-node consensus: at least one peer at the same height confirms our
+		// tip hash. The bestByWork peer may have a divergent hash (Nakamoto fork) but
+		// the network majority is on our chain. Treat as synced so mining can proceed.
+		hashMatched = true
+		progress = 1.0
+		log.Printf("[Sync] Multi-node consensus: peer(s) confirm our tip hash at H=%d, progress=1.0 (bestByWork=%s diverges, work diff is precision noise)",
+			localHeight, bestByWorkPeerID)
 	} else if localTip != nil && bestByWorkLatestHash != "" {
 		localHashHex := hex.EncodeToString(localTip.Hash)
 		if localHashHex == bestByWorkLatestHash {
@@ -549,23 +574,26 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	// Trigger fork reorg only when the work-optimal peer has the same or lower height
 	// but more cumulative work. This indicates a fork — the peer diverged at some point
 	// and their chain accumulated more work.
-	// When maxPeerHeight > localHeight, the peer simply has a longer chain — blockKeeper
+	// Use bestByWorkHeight (height of the peer with most cumulative work), NOT maxPeerHeight
+	// (max across ALL peers). A different peer on the same chain with higher height must not
+	// prevent fork detection for the work-optimal peer.
+	// When bestByWorkHeight > localHeight, the work-optimal peer has a longer chain — blockKeeper
 	// handles that via regularBlockSync. Mixing these two cases causes fork reorg loops
 	// during normal catch-up sync, blocking mining and flooding logs.
 	if bestByWork != nil && localWork.Cmp(bestByWork) < 0 && bestByWorkPeerID != "" {
 		if localTip != nil && bestByWorkLatestHash != "" {
 			localHashHex := hex.EncodeToString(localTip.Hash)
 			if localHashHex == bestByWorkLatestHash {
-			} else if maxPeerHeight <= localHeight {
+			} else if bestByWorkHeight <= localHeight {
 				workDiff := new(big.Int).Sub(bestByWork, localWork)
 				workDiffRatio, _ := new(big.Float).Quo(
 					new(big.Float).SetInt(workDiff),
 					new(big.Float).SetInt(localWork),
 				).Float64()
 				if workDiffRatio >= minWorkDiffRatioForForkSync {
-					log.Printf("[Sync] Peer %s has more cumulative work (%s > %s) at comparable height (local=%d, peer=%d, diff=%d), triggering fork reorg",
+					log.Printf("[Sync] Peer %s has more cumulative work (%s > %s) at comparable height (local=%d, bestByWorkPeer=%d, maxPeer=%d), triggering fork reorg",
 						bestByWorkPeerID, bestByWork.String(), localWork.String(),
-						localHeight, maxPeerHeight, maxPeerHeight-localHeight)
+						localHeight, bestByWorkHeight, maxPeerHeight)
 					s.TriggerForkReorgForPeer(bestByWorkPeerID)
 				} else {
 					log.Printf("[Sync] Peer %s has insignificantly more work (diff=%.6e < %.6e), triggering timestamp-based fork resolution",
@@ -573,16 +601,16 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 					s.TriggerForkReorgForPeer(bestByWorkPeerID)
 				}
 			}
-		} else if maxPeerHeight <= localHeight {
+		} else if bestByWorkHeight <= localHeight {
 			workDiff := new(big.Int).Sub(bestByWork, localWork)
 			workDiffRatio, _ := new(big.Float).Quo(
 				new(big.Float).SetInt(workDiff),
 				new(big.Float).SetInt(localWork),
 			).Float64()
 			if workDiffRatio >= minWorkDiffRatioForForkSync {
-				log.Printf("[Sync] Peer %s has more cumulative work (%s > %s) at comparable height (local=%d, peer=%d, diff=%d), triggering fork reorg",
+				log.Printf("[Sync] Peer %s has more cumulative work (%s > %s) at comparable height (local=%d, bestByWorkPeer=%d, maxPeer=%d), triggering fork reorg",
 					bestByWorkPeerID, bestByWork.String(), localWork.String(),
-					localHeight, maxPeerHeight, maxPeerHeight-localHeight)
+					localHeight, bestByWorkHeight, maxPeerHeight)
 				s.TriggerForkReorgForPeer(bestByWorkPeerID)
 			} else {
 				log.Printf("[Sync] Peer %s has insignificantly more work (diff=%.6e < %.6e), triggering timestamp-based fork resolution",
