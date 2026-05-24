@@ -81,6 +81,19 @@ const (
 	// For total work ~2.5e27, minimum absolute diff = ~2.5e12 work units.
 	minWorkDiffRatioForForkSync = 1e-15
 
+	// minForkWorkDiff is the minimum ABSOLUTE cumulative work difference to consider
+	// a peer chain significantly ahead. Fixed at 2^32 (~4.3e9) — the work of one
+	// minimum-difficulty block. Any work difference below this is either a precision
+	// error (big.Int→string→big.Int roundtrip) or a valid Nakamoto fork with negligible
+	// divergence. In either case, the existing same-height timestamp tiebreaker correctly
+	// resolves the ambiguity.
+	//
+	// Using absolute big.Int comparison eliminates the float64 precision loss that
+	// occurs with the ratio-based approach at ~30-digit cumulative work values.
+	// The old approach of computing float64(workDiff/localWork) rounds the result to
+	// ~16 significant digits, making genuine 14-block forks appear as 1e-28 ratios.
+	minForkWorkDiff = 1 << 32
+
 	// syncStatusChBufferSize is the buffer size for the sync→miner event channel.
 	// Covers ~80 seconds of 5s-interval events before the miner must start consuming.
 	syncStatusChBufferSize = 16
@@ -535,14 +548,31 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 			localHeight, bestByWorkPeerID)
 	} else if localTip != nil && bestByWorkLatestHash != "" {
 		localHashHex := hex.EncodeToString(localTip.Hash)
-		if localHashHex == bestByWorkLatestHash {
-			hashMatched = true
-			progress = 1.0
+		// Hash comparison is only meaningful when the bestByWork peer is at or ahead of us.
+		// When bestByWorkHeight < localHeight, the peer's tip is at a different height —
+		// hashes will always differ, making the comparison meaningless noise that falsely
+		// sets progress=0.99 and blocks mining. Use maxPeerHeight as fallback instead.
+		if bestByWorkHeight >= localHeight {
+			if localHashHex == bestByWorkLatestHash {
+				hashMatched = true
+				progress = 1.0
+			} else {
+				progress = maxSyncProgressWithPartialPeers
+			}
+			log.Printf("[Sync] Hash comparison: local=%s... peer=%s... match=%v localH=%d bestByWorkH=%d maxPeerH=%d",
+				localHashHex[:16], bestByWorkLatestHash[:16], hashMatched, localHeight, bestByWorkHeight, maxPeerHeight)
 		} else {
-			progress = maxSyncProgressWithPartialPeers
+			// We have more blocks but less cumulative work (longer fork, lower difficulty).
+			// Tip hash comparison is meaningless across different heights.
+			// Use maxPeerHeight to decide: if no peer is ahead of us, treat as synced.
+			if maxPeerHeight > localHeight {
+				progress = maxSyncProgressWithPartialPeers
+			} else {
+				progress = 1.0
+			}
+			log.Printf("[Sync] Height-gap skip: bestByWorkH=%d < localH=%d, hash comparison deferred (maxPeerH=%d), progress=%.2f",
+				bestByWorkHeight, localHeight, maxPeerHeight, progress)
 		}
-		log.Printf("[Sync] Hash comparison: local=%s... peer=%s... match=%v localH=%d bestByWorkH=%d maxPeerH=%d",
-			localHashHex[:16], bestByWorkLatestHash[:16], hashMatched, localHeight, bestByWorkHeight, maxPeerHeight)
 	} else {
 		progress = maxSyncProgressWithPartialPeers
 		log.Printf("[Sync] Hash comparison: SKIPPED (localTip=%v, bestByWorkLatestHash=%q) localH=%d bestByWorkH=%d maxPeerH=%d",
@@ -571,50 +601,54 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 		s.blockKeeper.setPeerSyncInfo(bestByWorkPeerID, bestByWorkHeight, bestByWork, bestByWorkLatestHash)
 	}
 
-	// Trigger fork reorg only when the work-optimal peer has the same or lower height
-	// but more cumulative work. This indicates a fork — the peer diverged at some point
-	// and their chain accumulated more work.
-	// Use bestByWorkHeight (height of the peer with most cumulative work), NOT maxPeerHeight
-	// (max across ALL peers). A different peer on the same chain with higher height must not
-	// prevent fork detection for the work-optimal peer.
-	// When bestByWorkHeight > localHeight, the work-optimal peer has a longer chain — blockKeeper
-	// handles that via regularBlockSync. Mixing these two cases causes fork reorg loops
-	// during normal catch-up sync, blocking mining and flooding logs.
+	// Trigger fork reorg when the work-optimal peer has the same or higher height
+	// but more cumulative work. This covers two scenarios:
+	//
+	// 1. bestByWorkHeight == localHeight: Classic Nakamoto fork — two miners found
+	//    valid blocks at the same height, one accumulated more work. Use timestamp
+	//    resolution (first-come-first-served) when work diff is negligible.
+	//
+	// 2. bestByWorkHeight > localHeight: The work-optimal peer is AHEAD on a different
+	//    chain (more blocks + more cumulative work). The longer chain with more work is
+	//    the canonical one — timestamp comparison at different heights is misleading
+	//    (our fork block may be earlier but the majority network is ahead).
+	//    Skip timestamp resolution and directly rollback + resync.
+	//
+	// When bestByWorkHeight < localHeight: we have more blocks but less cumulative work
+	// (built on a fork with lower difficulty). Tip hash comparison at different heights
+	// is meaningless — defer to blockKeeper's checkSyncType for fork resolution.
 	if bestByWork != nil && localWork.Cmp(bestByWork) < 0 && bestByWorkPeerID != "" {
 		if localTip != nil && bestByWorkLatestHash != "" {
 			localHashHex := hex.EncodeToString(localTip.Hash)
 			if localHashHex == bestByWorkLatestHash {
-			} else if bestByWorkHeight <= localHeight {
+			} else if bestByWorkHeight >= localHeight {
 				workDiff := new(big.Int).Sub(bestByWork, localWork)
-				workDiffRatio, _ := new(big.Float).Quo(
-					new(big.Float).SetInt(workDiff),
-					new(big.Float).SetInt(localWork),
-				).Float64()
-				if workDiffRatio >= minWorkDiffRatioForForkSync {
-					log.Printf("[Sync] Peer %s has more cumulative work (%s > %s) at comparable height (local=%d, bestByWorkPeer=%d, maxPeer=%d), triggering fork reorg",
-						bestByWorkPeerID, bestByWork.String(), localWork.String(),
-						localHeight, bestByWorkHeight, maxPeerHeight)
+				minDiff := new(big.Int).SetUint64(minForkWorkDiff)
+				if workDiff.Cmp(minDiff) >= 0 {
+					log.Printf("[Sync] Peer %s has more cumulative work (diff=%s, abs >= %d) at H=%d (local H=%d), triggering fork reorg",
+						bestByWorkPeerID, workDiff.String(), minForkWorkDiff, bestByWorkHeight, localHeight)
 					s.TriggerForkReorgForPeer(bestByWorkPeerID)
 				} else {
-					log.Printf("[Sync] Peer %s has insignificantly more work (diff=%.6e < %.6e), triggering timestamp-based fork resolution",
-						bestByWorkPeerID, workDiffRatio, minWorkDiffRatioForForkSync)
+					log.Printf("[Sync] Peer %s has insignificantly more work (diff=%s < %d) at H=%d (local H=%d), triggering timestamp-based fork resolution",
+						bestByWorkPeerID, workDiff.String(), minForkWorkDiff, bestByWorkHeight, localHeight)
 					s.TriggerForkReorgForPeer(bestByWorkPeerID)
 				}
+			} else {
+				// bestByWorkHeight < localHeight: we have more blocks, less work.
+				// Tip hash comparison at different heights is meaningless.
+				log.Printf("[Sync] Fork reorg deferred: bestByWork peer %s at H=%d < local H=%d (work=%s > local=%s), deferring to blockKeeper",
+					bestByWorkPeerID, bestByWorkHeight, localHeight, bestByWork.String(), localWork.String())
 			}
-		} else if bestByWorkHeight <= localHeight {
+		} else if bestByWorkHeight >= localHeight {
 			workDiff := new(big.Int).Sub(bestByWork, localWork)
-			workDiffRatio, _ := new(big.Float).Quo(
-				new(big.Float).SetInt(workDiff),
-				new(big.Float).SetInt(localWork),
-			).Float64()
-			if workDiffRatio >= minWorkDiffRatioForForkSync {
-				log.Printf("[Sync] Peer %s has more cumulative work (%s > %s) at comparable height (local=%d, bestByWorkPeer=%d, maxPeer=%d), triggering fork reorg",
-					bestByWorkPeerID, bestByWork.String(), localWork.String(),
-					localHeight, bestByWorkHeight, maxPeerHeight)
+			minDiff := new(big.Int).SetUint64(minForkWorkDiff)
+			if workDiff.Cmp(minDiff) >= 0 {
+				log.Printf("[Sync] Peer %s has more cumulative work (diff=%s, abs >= %d) at H=%d (local H=%d), triggering fork reorg",
+					bestByWorkPeerID, workDiff.String(), minForkWorkDiff, bestByWorkHeight, localHeight)
 				s.TriggerForkReorgForPeer(bestByWorkPeerID)
 			} else {
-				log.Printf("[Sync] Peer %s has insignificantly more work (diff=%.6e < %.6e), triggering timestamp-based fork resolution",
-					bestByWorkPeerID, workDiffRatio, minWorkDiffRatioForForkSync)
+				log.Printf("[Sync] Peer %s has insignificantly more work (diff=%s < %d) at H=%d (local H=%d), triggering timestamp-based fork resolution",
+					bestByWorkPeerID, workDiff.String(), minForkWorkDiff, bestByWorkHeight, localHeight)
 				s.TriggerForkReorgForPeer(bestByWorkPeerID)
 			}
 		}
@@ -947,15 +981,14 @@ func (s *SyncLoop) TriggerForkReorg(peerID string, forkBlock *core.Block) {
 			return
 		}
 
-		// Check if work difference is significant.
-		// When the diff ratio is below the threshold, use block timestamp as tiebreaker.
+		// Check if work difference is significant. When the absolute diff is below
+		// minForkWorkDiff (one minimum-difficulty block), the work advantage is negligible.
+		// Use block timestamp as tiebreaker: the chain whose tip block has an earlier
+		// timestamp wins (first-come-first-served).
 		workDiff := new(big.Int).Sub(peerWork, localWork)
-		workDiffRatio, _ := new(big.Float).Quo(
-			new(big.Float).SetInt(workDiff),
-			new(big.Float).SetInt(localWork),
-		).Float64()
+		minDiff := new(big.Int).SetUint64(minForkWorkDiff)
 
-		if workDiffRatio < minWorkDiffRatioForForkSync {
+		if workDiff.Cmp(minDiff) < 0 {
 			resolved := s.resolveForkByTimestamp(ctx, peerIDCopy, blockCopy.GetHeight())
 			if !resolved {
 				return
@@ -1119,16 +1152,15 @@ func (s *SyncLoop) TriggerForkReorgForPeer(peerID string) {
 			}
 		}
 
-		// Check if work difference is significant. When the diff ratio is below the threshold,
-		// the fork is too close to call by work alone. Use block timestamp as tiebreaker:
-		// the chain whose tip block has an earlier timestamp wins (first-come-first-served).
+		// Check if work difference is significant. When the absolute diff is below
+		// minForkWorkDiff (one minimum-difficulty block), the work advantage is negligible.
+		// Use block timestamp as tiebreaker: the chain whose tip block has an earlier
+		// timestamp wins (first-come-first-served). This is only invoked for same-height
+		// forks because the updateSyncProgressFromPeers caller restricts to that case.
 		workDiff := new(big.Int).Sub(peerWork, localWork)
-		workDiffRatio, _ := new(big.Float).Quo(
-			new(big.Float).SetInt(workDiff),
-			new(big.Float).SetInt(localWork),
-		).Float64()
+		minDiff := new(big.Int).SetUint64(minForkWorkDiff)
 
-		if workDiffRatio < minWorkDiffRatioForForkSync {
+		if workDiff.Cmp(minDiff) < 0 {
 			resolved := s.resolveForkByTimestamp(ctx, peerID, localHeight)
 			if !resolved {
 				return
@@ -1556,16 +1588,13 @@ func (s *SyncLoop) performSyncStep() {
 	} else if maxPeerHeight == currentHeight && bestPeerWork.Cmp(localWork) > 0 {
 		// Check if work difference is significant enough to justify fork re-sync
 		workDiff := new(big.Int).Sub(bestPeerWork, localWork)
-		workDiffRatio, _ := new(big.Float).Quo(
-			new(big.Float).SetInt(workDiff),
-			new(big.Float).SetInt(localWork),
-		).Float64()
-		if workDiffRatio >= minWorkDiffRatioForForkSync {
+		minDiff := new(big.Int).SetUint64(minForkWorkDiff)
+		if workDiff.Cmp(minDiff) >= 0 {
 			shouldSync = true
-			syncReason = fmt.Sprintf("peer has same height but significantly more work (diff=%.2e > %.2e)", workDiffRatio, minWorkDiffRatioForForkSync)
+			syncReason = fmt.Sprintf("peer has same height but significantly more work (diff=%s >= %d)", workDiff.String(), minForkWorkDiff)
 		} else {
-			log.Printf("[Sync] Peer has same height but work difference too small (%.6e < %.6e), treating as synced",
-				workDiffRatio, minWorkDiffRatioForForkSync)
+			log.Printf("[Sync] Peer has same height but work difference too small (diff=%s < %d), treating as synced",
+				workDiff.String(), minForkWorkDiff)
 		}
 	} else if maxPeerHeight < currentHeight {
 		// Peer has lower height - we are ahead, no sync needed
