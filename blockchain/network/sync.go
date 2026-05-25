@@ -496,9 +496,10 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	var progress float64
 	if localWork.Cmp(bestByWork) >= 0 {
 		progress = 1.0
-	} else if maxPeerHeight <= localHeight+MaxSyncHeightGap {
+	} else if maxPeerHeight <= localHeight+MaxSyncHeightGap && localHeight <= maxPeerHeight {
 		// Peer is slightly ahead (within MaxSyncHeightGap blocks) — normal
-		// sync lag on the same chain. Treat as synced so mining can proceed.
+		// sync lag on the same chain. Only treat as synced when local is NOT ahead.
+		// If local is ahead but has less work, it is a fork — do NOT set progress=1.0.
 		progress = 1.0
 	} else {
 		progress = maxSyncProgressWithPartialPeers
@@ -1137,7 +1138,21 @@ func (s *SyncLoop) performSyncStep() {
 				workDiff.String(), minForkWorkDiff)
 		}
 	} else if maxPeerHeight < currentHeight {
-		// Peer has lower height - we are ahead, no sync needed
+		// Peer has lower height — check if it has more work (fork situation)
+		if bestPeerWork.Cmp(localWork) > 0 {
+			// Fork: local ahead in height but behind in cumulative work.
+			// Do NOT set progress=1.0 — mining would produce orphaned blocks.
+			// The blockKeeper's checkSyncType→syncTypeNone→backoff handles retry.
+			// chain.AddBlock redeems the fork when peers propagate new blocks via P2P.
+			s.mu.Lock()
+			s.syncProgress = maxSyncProgressWithPartialPeers
+			s.syncRoundInProgress = false
+			s.lastUpdateTime = time.Now()
+			s.mu.Unlock()
+			log.Printf("[Sync] Fork detected: peer lower H=%d but more work (localH=%d, progress=%.4f) — mining suspended, awaiting chain resolution via P2P",
+				maxPeerHeight, currentHeight, maxSyncProgressWithPartialPeers)
+			return
+		}
 		log.Printf("[Sync] Peer has lower height (%d < %d) - no sync needed, local chain is longer", maxPeerHeight, currentHeight)
 	}
 

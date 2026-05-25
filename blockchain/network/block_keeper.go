@@ -1084,12 +1084,9 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 			}
 			return syncTypeRegular, bestByWork
 		}
-		log.Printf("[BlockKeeper] checkSyncType: fork detection (peer has more work but lower height=%d, local=%d)",
+		log.Printf("[BlockKeeper] checkSyncType: fork detection (peer has more work but lower height=%d, local=%d) — deferring to chain.AddBlock via P2P propagation",
 			peerHeight, blockHeight)
-		if realPeer := bk.peers.PeerByID(bestByWork.ID()); realPeer != nil && realPeer.Height() > 0 {
-			return syncTypeRegular, realPeer
-		}
-		return syncTypeRegular, bestByWork
+		return syncTypeNone, nil
 	}
 
 	// When work is EQUAL, do NOT trigger fork detection.
@@ -1327,6 +1324,18 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 			log.Printf("[BlockKeeper] dispatchRegularSync: cannot determine peer height for %s (err=%v), skipping sync round", peer.ID(), fetchErr)
 		} else {
 			log.Printf("[BlockKeeper] dispatchRegularSync: peer %s has zero height (live+cached), skipping sync round", peer.ID())
+		}
+		return false
+	}
+
+	if localHeight >= peerHeight {
+		peerWork := bk.getPeerWork(peer)
+		localWork := bk.chain.CanonicalWork()
+		if peerWork != nil && localWork != nil && peerWork.Cmp(localWork) > 0 {
+			log.Printf("[BlockKeeper] dispatchRegularSync: fork recovery needed (localH=%d >= peerH=%d but peer has more work) — deferring to chain.AddBlock via P2P propagation",
+				localHeight, peerHeight)
+		} else {
+			log.Printf("[BlockKeeper] dispatchRegularSync: local ahead (h=%d >= peerH=%d), no sync needed", localHeight, peerHeight)
 		}
 		return false
 	}
