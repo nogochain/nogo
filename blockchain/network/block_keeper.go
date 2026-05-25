@@ -41,9 +41,10 @@ const (
 
 	logCooldownDur = 30 * time.Second
 
-	// Mining safety valve: after consecutiveSyncNoneThreshold no-op sync rounds
-	// (all peers at same height/work), declare sync idle so mining can proceed.
+	// After consecutiveSyncNoneThreshold no-op sync rounds, apply exponential
+	// backoff instead of permanent disable — sync retries with increasing delays.
 	consecutiveSyncNoneThreshold = 3
+	maxSyncCooldown              = 5 * time.Minute
 
 	// NogoChain-style sync type classification for intelligent strategy selection
 	syncTypeNone    = iota // no peer available or already synced
@@ -157,8 +158,7 @@ type blockKeeper struct {
 
 	lastSyncAttempt          time.Time
 	syncCooldown             time.Duration
-	syncIdleConfirmed        bool // true when sync is confirmed complete, mining can proceed
-	consecutiveSyncNoneCount int  // safety valve: tracks consecutive syncTypeNone rounds
+	consecutiveSyncNoneCount int // tracks consecutive syncTypeNone rounds for backoff escalation
 
 	logLimiter *rateLimitedLogger
 
@@ -171,16 +171,7 @@ type blockKeeper struct {
 func (bk *blockKeeper) isActive() bool {
 	bk.syncActiveMu.Lock()
 	defer bk.syncActiveMu.Unlock()
-	if bk.syncIdleConfirmed {
-		return false
-	}
-	if bk.syncActive {
-		return true
-	}
-	if bk.syncCooldown > 0 && time.Since(bk.lastSyncAttempt) < bk.syncCooldown {
-		return true
-	}
-	return false
+	return bk.syncActive
 }
 
 // setPeerSyncInfo is called by updateSyncProgressFromPeers to populate the shared cache.
@@ -1509,7 +1500,7 @@ func (bk *blockKeeper) syncWorker() {
 		select {
 		case <-syncTicker.C:
 			bk.syncActiveMu.Lock()
-			if bk.syncIdleConfirmed {
+			if bk.syncCooldown > 0 && time.Since(bk.lastSyncAttempt) < bk.syncCooldown {
 				bk.syncActiveMu.Unlock()
 				continue
 			}
@@ -1522,9 +1513,7 @@ func (bk *blockKeeper) syncWorker() {
 			bk.syncActive = false
 			bk.lastSyncAttempt = time.Now()
 			if bk.consecutiveSyncNoneCount >= consecutiveSyncNoneThreshold {
-				bk.syncIdleConfirmed = true
-				bk.syncCooldown = 0
-				log.Printf("[BlockKeeper] Sync idle confirmed after %d no-op rounds — mining may now proceed", consecutiveSyncNoneThreshold)
+				bk.applyExponentialBackoff()
 			}
 			bk.syncActiveMu.Unlock()
 
@@ -1532,7 +1521,6 @@ func (bk *blockKeeper) syncWorker() {
 			log.Printf("[BlockKeeper] Fork resolved, triggering immediate re-sync")
 			bk.syncActiveMu.Lock()
 			bk.syncActive = true
-			bk.syncIdleConfirmed = false
 			bk.consecutiveSyncNoneCount = 0
 			bk.syncCooldown = 0
 			bk.syncActiveMu.Unlock()
@@ -1544,8 +1532,7 @@ func (bk *blockKeeper) syncWorker() {
 			bk.lastSyncAttempt = time.Now()
 			if !synced {
 				bk.consecutiveSyncNoneCount = consecutiveSyncNoneThreshold
-				bk.syncIdleConfirmed = true
-				log.Printf("[BlockKeeper] Fork resolved, no sync needed — mining may resume immediately")
+				bk.applyExponentialBackoff()
 			}
 			bk.syncActiveMu.Unlock()
 
@@ -1554,6 +1541,25 @@ func (bk *blockKeeper) syncWorker() {
 			return
 		}
 	}
+}
+
+// applyExponentialBackoff computes cooldown based on consecutive failure count.
+// Escalation: 30s → 1min → 2min → 5min (capped at maxSyncCooldown).
+func (bk *blockKeeper) applyExponentialBackoff() {
+	const baseCooldown = 30 * time.Second
+	periods := bk.consecutiveSyncNoneCount / consecutiveSyncNoneThreshold
+	switch {
+	case periods <= 1:
+		bk.syncCooldown = baseCooldown
+	case periods == 2:
+		bk.syncCooldown = 1 * time.Minute
+	case periods == 3:
+		bk.syncCooldown = 2 * time.Minute
+	default:
+		bk.syncCooldown = maxSyncCooldown
+	}
+	log.Printf("[BlockKeeper] Sync backoff: %d consecutive failures (period=%d), cooldown=%v",
+		bk.consecutiveSyncNoneCount, periods, bk.syncCooldown)
 }
 
 // SetCheckpointCallbacks registers callbacks for checkpoint-based sync.
@@ -1566,7 +1572,6 @@ func (bk *blockKeeper) SetCheckpointCallbacks(getCp func() *core.CheckpointRecor
 func (bk *blockKeeper) TriggerSyncCheck() {
 	bk.syncActiveMu.Lock()
 	bk.syncActive = true
-	bk.syncIdleConfirmed = false
 	bk.consecutiveSyncNoneCount = 0
 	bk.syncCooldown = 0
 	bk.syncActiveMu.Unlock()
