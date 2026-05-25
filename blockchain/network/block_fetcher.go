@@ -36,19 +36,6 @@ type blockFetcher struct {
 	queue      *prque.Prque
 	msgSet     map[string]*blockMsg
 	mu         sync.Mutex
-
-	// onForkBlock is an optional callback triggered when a mined block
-	// is stored as a fork (accepted=false, err=nil). This enables the
-	// caller to initiate real-time fork resolution and reorg.
-	onForkBlock func(peerID string, block *core.Block)
-}
-
-// SetOnForkBlock registers a callback for fork blocks detected during
-// mined block processing. Used by SyncLoop to trigger TriggerForkReorg.
-func (f *blockFetcher) SetOnForkBlock(cb func(peerID string, block *core.Block)) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.onForkBlock = cb
 }
 
 // newBlockFetcher creates a blockFetcher for P2P block processing.
@@ -150,17 +137,8 @@ func (f *blockFetcher) insert(msg *blockMsg) {
 		return
 	}
 
-	// Block was stored as fork (not rejected). The canonical chain
-	// may still be on the other fork. Trigger fork resolution to
-	// compare cumulative work and reorg if peer chain is heavier.
-	log.Printf("[BlockFetcher] Block stored as fork height=%d hash=%s peer=%s, triggering fork reorg check",
+	log.Printf("[BlockFetcher] Block stored as fork height=%d hash=%s peer=%s (chain handles reorg atomically)",
 		msg.block.GetHeight(), hex.EncodeToString(msg.block.Hash)[:16], msg.peerID)
-	f.mu.Lock()
-	cb := f.onForkBlock
-	f.mu.Unlock()
-	if cb != nil {
-		cb(msg.peerID, msg.block)
-	}
 }
 
 func (f *blockFetcher) processNewBlock(msg *blockMsg) {

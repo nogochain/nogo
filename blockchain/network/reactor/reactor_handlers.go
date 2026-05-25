@@ -131,7 +131,6 @@ type SyncLoopInterface interface {
 	IsSyncing() bool
 	IsSynced() bool
 	TriggerSyncCheck()
-	TriggerForkReorg(peerID string, forkBlock *core.Block)
 	DeliverSyncBlock(peerID string, block *core.Block)
 	DeliverCheckpoint(record *core.CheckpointRecord)
 }
@@ -374,13 +373,8 @@ func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
 						}(&block, peerID)
 					}
 				} else {
-					// Fork block stored — trigger real-time fork resolution
-					// using the complete block to bypass height-gated checkSyncType.
-					if h.syncLoop != nil {
-						log.Printf("[SyncHandler] Fork block detected (%d from %s), triggering real-time reorg check",
-							block.GetHeight(), peerID)
-						h.syncLoop.TriggerForkReorg(peerID, &block)
-					}
+					log.Printf("[SyncHandler] Fork block stored (%d from %s), chain.AddBlock handles reorg atomically",
+						block.GetHeight(), peerID)
 				}
 			}
 		}
@@ -1117,17 +1111,8 @@ func (h *BlockReactorHandler) OnBlock(peerID string, blocks []*core.Block) error
 				}(block, peerID)
 			}
 		} else {
-			// Block stored as fork (prevHash mismatch or height conflict).
-			// Directly trigger fork resolution using the complete block received
-			// from the peer. This bypasses the height-gated checkSyncType which
-			// returns syncTypeNone when localHeight >= peerHeight.
-			// The ForkResolver compares cumulative work and executes reorg
-			// if the peer's chain is heavier.
-			if h.syncLoop != nil {
-				log.Printf("[BlockHandler] Fork block detected (%d from %s), triggering real-time reorg check",
-					block.GetHeight(), peerID)
-				h.syncLoop.TriggerForkReorg(peerID, block)
-			}
+			log.Printf("[BlockHandler] Fork block stored (%d from %s), chain.AddBlock handles reorg atomically",
+				block.GetHeight(), peerID)
 		}
 	}
 

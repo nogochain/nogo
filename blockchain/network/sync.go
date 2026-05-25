@@ -61,9 +61,6 @@ const (
 	// (no recent sync activity while in isolated mode)
 	StuckNodeThreshold = 5 * time.Minute
 
-	// fetchChainInfoTimeout is the timeout for fetching peer chain info during fork resolution
-	fetchChainInfoTimeout = 5 * time.Second
-
 	// ProgressChannelBufferSize is the buffer size for progress update channel
 	ProgressChannelBufferSize = 10
 
@@ -74,12 +71,6 @@ const (
 	// of connected peers responded to chain info queries.
 	// Prevents IsSynced() returning true when high-height peers are slow/unresponsive.
 	maxSyncProgressWithPartialPeers = 0.99
-
-	// minWorkDiffRatioForForkSync is the minimum relative work difference to justify
-	// triggering a fork re-sync when local and peer heights are the same.
-	// Must match ForkResolver.MinWorkDiffThreshold to prevent infinite fork-reorg loops.
-	// For total work ~2.5e27, minimum absolute diff = ~2.5e12 work units.
-	minWorkDiffRatioForForkSync = 1e-15
 
 	// minForkWorkDiff is the minimum ABSOLUTE cumulative work difference to consider
 	// a peer chain significantly ahead. Fixed at 2^32 (~4.3e9) — the work of one
@@ -151,8 +142,9 @@ type SyncLoop struct {
 	activeWorkers  atomic.Int32 // live goroutine count for block download/validation
 
 	// UNIFIED FORK RESOLUTION (core-main based architecture)
-	forkResolver     *forkresolution.ForkResolver
-	multiNodeArbiter *forkresolution.MultiNodeArbitrator
+	// ForkResolver serves as chain's ReorgExecutor (injected via node.go).
+	// All reorg decisions are made atomically by chain.AddBlock under chain.mu.
+	forkResolver *forkresolution.ForkResolver
 
 	// NEW: Stateless sync components (replace old isSyncing state machine)
 	blockKeeper   *blockKeeper  // Core sync coordinator (handles startSync, require*)
@@ -167,8 +159,7 @@ type SyncLoop struct {
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	syncProgress        float64
-	syncRoundInProgress bool       // CRITICAL: Prevent concurrent SyncWithPeer execution
-	reorgMu             sync.Mutex // CRITICAL: Prevent concurrent fork reorg operations (P0)
+	syncRoundInProgress bool // CRITICAL: Prevent concurrent SyncWithPeer execution
 	lastUpdateTime      time.Time
 
 	syncStatusCh chan SyncStatusEvent // sync→miner event channel for two-layer mining decision
@@ -248,14 +239,7 @@ func NewSyncLoop(pm PeerAPI, bc BlockchainInterface, miner Miner,
 	if fetcherChainImpl, ok := bc.(BlockFetcherChainInterface); ok {
 		if fetcherPeerImpl, ok := pm.(BlockFetcherPeerSetInterface); ok {
 			sm.blockFetcher = newBlockFetcher(fetcherChainImpl, fetcherPeerImpl)
-			// CRITICAL: Register fork block callback for real-time reorg
-			// When a mined block arrives as a fork (not canonical), the
-			// blockFetcher triggers this callback to compare cumulative work
-			// and request a reorg if the peer chain is heavier.
-			sm.blockFetcher.SetOnForkBlock(func(peerID string, block *core.Block) {
-				sm.TriggerForkReorg(peerID, block)
-			})
-			log.Printf("[SyncManager] BlockFetcher created, blockProcessor started, fork callback registered")
+			log.Printf("[SyncManager] BlockFetcher created, blockProcessor started")
 		} else {
 			log.Printf("[SyncManager] WARNING: PeerAPI does not implement BlockFetcherPeerSetInterface, blockFetcher not created")
 		}
@@ -370,16 +354,7 @@ func (s *SyncLoop) Start(ctx context.Context) error {
 				s.metrics.RecordForkDetected()
 			}
 		})
-
-		// Create MultiNodeArbitrator for enhanced consensus in 3+ node networks
-		s.multiNodeArbiter = forkresolution.NewMultiNodeArbitrator(s.ctx, s.forkResolver)
-
-		// CRITICAL: Inject unified fork resolver into blockKeeper
-		if s.blockKeeper != nil {
-			s.blockKeeper.SetForkResolver(s.forkResolver)
-			s.blockKeeper.SetMultiNodeArbitrator(s.multiNodeArbiter)
-			log.Printf("[SyncManager] Unified ForkResolver + MultiNodeArbitrator injected into BlockKeeper")
-		}
+		log.Printf("[SyncManager] ForkResolver created for unified reorg execution (chain.SetReorgExecutor)")
 	}
 
 	// CRITICAL: DISABLED old sync loop - replaced by blockKeeper.syncWorker()
@@ -437,15 +412,26 @@ func (s *SyncLoop) startPeerSyncProgressMonitor() {
 	}
 }
 
-// updateSyncProgressFromPeers computes sync progress by comparing local cumulative work
-// against the peer with the most cumulative work (heaviest chain rule).
-// progress=1.0 means the local chain is the canonical chain and mining can proceed.
-// progress<1.0 means a peer has more work, triggering sync/fork-reorg and blocking mining.
+// updateSyncProgressFromPeers computes sync progress based on local vs peer chain state.
+// Uses atomic big.Int comparison (no float64 precision loss).
+// progress=1.0: local chain is the most-work chain, mining can proceed.
+// progress=0.99: peer has more work and is ahead, sync is needed.
+//
+// Fork resolution is handled atomically by chain.AddBlock (single entry point).
+// This function does NOT trigger any fork reorg — chain.AddBlock's internal
+// shouldReorgToHeaviestLocked/reorganizeToHeaviestLocked handle that under chain.mu.
+//
+// Progress calculation is intentionally simple:
+//
+//	localWork >= bestByWork  →  progress = 1.0 (we are the heaviest chain)
+//	maxPeerHeight within gap  →  progress = 1.0 (just behind on same chain)
+//	otherwise                 →  progress = 0.99 (need sync)
 func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	if s == nil || s.pm == nil || s.bc == nil {
 		return
 	}
 
+	const MaxSyncHeightGap = 3
 	peers := s.pm.GetActivePeers()
 	if len(peers) == 0 {
 		s.mu.Lock()
@@ -460,40 +446,21 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	if localTip != nil {
 		localWork = s.bc.CanonicalWork()
 	}
+	localHeight := s.getLocalHeight()
 
 	responsivePeers := 0
 	var bestByWork *big.Int
 	var bestByWorkPeerID string
 	var bestByWorkLatestHash string
-	var maxPeerHeight uint64
 	var bestByWorkHeight uint64
-	localHeight := s.getLocalHeight()
+	var maxPeerHeight uint64
 
-	// Pre-compute local tip hash for multi-node consensus check.
-	// When two or more peer chains exist at the same height (classic Nakamoto fork),
-	// a single peer with slightly more work (due to serialization precision) must not
-	// block progress. If ANY peer at the same height confirms our tip hash, the network
-	// majority is on our chain and we are synced.
-	var localHashHex string
-	sameHeightSameHashFound := false
-	if localTip != nil {
-		localHashHex = hex.EncodeToString(localTip.Hash)
-	}
-
-	// Single-pass scan: find the peer with the most cumulative work,
-	// track the maximum peer height for height-gap safety check,
-	// AND detect whether any peer at our height confirms our tip hash.
 	for _, peer := range peers {
 		info, err := s.pm.FetchChainInfo(ctx, peer)
 		if err != nil || info == nil {
 			continue
 		}
 		responsivePeers++
-
-		// Multi-node consensus: does any peer at our height share our tip hash?
-		if !sameHeightSameHashFound && localHashHex != "" && info.Height == localHeight && info.LatestHash == localHashHex {
-			sameHeightSameHashFound = true
-		}
 
 		if info.Height > maxPeerHeight {
 			maxPeerHeight = info.Height
@@ -517,152 +484,36 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 		return
 	}
 
-	// CRITICAL FIX: if we received responses but no peer reported valid work,
-	// do NOT set progress to 1.0. This can happen when the sync peer is busy
-	// serving blocks and returns incomplete chain info. Setting progress=1.0
-	// here would allow IsSynced() to return true prematurely.
 	if bestByWork == nil {
 		log.Printf("[Sync] updateSyncProgressFromPeers: %d peers responded but none reported valid work, keeping current progress=%.4f",
 			responsivePeers, s.syncProgress)
 		return
 	}
 
-	// CRITICAL: Use big.Int comparison directly instead of big.Float→Float64
-	// Float64 has only ~16 significant digits, but cumulative work values
-	// can exceed 30 decimal digits. Converting via big.Float.Quo().Float64()
-	// loses precision and rounds a ratio like 0.999999999999972 to 1.0,
-	// causing IsSynced() to return true when the node is thousands of blocks behind.
-	hashMatched := false
+	// Nakamoto consensus: the chain with the most cumulative work is canonical.
+	// Fork resolution is handled inside chain.AddBlock — we do NOT trigger
+	// any reorg here. This function computes progress only.
 	var progress float64
 	if localWork.Cmp(bestByWork) >= 0 {
 		progress = 1.0
-		log.Printf("[Sync] Progress check: localWork >= bestByWork, progress=1.0 localH=%d bestByWorkH=%d maxPeerH=%d",
-			localHeight, bestByWorkHeight, maxPeerHeight)
-	} else if sameHeightSameHashFound {
-		// Multi-node consensus: at least one peer at the same height confirms our
-		// tip hash. The bestByWork peer may have a divergent hash (Nakamoto fork) but
-		// the network majority is on our chain. Treat as synced so mining can proceed.
-		hashMatched = true
+	} else if maxPeerHeight <= localHeight+MaxSyncHeightGap {
+		// Peer is slightly ahead (within MaxSyncHeightGap blocks) — normal
+		// sync lag on the same chain. Treat as synced so mining can proceed.
 		progress = 1.0
-		log.Printf("[Sync] Multi-node consensus: peer(s) confirm our tip hash at H=%d, progress=1.0 (bestByWork=%s diverges, work diff is precision noise)",
-			localHeight, bestByWorkPeerID)
-	} else if localTip != nil && bestByWorkLatestHash != "" {
-		localHashHex := hex.EncodeToString(localTip.Hash)
-		// Hash comparison is only meaningful when the bestByWork peer is at or ahead of us.
-		// When bestByWorkHeight < localHeight, the peer's tip is at a different height —
-		// hashes will always differ, making the comparison meaningless noise that falsely
-		// sets progress=0.99 and blocks mining. Use maxPeerHeight as fallback instead.
-		if bestByWorkHeight >= localHeight {
-			if localHashHex == bestByWorkLatestHash {
-				hashMatched = true
-				progress = 1.0
-			} else {
-				progress = maxSyncProgressWithPartialPeers
-			}
-			log.Printf("[Sync] Hash comparison: local=%s... peer=%s... match=%v localH=%d bestByWorkH=%d maxPeerH=%d",
-				localHashHex[:16], bestByWorkLatestHash[:16], hashMatched, localHeight, bestByWorkHeight, maxPeerHeight)
-		} else {
-			// We have more blocks but less cumulative work (longer fork, lower difficulty).
-			// Tip hash comparison is meaningless across different heights.
-			// Use maxPeerHeight to decide: if no peer is ahead of us, treat as synced.
-			if maxPeerHeight > localHeight {
-				progress = maxSyncProgressWithPartialPeers
-			} else {
-				progress = 1.0
-			}
-			log.Printf("[Sync] Height-gap skip: bestByWorkH=%d < localH=%d, hash comparison deferred (maxPeerH=%d), progress=%.2f",
-				bestByWorkHeight, localHeight, maxPeerHeight, progress)
-		}
 	} else {
 		progress = maxSyncProgressWithPartialPeers
-		log.Printf("[Sync] Hash comparison: SKIPPED (localTip=%v, bestByWorkLatestHash=%q) localH=%d bestByWorkH=%d maxPeerH=%d",
-			localTip != nil, bestByWorkLatestHash, localHeight, bestByWorkHeight, maxPeerHeight)
 	}
 
-	// Height-gap safety check: only when hashes differ (same chain = sync in progress, not fork).
-	// When hashes match, the height gap means we're just behind on the same chain.
-	const MaxSyncHeightGap = 3
-	if maxPeerHeight > localHeight+MaxSyncHeightGap && !hashMatched {
-		progress = maxSyncProgressWithPartialPeers
-		log.Printf("[Sync] Height-gap safety: peer has %d more blocks (local=%d, maxPeer=%d), forcing progress=%.4f",
-			maxPeerHeight-localHeight, localHeight, maxPeerHeight, maxSyncProgressWithPartialPeers)
-	}
+	log.Printf("[Sync] Progress: localH=%d maxPeerH=%d bestByWorkH=%d localWork>=bestByWork=%v progress=%.2f",
+		localHeight, maxPeerHeight, bestByWorkHeight, localWork.Cmp(bestByWork) >= 0, progress)
 
 	s.mu.Lock()
 	s.syncProgress = progress
 	s.lastUpdateTime = time.Now()
 	s.mu.Unlock()
 
-	// Populate shared peerSyncInfo cache in blockKeeper.
-	// This eliminates the duplicate independent peer query in checkSyncType,
-	// ensuring both sync reactor and blockKeeper use the same tip hash for
-	// precision-error detection (single source of truth).
-	if s.blockKeeper != nil && bestByWork != nil && bestByWorkPeerID != "" {
+	if s.blockKeeper != nil && bestByWorkPeerID != "" {
 		s.blockKeeper.setPeerSyncInfo(bestByWorkPeerID, bestByWorkHeight, bestByWork, bestByWorkLatestHash)
-	}
-
-	// Trigger fork reorg when the work-optimal peer has the same or higher height
-	// but more cumulative work. This covers two scenarios:
-	//
-	// 1. bestByWorkHeight == localHeight: Classic Nakamoto fork — two miners found
-	//    valid blocks at the same height, one accumulated more work. Use timestamp
-	//    resolution (first-come-first-served) when work diff is negligible.
-	//
-	// 2. bestByWorkHeight > localHeight: The work-optimal peer is AHEAD on a different
-	//    chain (more blocks + more cumulative work). The longer chain with more work is
-	//    the canonical one — timestamp comparison at different heights is misleading
-	//    (our fork block may be earlier but the majority network is ahead).
-	//    Skip timestamp resolution and directly rollback + resync.
-	//
-	// When bestByWorkHeight < localHeight: we have more blocks but less cumulative work
-	// (built on a fork with lower difficulty). Tip hash comparison at different heights
-	// is meaningless — defer to blockKeeper's checkSyncType for fork resolution.
-	if bestByWork != nil && localWork.Cmp(bestByWork) < 0 && bestByWorkPeerID != "" {
-		if localTip != nil && bestByWorkLatestHash != "" {
-			localHashHex := hex.EncodeToString(localTip.Hash)
-			if localHashHex == bestByWorkLatestHash {
-			} else if bestByWorkHeight >= localHeight {
-				workDiff := new(big.Int).Sub(bestByWork, localWork)
-				minDiff := new(big.Int).SetUint64(minForkWorkDiff)
-				if workDiff.Cmp(minDiff) >= 0 {
-					log.Printf("[Sync] Peer %s has more cumulative work (diff=%s, abs >= %d) at H=%d (local H=%d), triggering fork reorg",
-						bestByWorkPeerID, workDiff.String(), minForkWorkDiff, bestByWorkHeight, localHeight)
-					s.TriggerForkReorgForPeer(bestByWorkPeerID, false)
-				} else if bestByWorkHeight == localHeight && !sameHeightSameHashFound {
-					// MINORITY FORK: no peer at our height confirms our tip hash.
-					// Timestamp tiebreaker is meaningless — we are the only node on this fork.
-					// Force work-based reorg to join the majority chain.
-					log.Printf("[Sync] Peer %s has insignificantly more work and NO peer confirms our hash at H=%d — minority fork, forcing reorg",
-						bestByWorkPeerID, localHeight)
-					s.TriggerForkReorgForPeer(bestByWorkPeerID, true)
-				} else {
-					log.Printf("[Sync] Peer %s has insignificantly more work (diff=%s < %d) at H=%d (local H=%d), triggering timestamp-based fork resolution",
-						bestByWorkPeerID, workDiff.String(), minForkWorkDiff, bestByWorkHeight, localHeight)
-					s.TriggerForkReorgForPeer(bestByWorkPeerID, false)
-				}
-			} else {
-				// bestByWorkHeight < localHeight: we have more blocks, less work.
-				// Tip hash comparison at different heights is meaningless.
-				log.Printf("[Sync] Fork reorg deferred: bestByWork peer %s at H=%d < local H=%d (work=%s > local=%s), deferring to blockKeeper",
-					bestByWorkPeerID, bestByWorkHeight, localHeight, bestByWork.String(), localWork.String())
-			}
-		} else if bestByWorkHeight >= localHeight {
-			workDiff := new(big.Int).Sub(bestByWork, localWork)
-			minDiff := new(big.Int).SetUint64(minForkWorkDiff)
-			if workDiff.Cmp(minDiff) >= 0 {
-				log.Printf("[Sync] Peer %s has more cumulative work (diff=%s, abs >= %d) at H=%d (local H=%d), triggering fork reorg",
-					bestByWorkPeerID, workDiff.String(), minForkWorkDiff, bestByWorkHeight, localHeight)
-				s.TriggerForkReorgForPeer(bestByWorkPeerID, false)
-			} else if bestByWorkHeight == localHeight && !sameHeightSameHashFound {
-				log.Printf("[Sync] Peer %s has insignificantly more work and NO peer confirms our hash at H=%d — minority fork, forcing reorg",
-					bestByWorkPeerID, localHeight)
-				s.TriggerForkReorgForPeer(bestByWorkPeerID, true)
-			} else {
-				log.Printf("[Sync] Peer %s has insignificantly more work (diff=%s < %d) at H=%d (local H=%d), triggering timestamp-based fork resolution",
-					bestByWorkPeerID, workDiff.String(), minForkWorkDiff, bestByWorkHeight, localHeight)
-				s.TriggerForkReorgForPeer(bestByWorkPeerID, false)
-			}
-		}
 	}
 
 	event := SyncStatusEvent{Timestamp: time.Now()}
@@ -898,332 +749,6 @@ func (s *SyncLoop) TriggerSyncCheck() {
 	}
 }
 
-// TriggerForkReorg directly triggers fork resolution when a fork block is received.
-// Unlike TriggerSyncCheck which goes through height-gated checkSyncType,
-// this fetches the peer's actual chain info to accurately compare cumulative work,
-// then executes reorganization if the peer's chain is heavier.
-// CRITICAL: Enables real-time fork resolution when localHeight >= peerHeight,
-// which checkSyncType would otherwise classify as syncTypeNone.
-func (s *SyncLoop) TriggerForkReorg(peerID string, forkBlock *core.Block) {
-	if s == nil || forkBlock == nil {
-		return
-	}
-
-	s.mu.RLock()
-	forkResolver := s.forkResolver
-	pm := s.pm
-	ctx := s.ctx
-	bc := s.bc
-	bk := s.blockKeeper
-	s.mu.RUnlock()
-
-	if pm == nil {
-		log.Printf("[Sync] TriggerForkReorg: peer API is nil, cannot resolve fork")
-		return
-	}
-	if ctx == nil {
-		log.Printf("[Sync] TriggerForkReorg: ctx is nil, sync loop not started")
-		return
-	}
-
-	log.Printf("[Sync] TriggerForkReorg: fork block h=%d from peer=%s, evaluating reorg",
-		forkBlock.GetHeight(), peerID)
-
-	peerIDCopy := peerID
-	blockCopy := forkBlock
-
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[Sync] TriggerForkReorg panic recovered: %v", r)
-			}
-		}()
-
-		if !s.reorgMu.TryLock() {
-			log.Printf("[Sync] TriggerForkReorg: another reorg in progress, skipping")
-			return
-		}
-		defer s.reorgMu.Unlock()
-
-		localWork := big.NewInt(0)
-		if bc != nil {
-			if cw := bc.CanonicalWork(); cw != nil {
-				localWork.Set(cw)
-			}
-		}
-
-		// Fetch peer's actual chain info for accurate work comparison.
-		// calculateCumulativeWorkLocked cannot accurately compute remote chain work
-		// because it falls back to local canonical chain for missing fork parents.
-		fetchCtx, cancel := context.WithTimeout(context.Background(), fetchChainInfoTimeout)
-		defer cancel()
-
-		chainInfo, err := pm.FetchChainInfo(fetchCtx, peerIDCopy)
-		if err != nil {
-			log.Printf("[Sync] TriggerForkReorg: fetch chain info from %s failed: %v; local work=%s, falling back to sync",
-				peerIDCopy, err, localWork.String())
-			if bk != nil {
-				bk.TriggerImmediateReSync()
-			}
-			return
-		}
-
-		peerWork := chainInfo.Work
-		if peerWork == nil {
-			peerWork = big.NewInt(0)
-		}
-
-		log.Printf("[Sync] TriggerForkReorg: comparing work - local=%s peer=%s peer_h=%d",
-			localWork.String(), peerWork.String(), chainInfo.Height)
-
-		if bc != nil {
-			if localTip := bc.LatestBlock(); localTip != nil {
-				localHashHex := hex.EncodeToString(localTip.Hash)
-				if localHashHex == chainInfo.LatestHash {
-					log.Printf("[Sync] TriggerForkReorg: same tip hash %s, work diff is precision error, skipping",
-						localHashHex[:16])
-					return
-				}
-			}
-		}
-
-		if peerWork.Cmp(localWork) <= 0 {
-			log.Printf("[Sync] TriggerForkReorg: local chain is heavier, keeping current chain")
-			return
-		}
-
-		// Check if work difference is significant. When the absolute diff is below
-		// minForkWorkDiff (one minimum-difficulty block), the work advantage is negligible.
-		// Use block timestamp as tiebreaker: the chain whose tip block has an earlier
-		// timestamp wins (first-come-first-served).
-		workDiff := new(big.Int).Sub(peerWork, localWork)
-		minDiff := new(big.Int).SetUint64(minForkWorkDiff)
-
-		if workDiff.Cmp(minDiff) < 0 {
-			resolved := s.resolveForkByTimestamp(ctx, peerIDCopy, blockCopy.GetHeight())
-			if !resolved {
-				return
-			}
-		}
-
-		log.Printf("[Sync] TriggerForkReorg: peer chain heavier, requesting fork resolution")
-
-		if forkResolver != nil && bk != nil {
-			rollbackTarget := blockCopy.GetHeight()
-			if rollbackTarget > 0 {
-				rollbackTarget--
-			}
-			if rbErr := forkResolver.RollbackToHeight(rollbackTarget); rbErr != nil {
-				log.Printf("[Sync] TriggerForkReorg: rollback to height %d failed: %v, falling back to resync",
-					rollbackTarget, rbErr)
-			} else {
-				log.Printf("[Sync] TriggerForkReorg: rolled back to height %d, triggering re-sync",
-					rollbackTarget)
-			}
-			bk.TriggerImmediateReSync()
-		} else {
-			log.Printf("[Sync] TriggerForkReorg: forkResolver or blockKeeper is nil, falling back to immediate re-sync")
-			if bk != nil {
-				bk.TriggerImmediateReSync()
-			}
-		}
-	}()
-}
-
-// resolveForkByTimestamp handles fork resolution when cumulative work difference is negligible.
-// In this case, the blockchain tip with the EARLIER timestamp wins (first-come-first-served).
-// Returns true if the peer's chain should replace ours (peer timestamp is earlier).
-// Returns false if our local chain is the canonical one (local timestamp is earlier).
-func (s *SyncLoop) resolveForkByTimestamp(ctx context.Context, peerID string, localHeight uint64) bool {
-	s.mu.RLock()
-	bc := s.bc
-	pm := s.pm
-	s.mu.RUnlock()
-
-	if bc == nil || pm == nil {
-		return false
-	}
-
-	localTip := bc.LatestBlock()
-	if localTip == nil {
-		return false
-	}
-	localTime := localTip.Header.TimestampUnix
-
-	fetchCtx, cancel := context.WithTimeout(context.Background(), fetchChainInfoTimeout)
-	defer cancel()
-	peerTip, err := pm.FetchBlockByHeight(fetchCtx, peerID, localHeight)
-	if err != nil {
-		log.Printf("[Sync] resolveForkByTimestamp: failed to fetch peer %s tip: %v, keeping local chain",
-			peerID, err)
-		return false
-	}
-	if peerTip == nil {
-		log.Printf("[Sync] resolveForkByTimestamp: peer %s returned nil tip, keeping local chain",
-			peerID)
-		return false
-	}
-
-	peerTime := peerTip.Header.TimestampUnix
-
-	if localTime <= peerTime {
-		log.Printf("[Sync] resolveForkByTimestamp: local time=%d <= peer time=%d, keeping local chain (our block is earlier)",
-			localTime, peerTime)
-		return false
-	}
-
-	localHash := hex.EncodeToString(localTip.Hash)
-	peerHash := hex.EncodeToString(peerTip.Hash)
-	if localHash == peerHash {
-		log.Printf("[Sync] resolveForkByTimestamp: local and peer have same tip hash %s, work diff is precision error, treating as synced",
-			localHash[:16])
-		return false
-	}
-
-	log.Printf("[Sync] resolveForkByTimestamp: peer time=%d < local time=%d, peer's block is earlier, initiating reorg (local_hash=%s, peer_hash=%s)",
-		peerTime, localTime, localHash[:16], peerHash[:16])
-	return true
-}
-
-// TriggerForkReorgForPeer triggers fork resolution when a periodic scan detects
-// that a peer's chain has more cumulative work than the local canonical chain.
-// Unlike TriggerForkReorg, this does not require a specific fork block - it fetches
-// the peer's latest block and chain info to perform the comparison.
-// CRITICAL: This is the mechanism for detecting deep forks where the peer chain
-// has mined significantly more blocks (and accumulated more work) while the local
-// node was unaware of the fork.
-func (s *SyncLoop) TriggerForkReorgForPeer(peerID string, forceReorg bool) {
-	if s == nil {
-		return
-	}
-
-	s.mu.RLock()
-	forkResolver := s.forkResolver
-	pm := s.pm
-	ctx := s.ctx
-	bc := s.bc
-	bk := s.blockKeeper
-	s.mu.RUnlock()
-
-	if pm == nil || ctx == nil {
-		return
-	}
-
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[Sync] TriggerForkReorgForPeer panic recovered: %v", r)
-			}
-		}()
-
-		localWork := big.NewInt(0)
-		localHeight := uint64(0)
-		if bc != nil {
-			if cw := bc.CanonicalWork(); cw != nil {
-				localWork.Set(cw)
-			}
-			if tip := bc.LatestBlock(); tip != nil {
-				localHeight = tip.GetHeight()
-			}
-		}
-
-		fetchCtx, cancel := context.WithTimeout(context.Background(), fetchChainInfoTimeout)
-		defer cancel()
-
-		// CRITICAL: Do NOT hold reorgMu during FetchChainInfo (up to 5s timeout).
-		// Holding the lock here blocks TriggerForkReorg from the block handler,
-		// preventing fork blocks from being processed during the wait.
-		// Fetch first, then acquire the lock only for the rollback+resync phase.
-		chainInfo, err := pm.FetchChainInfo(fetchCtx, peerID)
-		if err != nil {
-			log.Printf("[Sync] TriggerForkReorgForPeer: fetch chain info from %s failed: %v",
-				peerID, err)
-			return
-		}
-
-		if !s.reorgMu.TryLock() {
-			log.Printf("[Sync] TriggerForkReorgForPeer: another reorg in progress, skipping")
-			return
-		}
-		defer s.reorgMu.Unlock()
-
-		// Re-read local state after acquiring lock (chain may have changed).
-		if bc != nil {
-			if cw := bc.CanonicalWork(); cw != nil {
-				localWork.Set(cw)
-			}
-			if tip := bc.LatestBlock(); tip != nil {
-				localHeight = tip.GetHeight()
-			}
-		}
-
-		peerWork := chainInfo.Work
-		if peerWork == nil {
-			peerWork = big.NewInt(0)
-		}
-
-		if peerWork.Cmp(localWork) <= 0 {
-			return
-		}
-
-		if bc != nil {
-			if localTip := bc.LatestBlock(); localTip != nil {
-				localHashHex := hex.EncodeToString(localTip.Hash)
-				if localHashHex == chainInfo.LatestHash {
-					log.Printf("[Sync] TriggerForkReorgForPeer: same tip hash %s, work diff is precision error, skipping",
-						localHashHex[:16])
-					return
-				}
-			}
-		}
-
-		// Check if work difference is significant. When the absolute diff is below
-		// minForkWorkDiff (one minimum-difficulty block), the work advantage is negligible.
-		// Use block timestamp as tiebreaker: the chain whose tip block has an earlier
-		// timestamp wins (first-come-first-served).
-		//
-		// MINORITY FORK GUARD: When forceReorg=true, the caller has already determined
-		// we are the only node on our fork (no peer confirms our tip hash at this height).
-		// Timestamp tiebreaker is meaningless for minority forks — skip directly to rollback.
-		workDiff := new(big.Int).Sub(peerWork, localWork)
-		minDiff := new(big.Int).SetUint64(minForkWorkDiff)
-
-		if workDiff.Cmp(minDiff) < 0 && !forceReorg {
-			resolved := s.resolveForkByTimestamp(ctx, peerID, localHeight)
-			if !resolved {
-				return
-			}
-		}
-
-		log.Printf("[Sync] TriggerForkReorgForPeer: peer=%s has more work local=%s peer=%s local_h=%d peer_h=%d, rolling back and re-syncing",
-			peerID, localWork.String(), peerWork.String(), localHeight, chainInfo.Height)
-
-		if forkResolver != nil && bk != nil {
-			if localHeight > 0 {
-				rollbackTarget := chainInfo.Height
-				if rollbackTarget > 0 {
-					rollbackTarget--
-				}
-				if rollbackTarget >= localHeight {
-					rollbackTarget = localHeight - 1
-				}
-				if rbErr := forkResolver.RollbackToHeight(rollbackTarget); rbErr != nil {
-					log.Printf("[Sync] TriggerForkReorgForPeer: rollback to height %d failed: %v, falling back to resync",
-						rollbackTarget, rbErr)
-				} else {
-					log.Printf("[Sync] TriggerForkReorgForPeer: rolled back to height %d, triggering re-sync",
-						rollbackTarget)
-				}
-			} else {
-				log.Printf("[Sync] TriggerForkReorgForPeer: localHeight=0 (genesis only), no rollback needed — triggering re-sync")
-			}
-			bk.TriggerImmediateReSync()
-		} else if bk != nil {
-			bk.TriggerImmediateReSync()
-		}
-	}()
-}
-
 // LatestWork returns the local chain's canonical work as a string for logging.
 func (s *SyncLoop) LatestWork() string {
 	if s.bc != nil {
@@ -1414,19 +939,6 @@ func (s *SyncLoop) updatePeerStateManagement(block *core.Block) {
 		if len(activePeers) > 0 {
 			for _, peer := range activePeers {
 				s.updatePeerState(peer, block)
-			}
-
-			// Update unified ForkResolver with peer state information
-			if s.forkResolver != nil && s.multiNodeArbiter != nil {
-				for _, peerID := range activePeers {
-					s.multiNodeArbiter.UpdatePeerState(
-						peerID,
-						hex.EncodeToString(block.Hash),
-						block.GetHeight(),
-						s.bc.CanonicalWork(),
-						8,
-					)
-				}
 			}
 		}
 	}
@@ -2475,11 +1987,6 @@ func (s *SyncLoop) fetchBlockWithRetry(ctx context.Context, peer string, prevHas
 // GetForkResolver returns the ForkResolutionEngine instance for external access
 func (s *SyncLoop) GetForkResolver() *forkresolution.ForkResolver {
 	return s.forkResolver
-}
-
-// GetMultiNodeArbitrator returns the multi-node arbitrator for external access
-func (s *SyncLoop) GetMultiNodeArbitrator() *forkresolution.MultiNodeArbitrator {
-	return s.multiNodeArbiter
 }
 
 // findCommonAncestorHeight finds the common ancestor height between local chain and peer chain.
