@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/core"
@@ -13,6 +14,9 @@ import (
 )
 
 const broadcastTimeout = 10 * time.Second
+
+const recentBlockDedupWindow = 10 * time.Second
+const maxRecentBlockDedupSize = 512
 
 // ReactorHandlers holds the concrete implementations of all reactor handler
 // interfaces. It bridges the reactor message-parsing layer to the actual
@@ -122,8 +126,10 @@ func (h *ReactorHandlers) GetCheckpointVoter() *core.CheckpointVoter {
 // SyncReactorHandler handles sync-protocol messages by querying the local
 // chain and responding to peers, or by processing data received from peers.
 type SyncReactorHandler struct {
-	handlers *ReactorHandlers
-	syncLoop SyncLoopInterface
+	handlers       *ReactorHandlers
+	syncLoop       SyncLoopInterface
+	recentBlocksMu sync.Mutex
+	recentBlocks   map[string]time.Time
 }
 
 // SyncLoopInterface defines the sync loop methods used by handlers
@@ -142,7 +148,49 @@ func (h *SyncReactorHandler) SetSyncLoop(sl SyncLoopInterface) {
 
 // NewSyncReactorHandler creates a sync handler backed by ReactorHandlers.
 func NewSyncReactorHandler(handlers *ReactorHandlers) *SyncReactorHandler {
-	return &SyncReactorHandler{handlers: handlers}
+	return &SyncReactorHandler{
+		handlers:     handlers,
+		recentBlocks: make(map[string]time.Time),
+	}
+}
+
+// recordBlockSeen records a block hash in the dedup cache.
+func (h *SyncReactorHandler) recordBlockSeen(hashHex string) {
+	h.recentBlocksMu.Lock()
+	defer h.recentBlocksMu.Unlock()
+	h.recentBlocks[hashHex] = time.Now()
+	if len(h.recentBlocks) > maxRecentBlockDedupSize {
+		// Evict expired entries first, then oldest if still full
+		for k, v := range h.recentBlocks {
+			if time.Since(v) > recentBlockDedupWindow {
+				delete(h.recentBlocks, k)
+			}
+		}
+		if len(h.recentBlocks) > maxRecentBlockDedupSize {
+			var oldestKey string
+			var oldestTs time.Time
+			for k, v := range h.recentBlocks {
+				if oldestTs.IsZero() || v.Before(oldestTs) {
+					oldestKey = k
+					oldestTs = v
+				}
+			}
+			delete(h.recentBlocks, oldestKey)
+		}
+	}
+}
+
+// isRecentBlock checks if a block hash was recently processed.
+func (h *SyncReactorHandler) isRecentBlock(hashHex string) bool {
+	h.recentBlocksMu.Lock()
+	defer h.recentBlocksMu.Unlock()
+	if ts, exists := h.recentBlocks[hashHex]; exists {
+		if time.Since(ts) < recentBlockDedupWindow {
+			return true
+		}
+		delete(h.recentBlocks, hashHex)
+	}
+	return false
 }
 
 // OnGetHeaders responds to a peer request for block headers starting at
@@ -346,6 +394,12 @@ func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
 		}
 
 		if h.handlers != nil && h.handlers.chain != nil {
+			hashHex := hex.EncodeToString(block.Hash)
+			if h.isRecentBlock(hashHex) {
+				continue
+			}
+			h.recordBlockSeen(hashHex)
+
 			if h.handlers.candidatePool != nil && h.handlers.candidatePool.ShouldPool(block.GetHeight()) {
 				if submitErr := h.handlers.candidatePool.SubmitCandidate(&block, "peer-"+peerID, time.Now()); submitErr != nil {
 					log.Printf("[SyncHandler] candidate pool rejected block %d from peer %s: %v",
@@ -951,8 +1005,10 @@ var _ TxHandler = (*TxReactorHandler)(nil)
 // BlockReactorHandler handles block-protocol messages by interacting
 // with the local chain and responding to peers.
 type BlockReactorHandler struct {
-	handlers *ReactorHandlers
-	syncLoop SyncLoopInterface
+	handlers       *ReactorHandlers
+	syncLoop       SyncLoopInterface
+	recentBlocksMu sync.Mutex
+	recentBlocks   map[string]time.Time
 }
 
 // SetSyncLoop sets the sync loop reference for the handler
@@ -969,7 +1025,46 @@ func (h *BlockReactorHandler) SetMiner(miner Miner) {
 
 // NewBlockReactorHandler creates a block handler backed by ReactorHandlers.
 func NewBlockReactorHandler(handlers *ReactorHandlers) *BlockReactorHandler {
-	return &BlockReactorHandler{handlers: handlers}
+	return &BlockReactorHandler{
+		handlers:     handlers,
+		recentBlocks: make(map[string]time.Time),
+	}
+}
+
+func (h *BlockReactorHandler) recordBlockSeen(hashHex string) {
+	h.recentBlocksMu.Lock()
+	defer h.recentBlocksMu.Unlock()
+	h.recentBlocks[hashHex] = time.Now()
+	if len(h.recentBlocks) > maxRecentBlockDedupSize {
+		for k, v := range h.recentBlocks {
+			if time.Since(v) > recentBlockDedupWindow {
+				delete(h.recentBlocks, k)
+			}
+		}
+		if len(h.recentBlocks) > maxRecentBlockDedupSize {
+			var oldestKey string
+			var oldestTs time.Time
+			for k, v := range h.recentBlocks {
+				if oldestTs.IsZero() || v.Before(oldestTs) {
+					oldestKey = k
+					oldestTs = v
+				}
+			}
+			delete(h.recentBlocks, oldestKey)
+		}
+	}
+}
+
+func (h *BlockReactorHandler) isRecentBlock(hashHex string) bool {
+	h.recentBlocksMu.Lock()
+	defer h.recentBlocksMu.Unlock()
+	if ts, exists := h.recentBlocks[hashHex]; exists {
+		if time.Since(ts) < recentBlockDedupWindow {
+			return true
+		}
+		delete(h.recentBlocks, hashHex)
+	}
+	return false
 }
 
 // OnInvBlock handles an inventory announcement of available blocks from a
@@ -1087,6 +1182,12 @@ func (h *BlockReactorHandler) OnBlock(peerID string, blocks []*core.Block) error
 			log.Printf("[BlockHandler] Nil block from peer %s, skipping", peerID)
 			continue
 		}
+
+		hashHex := hex.EncodeToString(block.Hash)
+		if h.isRecentBlock(hashHex) {
+			continue
+		}
+		h.recordBlockSeen(hashHex)
 
 		accepted, addErr := h.handlers.chain.AddBlock(block)
 		if addErr != nil {

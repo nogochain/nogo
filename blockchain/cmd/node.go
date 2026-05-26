@@ -437,7 +437,7 @@ func (n *Node) initializeComponents() error {
 
 	n.chain.SetOnMissingBlock(func(parentHash []byte, height uint64) {
 		parentHashHex := hex.EncodeToString(parentHash)
-		log.Printf("[Node] requesting missing parent block: hash=%s height=%d", parentHashHex[:16], height-1)
+		log.Printf("[Node] requesting missing parent block: hash=%s height=%d", parentHashHex[:16], height)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -538,7 +538,7 @@ func (n *Node) startComponents() error {
 		go func() {
 			interval := time.Duration(n.config.MineIntervalMs) * time.Millisecond
 			if interval <= 0 {
-				interval = 17 * time.Second
+				interval = 30 * time.Second
 			}
 
 			// REFACTORED: Parallel startup (like core-main node.go Line 210-218)

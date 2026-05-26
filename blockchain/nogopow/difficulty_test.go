@@ -28,7 +28,7 @@ func defaultTestConsensusParams() *config.ConsensusParams {
 	return &config.ConsensusParams{
 		ChainID:                      1,
 		DifficultyEnable:             true,
-		BlockTimeTargetSeconds:       17,
+		BlockTimeTargetSeconds:       30,
 		MinDifficulty:                1,
 		MaxDifficultyChangePercent:   50,
 		DifficultyAdjustmentInterval: 10,

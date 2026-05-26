@@ -35,15 +35,15 @@ import (
 
 const (
 	// DefaultTargetBlockTime is the target time between blocks in seconds
-	// Economic equilibrium point for NogoChain: 17 seconds
+	// Economic equilibrium point for NogoChain: 30 seconds
 	// Configurable via genesis.json: consensusParams.difficultyTargetMs
-	DefaultTargetBlockTime = 17
+	DefaultTargetBlockTime = 30
 
 	// MinBlockIntervalFraction is the minimum fraction of target block time
 	// that must elapse between successive blocks from ANY miner.
-	// Default: 80% of target time (13.6s for 17s target).
-	// This prevents N miners from producing blocks every 17/N seconds,
-	// which would cause 2-3s block intervals and deep forks.
+	// Default: 80% of target time (24s for 30s target).
+	// This prevents N miners from producing blocks every 30/N seconds,
+	// which would cause rapid block intervals and deep forks.
 	// Configurable via: MIN_BLOCK_INTERVAL_FRACTION
 	MinBlockIntervalFraction = 80
 
@@ -195,7 +195,7 @@ const (
 	DefaultNetworkSyncCheckDelayMs = 2000
 
 	// DefaultMiningIntervalSec is the mining attempt interval
-	// Aligned with DefaultTargetBlockTime (17 seconds) for fair mining
+	// Aligned with DefaultTargetBlockTime (30 seconds) for fair mining
 	// All nodes use the same interval for decentralized mining
 	// Configurable via: MINING_INTERVAL_SEC
 	DefaultMiningIntervalSec = 17
@@ -883,7 +883,7 @@ var MainnetGenesisConfig = GenesisConfiguration{
 	},
 	ConsensusParams: ConsensusParams{
 		DifficultyEnable:               true,
-		TargetBlockTime:                17 * time.Second,
+		TargetBlockTime:                30 * time.Second,
 		DifficultyWindow:               10,
 		DifficultyMaxStep:              4, // Allow faster adjustment
 		MinDifficultyBits:              1,

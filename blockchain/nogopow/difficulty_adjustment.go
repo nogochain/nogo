@@ -94,7 +94,7 @@ type DifficultyAdjuster struct {
 func NewDifficultyAdjuster(consensusParams *config.ConsensusParams) *DifficultyAdjuster {
 	if consensusParams == nil {
 		consensusParams = &config.ConsensusParams{
-			BlockTimeTargetSeconds:     17,
+			BlockTimeTargetSeconds:     30,
 			MaxDifficultyChangePercent: 100,
 		}
 	}

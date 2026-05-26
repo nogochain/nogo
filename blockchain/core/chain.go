@@ -290,6 +290,10 @@ type Chain struct {
 	onMissingBlock func(parentHash []byte, height uint64)
 	onMissingMu    sync.RWMutex
 
+	// pendingAncestorRequests tracks in-flight parent fetches to prevent
+	// request storms when batch orphans share the same missing parent.
+	pendingAncestorRequests map[string]time.Time
+
 	// skipLogCooldown suppresses duplicate "already on canonical chain" log spam
 	skipLogCooldown   time.Time
 	skipLogCooldownMu sync.Mutex
@@ -572,22 +576,23 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 	}
 
 	chain := &Chain{
-		chainID:          cfg.ChainID,
-		minerAddress:     cfg.MinerAddress,
-		genesisAddress:   genesisCfg.GenesisMinerAddress,
-		genesisTimestamp: genesisCfg.Timestamp,
-		consensus:        genesisCfg.ConsensusParams,
-		monetaryPolicy:   genesisCfg.MonetaryPolicy,
-		state:            make(map[string]Account),
-		store:            cfg.Store,
-		blocksByHash:     make(map[string]*Block),
-		blocks:           make([]*Block, 0),
-		forkBlocks:       make(map[uint64][]*Block),
-		workCache:        make(map[string]*big.Int),
-		txIndex:          make(map[string]TxLocation),
-		addressIndex:     make(map[string][]AddressTxEntry),
-		indexPath:        cfg.IndexPath,
-		canonicalWork:    big.NewInt(0),
+		chainID:                 cfg.ChainID,
+		minerAddress:            cfg.MinerAddress,
+		genesisAddress:          genesisCfg.GenesisMinerAddress,
+		genesisTimestamp:        genesisCfg.Timestamp,
+		consensus:               genesisCfg.ConsensusParams,
+		monetaryPolicy:          genesisCfg.MonetaryPolicy,
+		state:                   make(map[string]Account),
+		store:                   cfg.Store,
+		blocksByHash:            make(map[string]*Block),
+		blocks:                  make([]*Block, 0),
+		forkBlocks:              make(map[uint64][]*Block),
+		workCache:               make(map[string]*big.Int),
+		txIndex:                 make(map[string]TxLocation),
+		addressIndex:            make(map[string][]AddressTxEntry),
+		indexPath:               cfg.IndexPath,
+		canonicalWork:           big.NewInt(0),
+		pendingAncestorRequests: make(map[string]time.Time),
 		// Initialize integrity reward system
 		integrityManager:     NewNodeIntegrityManager(),
 		integrityDistributor: NewIntegrityRewardDistributor(),
@@ -2967,18 +2972,45 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 				c.skipLogCooldownMu.Unlock()
 				return false, nil
 			}
+			// Parent-relationship check: if parent is on active chain (not at tip),
+			// this is definitely a fork block — no need for timing heuristics.
+			parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+			if len(c.blocks) > 0 && c.isParentOnActiveChainLocked(parentHashHex) {
+				log.Printf("[Chain] Block %d (hash=%s) has parent=%s on active chain, deterministic fork (active height=%s)",
+					block.GetHeight(), hashHex[:16], parentHashHex[:16], c.activeParentHeightLocked(parentHashHex))
+				return c.addForkBlockLocked(block, hashHex)
+			}
+			if c.isParentInForkBlocksLocked(parentHashHex) {
+				log.Printf("[Chain] Block %d (hash=%s) extends existing fork chain (parent=%s), deterministic fork",
+					block.GetHeight(), hashHex[:16], parentHashHex[:16])
+				return c.addForkBlockLocked(block, hashHex)
+			}
 			log.Printf("[Chain] Block %d (hash=%s) exists but differs from canonical at same height, treating as fork",
 				block.GetHeight(), hashHex[:16])
 			return c.intelligentForkDetectionLocked(block, hashHex)
 		}
 
 		if block.GetHeight() == expectedHeight {
-			log.Printf("[Chain] Block %d (hash=%s) exists at expected height, attempting canonical re-add after rollback",
+			if len(c.blocks) > 0 {
+				currentTip := c.blocks[len(c.blocks)-1]
+				if !bytes.Equal(block.Header.PrevHash, currentTip.Hash) {
+					log.Printf("[Chain] Block %d (duplicate) has wrong PrevHash: expected %x, got %x",
+						block.GetHeight(), currentTip.Hash[:8], block.Header.PrevHash[:8])
+					return c.addForkBlockLocked(block, hashHex)
+				}
+			}
+			log.Printf("[Chain] Block %d (hash=%s) exists at expected height, re-adding to canonical",
 				block.GetHeight(), hashHex[:16])
 			return c.addCanonicalBlockLocked(block, hashHex)
 		}
 
 		if block.GetHeight() > expectedHeight {
+			parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+			if c.isParentInForkBlocksLocked(parentHashHex) {
+				log.Printf("[Chain] Block %d (hash=%s) extends known fork chain (parent=%s in fork blocks), adding to fork",
+					block.GetHeight(), hashHex[:16], parentHashHex[:16])
+				return c.addForkBlockLocked(block, hashHex)
+			}
 			log.Printf("[Chain] Block %d (hash=%s) exists with height > expected (%d), storing as orphan",
 				block.GetHeight(), hashHex[:16], expectedHeight)
 			return c.addOrphanBlockLocked(block, hashHex)
@@ -3002,6 +3034,19 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 		}
 		return c.addCanonicalBlockLocked(block, hashHex)
 	} else if block.GetHeight() < expectedHeight {
+		// Parent-relationship check: if parent is on active chain or in fork blocks,
+		// this block is deterministically a fork — no need for timing heuristics.
+		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+		if len(c.blocks) > 0 && c.isParentOnActiveChainLocked(parentHashHex) {
+			log.Printf("[Chain] Block %d has parent=%s on active chain, deterministic fork (active height=%s)",
+				block.GetHeight(), parentHashHex[:16], c.activeParentHeightLocked(parentHashHex))
+			return c.addForkBlockLocked(block, hashHex)
+		}
+		if c.isParentInForkBlocksLocked(parentHashHex) {
+			log.Printf("[Chain] Block %d extends existing fork chain (parent=%s), deterministic fork",
+				block.GetHeight(), parentHashHex[:16])
+			return c.addForkBlockLocked(block, hashHex)
+		}
 		log.Printf("[Chain] Block %d < expected %d, using intelligent fork detection", block.GetHeight(), expectedHeight)
 		return c.intelligentForkDetectionLocked(block, hashHex)
 	} else if block.GetHeight() == expectedHeight+1 {
@@ -3024,6 +3069,20 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 			block.GetHeight(), expectedHeight)
 		return c.addCanonicalBlockLocked(block, hashHex)
 	} else {
+		// Parent-relationship check: even with a large height gap,
+		// if the parent is in fork blocks or on the active chain, this block
+		// extends a known fork chain and should be treated as a fork block.
+		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+		if c.isParentInForkBlocksLocked(parentHashHex) {
+			log.Printf("[Chain] Block %d extends fork chain (parent=%s in fork blocks), adding to fork (gap ignored)",
+				block.GetHeight(), parentHashHex[:16])
+			return c.addForkBlockLocked(block, hashHex)
+		}
+		if len(c.blocks) > 0 && c.isParentOnActiveChainLocked(parentHashHex) {
+			log.Printf("[Chain] Block %d has parent=%s on active chain at height=%s, deterministic fork (gap ignored)",
+				block.GetHeight(), parentHashHex[:16], c.activeParentHeightLocked(parentHashHex))
+			return c.addForkBlockLocked(block, hashHex)
+		}
 		log.Printf("[Chain] Orphan block %d: height gap too large (expected %d), storing for later",
 			block.GetHeight(), expectedHeight)
 		return c.addOrphanBlockLocked(block, hashHex)
@@ -3290,7 +3349,7 @@ func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error)
 		if _, exists := c.orphanPool[hashHex]; exists {
 			log.Printf("[Chain] Block %d (hash=%s) already in orphan pool, skipping re-request",
 				block.GetHeight(), hashHex[:16])
-			return true, nil
+			return false, nil
 		}
 	}
 
@@ -3335,20 +3394,28 @@ func (c *Chain) addOrphanBlockLocked(block *Block, hashHex string) (bool, error)
 	log.Printf("[Chain] Orphan block stored: height=%d hash=%s parent=%s (pool size: %d/%d)",
 		block.GetHeight(), hashHex[:16], parentHashHex[:16], len(c.orphanPool), MaxOrphanPoolSize)
 
-	// CRITICAL FIX: Always request missing parent for orphan blocks.
-	// Previously, this was gated by "block.GetHeight() > uint64(len(c.blocks))",
-	// meaning orphans at heights equal to or below the canonical chain were
-	// silently stored without requesting their parent chain. This prevented
-	// deep fork detection when:
-	// 1. A miner's fork chain grows to the same height as the canonical chain
-	// 2. The fork chain's blocks arrive as orphans (parent not found)
-	// 3. The height check fails (height == canonical height)
-	// 4. The parent is never fetched, so the fork chain is never reconstructed
-	// 5. shouldReorgToHeaviestLocked never detects the heavier fork
-	//
-	// Now we unconditionally request the missing parent. EnsureAncestors
-	// handles this with maxDepth=500 batch downloading and deduplication.
-	c.requestMissingParentAsync(block)
+	// Deduplicated parent request logic: avoid network request storms
+	// when batch orphans arrive with the same missing parent.
+	// 1. Skip if parent is already in fork blocks — just process orphans locally.
+	// 2. Skip if parent fetch is already in-flight — deduplicate via pending set.
+	// 3. Otherwise, request parent from network.
+	if c.isParentInForkBlocksLocked(parentHashHex) {
+		log.Printf("[Chain] Orphan parent %s already in fork blocks, processing locally (no network request)",
+			parentHashHex[:16])
+	} else {
+		if c.pendingAncestorRequests == nil {
+			c.pendingAncestorRequests = make(map[string]time.Time)
+		}
+		const parentRequestDedupWindow = 30 * time.Second
+		lastReq, alreadyPending := c.pendingAncestorRequests[parentHashHex]
+		if alreadyPending && time.Since(lastReq) < parentRequestDedupWindow {
+			log.Printf("[Chain] Parent %s already requested %v ago, skipping duplicate request",
+				parentHashHex[:16], time.Since(lastReq).Round(time.Second))
+		} else {
+			c.pendingAncestorRequests[parentHashHex] = time.Now()
+			c.requestMissingParentAsync(block)
+		}
+	}
 
 	// Try to process orphan children
 	return c.tryProcessOrphansLocked()
@@ -3489,6 +3556,43 @@ func (c *Chain) isParentInForkBlocksLocked(parentHashHex string) bool {
 	}
 
 	return false
+}
+
+// isParentOnActiveChainLocked checks if parent hash exists on the active canonical chain
+// at a non-tip position. This provides deterministic fork detection: if a block's parent
+// is on the active chain but not at the tip, the block must be part of a side chain.
+// Caller must hold c.mu lock.
+func (c *Chain) isParentOnActiveChainLocked(parentHashHex string) bool {
+	if len(c.blocks) == 0 {
+		return false
+	}
+	parentBlock, exists := c.blocksByHash[parentHashHex]
+	if !exists {
+		return false
+	}
+	parentHeight := parentBlock.GetHeight()
+	if parentHeight >= uint64(len(c.blocks)) {
+		return false
+	}
+	canonicalBlock := c.blocks[parentHeight]
+	if canonicalBlock == nil {
+		return false
+	}
+	return hex.EncodeToString(canonicalBlock.Hash) == parentHashHex
+}
+
+// activeParentHeightLocked returns the height where the parent hash exists on the
+// active canonical chain. Returns "<unknown>" if not found.
+// Caller must hold c.mu lock.
+func (c *Chain) activeParentHeightLocked(parentHashHex string) string {
+	if len(c.blocks) == 0 {
+		return "<unknown>"
+	}
+	parentBlock, exists := c.blocksByHash[parentHashHex]
+	if !exists {
+		return "<unknown>"
+	}
+	return fmt.Sprintf("%d", parentBlock.GetHeight())
 }
 
 // canonicalTipLocked returns the current tip of the canonical chain
@@ -3787,7 +3891,9 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 	existingForks := c.forkBlocks[height]
 	for _, existing := range existingForks {
 		if hex.EncodeToString(existing.Hash) == hashHex {
-			log.Printf("[Chain] Fork block %d already stored (hash: %s), skipping", height, hashHex[:16])
+			log.Printf("[Chain] Fork block %d already stored (hash: %s), still processing orphans and checking reorg", height, hashHex[:16])
+			c.processOrphanDescendantsLocked(hashHex)
+			c.autoReorgIfNeededLocked()
 			return false, nil
 		}
 	}
@@ -3929,9 +4035,7 @@ func (c *Chain) isPartOfKnownForkLocked(block *Block, hashHex string) bool {
 // getBlockTime returns the average block time in seconds.
 // This is used for timing-based fork detection.
 func (c *Chain) getBlockTime() time.Duration {
-	// Default to 17 seconds
-	// In production, this could be derived from historical block data
-	return 17 * time.Second
+	return 30 * time.Second
 }
 
 // shouldSwitchBasedOnTieBreakerLocked determines if we should switch chains when work is equal

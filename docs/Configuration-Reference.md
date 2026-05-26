@@ -124,7 +124,7 @@ Defines all consensus-related parameters for block validation and difficulty adj
 |-------|------|----------|---------|-------------|
 | `ChainID` | `uint64` | `chainId` | `1` | Blockchain identifier |
 | `DifficultyEnable` | `bool` | `difficultyEnable` | `true` | Enable difficulty adjustment |
-| `BlockTimeTargetSeconds` | `int64` | `blockTimeTargetSeconds` | `17` | Target seconds between blocks |
+| `BlockTimeTargetSeconds` | `int64` | `blockTimeTargetSeconds` | `30` | Target seconds between blocks |
 | `DifficultyAdjustmentInterval` | `uint64` | `difficultyAdjustmentInterval` | `100` | Blocks between adjustments |
 | `MaxBlockTimeDriftSeconds` | `int64` | `maxBlockTimeDriftSeconds` | `7200` | Maximum timestamp drift (2 hours) |
 | `MinDifficulty` | `uint32` | `minDifficulty` | `1` | Minimum difficulty value |
@@ -796,7 +796,7 @@ func DefaultConfig() *Config {
   "consensus": {
     "chainId": 1,
     "difficultyEnable": true,
-    "blockTimeTargetSeconds": 17,
+    "blockTimeTargetSeconds": 30,
     "difficultyAdjustmentInterval": 100,
     "maxBlockTimeDriftSeconds": 7200,
     "minDifficulty": 1,
@@ -942,7 +942,7 @@ func DefaultConfig() *Config {
   "consensus": {
     "chainId": 2,
     "difficultyEnable": true,
-    "blockTimeTargetSeconds": 17,
+    "blockTimeTargetSeconds": 30,
     "difficultyAdjustmentInterval": 50,
     "maxBlockTimeDriftSeconds": 3600,
     "minDifficulty": 1,

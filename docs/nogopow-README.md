@@ -627,7 +627,7 @@ func DefaultConfig() *Config {
         ReuseObjects: true,
         Difficulty: DifficultyConfig{
             MinimumDifficulty:  big.NewInt(100),
-            TargetBlockTime:    17 * time.Second,
+            TargetBlockTime:    30 * time.Second,
             AdjustmentSensitivity: 1.0,
             Kp: 1.0,
             Ki: 0.1,

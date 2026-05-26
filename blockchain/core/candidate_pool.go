@@ -33,7 +33,7 @@ const (
 	defaultMaxLateness        = 120 * time.Second
 	defaultMaxCandidates      = 50
 	defaultMaxExtensionWindow = 30 * time.Second
-	defaultPITargetMiningTime = 17 * time.Second
+	defaultPITargetMiningTime = 30 * time.Second
 )
 
 type Candidate struct {

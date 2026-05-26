@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	secondsPerYear = 365 * 24 * 60 * 60
-	NogoWei        = 1
-	NogoNOGO       = 100_000_000
+	secondsPerYear     = 365 * 24 * 60 * 60
+	NogoWei            = 1
+	NogoNOGO           = 100_000_000
+	targetBlockTimeSec = 30
 )
 
 const (
@@ -36,9 +37,9 @@ var (
 
 func getBlocksPerYear(targetBlockTimeSec int64) uint64 {
 	if targetBlockTimeSec <= 0 {
-		targetBlockTimeSec = 15
+		targetBlockTimeSec = 30
 	}
-	return uint64(secondsPerYear / targetBlockTimeSec)
+	return uint64(secondsPerYear / uint64(targetBlockTimeSec))
 }
 
 type MonetaryPolicy struct {
@@ -48,7 +49,7 @@ type MonetaryPolicy struct {
 }
 
 func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
-	reduction := uint64(p.AnnualReductionPercent) * (height / getBlocksPerYear(15))
+	reduction := uint64(p.AnnualReductionPercent) * (height / getBlocksPerYear(targetBlockTimeSec))
 	reward := p.InitialBlockReward - (p.InitialBlockReward * reduction / 100)
 	if reward < p.MinimumBlockReward {
 		return p.MinimumBlockReward
@@ -545,7 +546,7 @@ func (ic *InflationCalculator) CalculateInflationRate(currentHeight uint64, curr
 		return 0
 	}
 
-	blocksPerYear := getBlocksPerYear(15)
+	blocksPerYear := getBlocksPerYear(targetBlockTimeSec)
 	policy := MonetaryPolicy{
 		InitialBlockReward:     initialBlockRewardWei.Uint64(),
 		AnnualReductionPercent: 10,

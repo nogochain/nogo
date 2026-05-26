@@ -48,7 +48,7 @@ func DefaultConfig() *Config {
 		ConsensusParams: &config.ConsensusParams{
 			ChainID:                      1,
 			DifficultyEnable:             true,
-			BlockTimeTargetSeconds:       17,
+			BlockTimeTargetSeconds:       30,
 			DifficultyAdjustmentInterval: 1,
 			MaxBlockTimeDriftSeconds:     900,
 			MinDifficulty:                1,

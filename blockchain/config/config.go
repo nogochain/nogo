@@ -128,7 +128,7 @@ func DefaultConfig() *Config {
 		Consensus: ConsensusParams{
 			ChainID:                        1,
 			DifficultyEnable:               true,
-			BlockTimeTargetSeconds:         17,
+			BlockTimeTargetSeconds:         30,
 			DifficultyAdjustmentInterval:   100,
 			MaxBlockTimeDriftSeconds:       7200,
 			MinDifficulty:                  1,
@@ -363,7 +363,7 @@ func (c *Config) IsWSEnabled() bool {
 }
 
 // DefaultTargetBlockTime is the default target block time in seconds
-const DefaultTargetBlockTime = int64(17)
+const DefaultTargetBlockTime = int64(30)
 
 // MinBlockIntervalFraction is the minimum fraction (percentage) of target block time
 // that must elapse before a new block can be mined. Prevents rapid-fire mining.
@@ -387,7 +387,7 @@ func GetConsensusParams() ConsensusParams {
 	return ConsensusParams{
 		ChainID:                        1,
 		DifficultyEnable:               true,
-		BlockTimeTargetSeconds:         17,
+		BlockTimeTargetSeconds:         30,
 		DifficultyAdjustmentInterval:   1,
 		MaxBlockTimeDriftSeconds:       900,
 		MinDifficultyBits:              1,

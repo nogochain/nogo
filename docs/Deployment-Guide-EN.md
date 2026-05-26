@@ -328,7 +328,7 @@ Create `config.json`:
   },
   "consensus": {
     "difficultyEnable": true,
-    "blockTimeTargetSeconds": 15,
+    "blockTimeTargetSeconds": 30,
     "difficultyAdjustmentInterval": 100,
     "maxBlockTimeDriftSeconds": 7200,
     "merkleEnable": true,
