@@ -61,6 +61,17 @@ const (
 
 	// MaxForkBlocksTotal limits the total number of fork blocks across all heights
 	MaxForkBlocksTotal = 50000
+
+	// MaxReorgDepth limits how far back findBestChainTipLocked scans fork blocks
+	// Prevents infinite oscillation by ignoring forks too deep below canonical tip
+	MaxReorgDepth = 100
+
+	// ReorgCooldownPeriod enforces a minimum wait between successive reorgs
+	// Activated when consecutive reorgs exceed RapidReorgThreshold
+	ReorgCooldownPeriod = 2 * time.Minute
+
+	// RapidReorgThreshold triggers reorg cooldown when consecutive reorgs exceed this count
+	RapidReorgThreshold = 5
 )
 
 // SyncNotifier defines the interface for notifying sync loop about chain events
@@ -308,6 +319,7 @@ type Chain struct {
 	reorgMu         sync.Mutex
 	lastReorgTime   time.Time
 	reorgCount      int
+	reorgLockUntil  time.Time
 
 	// Contract management
 	contractManager *ContractManager
@@ -1751,7 +1763,6 @@ func (c *Chain) IsReorgInProgress() bool {
 // findCommonAncestorLocked finds common ancestor between chains
 // Returns ancestor block and fork blocks to remove
 func (c *Chain) findCommonAncestorLocked(newBlock *Block) (*Block, []*Block, error) {
-	// Build parent map for new block
 	parentMap := make(map[string]*Block)
 	current := newBlock
 	for {
@@ -1763,13 +1774,25 @@ func (c *Chain) findCommonAncestorLocked(newBlock *Block) (*Block, []*Block, err
 		}
 
 		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
-		parent, exists := c.blocksByHash[parentHashHex]
-		if !exists {
-			// Parent not found - stop building parent map
-			// DO NOT request parent here - let sync loop handle batch download
-			break
+
+		parent := c.lookupBlockInForkBlocksLocked(parentHashHex)
+		if parent != nil {
+			current = parent
+			continue
 		}
-		current = parent
+
+		parent, exists := c.blocksByHash[parentHashHex]
+		if exists {
+			parentHeight := int(parent.GetHeight())
+			if parentHeight < len(c.blocks) {
+				canonicalBlock := c.blocks[parentHeight]
+				if hex.EncodeToString(canonicalBlock.Hash) == parentHashHex {
+					current = parent
+					continue
+				}
+			}
+		}
+		break
 	}
 
 	// Walk canonical chain to find ancestor
@@ -1804,18 +1827,31 @@ func (c *Chain) calculateChainWorkLocked(blocks []*Block) *big.Int {
 func (c *Chain) calculateChainWorkFromAncestorLocked(ancestor *Block, tip *Block) *big.Int {
 	totalWork := big.NewInt(0)
 
-	// Build chain from tip to ancestor
 	current := tip
 	for current.GetHeight() > ancestor.GetHeight() {
 		work := WorkForDifficultyBits(current.Header.DifficultyBits)
 		totalWork.Add(totalWork, work)
 
 		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
-		parent, exists := c.blocksByHash[parentHashHex]
-		if !exists {
-			break
+
+		parent := c.lookupBlockInForkBlocksLocked(parentHashHex)
+		if parent != nil {
+			current = parent
+			continue
 		}
-		current = parent
+
+		parent, exists := c.blocksByHash[parentHashHex]
+		if exists {
+			parentHeight := int(parent.GetHeight())
+			if parentHeight < len(c.blocks) {
+				canonicalBlock := c.blocks[parentHeight]
+				if hex.EncodeToString(canonicalBlock.Hash) == parentHashHex {
+					current = parent
+					continue
+				}
+			}
+		}
+		break
 	}
 
 	return totalWork
@@ -1830,6 +1866,17 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	log.Printf("[Chain] reorganizeChainLocked() executing (internal fallback path)")
 
 	log.Printf("Chain reorganization: ancestor height=%d, new tip height=%d", ancestor.GetHeight(), newTip.GetHeight())
+
+	if !c.reorgLockUntil.IsZero() {
+		if time.Now().Before(c.reorgLockUntil) {
+			remaining := time.Until(c.reorgLockUntil).Round(time.Second)
+			log.Printf("[Chain] Reorg cooldown active, %v remaining, rejecting reorg", remaining)
+			return fmt.Errorf("reorg cooldown active: %v remaining", remaining)
+		}
+		c.reorgLockUntil = time.Time{}
+		c.reorgCount = 0
+		log.Printf("[Chain] Reorg cooldown expired, reorg counter reset")
+	}
 
 	ancestorHeight := ancestor.GetHeight()
 	currentChainLen := len(c.blocks)
@@ -2011,11 +2058,10 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	c.lastReorgTime = now
 	c.reorgCount++
 
-	if c.reorgCount > 5 {
-		timeSinceLastReorg := now.Sub(c.lastReorgTime)
-		if timeSinceLastReorg < 30*time.Second {
-			log.Printf("[Chain] WARNING: Rapid reorgs detected (%d in %v), possible fork loop", c.reorgCount, timeSinceLastReorg)
-		}
+	if c.reorgCount > RapidReorgThreshold {
+		c.reorgLockUntil = now.Add(ReorgCooldownPeriod)
+		log.Printf("[Chain] Rapid reorgs detected (%d consecutive), activating cooldown until %v",
+			c.reorgCount, c.reorgLockUntil.Format(time.RFC3339))
 	}
 
 	if c.forkBlocks != nil {
@@ -3256,8 +3302,13 @@ func (c *Chain) findBestChainTipLocked() *Block {
 
 	for _, blocks := range c.forkBlocks {
 		for _, block := range blocks {
-			forkWork := c.calculateCumulativeWorkLocked(block)
 			forkHeight := block.GetHeight()
+
+			if currentCanonicalHeight > MaxReorgDepth && forkHeight < currentCanonicalHeight-MaxReorgDepth {
+				continue
+			}
+
+			forkWork := c.calculateCumulativeWorkLocked(block)
 			forkChainComplete := c.isForkChainCompleteLocked(block)
 
 			isBetter := false
@@ -3315,8 +3366,14 @@ func (c *Chain) isForkChainCompleteLocked(tip *Block) bool {
 		}
 
 		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
-		if _, exists := c.blocksByHash[parentHashHex]; exists {
-			return true
+		if parent, exists := c.blocksByHash[parentHashHex]; exists {
+			parentHeight := int(parent.GetHeight())
+			if parentHeight < len(c.blocks) {
+				canonicalBlock := c.blocks[parentHeight]
+				if hex.EncodeToString(canonicalBlock.Hash) == parentHashHex {
+					return true
+				}
+			}
 		}
 
 		foundInFork := false
@@ -3530,25 +3587,20 @@ func (c *Chain) tryProcessOrphansLocked() (bool, error) {
 // Caller must hold c.mu lock
 func (c *Chain) isParentInForkBlocksLocked(parentHashHex string) bool {
 	parentBlock, exists := c.blocksByHash[parentHashHex]
-	if !exists {
-		return false
-	}
-
-	if len(c.blocks) > 0 {
-		parentHeight := parentBlock.GetHeight()
-		if parentHeight < uint64(len(c.blocks)) {
-			canonicalBlock := c.blocks[parentHeight]
-			if canonicalBlock != nil && hex.EncodeToString(canonicalBlock.Hash) == parentHashHex {
-				return false
+	if exists {
+		if len(c.blocks) > 0 {
+			parentHeight := parentBlock.GetHeight()
+			if parentHeight < uint64(len(c.blocks)) {
+				canonicalBlock := c.blocks[parentHeight]
+				if canonicalBlock != nil && hex.EncodeToString(canonicalBlock.Hash) == parentHashHex {
+					return false
+				}
 			}
 		}
 	}
 
-	for height, forkBlocks := range c.forkBlocks {
-		if height < uint64(len(c.blocks)) {
-			continue
-		}
-		for _, forkBlock := range forkBlocks {
+	for _, forkBlocksAtHeight := range c.forkBlocks {
+		for _, forkBlock := range forkBlocksAtHeight {
 			if hex.EncodeToString(forkBlock.Hash) == parentHashHex {
 				return true
 			}
@@ -3892,6 +3944,19 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 	for _, existing := range existingForks {
 		if hex.EncodeToString(existing.Hash) == hashHex {
 			log.Printf("[Chain] Fork block %d already stored (hash: %s), still processing orphans and checking reorg", height, hashHex[:16])
+
+			parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+			if _, inMain := c.blocksByHash[parentHashHex]; !inMain && !c.isParentInForkBlocksLocked(parentHashHex) {
+				const parentRequestDedupWindow = 30 * time.Second
+				lastReq, alreadyPending := c.pendingAncestorRequests[parentHashHex]
+				if !alreadyPending || time.Since(lastReq) >= parentRequestDedupWindow {
+					c.pendingAncestorRequests[parentHashHex] = time.Now()
+					log.Printf("[Chain] Fork block %d parent %s still missing, re-requesting from peers",
+						height, parentHashHex[:16])
+					c.requestMissingParentAsync(block)
+				}
+			}
+
 			c.processOrphanDescendantsLocked(hashHex)
 			c.autoReorgIfNeededLocked()
 			return false, nil
@@ -3937,6 +4002,18 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 
 	log.Printf("[Chain] Fork block %d stored (hash: %s, canonical hash: %s)",
 		height, hashHex[:16], canonicalHash)
+
+	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+	if _, inMain := c.blocksByHash[parentHashHex]; !inMain && !c.isParentInForkBlocksLocked(parentHashHex) {
+		const parentRequestDedupWindow = 30 * time.Second
+		lastReq, alreadyPending := c.pendingAncestorRequests[parentHashHex]
+		if !alreadyPending || time.Since(lastReq) >= parentRequestDedupWindow {
+			c.pendingAncestorRequests[parentHashHex] = time.Now()
+			log.Printf("[Chain] Fork block %d parent %s missing from all stores, requesting from peers",
+				height, parentHashHex[:16])
+			c.requestMissingParentAsync(block)
+		}
+	}
 
 	if c.shouldReorgToHeaviestLocked() {
 		log.Printf("[Chain] Heavier fork chain detected (global check), triggering reorganization")
@@ -4111,42 +4188,52 @@ func (c *Chain) calculateCumulativeWorkLocked(block *Block) *big.Int {
 		return new(big.Int).Set(cached)
 	}
 
-	// Iterative computation: walk from block to genesis, collect path
 	type workNode struct {
 		block *Block
-		work  *big.Int
 	}
-	var path []workNode
+	var path []*Block
 	current := block
 	for current != nil {
-		hashHex := hex.EncodeToString(current.Hash)
-		if cached, exists := c.workCache[hashHex]; exists {
-			// Seed with cached value and propagate forward
+		curHashHex := hex.EncodeToString(current.Hash)
+		if cached, exists := c.workCache[curHashHex]; exists {
 			accumulated := new(big.Int).Set(cached)
 			for i := len(path) - 1; i >= 0; i-- {
-				accumulated.Add(accumulated, WorkForDifficultyBits(path[i].block.Header.DifficultyBits))
-				c.workCache[hex.EncodeToString(path[i].block.Hash)] = new(big.Int).Set(accumulated)
+				accumulated.Add(accumulated, WorkForDifficultyBits(path[i].Header.DifficultyBits))
+				c.workCache[hex.EncodeToString(path[i].Hash)] = new(big.Int).Set(accumulated)
 			}
 			c.enforceWorkCacheSize()
 			return accumulated
 		}
-		path = append(path, workNode{block: current})
+		path = append(path, current)
 		if len(current.Header.PrevHash) == 0 || current.GetHeight() == 0 {
 			break
 		}
 		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
-		parent, exists := c.blocksByHash[parentHashHex]
-		if !exists {
-			break
+
+		parent := c.lookupBlockInForkBlocksLocked(parentHashHex)
+		if parent != nil {
+			current = parent
+			continue
 		}
-		current = parent
+
+		parent, exists := c.blocksByHash[parentHashHex]
+		if exists {
+			parentHeight := int(parent.GetHeight())
+			if parentHeight < len(c.blocks) {
+				canonicalBlock := c.blocks[parentHeight]
+				if hex.EncodeToString(canonicalBlock.Hash) == parentHashHex {
+					current = parent
+					continue
+				}
+			}
+		}
+		break
 	}
 
-	// Compute cumulative work from genesis forward
 	accumulated := big.NewInt(0)
 	for i := len(path) - 1; i >= 0; i-- {
-		accumulated.Add(accumulated, WorkForDifficultyBits(path[i].block.Header.DifficultyBits))
-		c.workCache[hex.EncodeToString(path[i].block.Hash)] = new(big.Int).Set(accumulated)
+		accumulated.Add(accumulated, WorkForDifficultyBits(path[i].Header.DifficultyBits))
+		c.workCache[hex.EncodeToString(path[i].Hash)] = new(big.Int).Set(accumulated)
 	}
 	c.enforceWorkCacheSize()
 	return accumulated
@@ -4156,6 +4243,23 @@ func (c *Chain) CalculateCumulativeWork(block *Block) *big.Int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.calculateCumulativeWorkLocked(block)
+}
+
+// lookupBlockInForkBlocksLocked searches forkBlocks for a block matching the given hash.
+// This is needed by calculateCumulativeWorkLocked to trace fork chain ancestry through forkBlocks,
+// since fork blocks are stored in forkBlocks map rather than blocksByHash.
+// Without this, fork chain cumulative work is incorrectly computed as only the tip block's own
+// difficulty, making fork chains unable to win a reorg against the canonical chain.
+// Caller must hold c.mu lock.
+func (c *Chain) lookupBlockInForkBlocksLocked(hashHex string) *Block {
+	for _, blocks := range c.forkBlocks {
+		for _, block := range blocks {
+			if hex.EncodeToString(block.Hash) == hashHex {
+				return block
+			}
+		}
+	}
+	return nil
 }
 
 // enforceWorkCacheSize ensures the work cache does not exceed MaxWorkCacheSize
