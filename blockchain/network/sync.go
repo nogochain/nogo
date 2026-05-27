@@ -765,12 +765,31 @@ func (s *SyncLoop) DeliverSyncBlock(peerID string, block *core.Block) {
 		return
 	}
 	if s.blockKeeper == nil {
+		log.Printf("[Sync] DeliverSyncBlock: blockKeeper is nil, cannot deliver block h=%d from peer=%s", block.GetHeight(), peerID)
 		return
 	}
+
+	msg := &blockMsg{
+		peerID:     peerID,
+		block:      block,
+		sessionSeq: s.blockKeeper.syncSessionSeq,
+	}
+
 	select {
-	case s.blockKeeper.syncBlockCh <- &blockMsg{peerID: peerID, block: block, sessionSeq: s.blockKeeper.syncSessionSeq}:
+	case s.blockKeeper.syncBlockCh <- msg:
+		log.Printf("[Sync] DeliverSyncBlock: delivered block h=%d from peer=%s to syncBlockCh (sessionSeq=%d)",
+			block.GetHeight(), peerID[:min(12, len(peerID))], msg.sessionSeq)
 	default:
-		log.Printf("[Sync] DeliverSyncBlock: syncBlockCh full, dropping block height=%d from peer=%s", block.GetHeight(), peerID)
+		log.Printf("[Sync] DeliverSyncBlock: syncBlockCh full (buffer=2048), delivering async block h=%d from peer=%s", block.GetHeight(), peerID)
+		go func() {
+			timer := time.NewTimer(30 * time.Second)
+			defer timer.Stop()
+			select {
+			case s.blockKeeper.syncBlockCh <- msg:
+			case <-timer.C:
+				log.Printf("[Sync] DeliverSyncBlock: async delivery timed out for block h=%d from peer=%s", block.GetHeight(), peerID)
+			}
+		}()
 	}
 }
 

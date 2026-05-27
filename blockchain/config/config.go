@@ -131,9 +131,9 @@ func DefaultConfig() *Config {
 			BlockTimeTargetSeconds:         30,
 			DifficultyAdjustmentInterval:   100,
 			MaxBlockTimeDriftSeconds:       7200,
-			MinDifficulty:                  1,
+			MinDifficulty:                  10,  // Increased from 1 to prevent difficulty from dropping too low
 			MaxDifficulty:                  4294967295,
-			MinDifficultyBits:              1,
+			MinDifficultyBits:              10,  // Increased from 1 to match MinDifficulty
 			MaxDifficultyBits:              255,
 			MaxDifficultyChangePercent:     20,  // Reduced from 100 to 20 for PI controller stability (Kp=0.2)
 			MedianTimePastWindow:           11,
@@ -367,7 +367,11 @@ const DefaultTargetBlockTime = int64(30)
 
 // MinBlockIntervalFraction is the minimum fraction (percentage) of target block time
 // that must elapse before a new block can be mined. Prevents rapid-fire mining.
-const MinBlockIntervalFraction = int64(50)
+// Production rationale: 35% balances security (prevents multi-miner race conditions)
+// and decentralization (allows multiple miners to compete within the window).
+// Calculation: 30s target × 35% = 10.5s minimum interval.
+// Previous value 50% (15s) caused single-miner dominance in low-hashrate networks.
+const MinBlockIntervalFraction = int64(35)
 
 // GetBlocksPerYear calculates blocks per year based on target block time
 func GetBlocksPerYear() uint64 {

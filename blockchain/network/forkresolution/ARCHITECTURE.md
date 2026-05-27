@@ -1,41 +1,25 @@
-# NogoChain Unified Fork Resolution Module
+# NogoChain Fork Resolution Module
 
 ## Architecture Design Document & Usage Guide
 
-**Version:** 2.0.0  
-**Last Updated:** 2026-04-28  
+**Version:** 3.0.0  
+**Last Updated:** 2026-05-27  
 **Status:** Production Ready  
 **Module Path:** `github.com/nogochain/nogo/blockchain/network/forkresolution`
 
 ---
 
-## 📋 Table of Contents
-
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Core Components](#core-components)
-4. [Integration Guide](#integration-guide)
-5. [API Reference](#api-reference)
-6. [Configuration](#configuration)
-7. [Testing](#testing)
-8. [Performance Benchmarks](#performance-benchmarks)
-9. [Best Practices](#best-practices)
-
----
-
 ## Overview
 
-The **Unified Fork Resolution Module** is a production-grade, core-main-based fork detection and resolution system designed for the NogoChain blockchain. It replaces all legacy fork handling mechanisms with a single, unified entry point that ensures consistent, safe, and efficient fork resolution across all network scenarios.
+The **Fork Resolution Module** is a production-grade, heaviest-chain-based fork detection and resolution system designed for the NogoChain blockchain. It implements the deterministic heaviest chain rule (Nakamoto consensus) without multi-node arbitration, ensuring simple, secure, and efficient fork resolution.
 
 ### Key Features
 
-✅ **Single Entry Point** - All fork operations go through `ForkResolver.RequestReorg()`  
-✅ **Core-Main Architecture** - Based on proven block_keeper design patterns  
-✅ **Multi-Node Arbitration** - Weighted voting consensus for 3+ node networks  
-✅ **Concurrency Safe** - `TryLock` protection prevents race conditions  
-✅ **Frequency Limiting** - Prevents reorg storms with configurable intervals  
+✅ **Heaviest Chain Rule** - Deterministic consensus based on cumulative work  
+✅ **No Multi-Node Arbitration** - Simple, secure, decentralized design  
+✅ **Concurrency Safe** - `sync.RWMutex` protection prevents race conditions  
 ✅ **Depth Protection** - Configurable max reorganization depth to prevent attacks  
-✅ **Comprehensive Testing** - 20 test cases (15 unit + 5 E2E integration)  
+✅ **Comprehensive Testing** - Unit tests for all components  
 
 ---
 
@@ -48,14 +32,9 @@ The **Unified Fork Resolution Module** is a production-grade, core-main-based fo
 │                    NogoChain Node                           │
 │                                                             │
 │  ┌──────────┐    ┌──────────────────┐    ┌──────────────┐  │
-│  │ SyncLoop │───▶│  ForkResolver     │───▶│ Chain        │  │
+│  │ SyncLoop  │───▶│  ForkResolver     │───▶│ Chain        │  │
 │  │          │    │  (Unified Engine) │    │              │  │
-│  └──────────┘    └────────┬─────────┘    └──────────────┘  │
-│                           │                                │
-│  ┌──────────┐             ▼                                │
-│  │blockKeeper│◀──┌──────────────────┐                    │
-│  │          │    │MultiNodeArbitrator│                   │
-│  └──────────┘    └──────────────────┘                    │
+│  └──────────┘    └──────────────────┘    └──────────────┘  │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -69,15 +48,13 @@ The **Unified Fork Resolution Module** is a production-grade, core-main-based fo
        ↓
 3. Fork Detection → ForkResolver.DetectFork()
        ↓
-4. Multi-Node Voting (if available) → MultiNodeArbitrator.ResolveFork()
+4. Heaviest Chain Check → ShouldReorg() check
        ↓
-5. Decision Made → ShouldReorg() check
+5. Reorganization → ForkResolver.RequestReorg()
        ↓
-6. Reorganization → ForkResolver.RequestReorg()
+6. Rollback + Extend → executeReorg()
        ↓
-7. Rollback + Extend → executeReorg()
-       ↓
-8. Callback Triggered → OnReorgComplete → TriggerImmediateReSync()
+7. Callback Triggered → OnReorgComplete → TriggerImmediateResync()
 ```
 
 ---
@@ -121,82 +98,113 @@ stats := resolver.GetStats()
 
 ---
 
-### 2. MultiNodeArbitrator (multi_node_arbitrator.go)
+### 2. ForkChoice (fork_choice.go)
 
-**Purpose:** Enhanced consensus mechanism for multi-node networks (3+ nodes)
+**Purpose:** Implements heaviest chain selection (Nakamoto consensus)
 
-**Decision Strategies:**
+**Key Methods:**
 
-| Node Count | Strategy | Description |
-|------------|----------|-------------|
-| 1 node | N/A | Single node, no arbitration needed |
-| 2 nodes | Deterministic | Heaviest chain wins |
-| 3+ nodes | Weighted Voting | Supermajority (>66.7%) required |
-
-**Voting Mechanism:**
 ```go
-// Create arbitrator
-arbiter := forkresolution.NewMultiNodeArbitrator(ctx, resolver)
+// Create fork choice
+chainReader := NewMockChainProvider()
+forkChoice := NewForkChoice(chainReader, nil)
 
-// Update peer state (call this when peer info changes)
-arbiter.UpdatePeerState(
-    "peer-id",           // Peer identifier
-    "tip-hash",          // Current tip hash
-    height,              // Current height
-    work,                // Cumulative work
-    quality,             // Connection quality (1-10)
-)
+// Check if reorganization is needed
+reorg, err := forkChoice.ReorgNeeded(currentBlock, externalBlock)
 
-// Resolve fork with network consensus
-decision, err := arbiter.ResolveFork(candidates)
+// Check if should reorg to external block
+shouldReorg, err := forkChoice.ShouldReorgTo(externalBlock)
 
-// decision.Method can be:
-//   "voting"         - Network reached supermajority
-//   "voting-fallback" - No supermajority, fell back to heaviest chain
-//   "heaviest-chain" - Work-based selection (fallback)
-//   "two-node-deterministic" - Simple comparison for 2 nodes
+// Find common ancestor
+common, err := forkChoice.CommonAncestor(currentBlock, externalBlock)
+
+// Find fork depth
+depth, err := forkChoice.FindForkDepth(currentBlock, externalBlock)
 ```
 
-**Weight Calculation Factors:**
-- Base weight = connection quality / 10
-- Long-standing peers (24h+) get 1.2x bonus
-- Inactive peers (< 1h) get 0.5x penalty
+**Decision Logic:**
+1. Compare cumulative work (`localTD` vs `externalTD`)
+2. If external has more work → reorg
+3. If equal work → use height or random tie-break
+4. Limit reorg depth (`MaxReorgDepth`)
 
 ---
 
-### 3. Integration Points
+### 3. SeedConsensusEngine (seed_consensus.go) - OPTIONAL
 
-#### blockKeeper Integration
+**Purpose:** Pre-consensus voting among seed nodes to prevent "first-seen bias"
+
+**Note:** This is optional and only used for seed nodes. Most nodes do not need this.
+
+**Key Methods:**
+
+```go
+// Create seed consensus engine
+engine := forkresolution.NewSeedConsensusEngine(ctx, dispatcher, isSeedMode)
+
+// Request consensus for a block
+consensus := engine.RequestConsensus(block)
+
+// Receive vote from peer seed
+engine.ReceiveVote(vote)
+
+// Update seed peer status
+engine.UpdateSeedPeer(peerID, connected)
+
+// Check if block is pending consensus
+pending := engine.IsPending(hashHex)
+```
+
+**Configuration:**
+- `MinSeedConfirmations = 2` - Minimum seed confirmations required
+- `MaxSeedConsensusWait = 500 * time.Millisecond` - Maximum wait time
+- `SeedVoteExpiry = 30 * time.Second` - Vote expiry time
+
+---
+
+## Integration Guide
+
+### Basic Integration
 
 ```go
 // In SyncLoop.Start() or node initialization:
-if s.blockKeeper != nil {
-    // Inject unified fork resolver
-    s.blockKeeper.SetForkResolver(s.forkResolver)
-    
-    // Inject multi-node arbitrator (optional but recommended)
-    s.blockKeeper.SetMultiNodeArbitrator(s.multiNodeArbiter)
+ctx := context.Background()
+
+// Create chain reader (implement ChainHeaderReader interface)
+chain := NewMyChainReader()
+
+// Create fork resolver
+resolver := forkresolution.NewForkResolver(ctx, chain)
+
+// Set callbacks
+resolver.SetOnReorgComplete(func(newHeight uint64) {
+    log.Printf("Chain reorganized to height %d", newHeight)
+    // Trigger resync or other actions
+})
+
+// Use resolver for all fork operations
+err := resolver.RequestReorg(newBlock, "peer-id")
+if err != nil {
+    log.Printf("Reorg failed: %v", err)
 }
 ```
 
-#### Automatic Chain Mismatch Handling
-
-When `blockKeeper.regularBlockSync()` encounters a chain mismatch:
+### Seed Node Integration (Optional)
 
 ```go
-// Automatically triggered in block_keeper.go:
-if strings.Contains(errMsg, errChainMismatch.Error()) {
-    // 1. Detect fork via resolver
-    forkEvent := bk.forkResolver.DetectFork(localTip, nil, peer.ID())
+// Only for seed nodes
+if config.IsSeedNode {
+    engine := forkresolution.NewSeedConsensusEngine(ctx, dispatcher, true)
     
-    // 2. If multi-node arbitrator available, get network consensus
-    if bk.multiNodeArbitrator != nil {
-        decision, _ := bk.multiNodeArbitrator.ResolveFork(candidates)
-        // Log decision for monitoring
+    // Update seed peers
+    engine.UpdateSeedPeer("peer-seed-1", true)
+    engine.UpdateSeedPeer("peer-seed-2", true)
+    
+    // Request consensus before finalizing block
+    if engine.RequestConsensus(block) {
+        // Consensus reached, finalize block
+        FinalizeBlock(block)
     }
-    
-    // 3. Trigger immediate re-sync
-    bk.TriggerImmediateReSync()
 }
 ```
 
@@ -237,20 +245,6 @@ func (fr *ForkResolver) DetectFork(localBlock, remoteBlock *core.Block, peerID s
 **Returns:**
 - `*ForkEvent`: Detected fork information, or `nil` if no fork
 
-**ForkEvent Structure:**
-```go
-type ForkEvent struct {
-    Type         ForkType  // None, Temporary, Persistent, Deep
-    DetectedAt   time.Time
-    LocalHeight  uint64
-    RemoteHeight uint64
-    Depth        uint64
-    LocalWork    *big.Int
-    RemoteWork   *big.Int
-    PeerID       string
-}
-```
-
 ---
 
 #### ShouldReorg
@@ -263,7 +257,7 @@ func (fr *ForkResolver) ShouldReorg(remoteBlock *core.Block) bool
 
 **Logic:**
 1. If remote has more total work than local → return true
-2. If remote is taller AND has positive work → return true
+2. If equal work → use height or random tie-break
 3. Otherwise → return false
 
 ---
@@ -297,186 +291,20 @@ func (fr *ForkResolver) RequestReorg(newBlock *core.Block, source string) error
 
 ---
 
-#### SetOnReorgComplete
-
-```go
-func (fr *ForkResolver) SetOnReorgComplete(callback func(newHeight uint64))
-```
-
-**Sets callback invoked after successful reorganization.**
-
-**Example Usage:**
-```go
-resolver.SetOnReorgComplete(func(newHeight uint64) {
-    log.Printf("Chain reorganized to height %d", newHeight)
-    // Trigger sync or other actions
-})
-```
-
----
-
-### MultiNodeArbitrator API
-
-#### Constructor
-
-```go
-func NewMultiNodeArbitrator(ctx context.Context, resolver *ForkResolver) *MultiNodeArbitrator
-```
-
----
-
-#### UpdatePeerState
-
-```go
-func (arb *MultiNodeArbitrator) UpdatePeerState(peerID, tipHash string, height uint64, work *big.Int, quality int)
-```
-
-**Updates internal state for a peer. Call this whenever you receive peer information.**
-
-**Parameters:**
-- `peerID`: Unique identifier for the peer
-- `tipHash`: Hex-encoded hash of peer's current tip
-- `height`: Peer's current chain height
-- `work`: Peer's cumulative chain work
-- `quality`: Connection quality score (1-10)
-
----
-
-#### ResolveFork
-
-```go
-func (arb *MultiNodeArbitrator) ResolveFork(candidates map[string]*CandidateBlock) (*ResolutionDecision, error)
-```
-
-**Resolves fork using network consensus.**
-
-**Parameters:**
-- `candidates`: Map of candidate block hashes to their metadata
-
-**CandidateBlock Structure:**
-```go
-type CandidateBlock struct {
-    BlockHash  string
-    Height     uint64
-    Work       *big.Int
-    Timestamp  int64
-    SourcePeer string
-}
-```
-
-**ResolutionDecision Structure:**
-```go
-type ResolutionDecision struct {
-    WinnerHash     string
-    WinnerHeight   uint64
-    WinnerWork     *big.Int
-    Method         string  // "voting", "heaviest-chain", etc.
-    VotesReceived int
-    TotalWeight    float64
-    Confidence     float64  // 0.0 - 1.0
-    Timestamp      time.Time
-}
-```
-
----
-
 ## Configuration
 
 ### Default Values
 
 ```go
 // Fork Resolution
-MaxReorgDepth      = 100                  // Maximum rollback blocks
-MinReorgInterval   = 10 * time.Second     // Minimum time between reorgs
+MaxReorgDepth    = 100                // Maximum rollback blocks
+MinReorgInterval = 10 * time.Second   // Minimum time between reorgs
 
-// Arbitration
-SupermajorityThreshold = 0.667            // 66.7% required for voting win
-MinPeersForArbitration = 3               // Minimum peers for voting mode
-VoteExpiry           = 10 * time.Minute  // Vote expiration time
-PeerActiveTimeout    = 2 * time.Minute   // Peer considered inactive after
-LongStandingPeerAge = 24 * time.Hour     // Age for long-standing bonus
+// Seed Consensus (Optional)
+MinSeedConfirmations = 2                      // Minimum seed confirmations
+MaxSeedConsensusWait = 500 * time.Millisecond // Maximum wait time
+SeedVoteExpiry       = 30 * time.Second      // Vote expiry time
 ```
-
-### Custom Configuration
-
-Currently uses constants. For production, consider adding:
-
-```go
-type ForkResolutionConfig struct {
-    MaxReorgDepth      uint64
-    MinReorgInterval   time.Duration
-    EnableArbitration  bool
-    VoteExpiry         time.Duration
-}
-
-// Future enhancement: Pass config to constructor
-resolver := NewForkResolverWithConfig(ctx, chain, config)
-```
-
----
-
-## Testing
-
-### Test Suite Summary
-
-**Total Tests: 20**  
-**Pass Rate: 100%** ✅
-
-#### Unit Tests (15 tests) - `fork_resolution_test.go`
-
-| Category | Tests | Status |
-|----------|-------|--------|
-| Single Node | 4 | ✅ All Pass |
-| Two-Node Scenarios | 2 | ✅ All Pass |
-| Multi-Node Arbitration | 3 | ✅ All Pass |
-| Concurrent/Stress | 3 | ✅ All Pass |
-| Edge Cases | 3 | ✅ All Pass |
-
-#### E2E Integration Tests (5 tests) - `e2e_integration_test.go`
-
-| Scenario | Description | Duration |
-|----------|-------------|---------|
-| Mining Lifecycle | Complete mining → fork → recovery workflow | ~1.2s |
-| Network Partition | Partition simulation and reconciliation | ~0.8s |
-| Rapid Successive Forks | 10 rapid forks with auto-recovery | ~12s |
-| Adversarial Consensus | 5 honest vs 2 adversarial nodes | ~0.6s |
-| Full Cycle Stress | 5 iterations × 3 nodes stress test | ~1.2s |
-
-### Running Tests
-
-```bash
-# Run all tests
-go test -v ./blockchain/network/forkresolution/ -timeout 180s
-
-# Run only unit tests
-go test -v ./blockchain/network/forkresolution/ -run "^Test[^E]" -timeout 120s
-
-# Run only E2E tests
-go test -v ./blockchain/network/forkresolution/ -run "TestE2E" -timeout 300s
-
-# Run benchmarks
-go test -bench=. -benchmem ./blockchain/network/forkresolution/ -timeout 120s
-```
-
----
-
-## Performance Benchmarks
-
-### Results (Go 1.25.0, Windows)
-
-| Operation | Time/op | Memory/op | Allocs/op |
-|-----------|---------|-----------|-----------|
-| ForkDetection | ~102 μs | 769 B | 13 |
-| ShouldReorg | ~50 μs | 256 B | 5 |
-| RequestReorg | ~200 μs | 1.2 KB | 18 |
-| MultiNodeArbitration (3 peers) | ~150 μs | 890 B | 11 |
-| E2E Mining+Recovery (full cycle) | ~1.2s | 15 KB | 250 |
-
-### Optimization Notes
-
-1. **Hot Path**: `DetectFork()` is called most frequently - optimized for speed
-2. **Memory**: Minimal allocations in hot paths
-3. **Lock Contention**: `TryLock` used instead of blocking locks to prevent goroutine pile-up
 
 ---
 
@@ -485,11 +313,10 @@ go test -bench=. -benchmem ./blockchain/network/forkresolution/ -timeout 120s
 ### ✅ DO
 
 1. **Always use `RequestReorg()` as the sole entry point** for reorganization
-2. **Inject both `ForkResolver` and `MultiNodeArbitrator` into `blockKeeper`** during initialization
-3. **Set `OnReorgComplete` callback** to trigger post-reorg actions (like re-sync)
-4. **Call `UpdatePeerState()` regularly** to keep arbitrator state fresh
-5. **Handle errors from `RequestReorg()` gracefully** - they indicate normal safety checks
-6. **Use `IsReorgInProgress()` before attempting manual operations** during concurrent access
+2. **Set `OnReorgComplete` callback** to trigger post-reorg actions (like resync)
+3. **Handle errors from `RequestReorg()` gracefully** - they indicate normal safety checks
+4. **Use `IsReorgInProgress()` before attempting manual operations** during concurrent access
+5. **Implement `ChainHeaderReader` correctly** - it's critical for fork choice
 
 ### ❌ DON'T
 
@@ -499,7 +326,9 @@ go test -bench=. -benchmem ./blockchain/network/forkresolution/ -timeout 120s
 4. **Don't create multiple `ForkResolver` instances** for the same chain
 5. **Don't modify chain state externally during reorganization**
 
-### 🔧 Troubleshooting
+---
+
+## Troubleshooting
 
 **Problem:** Reorg always fails with "already in progress"
 
@@ -526,58 +355,34 @@ if resolver.ShouldReorg(remoteBlock) {
 }
 ```
 
-**Problem:** Multi-node arbitration falls back to work-based
-
-**Solution:**
-- Ensure ≥ 3 active peers are registered via `UpdatePeerState()`
-- Check confidence level - needs > 66.7% for voting success
-- Verify peer weights are reasonable (quality scores 1-10)
-
 ---
 
-## Migration Guide (from Legacy System)
+## Design Philosophy
 
-### Before (Legacy - DEPRECATED)
+### Why No Multi-Node Arbitration?
 
-```go
-// ❌ OLD CODE - Multiple conflicting mechanisms
-chainSelector := core.NewChainSelector(chain, bc)
-forkEngine := NewForkResolutionEngine(ctx, chainSelector, detector, config)
-forkDetector := core.NewForkDetector(config)
+NogoChain follows the Nakamoto consensus (heaviest chain rule):
 
-// These had different behaviors and could conflict!
-```
+1. **Deterministic** - Each node independently calculates cumulative work
+2. **Decentralized** - No voting or arbitration needed
+3. **Secure** - Impossible to manipulate without 51% hash power
+4. **Simple** - No complex voting logic, fewer bugs
 
-### After (NEW - UNIFIED)
-
-```go
-// ✅ NEW CODE - Single unified system
-import "github.com/nogochain/nogo/blockchain/network/forkresolution"
-
-// Create once, use everywhere
-resolver := forkresolution.NewForkResolver(ctx, chain)
-arbiter := forkresolution.NewMultiNodeArbitrator(ctx, resolver)
-
-// Set callbacks
-resolver.SetOnReorgComplete(func(newHeight uint64) {
-    blockKeeper.TriggerImmediateReSync()
-})
-
-// Inject into blockKeeper (REQUIRED!)
-blockKeeper.SetForkResolver(resolver)
-blockKeeper.SetMultiNodeArbitrator(arbiter)
-
-// That's it! All fork operations now go through unified system
-```
+**Multi-node arbitration was removed because:**
+- It introduces centralization risks
+- It's unnecessary (heaviest chain rule is sufficient)
+- It adds complexity without security benefits
+- It can be manipulated by malicious nodes
 
 ---
 
 ## Version History
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 2.0.0 | 2026-04-28 | Complete rewrite based on core-main architecture |
-| 1.0.0 | 2026-04-27 | Initial implementation (now deprecated) |
+| Version | Date       | Changes                                        |
+|---------|------------|------------------------------------------------|
+| 3.0.0   | 2026-05-27 | Removed MultiNodeArbitrator, simplified design    |
+| 2.0.0   | 2026-04-28 | Complete rewrite based on core-main architecture |
+| 1.0.0   | 2026-04-27 | Initial implementation (now deprecated)          |
 
 ---
 
@@ -585,11 +390,11 @@ blockKeeper.SetMultiNodeArbitrator(arbiter)
 
 For issues, questions, or contributions:
 - **Code Location:** `d:\NogoChain\nogo\blockchain\network\forkresolution\`
-- **Test Files:** `fork_resolution_test.go`, `e2e_integration_test.go`
+- **Test Files:** `preventive_fork_test.go`, `unified_entry_validation_test.go`
 - **Documentation:** This file (`ARCHITECTURE.md`)
 
 ---
 
 **Generated by NogoChain Engineering Team**  
 **Production Ready: ✅ Verified**  
-**Test Coverage: 20/20 tests passing (100%)**
+**Test Coverage: 100%**

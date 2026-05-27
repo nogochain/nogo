@@ -24,7 +24,7 @@ var (
 		SyncEnable:           true,
 		MineForceEmptyBlocks: true,
 		MaxTxPerBlock:        10000,
-		MineIntervalMs:       17000,
+		MineIntervalMs:       30000,
 		MetricsEnabled:       true,
 		MetricsAddr:          "0.0.0.0:9100",
 		DataDir:              "./nogodata",
@@ -118,6 +118,11 @@ func handleServerCommand() {
 	}
 	if dataDir := os.Getenv("NOGO_DATA_DIR"); dataDir != "" {
 		cfg.DataDir = dataDir
+	}
+	if mineIntervalMs := os.Getenv("MINE_INTERVAL_MS"); mineIntervalMs != "" {
+		if ms, err := strconv.Atoi(mineIntervalMs); err == nil && ms > 0 {
+			cfg.MineIntervalMs = int64(ms)
+		}
 	}
 
 	// Override with relay server configuration from environment variables

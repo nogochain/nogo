@@ -51,9 +51,9 @@ func DefaultConfig() *Config {
 			BlockTimeTargetSeconds:       30,
 			DifficultyAdjustmentInterval: 1,
 			MaxBlockTimeDriftSeconds:     900,
-			MinDifficulty:                1,
+			MinDifficulty:                10,  // Increased from 1 to prevent difficulty from dropping too low
 			MaxDifficulty:                4294967295,
-			MinDifficultyBits:            1,
+			MinDifficultyBits:            10,  // Increased from 1 to match MinDifficulty
 			MaxDifficultyBits:            255,
 			MaxDifficultyChangePercent:   100, // Increased for faster convergence when network hashrate changes
 			MedianTimePastWindow:         11,

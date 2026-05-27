@@ -19,26 +19,23 @@ func NewWorkCalculator() *WorkCalculator {
 	return &WorkCalculator{}
 }
 
-// GetBlockProof calculates the proof of work for a given difficulty bits
-// Implementation matches Bitcoin's algorithm: (2^256 / (target+1))
-// Mathematical correctness: proven algorithm from Bitcoin Core
-// Returns work as *big.Int for precise comparison
+// GetBlockProof calculates the proof of work for a given difficulty bits.
+// Design: NogoChain uses LINEAR difficulty in range [1, 256],
+// NOT Bitcoin-style compact encoding. See WorkForDifficultyBits for proof.
+//
+// Work formula: work = difficulty (linear proportionality).
+// This is consistent with chain.go:WorkForDifficultyBits().
+// Chain selection uses cumulative work = sum(difficulty_i) for all blocks i.
+//
+// Thread-safety: pure function, no shared state.
+// Math & numeric safety: uses big.Int for cumulative work precision.
 func (wc *WorkCalculator) GetBlockProof(difficultyBits uint32) *big.Int {
-	// Calculate target from difficulty bits
-	target := difficultyBitsToTarget(difficultyBits)
-	if target.Sign() <= 0 {
+	if difficultyBits == 0 {
 		return new(big.Int)
 	}
-
-	// Bitcoin formula: work = (2^256) / (target + 1)
-	// Represent 2^256 as big.Int
-	two256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
-
-	// Calculate work = 2^256 / (target + 1)
-	targetPlusOne := new(big.Int).Add(target, big.NewInt(1))
-	work := new(big.Int).Div(two256, targetPlusOne)
-
-	return work
+	// Linear difficulty system: work = difficulty.
+	// Cumulative chain work is sum of all block difficulties.
+	return new(big.Int).SetInt64(int64(difficultyBits))
 }
 
 // CalculateChainWork computes cumulative work from genesis to target block
@@ -81,35 +78,6 @@ func (wc *WorkCalculator) CalculateChainWork(block *Block, getBlockByHash func(h
 	}
 
 	return totalWork
-}
-
-// difficultyBitsToTarget converts difficulty bits to target value
-// Implementation matches Bitcoin's SetCompact/Uncompact logic
-// Returns target as big.Int for precise calculations
-func difficultyBitsToTarget(difficultyBits uint32) *big.Int {
-	// Extract exponent and mantissa
-	exponent := uint8((difficultyBits >> 24) & 0xFF)
-	mantissa := difficultyBits & 0x007FFFFF
-
-	// Special case: if mantissa is 0, return 0
-	if mantissa == 0 {
-		return new(big.Int)
-	}
-
-	// Calculate target: mantissa * 2^(8 * (exponent - 3))
-	target := new(big.Int).SetUint64(uint64(mantissa))
-	shift := uint(8 * (exponent - 3))
-
-	if shift < 256 {
-		target.Lsh(target, shift)
-	} else {
-		// Handle large shifts
-		target.Lsh(target, 255)
-		mult := new(big.Int).Exp(big.NewInt(2), big.NewInt(int64(shift-255)), nil)
-		target.Mul(target, mult)
-	}
-
-	return target
 }
 
 // CompareChainWork compares two chain work values

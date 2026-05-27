@@ -65,13 +65,6 @@ const (
 	// MaxReorgDepth limits how far back findBestChainTipLocked scans fork blocks
 	// Prevents infinite oscillation by ignoring forks too deep below canonical tip
 	MaxReorgDepth = 100
-
-	// ReorgCooldownPeriod enforces a minimum wait between successive reorgs
-	// Activated when consecutive reorgs exceed RapidReorgThreshold
-	ReorgCooldownPeriod = 2 * time.Minute
-
-	// RapidReorgThreshold triggers reorg cooldown when consecutive reorgs exceed this count
-	RapidReorgThreshold = 5
 )
 
 // SyncNotifier defines the interface for notifying sync loop about chain events
@@ -318,8 +311,6 @@ type Chain struct {
 	reorgInProgress bool
 	reorgMu         sync.Mutex
 	lastReorgTime   time.Time
-	reorgCount      int
-	reorgLockUntil  time.Time
 
 	// Contract management
 	contractManager *ContractManager
@@ -338,10 +329,8 @@ type Chain struct {
 	// Thread-safety: callback is invoked under mutex lock, must not block
 	onForkResolved func(newHeight uint64, rolledBack uint64)
 
-	// External reorg state checker - allows coordination with ForkResolutionEngine
-	// When set, Mining will check this before starting to mine
-	// This prevents the "mine-rollback-mine" oscillation loop
-	externalReorgChecker func() bool
+	// External reorg state checker removed - heaviest chain rule is deterministic
+	// No external coordination needed for fork resolution
 
 	// UNIFIED FORK RESOLUTION: ReorgExecutor for centralized reorg management
 	// When set, all reorg operations from Chain will delegate to this executor
@@ -483,19 +472,6 @@ func (c *Chain) SetOnBlockAdded(callback func(*Block)) {
 	c.onBlockMu.Lock()
 	defer c.onBlockMu.Unlock()
 	c.onBlockAdded = callback
-}
-
-// SetExternalReorgChecker sets an external reorg state checker function
-// Production-grade: allows coordination with ForkResolutionEngine to prevent mining during reorg
-// This prevents the "mine-rollback-mine" oscillation loop that caused D-node to waste 1 hour
-// Dependency injection: called during node initialization after ForkResolutionEngine creation
-// Parameters:
-//   - checker: function that returns true if a reorganization is in progress (e.g., ForkResolutionEngine.IsReorgInProgress)
-func (c *Chain) SetExternalReorgChecker(checker func() bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.externalReorgChecker = checker
-	log.Printf("[Chain] External reorg checker set for Mining coordination")
 }
 
 // GetOnBlockAdded returns the current callback function
@@ -1765,6 +1741,7 @@ func (c *Chain) IsReorgInProgress() bool {
 func (c *Chain) findCommonAncestorLocked(newBlock *Block) (*Block, []*Block, error) {
 	parentMap := make(map[string]*Block)
 	current := newBlock
+	forkDivergenceHeight := int64(-1)
 	for {
 		hashHex := hex.EncodeToString(current.Hash)
 		parentMap[hashHex] = current
@@ -1774,6 +1751,7 @@ func (c *Chain) findCommonAncestorLocked(newBlock *Block) (*Block, []*Block, err
 		}
 
 		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
+		parentHeight := int(current.GetHeight()) - 1
 
 		parent := c.lookupBlockInForkBlocksLocked(parentHashHex)
 		if parent != nil {
@@ -1783,7 +1761,6 @@ func (c *Chain) findCommonAncestorLocked(newBlock *Block) (*Block, []*Block, err
 
 		parent, exists := c.blocksByHash[parentHashHex]
 		if exists {
-			parentHeight := int(parent.GetHeight())
 			if parentHeight < len(c.blocks) {
 				canonicalBlock := c.blocks[parentHeight]
 				if hex.EncodeToString(canonicalBlock.Hash) == parentHashHex {
@@ -1792,17 +1769,30 @@ func (c *Chain) findCommonAncestorLocked(newBlock *Block) (*Block, []*Block, err
 				}
 			}
 		}
+
+		if parentHeight >= 0 && parentHeight < len(c.blocks) && c.blocks[parentHeight] != nil {
+			canonicalHashAtParent := hex.EncodeToString(c.blocks[parentHeight].Hash)
+			if canonicalHashAtParent != parentHashHex {
+				forkDivergenceHeight = int64(parentHeight)
+			}
+		}
 		break
 	}
 
-	// Walk canonical chain to find ancestor
+	if forkDivergenceHeight >= 0 {
+		ancestorHeight := forkDivergenceHeight - 1
+		if ancestorHeight >= 0 && int(ancestorHeight) < len(c.blocks) && c.blocks[ancestorHeight] != nil {
+			ancestorHashHex := hex.EncodeToString(c.blocks[ancestorHeight].Hash)
+			parentMap[ancestorHashHex] = c.blocks[ancestorHeight]
+		}
+	}
+
 	var forkBlocks []*Block
 	for i := len(c.blocks) - 1; i >= 0; i-- {
 		canonicalBlock := c.blocks[i]
 		canonicalHashHex := hex.EncodeToString(canonicalBlock.Hash)
 
 		if _, exists := parentMap[canonicalHashHex]; exists {
-			// Found common ancestor
 			return canonicalBlock, forkBlocks, nil
 		}
 
@@ -1867,16 +1857,8 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 
 	log.Printf("Chain reorganization: ancestor height=%d, new tip height=%d", ancestor.GetHeight(), newTip.GetHeight())
 
-	if !c.reorgLockUntil.IsZero() {
-		if time.Now().Before(c.reorgLockUntil) {
-			remaining := time.Until(c.reorgLockUntil).Round(time.Second)
-			log.Printf("[Chain] Reorg cooldown active, %v remaining, rejecting reorg", remaining)
-			return fmt.Errorf("reorg cooldown active: %v remaining", remaining)
-		}
-		c.reorgLockUntil = time.Time{}
-		c.reorgCount = 0
-		log.Printf("[Chain] Reorg cooldown expired, reorg counter reset")
-	}
+	// Heaviest chain rule: no external coordination needed for fork resolution
+	// External reorg checker removed - deterministic consensus via cumulative work
 
 	ancestorHeight := ancestor.GetHeight()
 	currentChainLen := len(c.blocks)
@@ -2054,15 +2036,7 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 			ancestorHeight, newHeight, ancestorHeight)
 	}
 
-	now := time.Now()
-	c.lastReorgTime = now
-	c.reorgCount++
-
-	if c.reorgCount > RapidReorgThreshold {
-		c.reorgLockUntil = now.Add(ReorgCooldownPeriod)
-		log.Printf("[Chain] Rapid reorgs detected (%d consecutive), activating cooldown until %v",
-			c.reorgCount, c.reorgLockUntil.Format(time.RFC3339))
-	}
+	c.lastReorgTime = time.Now()
 
 	if c.forkBlocks != nil {
 		for forkHeight := range c.forkBlocks {
@@ -2678,16 +2652,31 @@ func verifyBlockPoWSeal(consensus ConsensusParams, block *Block, parent *Block, 
 	return nil
 }
 
-// WorkForDifficultyBits calculates work value for difficulty
-// Math & numeric safety: uses big.Int to prevent overflow
+// WorkForDifficultyBits calculates work value for difficulty bits.
+// Design: NogoChain uses LINEAR difficulty in range [1, 256],
+// NOT Bitcoin-style compact encoding (exponent|mantissa).
+// Proof: nogopow/compatibility.go CalcNextDifficulty clamps output to [1,256]
+// and passes DifficultyBits as linear value to PI controller via big.NewInt(int64(bits)).
+//
+// Work formula: work = difficulty (linear proportionality).
+// This ensures small difficulty adjustments result in proportional work adjustments,
+// preventing exponential work differences that cause infinite reorganizations
+// when multiple nodes compete (one node's chain always appears much heavier).
+//
+// Math & numeric safety: uses big.Int to prevent overflow on cumulative work.
+// Thread-safety: pure function, no shared state.
+//
+// Unified implementation: uses SetUint64 for consistency with CalculateCumulativeWork.
+// This prevents negative work values when DifficultyBits > 2147483647 (future-proof).
 func WorkForDifficultyBits(bits uint32) *big.Int {
-	if bits > 256 {
-		bits = 256
-	}
 	if bits == 0 {
-		return big.NewInt(0)
+		return new(big.Int)
 	}
-	return new(big.Int).Lsh(big.NewInt(1), uint(bits))
+	// Linear work: work = difficulty.
+	// In linear difficulty system, hash work ∝ difficulty value.
+	// Cumulative chain work = sum(difficulty_i) for all blocks i.
+	// Unified: SetUint64 matches CalculateCumulativeWork implementation.
+	return new(big.Int).SetUint64(uint64(bits))
 }
 
 // getNetworkTimeUnix returns current Unix timestamp using NTP
@@ -3241,7 +3230,12 @@ func (c *Chain) addBlockReconnectLocked(block *Block, hashHex string) (bool, err
 }
 
 func (c *Chain) autoReorgIfNeededLocked() {
-	if c.externalReorgChecker != nil && c.externalReorgChecker() {
+	// Note: External reorg checker removed - heaviest chain rule is deterministic
+	// No external coordination needed for fork resolution
+
+	// CRITICAL FIX: Check if chain has blocks before accessing
+	// Prevents "index out of range" panic when len(c.blocks) == 0
+	if len(c.blocks) == 0 {
 		return
 	}
 
@@ -3250,10 +3244,7 @@ func (c *Chain) autoReorgIfNeededLocked() {
 		return
 	}
 
-	currentTipHash := ""
-	if len(c.blocks) > 0 {
-		currentTipHash = hex.EncodeToString(c.blocks[len(c.blocks)-1].Hash)
-	}
+	currentTipHash := hex.EncodeToString(c.blocks[len(c.blocks)-1].Hash)
 	bestTipHash := hex.EncodeToString(bestTip.Hash)
 	if bestTipHash == currentTipHash {
 		return
@@ -3276,6 +3267,7 @@ func (c *Chain) autoReorgIfNeededLocked() {
 
 	ancestor, _, err := c.findCommonAncestorLocked(bestTip)
 	if err != nil || ancestor == nil {
+		log.Printf("[Chain] AUTO REORG cancelled: findCommonAncestorLocked returned err=%v ancestor=%v", err, ancestor)
 		return
 	}
 
@@ -3298,7 +3290,6 @@ func (c *Chain) findBestChainTipLocked() *Block {
 	var bestTip *Block = c.blocks[currentCanonicalHeight]
 	bestHeight := currentCanonicalHeight
 	bestWork := new(big.Int).Set(canonicalWork)
-	bestChainComplete := true
 
 	for _, blocks := range c.forkBlocks {
 		for _, block := range blocks {
@@ -3308,8 +3299,14 @@ func (c *Chain) findBestChainTipLocked() *Block {
 				continue
 			}
 
+			// Nakamoto consensus safety: only consider complete fork chains.
+			// An incomplete chain means some ancestor blocks are missing,
+			// making cumulative work unreliable and reorg guaranteed to fail.
+			if !c.isForkChainCompleteLocked(block) {
+				continue
+			}
+
 			forkWork := c.calculateCumulativeWorkLocked(block)
-			forkChainComplete := c.isForkChainCompleteLocked(block)
 
 			isBetter := false
 			workCmp := forkWork.Cmp(bestWork)
@@ -3325,9 +3322,7 @@ func (c *Chain) findBestChainTipLocked() *Block {
 				if forkHeight > bestHeight {
 					isBetter = true
 				} else if forkHeight == bestHeight {
-					if forkChainComplete != bestChainComplete {
-						isBetter = forkChainComplete
-					} else if c.shouldSwitchBasedOnTieBreakerLocked(block, bestTip) {
+					if c.shouldSwitchBasedOnTieBreakerLocked(block, bestTip) {
 						isBetter = true
 					}
 				}
@@ -3338,7 +3333,6 @@ func (c *Chain) findBestChainTipLocked() *Block {
 				bestTip = block
 				bestHeight = forkHeight
 				bestWork = forkWork
-				bestChainComplete = forkChainComplete
 			}
 		}
 	}
@@ -3957,6 +3951,13 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 				}
 			}
 
+			if c.isForkChainCompleteLocked(block) && c.shouldReorgToHeaviestLocked() {
+				log.Printf("[Chain] DUPLICATE fork block %d: chain complete, triggering reorganization", height)
+				if err := c.reorganizeToHeaviestLocked(); err != nil {
+					log.Printf("[Chain] Reorganization from DUPLICATE path failed: %v", err)
+				}
+			}
+
 			c.processOrphanDescendantsLocked(hashHex)
 			c.autoReorgIfNeededLocked()
 			return false, nil
@@ -4004,7 +4005,9 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 		height, hashHex[:16], canonicalHash)
 
 	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+	parentMissing := false
 	if _, inMain := c.blocksByHash[parentHashHex]; !inMain && !c.isParentInForkBlocksLocked(parentHashHex) {
+		parentMissing = true
 		const parentRequestDedupWindow = 30 * time.Second
 		lastReq, alreadyPending := c.pendingAncestorRequests[parentHashHex]
 		if !alreadyPending || time.Since(lastReq) >= parentRequestDedupWindow {
@@ -4015,8 +4018,9 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 		}
 	}
 
-	if c.shouldReorgToHeaviestLocked() {
-		log.Printf("[Chain] Heavier fork chain detected (global check), triggering reorganization")
+	forkChainComplete := !parentMissing && c.isForkChainCompleteLocked(block)
+	if forkChainComplete && c.shouldReorgToHeaviestLocked() {
+		log.Printf("[Chain] Heavier fork chain detected (global check, chain complete), triggering reorganization")
 		if err := c.reorganizeToHeaviestLocked(); err != nil {
 			log.Printf("[Chain] Reorganization failed: %v", err)
 			return false, fmt.Errorf("reorg failed: %w", err)

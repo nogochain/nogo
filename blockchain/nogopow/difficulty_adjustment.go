@@ -377,9 +377,11 @@ func (da *DifficultyAdjuster) enforceBoundaryConditionsLocked(newDifficulty, par
 		newDifficulty.Set(minAllowed)
 	}
 
-	// Absolute minimum difficulty of 1
-	if newDifficulty.Cmp(big.NewInt(1)) < 0 {
-		newDifficulty.Set(big.NewInt(1))
+	// Use configured minimum difficulty instead of hardcoded 1
+	// This prevents difficulty from dropping below a reasonable threshold
+	configMinDiff := big.NewInt(int64(da.consensusParams.MinDifficulty))
+	if newDifficulty.Cmp(configMinDiff) < 0 {
+		newDifficulty.Set(configMinDiff)
 	}
 
 	return newDifficulty

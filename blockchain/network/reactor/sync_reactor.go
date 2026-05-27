@@ -431,12 +431,16 @@ func (sr *SyncReactor) handleHeaders(peerID string, payload []byte, handler Sync
 
 // handleGetBlocks parses and dispatches a GetBlocks request.
 func (sr *SyncReactor) handleGetBlocks(peerID string, payload []byte, handler SyncHandler) {
+	log.Printf("[SyncReactor] handleGetBlocks: received GetBlocks request from peer=%s payloadLen=%d",
+		peerID[:min(12, len(peerID))], len(payload))
 	if len(payload) == 0 {
+		log.Printf("[SyncReactor] handleGetBlocks: empty payload from peer=%s, dropping", peerID[:min(12, len(peerID))])
 		return
 	}
 
 	var req getBlocksPayload
 	if err := json.Unmarshal(payload, &req); err != nil {
+		log.Printf("[SyncReactor] handleGetBlocks: unmarshal failed from peer=%s: %v", peerID[:min(12, len(peerID))], err)
 		return
 	}
 
@@ -444,12 +448,20 @@ func (sr *SyncReactor) handleGetBlocks(peerID string, payload []byte, handler Sy
 		req.Heights = []uint64{}
 	}
 
+	if len(req.Heights) > 0 {
+		log.Printf("[SyncReactor] handleGetBlocks: peer=%s requesting %d blocks [%d-%d]",
+			peerID[:min(12, len(peerID))], len(req.Heights), req.Heights[0], req.Heights[len(req.Heights)-1])
+	}
+
 	handler.OnGetBlocks(peerID, req.Heights)
 }
 
 // handleBlocks parses and dispatches a Blocks response.
 func (sr *SyncReactor) handleBlocks(peerID string, payload []byte, handler SyncHandler) {
+	log.Printf("[SyncReactor] handleBlocks: received Blocks response from peer=%s payloadLen=%d",
+		peerID[:min(12, len(peerID))], len(payload))
 	if len(payload) == 0 {
+		log.Printf("[SyncReactor] handleBlocks: empty payload from peer=%s, dropping", peerID[:min(12, len(peerID))])
 		return
 	}
 

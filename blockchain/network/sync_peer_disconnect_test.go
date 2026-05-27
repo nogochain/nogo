@@ -1,6 +1,8 @@
 package network
 
 import (
+	"context"
+	"fmt"
 	"math/big"
 	"sync"
 	"testing"
@@ -78,6 +80,18 @@ func (p *mockSyncPeer) getBlockByHeight(height uint64) bool                  { r
 func (p *mockSyncPeer) getBlocksByHeights(heights []uint64) bool             { return false }
 func (p *mockSyncPeer) getBlocks(locator [][]byte, stopHash []byte) bool     { return false }
 func (p *mockSyncPeer) getHeaders(locator [][]byte, stopHash []byte) bool    { return false }
+func (p *mockSyncPeer) fetchBlock(_ context.Context, _ uint64) (*core.Block, error) {
+	return nil, fmt.Errorf("mock: fetchBlock not supported")
+}
+func (p *mockSyncPeer) fetchBlocksBatch(_ context.Context, _ uint64, _ uint64) ([]*core.Block, error) {
+	return nil, fmt.Errorf("mock: fetchBlocksBatch not supported")
+}
+func (p *mockSyncPeer) fetchBlocksByLocator(_ context.Context, _ [][]byte, _ []byte) ([]*core.Block, error) {
+	return nil, fmt.Errorf("mock: fetchBlocksByLocator not supported")
+}
+func (p *mockSyncPeer) fetchHeadersByLocator(_ context.Context, _ [][]byte, _ []byte) ([]*HeaderLocator, error) {
+	return nil, fmt.Errorf("mock: fetchHeadersByLocator not supported")
+}
 
 func TestSyncPeerDisconnectNotification(t *testing.T) {
 	sw := NewSwitch(DefaultSwitchConfig())

@@ -4428,12 +4428,133 @@ func (p *switchPeerAdapter) getBlocksByHeights(heights []uint64) bool {
 		return false
 	}
 
+	log.Printf("[switchPeerAdapter] getBlocksByHeights: sending GetBlocks [%d-%d] (count=%d) to peer=%s msgSize=%d",
+		heights[0], heights[len(heights)-1], len(heights), p.id[:min(12, len(p.id))], len(reqMsg))
+
 	if ok := p.sw.Send(p.id, mconnection.ChannelSync, reqMsg); !ok {
 		log.Printf("[switchPeerAdapter] getBlocksByHeights: send failed to peer %s (%d blocks)", p.id, len(heights))
 		return false
 	}
 
+	log.Printf("[switchPeerAdapter] getBlocksByHeights: send OK to peer %s", p.id[:min(12, len(p.id))])
 	return true
+}
+
+func (p *switchPeerAdapter) fetchBlock(ctx context.Context, height uint64) (*core.Block, error) {
+	if p.sw == nil || p.sw.ctx == nil {
+		return nil, errors.New("switchPeerAdapter: switch not started")
+	}
+	return p.sw.FetchBlockByHeight(ctx, p.id, height)
+}
+
+func (p *switchPeerAdapter) fetchBlocksBatch(ctx context.Context, startHeight uint64, count uint64) ([]*core.Block, error) {
+	if p.sw == nil || p.sw.ctx == nil {
+		return nil, errors.New("switchPeerAdapter: switch not started")
+	}
+	return p.sw.FetchBlocksByHeightRange(ctx, p.id, startHeight, count)
+}
+
+func (p *switchPeerAdapter) fetchBlocksByLocator(ctx context.Context, locator [][]byte, stopHash []byte) ([]*core.Block, error) {
+	if p.sw == nil || p.sw.ctx == nil {
+		return nil, errors.New("switchPeerAdapter: switch not started")
+	}
+
+	heights := make([]uint64, 0, len(locator))
+	for _, loc := range locator {
+		if len(loc) >= 8 {
+			h := binary.BigEndian.Uint64(loc[len(loc)-8:])
+			heights = append(heights, h)
+		}
+	}
+	if len(heights) == 0 {
+		heights = []uint64{p.height}
+	}
+
+	reqMsg, err := reactor.BuildGetBlocksMsg(heights)
+	if err != nil {
+		return nil, fmt.Errorf("switchPeerAdapter: build getBlocks msg: %w", err)
+	}
+
+	respBytes, err := p.sw.sendAndWait(ctx, p.id, mconnection.ChannelSync, reactor.SyncMsgBlocks, reqMsg)
+	if err != nil {
+		return nil, fmt.Errorf("switchPeerAdapter: fetchBlocksByLocator from %s: %w", p.id, err)
+	}
+
+	if len(respBytes) < 1 {
+		return nil, errors.New("switchPeerAdapter: empty blocks response")
+	}
+
+	respCopy := make([]byte, len(respBytes)-1)
+	copy(respCopy, respBytes[1:])
+
+	var blocks []core.Block
+	if unmarshalErr := json.Unmarshal(respCopy, &blocks); unmarshalErr != nil {
+		return nil, fmt.Errorf("switchPeerAdapter: unmarshal blocks response: %w", unmarshalErr)
+	}
+
+	result := make([]*core.Block, 0, len(blocks))
+	for i := range blocks {
+		result = append(result, &blocks[i])
+	}
+
+	return result, nil
+}
+
+func (p *switchPeerAdapter) fetchHeadersByLocator(ctx context.Context, locator [][]byte, stopHash []byte) ([]*HeaderLocator, error) {
+	if p.sw == nil || p.sw.ctx == nil {
+		return nil, errors.New("switchPeerAdapter: switch not started")
+	}
+
+	from := uint64(0)
+	count := uint64(128)
+	if p.height > 0 {
+		from = p.height + 1
+	}
+
+	reqMsg, err := reactor.BuildGetHeadersMsg(from, count)
+	if err != nil {
+		return nil, fmt.Errorf("switchPeerAdapter: build getHeaders msg: %w", err)
+	}
+
+	respBytes, err := p.sw.sendAndWait(ctx, p.id, mconnection.ChannelSync, reactor.SyncMsgHeaders, reqMsg)
+	if err != nil {
+		return nil, fmt.Errorf("switchPeerAdapter: fetchHeadersByLocator from %s: %w", p.id, err)
+	}
+
+	if len(respBytes) < 1 {
+		return nil, errors.New("switchPeerAdapter: empty headers response")
+	}
+
+	type headersResp struct {
+		Headers []byte `json:"headers"`
+		HasMore bool   `json:"hasMore"`
+	}
+
+	respCopy := make([]byte, len(respBytes)-1)
+	copy(respCopy, respBytes[1:])
+
+	var resp headersResp
+	if unmarshalErr := json.Unmarshal(respCopy, &resp); unmarshalErr != nil {
+		return nil, fmt.Errorf("switchPeerAdapter: unmarshal headers response: %w", unmarshalErr)
+	}
+
+	var parsedHeaders []core.BlockHeader
+	if len(resp.Headers) > 0 {
+		if unmarshalErr := json.Unmarshal(resp.Headers, &parsedHeaders); unmarshalErr != nil {
+			return nil, fmt.Errorf("switchPeerAdapter: unmarshal headers data: %w", unmarshalErr)
+		}
+	}
+
+	result := make([]*HeaderLocator, 0, len(parsedHeaders))
+	for _, h := range parsedHeaders {
+		hl := &HeaderLocator{
+			Header: h,
+			Height: h.Height,
+		}
+		result = append(result, hl)
+	}
+
+	return result, nil
 }
 
 func (p *switchPeerAdapter) getBlocks(locator [][]byte, stopHash []byte) bool {

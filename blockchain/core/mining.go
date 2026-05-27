@@ -88,14 +88,7 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 		return nil, fmt.Errorf("no genesis block")
 	}
 
-	// PRODUCTION FIX: Check external reorg state (ForkResolutionEngine) before mining
-	// This prevents the oscillation loop where Mining and ForkResolutionEngine conflict
-	if c.externalReorgChecker != nil && c.externalReorgChecker() {
-		c.mu.Unlock()
-		return nil, fmt.Errorf("reorganization in progress (external check), cannot mine - preventing oscillation")
-	}
-
-	// Also check internal reorg state
+	// Check internal reorg state
 	if c.IsReorgInProgress() {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("reorganization in progress (internal), cannot mine")

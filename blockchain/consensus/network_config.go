@@ -40,7 +40,7 @@ func MainnetConfig() *NetworkConfig {
 		SyncEnable:           true,
 		MineForceEmptyBlocks: true,
 		MaxTxPerBlock:        100,
-		MineIntervalMs:       17000,
+		MineIntervalMs:       30000,
 		MetricsEnabled:       true,
 		MetricsAddr:          "0.0.0.0:9100",
 		DataDir:              "./nogodata",

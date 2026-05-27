@@ -26,11 +26,11 @@ const maxRecentBlockDedupSize = 512
 // corresponding business operation, and (when responding) serializes and
 // sends wire messages back through the Switch.
 type ReactorHandlers struct {
-	chain          Chain
-	mempool        Mempool
-	sw             Switch
-	miner          Miner
-	candidatePool  CandidatePoolRouter
+	chain           Chain
+	mempool         Mempool
+	sw              Switch
+	miner           Miner
+	candidatePool   CandidatePoolRouter
 	checkpointVoter *core.CheckpointVoter
 }
 
@@ -281,11 +281,16 @@ func (h *SyncReactorHandler) OnHeaders(peerID string, headers []byte, hasMore bo
 // 3. Large block responses don't stall the connection's message pump
 func (h *SyncReactorHandler) OnGetBlocks(peerID string, heights []uint64) error {
 	if h.handlers == nil || h.handlers.chain == nil {
+		log.Printf("[SyncHandler] OnGetBlocks: chain not available for peer=%s, rejecting request for %d blocks",
+			peerID[:min(12, len(peerID))], len(heights))
 		return fmt.Errorf("sync handler: chain not available")
 	}
 	if len(heights) == 0 {
 		return fmt.Errorf("sync handler: OnGetBlocks heights must not be empty")
 	}
+
+	log.Printf("[SyncHandler] OnGetBlocks: peer=%s requested %d blocks [%d-%d], dispatching async",
+		peerID[:min(12, len(peerID))], len(heights), heights[0], heights[len(heights)-1])
 
 	const maxBlocksPerResponse = 100
 
@@ -301,6 +306,9 @@ func (h *SyncReactorHandler) OnGetBlocks(peerID string, heights []uint64) error 
 			}
 			blocks = append(blocks, block)
 		}
+
+		log.Printf("[SyncHandler] OnGetBlocks async: found=%d missing=%d for peer=%s",
+			len(blocks), len(missing), peerID[:min(12, len(peerID))])
 
 		if len(blocks) == 0 {
 			msg, err := buildNotFoundMsgForSync(SyncMsgBlocks, missing)
@@ -379,6 +387,9 @@ func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
 		return fmt.Errorf("sync handler: empty blocks from peer %s", peerID)
 	}
 
+	log.Printf("[SyncHandler] OnBlocks: received %d blocks from peer=%s syncLoopPresent=%v",
+		len(rawBlocks), peerID[:min(12, len(peerID))], h.syncLoop != nil)
+
 	deliveredCount := 0
 	for _, raw := range rawBlocks {
 		var block core.Block
@@ -388,6 +399,8 @@ func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
 		}
 
 		if h.syncLoop != nil {
+			log.Printf("[SyncHandler] OnBlocks: delivering block h=%d to syncBlockCh from peer=%s",
+				block.GetHeight(), peerID[:min(12, len(peerID))])
 			h.syncLoop.DeliverSyncBlock(peerID, &block)
 			deliveredCount++
 			continue

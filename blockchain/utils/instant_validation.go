@@ -102,25 +102,9 @@ func (v *InstantValidator) GetOrphanPool() *OrphanPool {
 }
 
 // CalculateCumulativeWork calculates the total work for a chain
+// DEPRECATED: This function is dead code (not called by any code).
+// For chain work calculation, use chain.CalculateCumulativeWork() method instead.
+// This function is kept as a placeholder for future use, but it is NOT functional.
 func CalculateCumulativeWork(b *core.Block) (*big.Int, error) {
-	if b == nil {
-		return big.NewInt(0), nil
-	}
-
-	totalWork := big.NewInt(0)
-	current := b
-
-	for current != nil {
-		if current.Header.DifficultyBits == 0 {
-			return nil, errors.New("invalid difficulty")
-		}
-		work := new(big.Int).SetUint64(uint64(current.Header.DifficultyBits))
-		totalWork.Add(totalWork, work)
-
-		if len(current.Header.PrevHash) == 0 {
-			break
-		}
-	}
-
-	return totalWork, nil
+	return big.NewInt(0), nil
 }

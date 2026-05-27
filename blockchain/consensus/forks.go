@@ -43,16 +43,6 @@ type (
 	AddressTxEntry  = core.AddressTxEntry
 )
 
-func WorkForDifficultyBits(bits uint32) *big.Int {
-	if bits > 256 {
-		bits = 256
-	}
-	if bits == 0 {
-		return big.NewInt(0)
-	}
-	return new(big.Int).Lsh(big.NewInt(1), uint(bits))
-}
-
 func blockVersionForHeight(consensus ConsensusParams, height uint64) uint32 {
 	if consensus.MerkleRootActive(height) || consensus.BinaryEncodingActive(height) {
 		return 2

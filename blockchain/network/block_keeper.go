@@ -624,6 +624,11 @@ func (bk *blockKeeper) regularBlockSync(targetHeight uint64, batchLimit uint64) 
 			log.Printf("[BlockKeeper] Batch sync progress: %d/%d (%.1f%%)", newTip, targetHeight, pct)
 		}
 		i = newTip + 1
+		if i == startHeight {
+			log.Printf("[BlockKeeper] Batch sync stalled: tip=%d unchanged (all fork blocks), waiting for missing parent to trigger reorg",
+				newTip)
+			break
+		}
 	}
 
 	return nil
@@ -634,42 +639,22 @@ func (bk *blockKeeper) requireBlock(height uint64) (*core.Block, error) {
 		return nil, fmt.Errorf("%w: syncPeer is nil", errPeerDropped)
 	}
 
-	if ok := bk.syncPeer.getBlockByHeight(height); !ok {
-		return nil, errPeerDropped
+	log.Printf("[BlockKeeper] requireBlock: requesting block h=%d from peer=%s sessionSeq=%d",
+		height, bk.syncPeer.ID()[:min(12, len(bk.syncPeer.ID()))], bk.syncSessionSeq)
+
+	ctx, cancel := context.WithTimeout(context.Background(), syncTimeout)
+	defer cancel()
+
+	block, err := bk.syncPeer.fetchBlock(ctx, height)
+	if err != nil {
+		log.Printf("[BlockKeeper] requireBlock: fetchBlock failed h=%d from peer=%s: %v",
+			height, bk.syncPeer.ID()[:min(12, len(bk.syncPeer.ID()))], err)
+		return nil, fmt.Errorf("%w: requireBlock height=%d: %w", errRequestTimeout, height, err)
 	}
 
-	sessionSeq := bk.syncSessionSeq
-
-	timeout := time.NewTimer(syncTimeout)
-	defer timeout.Stop()
-
-	for {
-		select {
-		case msg := <-bk.syncBlockCh:
-			if msg.peerID != bk.syncPeer.ID() {
-				continue
-			}
-			if msg.block == nil {
-				continue
-			}
-			if msg.block.GetHeight() != height {
-				continue
-			}
-			if msg.sessionSeq != sessionSeq {
-				// Block from a previous sync session (stale).
-				// This happens after RollbackToHeight triggers a new sync
-				// while old session blocks are still in-flight.
-				log.Printf("[BlockKeeper] requireBlock h=%d skipping stale block (sess=%d, current=%d)",
-					height, msg.sessionSeq, sessionSeq)
-				continue
-			}
-			return msg.block, nil
-		case <-timeout.C:
-			return nil, fmt.Errorf("%w: requireBlock height=%d", errRequestTimeout, height)
-		case <-bk.quit:
-			return nil, errors.New("blockKeeper shutdown")
-		}
-	}
+	log.Printf("[BlockKeeper] requireBlock: received block h=%d from peer=%s",
+		height, bk.syncPeer.ID()[:min(12, len(bk.syncPeer.ID()))])
+	return block, nil
 }
 
 func (bk *blockKeeper) requireBlockFast(height uint64) (*core.Block, error) {
@@ -677,37 +662,15 @@ func (bk *blockKeeper) requireBlockFast(height uint64) (*core.Block, error) {
 		return nil, fmt.Errorf("%w: syncPeer is nil", errPeerDropped)
 	}
 
-	if ok := bk.syncPeer.getBlockByHeight(height); !ok {
-		return nil, errPeerDropped
+	ctx, cancel := context.WithTimeout(context.Background(), fastSyncTimeout)
+	defer cancel()
+
+	block, err := bk.syncPeer.fetchBlock(ctx, height)
+	if err != nil {
+		return nil, fmt.Errorf("%w: requireBlockFast height=%d: %w", errRequestTimeout, height, err)
 	}
 
-	sessionSeq := bk.syncSessionSeq
-
-	timeout := time.NewTimer(fastSyncTimeout)
-	defer timeout.Stop()
-
-	for {
-		select {
-		case msg := <-bk.syncBlockCh:
-			if msg.peerID != bk.syncPeer.ID() {
-				continue
-			}
-			if msg.block == nil {
-				continue
-			}
-			if msg.block.GetHeight() != height {
-				continue
-			}
-			if msg.sessionSeq != sessionSeq {
-				continue
-			}
-			return msg.block, nil
-		case <-timeout.C:
-			return nil, fmt.Errorf("%w: requireBlockFast height=%d", errRequestTimeout, height)
-		case <-bk.quit:
-			return nil, errors.New("blockKeeper shutdown")
-		}
-	}
+	return block, nil
 }
 
 func (bk *blockKeeper) requireBlocksBatch(startHeight uint64, count uint64) (map[uint64]*core.Block, error) {
@@ -715,51 +678,28 @@ func (bk *blockKeeper) requireBlocksBatch(startHeight uint64, count uint64) (map
 		return nil, fmt.Errorf("%w: syncPeer is nil", errPeerDropped)
 	}
 
-	heights := make([]uint64, 0, count)
-	for i := uint64(0); i < count; i++ {
-		heights = append(heights, startHeight+i)
-	}
+	log.Printf("[BlockKeeper] requireBlocksBatch: fetching [%d-%d] (count=%d) from peer=%s sessionSeq=%d",
+		startHeight, startHeight+count-1, count, bk.syncPeer.ID()[:min(12, len(bk.syncPeer.ID()))], bk.syncSessionSeq)
 
-	if ok := bk.syncPeer.getBlocksByHeights(heights); !ok {
-		return nil, errPeerDropped
+	ctx, cancel := context.WithTimeout(context.Background(), batchSyncTimeout)
+	defer cancel()
+
+	blocks, err := bk.syncPeer.fetchBlocksBatch(ctx, startHeight, count)
+	if err != nil {
+		log.Printf("[BlockKeeper] requireBlocksBatch: fetchBlocksBatch failed [%d-%d] from peer=%s: %v",
+			startHeight, startHeight+count-1, bk.syncPeer.ID()[:min(12, len(bk.syncPeer.ID()))], err)
+		return nil, fmt.Errorf("%w: requireBlocksBatch [%d-%d]: %w", errRequestTimeout, startHeight, startHeight+count-1, err)
 	}
 
 	result := make(map[uint64]*core.Block)
-	sessionSeq := bk.syncSessionSeq
-	timeout := time.NewTimer(batchSyncTimeout)
-	defer timeout.Stop()
-
-	expected := int(count)
-
-	for len(result) < expected && expected > 0 {
-		select {
-		case msg := <-bk.syncBlockCh:
-			if msg.peerID != bk.syncPeer.ID() {
-				continue
-			}
-			if msg.block == nil {
-				continue
-			}
-			if msg.sessionSeq != sessionSeq {
-				continue
-			}
-			h := msg.block.GetHeight()
-			if h >= startHeight && h < startHeight+count {
-				if _, exists := result[h]; !exists {
-					result[h] = msg.block
-				}
-			}
-		case <-timeout.C:
-			log.Printf("[BlockKeeper] requireBlocksBatch: timeout waiting for %d/%d blocks (start=%d)",
-				len(result), expected, startHeight)
-			if len(result) > 0 {
-				return result, nil
-			}
-			return nil, fmt.Errorf("%w: requireBlocksBatch timeout (got %d/%d)", errRequestTimeout, len(result), expected)
-		case <-bk.quit:
-			return result, nil
+	for _, b := range blocks {
+		if b != nil {
+			result[b.GetHeight()] = b
 		}
 	}
+
+	log.Printf("[BlockKeeper] requireBlocksBatch: received %d/%d blocks [%d-%d] from peer=%s",
+		len(result), int(count), startHeight, startHeight+count-1, bk.syncPeer.ID()[:min(12, len(bk.syncPeer.ID()))])
 
 	return result, nil
 }
@@ -769,26 +709,15 @@ func (bk *blockKeeper) requireBlocks(locator [][]byte, stopHash []byte) ([]*core
 		return nil, fmt.Errorf("%w: syncPeer is nil", errPeerDropped)
 	}
 
-	if ok := bk.syncPeer.getBlocks(locator, stopHash); !ok {
-		return nil, errPeerDropped
+	ctx, cancel := context.WithTimeout(context.Background(), syncTimeout)
+	defer cancel()
+
+	blocks, err := bk.syncPeer.fetchBlocksByLocator(ctx, locator, stopHash)
+	if err != nil {
+		return nil, fmt.Errorf("%w: requireBlocks: %w", errRequestTimeout, err)
 	}
 
-	timeout := time.NewTimer(syncTimeout)
-	defer timeout.Stop()
-
-	for {
-		select {
-		case msg := <-bk.blocksProcessCh:
-			if msg.peerID != bk.syncPeer.ID() {
-				continue
-			}
-			return msg.blocks, nil
-		case <-timeout.C:
-			return nil, fmt.Errorf("%w: requireBlocks", errRequestTimeout)
-		case <-bk.quit:
-			return nil, errors.New("blockKeeper shutdown")
-		}
-	}
+	return blocks, nil
 }
 
 func (bk *blockKeeper) requireHeaders(locator [][]byte, stopHash []byte) ([]*HeaderLocator, error) {
@@ -796,26 +725,15 @@ func (bk *blockKeeper) requireHeaders(locator [][]byte, stopHash []byte) ([]*Hea
 		return nil, fmt.Errorf("%w: syncPeer is nil", errPeerDropped)
 	}
 
-	if ok := bk.syncPeer.getHeaders(locator, stopHash); !ok {
-		return nil, errPeerDropped
+	ctx, cancel := context.WithTimeout(context.Background(), syncTimeout)
+	defer cancel()
+
+	headers, err := bk.syncPeer.fetchHeadersByLocator(ctx, locator, stopHash)
+	if err != nil {
+		return nil, fmt.Errorf("%w: requireHeaders: %w", errRequestTimeout, err)
 	}
 
-	timeout := time.NewTimer(syncTimeout)
-	defer timeout.Stop()
-
-	for {
-		select {
-		case msg := <-bk.headersProcessCh:
-			if msg.peerID != bk.syncPeer.ID() {
-				continue
-			}
-			return msg.headers, nil
-		case <-timeout.C:
-			return nil, fmt.Errorf("%w: requireHeaders", errRequestTimeout)
-		case <-bk.quit:
-			return nil, errors.New("blockKeeper shutdown")
-		}
-	}
+	return headers, nil
 }
 
 func (bk *blockKeeper) resetHeaderState() {
@@ -1310,6 +1228,9 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 	peerHeight := peer.Height()
 	peerHasLiveInfo := peerHeight > 0
 
+	log.Printf("[BlockKeeper] dispatchRegularSync: syncPeer=%s height=%d sessionSeq=%d localH=%d",
+		peer.ID()[:min(12, len(peer.ID()))], peerHeight, bk.syncSessionSeq, localHeight)
+
 	freshHeight, _, _, fetchErr := bk.peers.GetPeerChainInfo(peer.ID())
 	if fetchErr == nil && freshHeight > 0 {
 		if freshHeight > peerHeight {
@@ -1349,6 +1270,9 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 		batchLimit = maxBlockPerMsg * largeGapBatchMult
 		log.Printf("[BlockKeeper] Large sync gap (%d blocks), using expanded batch limit %d", gapSize, batchLimit)
 	}
+	if batchLimit > uint64(MaxSyncRange) {
+		batchLimit = uint64(MaxSyncRange)
+	}
 
 	syncedAny := false
 	for localHeight < peerHeight {
@@ -1357,6 +1281,7 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 			targetHeight = peerHeight
 		}
 
+		prevLocalHeight := localHeight
 		err := bk.regularBlockSync(targetHeight, batchLimit)
 		if err != nil {
 			errMsg := err.Error()
@@ -1390,6 +1315,12 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 		}
 
 		localHeight = bk.chain.LatestBlock().GetHeight()
+		if localHeight == prevLocalHeight {
+			log.Printf("[BlockKeeper] dispatchRegularSync: tip stuck at h=%d (all fork blocks, missing ancestor), pausing sync to wait for reorg",
+				localHeight)
+			bk.peers.DecSyncLoad(peer.ID())
+			return true
+		}
 		syncedAny = true
 	}
 
@@ -1418,6 +1349,18 @@ func (p *simplePeer) getBlockByHeight(height uint64) bool               { return
 func (p *simplePeer) getBlocksByHeights(heights []uint64) bool          { return false }
 func (p *simplePeer) getBlocks(locator [][]byte, stopHash []byte) bool  { return false }
 func (p *simplePeer) getHeaders(locator [][]byte, stopHash []byte) bool { return false }
+func (p *simplePeer) fetchBlock(_ context.Context, _ uint64) (*core.Block, error) {
+	return nil, errors.New("simplePeer: fetchBlock not supported")
+}
+func (p *simplePeer) fetchBlocksBatch(_ context.Context, _ uint64, _ uint64) ([]*core.Block, error) {
+	return nil, errors.New("simplePeer: fetchBlocksBatch not supported")
+}
+func (p *simplePeer) fetchBlocksByLocator(_ context.Context, _ [][]byte, _ []byte) ([]*core.Block, error) {
+	return nil, errors.New("simplePeer: fetchBlocksByLocator not supported")
+}
+func (p *simplePeer) fetchHeadersByLocator(_ context.Context, _ [][]byte, _ []byte) ([]*HeaderLocator, error) {
+	return nil, errors.New("simplePeer: fetchHeadersByLocator not supported")
+}
 
 // getPeerWork retrieves the cumulative work of a peer's chain.
 // Uses PeerSetInterface.GetPeerChainInfo for direct access.
@@ -1770,6 +1713,10 @@ type PeerInterface interface {
 	getBlocksByHeights(heights []uint64) bool
 	getBlocks(locator [][]byte, stopHash []byte) bool
 	getHeaders(locator [][]byte, stopHash []byte) bool
+	fetchBlock(ctx context.Context, height uint64) (*core.Block, error)
+	fetchBlocksBatch(ctx context.Context, startHeight uint64, count uint64) ([]*core.Block, error)
+	fetchBlocksByLocator(ctx context.Context, locator [][]byte, stopHash []byte) ([]*core.Block, error)
+	fetchHeadersByLocator(ctx context.Context, locator [][]byte, stopHash []byte) ([]*HeaderLocator, error)
 }
 
 // PeerDisconnectNotifier defines the interface for receiving peer disconnection notifications.
