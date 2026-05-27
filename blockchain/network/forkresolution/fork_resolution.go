@@ -844,22 +844,21 @@ func (fr *ForkResolver) findAncestorByBlockLocator(localTip, remoteBlock *core.B
 	// Generate block locator hashes (exponential step-doubling)
 	locatorHashes := make([]string, 0)
 	step := uint64(1)
-	height := localTip.GetHeight()
+	currentHeight := localTip.GetHeight()
 
 	locatorHashes = append(locatorHashes, hex.EncodeToString(localTip.Hash))
 
-	for height > 0 {
-		height = localTip.GetHeight()
-		if step > height {
-			height = 0
+	for currentHeight > 0 {
+		if step > currentHeight {
+			currentHeight = 0
 		} else {
-			height = height - step
+			currentHeight = currentHeight - step
 		}
 
-		if block, exists := localAncestors[height]; exists {
+		if block, exists := localAncestors[currentHeight]; exists {
 			locatorHashes = append(locatorHashes, hex.EncodeToString(block.Hash))
 		} else {
-			block, exists := fr.chain.BlockByHeight(height)
+			block, exists := fr.chain.BlockByHeight(currentHeight)
 			if exists {
 				locatorHashes = append(locatorHashes, hex.EncodeToString(block.Hash))
 			}
@@ -870,7 +869,7 @@ func (fr *ForkResolver) findAncestorByBlockLocator(localTip, remoteBlock *core.B
 		} else {
 			step *= 2
 		}
-		if height == 0 {
+		if currentHeight == 0 {
 			break
 		}
 	}

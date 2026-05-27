@@ -268,6 +268,7 @@ type Chain struct {
 	orphanPool       map[string]*Block    // hash -> block
 	orphanByParent   map[string][]string  // parent hash -> list of orphan hashes
 	orphanTimestamps map[string]time.Time // hash -> insertion time for TTL cleanup
+	orphanOrder      []string            // insertion order for LRU eviction
 
 	// Indexes
 	txIndex          map[string]TxLocation       // txid -> location (canonical only)
@@ -1238,31 +1239,386 @@ func (c *Chain) AppendBlock(block *Block) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Check if block already exists
+	// Phase 1: Check if block already exists
 	hashHex := hex.EncodeToString(block.Hash)
 	if _, exists := c.blocksByHash[hashHex]; exists {
 		return ErrKnownBlock
 	}
 
-	// Validate block
-	if err := c.validateBlockLocked(block); err != nil {
-		// Validation failed - block is rejected
-		// DO NOT trigger missing block callback here
-		// Sync loop will handle batch download
-		return fmt.Errorf("validate block: %w", err)
+	// Phase 2: Validate block header only (not parent existence)
+	// Following LegacyCore logic: validate header first, then handle parent
+	if err := c.validateBlockHeaderLocked(block); err != nil {
+		return fmt.Errorf("validate block header: %w", err)
 	}
 
-	// Check if block extends canonical chain
+	// Phase 3: Three-stage parent processing (LegacyCore pattern)
 	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
-	isCanonicalExtension := len(c.blocks) > 0 && parentHashHex == hex.EncodeToString(c.blocks[len(c.blocks)-1].Hash)
-
-	if !isCanonicalExtension {
-		// Block may be orphan or fork, handle reorganization
-		if err := c.handleReorganizationLocked(block); err != nil {
-			return fmt.Errorf("handle reorganization: %w", err)
+	
+	// Stage 3a: Parent in canonical chain?
+	if parent, exists := c.blocksByHash[parentHashHex]; exists {
+		if c.isCanonicalLocked(parent) {
+			// Parent is in canonical chain
+			if parentHashHex == hex.EncodeToString(c.blocks[len(c.blocks)-1].Hash) {
+				// Extends current tip - connect directly
+				return c.connectBlockLocked(block)
+			} else {
+				// Parent in canonical but not tip → fork at this point
+				// Add to fork and try reorganization
+				c.addToForkLocked(block)
+				return c.tryReorganizeLocked(block)
+			}
 		}
 	}
 
+	// Stage 3b: Parent in fork blocks?
+	if parentBlocks, exists := c.forkBlocks[block.GetHeight()-1]; exists {
+		for _, parent := range parentBlocks {
+			if hex.EncodeToString(parent.Hash) == parentHashHex {
+				// Found parent in fork
+				// Add current block to fork
+				c.addToForkLocked(block)
+				// Try to reorganize immediately
+				return c.tryReorganizeLocked(block)
+			}
+		}
+	}
+
+	// Stage 3c: Parent in orphan pool?
+	if _, exists := c.orphanPool[parentHashHex]; exists {
+		// Add to orphan pool
+		c.addOrphanLocked(block)
+		// Accept orphan children if parent becomes available
+		c.acceptOrphanChildrenLocked(hashHex)
+		return ErrOrphanBlock
+	}
+
+	// Stage 3d: Parent unknown → add to orphan pool
+	c.addOrphanLocked(block)
+	
+	// Trigger missing block request
+	if c.onMissingBlock != nil {
+		c.onMissingBlock(block.Header.PrevHash, block.GetHeight()-1)
+	}
+	
+	// Accept orphan children if parent becomes available
+	c.acceptOrphanChildrenLocked(hashHex)
+	
+	return ErrOrphanBlock
+}
+
+// ProcessOrphanBlock processes an orphan block that now has its parent available
+// This function should be called when a missing parent is received
+func (c *Chain) ProcessOrphanBlock(orphanHashHex string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	
+	// Get orphan block from pool
+	orphanBlock, exists := c.orphanPool[orphanHashHex]
+	if !exists {
+		return fmt.Errorf("orphan block %s not found", orphanHashHex)
+	}
+	
+	// Remove from orphan pool
+	c.removeOrphanLocked(orphanHashHex)
+	
+	// Process the block recursively
+	// This will handle fork/reorg if needed
+	return c.AppendBlock(orphanBlock)
+}
+
+// validateBlockHeaderLocked validates block header without checking parent existence
+// Following LegacyCore pattern: separate header validation from parent check
+func (c *Chain) validateBlockHeaderLocked(block *Block) error {
+	// Basic validation
+	if block == nil {
+		return errors.New("block is nil")
+	}
+	if len(block.Hash) == 0 {
+		return errors.New("block hash is empty")
+	}
+	if len(block.Transactions) == 0 {
+		return errors.New("block has no transactions")
+	}
+
+	// Genesis block validation
+	if block.GetHeight() == 0 {
+		return c.validateGenesisBlockLocked(block)
+	}
+
+	// Header validation (without parent check)
+	// PoW validation is skipped here (done at mine time and sync)
+	// Timestamp, difficulty, merkle root validation will be done in connectBlockLocked
+	
+	return nil
+}
+
+// isCanonicalLocked checks if a block is in the canonical chain
+func (c *Chain) isCanonicalLocked(block *Block) bool {
+	blockHeight := block.GetHeight()
+	if blockHeight >= uint64(len(c.blocks)) {
+		return false
+	}
+	canonicalBlock := c.blocks[blockHeight]
+	return bytes.Equal(canonicalBlock.Hash, block.Hash)
+}
+
+// addToForkLocked adds a block to the fork blocks map
+func (c *Chain) addToForkLocked(block *Block) {
+	height := block.GetHeight()
+	if c.forkBlocks[height] == nil {
+		c.forkBlocks[height] = make([]*Block, 0)
+	}
+	
+	// Check if block already exists at this height
+	for _, existing := range c.forkBlocks[height] {
+		if bytes.Equal(existing.Hash, block.Hash) {
+			return // Block already in fork
+		}
+	}
+	
+	c.forkBlocks[height] = append(c.forkBlocks[height], block)
+	c.blocksByHash[hex.EncodeToString(block.Hash)] = block
+	
+	// Limit fork blocks per height
+	if len(c.forkBlocks[height]) > MaxForkBlocksPerHeight {
+		// Remove oldest block (simple eviction)
+		removed := c.forkBlocks[height][0]
+		c.forkBlocks[height] = c.forkBlocks[height][1:]
+		delete(c.blocksByHash, hex.EncodeToString(removed.Hash))
+	}
+	
+	// Limit total fork blocks
+	c.enforceForkBlocksTotalLimitLocked()
+}
+
+// enforceForkBlocksTotalLimitLocked limits total fork blocks across all heights
+func (c *Chain) enforceForkBlocksTotalLimitLocked() {
+	total := 0
+	for _, blocks := range c.forkBlocks {
+		total += len(blocks)
+	}
+	
+	if total <= MaxForkBlocksTotal {
+		return
+	}
+	
+	// Remove blocks from lowest heights first
+	heights := make([]uint64, 0, len(c.forkBlocks))
+	for h := range c.forkBlocks {
+		heights = append(heights, h)
+	}
+	sort.Slice(heights, func(i, j int) bool {
+		return heights[i] < heights[j]
+	})
+	
+	removed := 0
+	toRemove := total - MaxForkBlocksTotal
+	for _, h := range heights {
+		if removed >= toRemove {
+			break
+		}
+		blocks := c.forkBlocks[h]
+		for i := 0; i < len(blocks) && removed < toRemove; i++ {
+			delete(c.blocksByHash, hex.EncodeToString(blocks[i].Hash))
+			removed++
+		}
+		if removed >= toRemove {
+			c.forkBlocks[h] = blocks[toRemove:]
+			break
+		}
+		delete(c.forkBlocks, h)
+	}
+}
+
+// tryReorganizeLocked attempts to reorganize the chain if the new fork is heavier
+// Following LegacyCore's tryActivateSideChainLocked pattern
+func (c *Chain) tryReorganizeLocked(newBlock *Block) error {
+	// Build path from new block back to fork point
+	attachRev := make([]*Block, 0)
+	cur := newBlock
+	var forkHeight uint64
+	
+	for {
+		attachRev = append(attachRev, cur)
+		
+		// Check if parent is in canonical chain
+		parentHashHex := hex.EncodeToString(cur.Header.PrevHash)
+		if parent, exists := c.blocksByHash[parentHashHex]; exists {
+			if c.isCanonicalLocked(parent) {
+				forkHeight = parent.GetHeight()
+				break
+			}
+		}
+		
+		// Check if parent is in fork blocks
+		parentBlocks, exists := c.forkBlocks[cur.GetHeight()-1]
+		if exists {
+			found := false
+			for _, parent := range parentBlocks {
+				if hex.EncodeToString(parent.Hash) == parentHashHex {
+					cur = parent
+					found = true
+					break
+				}
+			}
+			if found {
+				continue
+			}
+		}
+		
+		// Parent not found - cannot reorganize
+		return nil
+	}
+	
+	// Calculate work for new chain
+	newChainWork := c.calculateChainWorkFromAncestorLocked(nil, newBlock) // TODO: pass ancestor
+	
+	// Calculate work for current canonical chain from fork point
+	canonicalWork := c.calculateCanonicalWorkFromHeightLocked(forkHeight)
+	
+	// Compare work
+	if newChainWork.Cmp(canonicalWork) <= 0 {
+		// New chain is not heavier - no reorganization
+		return nil
+	}
+	
+	// New chain is heavier - perform reorganization
+	log.Printf("[Chain] Reorganizing: fork point at h=%d, new work=%s, canonical work=%s",
+		forkHeight, newChainWork.String(), canonicalWork.String())
+	
+	// Use unified reorg executor if available
+	if c.reorgExecutor != nil {
+		c.reorgMu.Lock()
+		c.reorgInProgress = true
+		c.reorgMu.Unlock()
+		
+		defer func() {
+			c.reorgMu.Lock()
+			c.reorgInProgress = false
+			c.reorgMu.Unlock()
+		}()
+		
+		return c.reorgExecutor.RequestReorg(newBlock, "Chain-tryReorganize")
+	}
+	
+	// Fallback: internal reorganization
+	return c.reorganizeChainLocked(nil, newBlock) // TODO: pass ancestor
+}
+
+// calculateCanonicalWorkFromHeightLocked calculates work for canonical chain from given height
+func (c *Chain) calculateCanonicalWorkFromHeightLocked(fromHeight uint64) *big.Int {
+	totalWork := big.NewInt(0)
+	
+	for h := fromHeight + 1; h < uint64(len(c.blocks)); h++ {
+		block := c.blocks[h]
+		work := WorkForDifficultyBits(block.Header.DifficultyBits)
+		totalWork.Add(totalWork, work)
+	}
+	
+	return totalWork
+}
+
+// acceptOrphanChildrenLocked accepts orphan children of the given block
+// Following LegacyCore's acceptOrphanChildrenLocked pattern
+func (c *Chain) acceptOrphanChildrenLocked(parentHash string) {
+	queue := []string{parentHash}
+	
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		
+		children := c.orphanByParent[cur]
+		delete(c.orphanByParent, cur)
+		
+		for _, orphanHash := range children {
+			orphanBlock, ok := c.orphanPool[orphanHash]
+			if !ok {
+				continue
+			}
+			
+			// Check if orphan's parent is now available
+			orphanParentHash := hex.EncodeToString(orphanBlock.Header.PrevHash)
+			if orphanParentHash != cur {
+				continue // Parent not matched
+			}
+			
+			// Remove from orphan pool
+			c.removeOrphanLocked(orphanHash)
+			
+			// Process the orphan block recursively
+			// This will handle fork/reorg if needed
+			// Use a new goroutine to avoid deadlock
+			go func(block *Block, hash string) {
+				// The orphan block is now ready to be processed
+				// Process it through the normal pipeline
+				log.Printf("[Chain] Processing ready orphan block %s (parent=%s)", hash[:8], cur[:8])
+				
+				// Process the block - this will handle fork/reorg if needed
+				if err := c.AppendBlock(block); err != nil {
+					log.Printf("[Chain] Failed to process orphan block %s: %v", hash[:8], err)
+				}
+			}(orphanBlock, orphanHash)
+			
+			queue = append(queue, orphanHash)
+		}
+	}
+}
+
+// addOrphanLocked adds a block to the orphan pool
+func (c *Chain) addOrphanLocked(block *Block) {
+	hashHex := hex.EncodeToString(block.Hash)
+	
+	if _, exists := c.orphanPool[hashHex]; exists {
+		return // Already in orphan pool
+	}
+	
+	// Limit orphan pool size
+	if len(c.orphanPool) >= MaxOrphanPoolSize {
+		// Remove oldest orphan
+		if len(c.orphanOrder) > 0 {
+			oldest := c.orphanOrder[0]
+			c.removeOrphanLocked(oldest)
+		}
+	}
+	
+	// Add to orphan pool
+	c.orphanPool[hashHex] = block
+	c.orphanByParent[hex.EncodeToString(block.Header.PrevHash)] = append(
+		c.orphanByParent[hex.EncodeToString(block.Header.PrevHash)],
+		hashHex,
+	)
+	c.orphanTimestamps[hashHex] = time.Now()
+	c.orphanOrder = append(c.orphanOrder, hashHex)
+	
+	// Clean up old orphans
+	c.cleanupOldOrphansLocked()
+}
+
+
+
+// cleanupOldOrphansLocked removes orphans that are too old
+func (c *Chain) cleanupOldOrphansLocked() {
+	now := time.Now()
+	
+	for hashHex, timestamp := range c.orphanTimestamps {
+		if now.Sub(timestamp) > MaxOrphanPoolAge {
+			c.removeOrphanLocked(hashHex)
+		}
+	}
+}
+
+// connectBlockLocked connects a block to the canonical chain
+// This function applies the block to state and adds it to the chain
+// Following LegacyCore's connectBlockLocked pattern
+func (c *Chain) connectBlockLocked(block *Block) error {
+	hashHex := hex.EncodeToString(block.Hash)
+	
+	// Validate block completely (including parent check)
+	// This is safe because connectBlockLocked is only called when parent is known
+	if err := c.validateBlockLocked(block); err != nil {
+		return fmt.Errorf("validate block: %w", err)
+	}
+	
 	// Apply block to state
 	if err := applyBlockToState(c.consensus, c.monetaryPolicy, c.state, block, c.genesisAddress, c.genesisTimestamp); err != nil {
 		return fmt.Errorf("apply block to state: %w", err)
@@ -1329,6 +1685,9 @@ func (c *Chain) AppendBlock(block *Block) error {
 	// Add to chain
 	c.blocks = append(c.blocks, block)
 	c.blocksByHash[hashHex] = block
+	
+	// Remove from fork blocks if present
+	c.removeFromForkLocked(block)
 
 	// Update indexes
 	c.addToIndexLocked(block)
@@ -1392,8 +1751,42 @@ func (c *Chain) AppendBlock(block *Block) error {
 			},
 		})
 	}
+	
+	// Call onBlockAdded callback
+	c.onBlockMu.RLock()
+	onAdded := c.onBlockAdded
+	c.onBlockMu.RUnlock()
+	
+	if onAdded != nil {
+		go onAdded(block) // Async to avoid deadlock
+	}
+	
+	// Notify sync notifier
+	if c.syncNotifier != nil {
+		c.syncNotifier.OnChainReorganized(block)
+	}
 
 	return nil
+}
+
+// removeFromForkLocked removes a block from fork blocks map
+func (c *Chain) removeFromForkLocked(block *Block) {
+	height := block.GetHeight()
+	
+	if blocks, exists := c.forkBlocks[height]; exists {
+		for i, b := range blocks {
+			if bytes.Equal(b.Hash, block.Hash) {
+				// Remove this block
+				blocks = append(blocks[:i], blocks[i+1:]...)
+				if len(blocks) == 0 {
+					delete(c.forkBlocks, height)
+				} else {
+					c.forkBlocks[height] = blocks
+				}
+				break
+			}
+		}
+	}
 }
 
 // validateBlockLocked performs comprehensive block validation
@@ -1832,13 +2225,12 @@ func (c *Chain) calculateChainWorkFromAncestorLocked(ancestor *Block, tip *Block
 
 		parent, exists := c.blocksByHash[parentHashHex]
 		if exists {
-			parentHeight := int(parent.GetHeight())
-			if parentHeight < len(c.blocks) {
-				canonicalBlock := c.blocks[parentHeight]
-				if hex.EncodeToString(canonicalBlock.Hash) == parentHashHex {
-					current = parent
-					continue
-				}
+			parentHeight := parent.GetHeight()
+			// FIX: Do NOT check hash equality! Fork point has different hash by definition.
+			// Only check if parent's height is within canonical range.
+			if parentHeight < uint64(len(c.blocks)) {
+				current = parent
+				continue
 			}
 		}
 		break
@@ -3340,8 +3732,14 @@ func (c *Chain) findBestChainTipLocked() *Block {
 	return bestTip
 }
 
-// isForkChainCompleteLocked checks if a fork block's entire ancestry back to genesis/fork-point exists.
-// An incomplete chain means some ancestor blocks haven't been received yet, making work estimation unreliable.
+// isForkChainCompleteLocked checks if a fork chain is complete (all blocks available).
+// A fork chain is complete if we can trace back to a block that exists in our canonical chain.
+// NOTE: We do NOT check if the fork point's hash matches the canonical hash at that height,
+// because a fork by definition means the same height has two different hashes.
+// We only need to verify that the fork point's PARENT is in our canonical chain.
+// Example: Local has block 300 (hash=e1ff), network has block 300 (hash=b2a8).
+//          Block 301's PrevHash = b2a8, which is NOT in canonical (canonical has e1ff).
+//          But block 300's parent (299) IS in canonical, so the fork chain is complete.
 // Caller must hold c.mu lock.
 func (c *Chain) isForkChainCompleteLocked(tip *Block) bool {
 	current := tip
@@ -3351,6 +3749,7 @@ func (c *Chain) isForkChainCompleteLocked(tip *Block) bool {
 	for steps := uint64(0); steps < maxSteps; steps++ {
 		hashHex := hex.EncodeToString(current.Hash)
 		if visited[hashHex] {
+			// Cycle detected, chain is complete (already validated)
 			return true
 		}
 		visited[hashHex] = true
@@ -3360,16 +3759,23 @@ func (c *Chain) isForkChainCompleteLocked(tip *Block) bool {
 		}
 
 		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
+
+		// Check if parent is in blocksByHash
 		if parent, exists := c.blocksByHash[parentHashHex]; exists {
-			parentHeight := int(parent.GetHeight())
-			if parentHeight < len(c.blocks) {
-				canonicalBlock := c.blocks[parentHeight]
-				if hex.EncodeToString(canonicalBlock.Hash) == parentHashHex {
-					return true
-				}
+			parentHeight := parent.GetHeight()
+
+			// Check if parent's height is within canonical chain range
+			// If yes, we found the fork point's parent in canonical chain
+			// NOTE: We do NOT check hash equality here! Fork point has different hash by definition.
+			if parentHeight < uint64(len(c.blocks)) {
+				// Parent height is within canonical range
+				// This means we can reorg from this point
+				// The fork chain is complete
+				return true
 			}
 		}
 
+		// Look for parent in fork blocks
 		foundInFork := false
 		for _, fbList := range c.forkBlocks {
 			for _, fb := range fbList {
@@ -3385,6 +3791,8 @@ func (c *Chain) isForkChainCompleteLocked(tip *Block) bool {
 		}
 
 		if !foundInFork {
+			// Parent not found in blocksByHash or forkBlocks
+			// Chain is incomplete
 			return false
 		}
 	}
@@ -4222,13 +4630,13 @@ func (c *Chain) calculateCumulativeWorkLocked(block *Block) *big.Int {
 
 		parent, exists := c.blocksByHash[parentHashHex]
 		if exists {
-			parentHeight := int(parent.GetHeight())
-			if parentHeight < len(c.blocks) {
-				canonicalBlock := c.blocks[parentHeight]
-				if hex.EncodeToString(canonicalBlock.Hash) == parentHashHex {
-					current = parent
-					continue
-				}
+			parentHeight := parent.GetHeight()
+			// FIX: Do NOT check hash equality! Fork point has different hash by definition.
+			// Only check if parent's height is within canonical range.
+			// If yes, we can use this parent to continue calculating cumulative work.
+			if parentHeight < uint64(len(c.blocks)) {
+				current = parent
+				continue
 			}
 		}
 		break

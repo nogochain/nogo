@@ -13,6 +13,14 @@ import (
 	"time"
 )
 
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // =============================================================================
 // CORE TEST: Preventive Light Fork Resolution (The KEY Innovation)
 // =============================================================================
