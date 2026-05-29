@@ -1,7 +1,7 @@
 # NogoChain Frequently Asked Questions (FAQ)
 
-> **Version**: 1.1.0
-> **Last Updated**: 2026-04-26
+> **Version**: 1.2.0
+> **Last Updated**: 2026-05-29
 > **Status**: ✅ Production Ready
 > **Language**: English (Primary)
 
@@ -29,7 +29,7 @@ This document contains frequently asked questions and answers for using NogoChai
 **A**: NogoChain is a high-performance, decentralized blockchain platform using the NogoPow consensus algorithm, supporting smart contracts and decentralized applications.
 
 **Features**:
-- Target block time: 17 seconds
+- Target block time: 30 seconds
 - Annual inflation rate: 10% decreasing
 - Fee distribution: 100% burned (deflationary mechanism)
 - Supports on-chain governance
@@ -155,7 +155,7 @@ Where:
 - R₀ = 8 NOGO (initial reward)
 - r = 10% (annual decrease rate)
 - h = current block height
-- B_year = annual block count (approximately 1,854,470)
+- B_year = annual block count (approximately 1,051,200)
 
 **Examples**:
 - Year 1: 8 NOGO/block
@@ -316,10 +316,8 @@ export RATE_LIMIT_BURST=50
 
 **A**:
 
-- **96%**: Miner rewards (block rewards only)
-- **2%**: Community fund
+- **99%**: Miner rewards (block rewards only)
 - **1%**: Genesis address
-- **1%**: Integrity reward pool
 
 Fees: 100% burned (deflationary mechanism)
 
@@ -335,11 +333,11 @@ Inflation Rate = (Annual Issuance / Circulating Supply) × 100%
 **30-Year Prediction**:
 | Year | Annual Issuance | Circulating Supply | Inflation Rate |
 |------|-----------------|-------------------|----------------|
-| 1 | 14,835,760 | 14,835,760 | 100% |
-| 5 | 10,000,000 | 60,000,000 | 16.67% |
-| 10 | 6,000,000 | 100,000,000 | 6% |
-| 20 | 2,000,000 | 160,000,000 | 1.25% |
-| 30 | 1,000,000 | 190,000,000 | 0.53% |
+| 1 | 8,409,600 | 8,409,600 | 100% |
+| 5 | 5,517,538 | 28,920,614 | 19.1% |
+| 10 | 3,658,000 | 51,100,000 | 7.2% |
+| 20 | 1,278,000 | 74,000,000 | 1.7% |
+| 30 | 475,000 | 82,000,000 | 0.6% |
 
 ### Q22: How are fees distributed?
 
@@ -496,11 +494,18 @@ Please provide the following information:
 
 ---
 
-**Last Updated**: 2026-04-26
-**Version**: 1.1.0
+**Last Updated**: 2026-05-29
+**Version**: 1.2.0
 **Maintainer**: NogoChain Development Team
 
 ## Changelog
+
+### v1.2.0 (2026-05-29)
+- 🔧 Updated target block time: 17s → 30s
+- 🔧 Updated B_year: 1,854,470 → 1,051,200
+- 🔧 Updated reward distribution: miner rewards 96% → 99%, removed community fund (2%) and integrity pool (1%)
+- 🔧 Updated inflation rate prediction table based on new B_year
+- 🔧 Updated fee distribution: 100% burned (deflationary mechanism)
 
 ### v1.1.0 (2026-04-26)
 - 🐛 Fixed UTF-8 encoding errors (multiple locations)

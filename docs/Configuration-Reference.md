@@ -127,11 +127,11 @@ Defines all consensus-related parameters for block validation and difficulty adj
 | `BlockTimeTargetSeconds` | `int64` | `blockTimeTargetSeconds` | `30` | Target seconds between blocks |
 | `DifficultyAdjustmentInterval` | `uint64` | `difficultyAdjustmentInterval` | `100` | Blocks between adjustments |
 | `MaxBlockTimeDriftSeconds` | `int64` | `maxBlockTimeDriftSeconds` | `7200` | Maximum timestamp drift (2 hours) |
-| `MinDifficulty` | `uint32` | `minDifficulty` | `1` | Minimum difficulty value |
+| `MinDifficulty` | `uint32` | `minDifficulty` | `10` | Minimum difficulty value |
 | `MaxDifficulty` | `uint32` | `maxDifficulty` | `4294967295` | Maximum difficulty value |
-| `MinDifficultyBits` | `uint32` | `minDifficultyBits` | `1` | Minimum difficulty bits |
+| `MinDifficultyBits` | `uint32` | `minDifficultyBits` | `10` | Minimum difficulty bits |
 | `MaxDifficultyBits` | `uint32` | `maxDifficultyBits` | `255` | Maximum difficulty bits |
-| `MaxDifficultyChangePercent` | `uint8` | `maxDifficultyChangePercent` | `100` | Maximum difficulty change per adjustment |
+| `MaxDifficultyChangePercent` | `uint8` | `maxDifficultyChangePercent` | `20` | Maximum difficulty change per adjustment |
 | `MedianTimePastWindow` | `int` | `medianTimePastWindow` | `11` | MTP calculation window (must be odd) |
 | `MerkleEnable` | `bool` | `merkleEnable` | `true` | Enable Merkle root validation |
 | `MerkleActivationHeight` | `uint64` | `merkleActivationHeight` | `0` | Block height for Merkle activation |
@@ -174,10 +174,10 @@ Defines the economic model for block rewards and token distribution.
 | `HalvingInterval` | `uint64` | `halvingInterval` | `0` | Legacy field for compatibility |
 | `MaxSupply` | `uint64` | `maxSupply` | `0` | Maximum total supply |
 | `MinerFeeShare` | `uint8` | `minerFeeShare` | `0` | Percentage of fees to miner (0-100) |
-| `MinerRewardShare` | `uint8` | `minerRewardShare` | `96` | Percentage of reward to miner |
-| `CommunityFundShare` | `uint8` | `communityFundShare` | `2` | Percentage to community fund |
+| `MinerRewardShare` | `uint8` | `minerRewardShare` | `99` | Percentage of reward to miner |
+| `CommunityFundShare` | `uint8` | `communityFundShare` | `0` | Percentage to community fund |
 | `GenesisShare` | `uint8` | `genesisShare` | `1` | Percentage to genesis address |
-| `IntegrityPoolShare` | `uint8` | `integrityPoolShare` | `1` | Percentage to integrity pool |
+| `IntegrityPoolShare` | `uint8` | `integrityPoolShare` | `0` | Percentage to integrity pool |
 | `TailEmission` | `uint64` | `tailEmission` | `0` | Legacy field for compatibility |
 
 **Validation Rules:**
@@ -504,14 +504,14 @@ func DefaultConfig() *Config {
         Consensus: ConsensusParams{
             ChainID:                        1,
             DifficultyEnable:               true,
-            BlockTimeTargetSeconds:         17,
+            BlockTimeTargetSeconds:         30,
             DifficultyAdjustmentInterval:   100,
             MaxBlockTimeDriftSeconds:       7200,
-            MinDifficulty:                  1,
+            MinDifficulty:                  10,
             MaxDifficulty:                  4294967295,
-            MinDifficultyBits:              1,
+            MinDifficultyBits:              10,
             MaxDifficultyBits:              255,
-            MaxDifficultyChangePercent:     100,
+            MaxDifficultyChangePercent:     20,
             MedianTimePastWindow:           11,
             MerkleEnable:                   true,
             MerkleActivationHeight:         0,
@@ -524,10 +524,10 @@ func DefaultConfig() *Config {
                 MinimumBlockReward:     10000000,
                 UncleRewardEnabled:     true,
                 MaxUncleDepth:          6,
-                MinerRewardShare:       96,
-                CommunityFundShare:     2,
+                MinerRewardShare:       99,
+                CommunityFundShare:     0,
                 GenesisShare:           1,
-                IntegrityPoolShare:     1,
+                IntegrityPoolShare:     0,
                 MinerFeeShare:          0,
             },
         },
@@ -615,14 +615,14 @@ func DefaultConfig() *Config {
 | Environment Variable | Config Field | Type | Example |
 |---------------------|--------------|------|---------|
 | `DIFFICULTY_ENABLE` | `Consensus.DifficultyEnable` | bool | `true` |
-| `BLOCK_TIME_SECONDS` | `Consensus.BlockTimeTargetSeconds` | int64 | `17` |
+| `BLOCK_TIME_SECONDS` | `Consensus.BlockTimeTargetSeconds` | int64 | `30` |
 | `DIFFICULTY_WINDOW` | `Consensus.DifficultyAdjustmentInterval` | uint64 | `100` |
 | `MAX_TIME_DRIFT` | `Consensus.MaxBlockTimeDriftSeconds` | int64 | `7200` |
-| `DIFFICULTY_MIN` | `Consensus.MinDifficulty` | uint32 | `1` |
+| `DIFFICULTY_MIN` | `Consensus.MinDifficulty` | uint32 | `10` |
 | `DIFFICULTY_MAX` | `Consensus.MaxDifficulty` | uint32 | `4294967295` |
-| `DIFFICULTY_MIN_BITS` | `Consensus.MinDifficultyBits` | uint32 | `1` |
+| `DIFFICULTY_MIN_BITS` | `Consensus.MinDifficultyBits` | uint32 | `10` |
 | `DIFFICULTY_MAX_BITS` | `Consensus.MaxDifficultyBits` | uint32 | `255` |
-| `DIFFICULTY_MAX_STEP` | `Consensus.MaxDifficultyChangePercent` | uint8 | `100` |
+| `DIFFICULTY_MAX_STEP` | `Consensus.MaxDifficultyChangePercent` | uint8 | `20` |
 | `MTP_WINDOW` | `Consensus.MedianTimePastWindow` | int | `11` |
 | `MERKLE_ENABLE` | `Consensus.MerkleEnable` | bool | `true` |
 | `MERKLE_ACTIVATION_HEIGHT` | `Consensus.MerkleActivationHeight` | uint64 | `0` |
@@ -799,11 +799,11 @@ func DefaultConfig() *Config {
     "blockTimeTargetSeconds": 30,
     "difficultyAdjustmentInterval": 100,
     "maxBlockTimeDriftSeconds": 7200,
-    "minDifficulty": 1,
+    "minDifficulty": 10,
     "maxDifficulty": 4294967295,
-    "minDifficultyBits": 1,
+    "minDifficultyBits": 10,
     "maxDifficultyBits": 255,
-    "maxDifficultyChangePercent": 100,
+    "maxDifficultyChangePercent": 20,
     "medianTimePastWindow": 11,
     "merkleEnable": true,
     "merkleActivationHeight": 0,
@@ -816,10 +816,10 @@ func DefaultConfig() *Config {
       "minimumBlockReward": 10000000,
       "uncleRewardEnabled": true,
       "maxUncleDepth": 6,
-      "minerRewardShare": 96,
-      "communityFundShare": 2,
+      "minerRewardShare": 99,
+      "communityFundShare": 0,
       "genesisShare": 1,
-      "integrityPoolShare": 1,
+      "integrityPoolShare": 0,
       "minerFeeShare": 0
     }
   },
@@ -945,7 +945,7 @@ func DefaultConfig() *Config {
     "blockTimeTargetSeconds": 30,
     "difficultyAdjustmentInterval": 50,
     "maxBlockTimeDriftSeconds": 3600,
-    "minDifficulty": 1,
+    "minDifficulty": 10,
     "maxDifficulty": 4294967295,
     "genesisDifficultyBits": 50,
     "monetaryPolicy": {

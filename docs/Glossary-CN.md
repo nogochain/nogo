@@ -1,7 +1,7 @@
 # NogoChain 术语表
 
 > **版本**: 1.0.0  
-> **最后更新**: 2026-04-09  
+> **最后更新**: 2026-05-29  
 > **状态**: ✅ 生产就绪
 
 本文档收录 NogoChain 项目中使用的专业术语，按字母顺序排列，方便查阅。
@@ -67,7 +67,7 @@
 **代码参考**: [`config/config.go`](file:///d:/NogoChain/nogo/config/config.go#L36)
 
 ### Community Fund（社区基金）
-占区块奖励 2% 的社区发展基金，由社区治理控制。
+⚠️ 已从经济模型中移除（份额=0%），此前占区块奖励 2%，由社区治理控制。
 
 **代码参考**: [`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go#L147)
 
@@ -104,7 +104,7 @@ NogoChain 使用的数字签名算法，提供高性能和安全性。
 ## F
 
 ### Fee（手续费）
-用户为交易支付的费用，100% 归矿工所有。
+用户为交易支付的费用，100% 销毁（通缩机制）。
 
 **代码参考**: [`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go#L150)
 
@@ -131,7 +131,7 @@ NogoChain 使用的数字签名算法，提供高性能和安全性。
 
 **代码参考**: [`blockchain/crypto/hdwallet.go`](file:///d:/NogoChain/nogo/blockchain/crypto/hdwallet.go)
 
-### Halving（减半）
+### Halving（减产）
 区块奖励每年递减 10% 的机制，最低降至 0.1 NOGO。
 
 **代码参考**: [`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go#L89-L104)
@@ -141,7 +141,7 @@ NogoChain 使用的数字签名算法，提供高性能和安全性。
 ## I
 
 ### Integrity Pool（完整性奖励池）
-占区块奖励 1% 的奖励池，用于奖励诚信节点。
+⚠️ 已从经济模型中移除（份额=0%），此前占区块奖励 1%，用于奖励诚信节点。
 
 **代码参考**: [`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go#L149)
 
@@ -207,7 +207,7 @@ NogoChain 的工作量证明共识算法，基于矩阵乘法。
 ## O
 
 ### Orphan Pool（孤儿池）
-存储孤儿块的池子，默认最大 100 个区块，存活 24 小时。
+存储孤儿块的池子，默认最大 2048 块，TTL 60 分钟。
 
 **代码参考**: [`blockchain/network/orphan_pool.go`](file:///d:/NogoChain/nogo/blockchain/network/orphan_pool.go)
 
@@ -339,6 +339,6 @@ NogoChain 的工作量证明共识算法，基于矩阵乘法。
 
 ---
 
-**最后更新**: 2026-04-09  
+**最后更新**: 2026-05-29  
 **版本**: 1.0.0  
 **维护者**: NogoChain 开发团队

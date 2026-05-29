@@ -1,7 +1,7 @@
 # NogoPow Consensus Engine
 
 **File Path**: `blockchain/nogopow/nogopow.go`  
-**Last Updated**: 2026-04-15  
+**Last Updated**: 2026-05-29  
 **Version**: 1.1.0
 
 ---
@@ -310,7 +310,7 @@ func (da *DifficultyAdjuster) calculatePIDifficulty(timeDiff, targetTime int64, 
     // Clamp integral to [-10.0, 10.0]
     
     // Proportional term: Kp × error
-    // Kp = MaxDifficultyChangePercent / 100 (default 0.2)
+    // Kp = MaxDifficultyChangePercent / 100 (default 0.15)
     proportionalTerm = error × Kp
     
     // Integral term: Ki × integral
@@ -337,9 +337,9 @@ newDifficulty = parentDifficulty × (1 + adjustment)
 ```
 
 **Parameters**:
-- **Kp (Proportional Gain)**: MaxDifficultyChangePercent / 100 (default 1.0 when MaxDifficultyChangePercent=100)
-- **Ki (Integral Gain)**: 0.1 (fixed for stable convergence)
-- **TargetBlockTime**: 17 seconds
+- **Kp (Proportional Gain)**: MaxDifficultyChangePercent / 100 (default 0.15 when MaxDifficultyChangePercent=20)
+- **Ki (Integral Gain)**: 0.03 (fixed for stable convergence)
+- **TargetBlockTime**: 30 seconds
 - **Integral Anti-windup**: [-10.0, 10.0] (prevents saturation)
 
 **Economic Properties**:
@@ -349,15 +349,15 @@ newDifficulty = parentDifficulty × (1 + adjustment)
 4. **Minimum difficulty floor**: Ensures network liveness
 
 **Example Scenarios**:
-- **Blocks too slow** (30s vs 15s target): 
-  - error = (15-30)/15 = -1.0 
-  - adjustment = 0.2 × (-1.0) + 0.1 × integral 
+- **Blocks too slow** (60s vs 30s target): 
+  - error = (30-60)/30 = -1.0 
+  - adjustment = 0.15 × (-1.0) + 0.03 × integral 
   - difficulty decreases
-- **Blocks too fast** (5s vs 15s target): 
-  - error = (15-5)/15 = 0.67 
-  - adjustment = 0.2 × 0.67 + 0.1 × integral 
+- **Blocks too fast** (10s vs 30s target): 
+  - error = (30-10)/30 = 0.67 
+  - adjustment = 0.15 × 0.67 + 0.03 × integral 
   - difficulty increases
-- **Blocks on target** (15s): 
+- **Blocks on target** (30s): 
   - error = 0 
   - adjustment = 0 (if integral = 0) 
   - no change
@@ -629,8 +629,8 @@ func DefaultConfig() *Config {
             MinimumDifficulty:  big.NewInt(100),
             TargetBlockTime:    30 * time.Second,
             AdjustmentSensitivity: 1.0,
-            Kp: 1.0,
-            Ki: 0.1,
+            Kp: 0.15,
+            Ki: 0.03,
         },
         CacheSize: 1000,
         Logger:    &defaultLogger{},

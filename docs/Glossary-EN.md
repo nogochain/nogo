@@ -1,7 +1,7 @@
 # NogoChain Glossary
 
-> **Version**: 1.0.0  
-> **Last Updated**: 2026-04-09  
+> **Version**: 1.2.0  
+> **Last Updated**: 2026-05-29  
 > **Status**: ✅ Production Ready
 
 This document contains professional terminology used in the NogoChain project, arranged in alphabetical order for easy reference.
@@ -69,6 +69,8 @@ Regularly saved blockchain state snapshots used to accelerate synchronization an
 ### Community Fund
 A community development fund accounting for 2% of block rewards, controlled by community governance.
 
+> ⚠️ **Removed from economic model (share=0%).** Previously accounted for 2% of block rewards.
+
 **Code Reference**: [`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go#L147)
 
 ### Consensus
@@ -104,7 +106,7 @@ The digital signature algorithm used by NogoChain, providing high performance an
 ## F
 
 ### Fee
-The fee users pay for transactions, 100% goes to miners.
+The fee users pay for transactions, 100% burned (deflationary mechanism).
 
 **Code Reference**: [`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go#L150)
 
@@ -131,8 +133,8 @@ A wallet system that generates multiple keys from a single seed.
 
 **Code Reference**: [`blockchain/crypto/hdwallet.go`](file:///d:/NogoChain/nogo/blockchain/crypto/hdwallet.go)
 
-### Halving
-The mechanism where block rewards decrease by 10% annually, with a minimum reduction to 0.1 NOGO.
+### Annual Reduction
+Block rewards decrease by 10% annually, with a minimum of 0.1 NOGO.
 
 **Code Reference**: [`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go#L89-L104)
 
@@ -141,7 +143,9 @@ The mechanism where block rewards decrease by 10% annually, with a minimum reduc
 ## I
 
 ### Integrity Pool
-A reward pool accounting for 1% of block rewards, used to reward honest nodes.
+A reward pool used to reward honest nodes.
+
+> ⚠️ **Removed from economic model (share=0%).** Previously accounted for 1% of block rewards.
 
 **Code Reference**: [`blockchain/config/monetary_policy.go`](file:///d:/NogoChain/nogo/blockchain/config/monetary_policy.go#L149)
 
@@ -207,7 +211,7 @@ Protocol for synchronizing node time, maximum allowed drift is 100 milliseconds.
 ## O
 
 ### Orphan Pool
-A pool storing orphan blocks, default maximum 100 blocks, valid for 24 hours.
+A pool storing orphan blocks, default maximum 2048 blocks, TTL 60 minutes.
 
 **Code Reference**: [`blockchain/network/orphan_pool.go`](file:///d:/NogoChain/nogo/blockchain/network/orphan_pool.go)
 
@@ -339,6 +343,6 @@ Protocol for real-time pushing of blockchain events.
 
 ---
 
-**Last Updated**: 2026-04-09  
-**Version**: 1.0.0  
+**Last Updated**: 2026-05-29  
+**Version**: 1.2.0  
 **Maintainer**: NogoChain Development Team

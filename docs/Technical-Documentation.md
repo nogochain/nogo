@@ -1,7 +1,7 @@
 # NogoChain Technical Documentation
 
-**Version:** 1.0.0  
-**Last Updated:** 2026-04-20  
+**Version:** 1.1.0  
+**Last Updated:** 2026-05-29  
 **License:** GNU Lesser General Public License v3.0
 
 ---
@@ -36,7 +36,6 @@ NogoChain is a production-grade blockchain implementation written in Go, designe
 - **Merkle Tree Support**: Version 2 blocks include Merkle root for transaction verification
 - **P2P Network**: Multiplexed connections with flow control and peer discovery
 - **Deflationary Economics**: Transaction fees are burned, creating deflationary pressure
-- **Integrity Rewards**: 1% of block rewards allocated to integrity node operators
 
 ### 1.3 Technology Stack
 
@@ -413,15 +412,15 @@ The PI (Proportional-Integral) controller adjusts difficulty based on block time
 
 ```
 error = (actualTime - targetTime) / targetTime
-integral = integral + error (clamped to [-10, 10])
+integral = integral + error (clamped to [-3.0, 3.0])
 output = Kp * error + Ki * integral
 newDifficulty = parentDifficulty * (1 - output)
 ```
 
 **Parameters:**
-- `Kp` (Proportional Gain): `MaxDifficultyChangePercent / 100` (default 1.0)
-- `Ki` (Integral Gain): 0.1 (fixed)
-- Anti-windup: Integral clamped to [-10.0, 10.0]
+- `Kp` (Proportional Gain): 0.15
+- `Ki` (Integral Gain): 0.03
+- Anti-windup: Integral clamped to [-3.0, 3.0]
 
 **Source:** [nogopow/difficulty_adjustment.go:104-176](../blockchain/nogopow/difficulty_adjustment.go#L104-L176)
 
@@ -481,13 +480,13 @@ func (da *DifficultyAdjuster) enforceBoundaryConditions(newDifficulty, parentDif
 | Parameter | Default Value |
 |-----------|---------------|
 | ChainID | 1 |
-| BlockTimeTargetSeconds | 17 |
-| DifficultyAdjustmentInterval | 1 (per block) |
-| MaxBlockTimeDriftSeconds | 900 |
-| MinDifficulty | 1 |
+| BlockTimeTargetSeconds | 30 |
+| DifficultyAdjustmentInterval | 100 |
+| MaxBlockTimeDriftSeconds | 7200 |
+| MinDifficulty | 10 |
 | MaxDifficulty | 4,294,967,295 |
 | GenesisDifficultyBits | 100 |
-| MaxDifficultyChangePercent | 100 |
+| MaxDifficultyChangePercent | 20 |
 
 ---
 
@@ -728,10 +727,10 @@ type MonetaryPolicy struct {
     UncleRewardEnabled     bool   `json:"uncleRewardEnabled"`     // ⚠️ 预留接口（未启用）
     MaxUncleDepth          uint8  `json:"maxUncleDepth"`          // 6（预留接口，未使用）
     MinerFeeShare          uint8  `json:"minerFeeShare"`          // 0% (burned)
-    MinerRewardShare       uint8  `json:"minerRewardShare"`       // 96%
-    CommunityFundShare     uint8  `json:"communityFundShare"`     // 2%
+    MinerRewardShare       uint8  `json:"minerRewardShare"`       // 99%
+    CommunityFundShare     uint8  `json:"communityFundShare"`     // 0%
     GenesisShare           uint8  `json:"genesisShare"`           // 1%
-    IntegrityPoolShare     uint8  `json:"integrityPoolShare"`     // 1%
+    IntegrityPoolShare     uint8  `json:"integrityPoolShare"`     // 0%
 }
 ```
 
@@ -741,16 +740,16 @@ type MonetaryPolicy struct {
 
 | Recipient | Share | Purpose |
 |-----------|-------|---------|
-| Miner | 96% | Block production reward |
-| Community Fund | 2% | Governance-controlled development fund |
+| Miner | 99% | Block production reward |
 | Genesis Address | 1% | Preset genesis miner address |
-| Integrity Pool | 1% | Integrity node reward distribution |
+
+> **Note**: Community Fund and Integrity Pool have been removed from the economic model.
 
 ### 9.3 Reward Calculation
 
 ```go
 func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
-    years := height / GetBlocksPerYear()  // ~1,847,058 blocks/year
+    years := height / GetBlocksPerYear()  // ~1,051,200 blocks/year
     
     reward := new(big.Int).SetUint64(p.InitialBlockReward)
     for i := uint64(0); i < years; i++ {
@@ -914,7 +913,7 @@ Configuration is loaded from:
 ### 12.1 General Questions
 
 **Q: What is the target block time?**  
-A: 17 seconds, adjustable via consensus parameters.
+A: 30 seconds, adjustable via consensus parameters.
 
 **Q: How is difficulty adjusted?**  
 A: Using a PI (Proportional-Integral) controller that responds to block time deviation from target.
@@ -943,10 +942,10 @@ A: Progress is saved every 30 seconds to `sync_progress.json`. On restart, the n
 A: A custom Proof-of-Work algorithm using matrix multiplication with a PI controller for difficulty adjustment.
 
 **Q: What is the minimum difficulty?**  
-A: 1 (for genesis and early blocks). The PI controller will auto-adjust based on network hashrate.
+A: 10 (for genesis and early blocks). The PI controller will auto-adjust based on network hashrate.
 
 **Q: How are block rewards distributed?**  
-A: 96% to miner, 2% to community fund, 1% to genesis address, 1% to integrity pool.
+A: 99% to miner, 1% to genesis address.
 
 ### 12.4 Network Questions
 

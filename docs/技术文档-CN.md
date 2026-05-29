@@ -1,7 +1,7 @@
 # NogoChain 技术文档
 
 **版本:** 1.0.0  
-**最后更新:** 2026-04-20  
+**最后更新:** 2026-05-29  
 **许可证:** GNU Lesser General Public License v3.0
 
 ---
@@ -36,7 +36,6 @@ NogoChain 是一个使用 Go 语言编写的生产级区块链实现，专为主
 - **Merkle 树支持**: 版本 2 区块包含用于交易验证的 Merkle 根
 - **P2P 网络**: 多路复用连接，支持流量控制和节点发现
 - **通缩经济学**: 交易费用被销毁，创造通缩压力
-- **诚信奖励**: 1% 的区块奖励分配给诚信节点运营者
 
 ### 1.3 技术栈
 
@@ -419,8 +418,8 @@ newDifficulty = parentDifficulty * (1 - output)
 ```
 
 **参数:**
-- `Kp`（比例增益）: `MaxDifficultyChangePercent / 100`（默认 1.0）
-- `Ki`（积分增益）: 0.1（固定值）
+- `Kp`（比例增益）: `MaxDifficultyChangePercent / 100`（默认 0.15）
+- `Ki`（积分增益）: 0.03（固定值）
 - 抗饱和: 积分限制在 [-10.0, 10.0]
 
 **源码:** [nogopow/difficulty_adjustment.go:104-176](../blockchain/nogopow/difficulty_adjustment.go#L104-L176)
@@ -481,13 +480,13 @@ func (da *DifficultyAdjuster) enforceBoundaryConditions(newDifficulty, parentDif
 | 参数 | 默认值 |
 |------|--------|
 | ChainID | 1 |
-| BlockTimeTargetSeconds | 17 |
-| DifficultyAdjustmentInterval | 1（每个区块）|
-| MaxBlockTimeDriftSeconds | 900 |
-| MinDifficulty | 1 |
+| BlockTimeTargetSeconds | 30 |
+| DifficultyAdjustmentInterval | 100（每 100 个区块）|
+| MaxBlockTimeDriftSeconds | 7200 |
+| MinDifficulty | 10 |
 | MaxDifficulty | 4,294,967,295 |
 | GenesisDifficultyBits | 100 |
-| MaxDifficultyChangePercent | 100 |
+| MaxDifficultyChangePercent | 20 |
 
 ---
 
@@ -728,10 +727,10 @@ type MonetaryPolicy struct {
     UncleRewardEnabled     bool   `json:"uncleRewardEnabled"`     // ⚠️ 预留接口（未启用）
     MaxUncleDepth          uint8  `json:"maxUncleDepth"`          // 6（预留接口，未使用）
     MinerFeeShare          uint8  `json:"minerFeeShare"`          // 0%（销毁）
-    MinerRewardShare       uint8  `json:"minerRewardShare"`       // 96%
-    CommunityFundShare     uint8  `json:"communityFundShare"`     // 2%
+    MinerRewardShare       uint8  `json:"minerRewardShare"`       // 99%
+    CommunityFundShare     uint8  `json:"communityFundShare"`     // 0%
     GenesisShare           uint8  `json:"genesisShare"`           // 1%
-    IntegrityPoolShare     uint8  `json:"integrityPoolShare"`     // 1%
+    IntegrityPoolShare     uint8  `json:"integrityPoolShare"`     // 0%
 }
 ```
 
@@ -914,7 +913,7 @@ go test ./blockchain/... -race -vet=all
 ### 12.1 一般问题
 
 **Q: 目标区块时间是多少？**  
-A: 17 秒，可通过共识参数调整。
+A: 30 秒，可通过共识参数调整。
 
 **Q: 难度如何调整？**  
 A: 使用 PI（比例-积分）控制器，根据区块时间与目标的偏差进行调整。
@@ -943,10 +942,10 @@ A: 进度每 30 秒保存到 `sync_progress.json`。重启时，如果在 24 小
 A: 一种自定义的工作量证明算法，使用矩阵乘法和 PI 控制器进行难度调整。
 
 **Q: 最小难度是多少？**  
-A: 1（用于创世区块和早期区块）。PI 控制器会根据网络算力自动调整。
+A: 10（用于创世区块和早期区块）。PI 控制器会根据网络算力自动调整。
 
 **Q: 区块奖励如何分配？**  
-A: 96% 给矿工，2% 给社区基金，1% 给创世地址，1% 给诚信池。
+A: 99% 给矿工，0% 给社区基金，1% 给创世地址，0% 给诚信池。
 
 ### 12.4 网络问题
 
@@ -1003,4 +1002,4 @@ along with the NogoChain library. If not, see <http://www.gnu.org/licenses/>.
 ---
 
 *本文档由 NogoChain 团队维护*  
-*最后更新：2026-04-20*
+*最后更新：2026-05-29*

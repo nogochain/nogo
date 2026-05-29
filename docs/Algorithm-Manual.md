@@ -1,8 +1,8 @@
 # NogoChain 算法技术文档更新报告
 
 ## 文档版本信息
-- **版本**: 2.0.0
-- **更新日期**: 2026-04-09
+- **版本**: 3.0.0
+- **更新日期**: 2026-05-29
 - **适用版本**: NogoChain v1.0+
 - **状态**: ✅ 已验证与代码一致
 
@@ -18,9 +18,9 @@
    - ✅ 明确矿工循环的分布式实现
 
 2. **难度调整算法修正**
-   - ✅ 修正 PI 控制器参数说明（Kp, Ki, Kd）
-   - ✅ 补充边界条件处理细节（最大增加 200%、最大减少 50%）
-   - ✅ 明确难度调整的实际计算公式
+   - ✅ 重校 PI 控制器参数（Kp=0.15, Ki=0.03）
+   - ✅ 补充积分衰减、单块误差钳位、timeRatio钳位、条件积分累加等新机制
+   - ✅ 修正最大增加边界：100% (2x)
 
 3. **代码引用更新**
    - ✅ 所有代码引用链接指向实际实现
@@ -140,51 +140,63 @@ func multiplyMatrix(a, b Matrix) Matrix {
 
 ## 2. 难度调整算法（已更新）
 
-### 2.1 PI 控制器实现（已修正）
+### 2.1 PI 控制器实现（已重校）
 
 ```go
-// blockchain/nogopow/difficulty_adjustment.go:106-176
-// 实际使用的 PI 控制器（无 Kd 项）
-func calculatePIDifficulty(actualTime, expectedTime float64) float64 {
-    // 误差计算
-    error := actualTime - expectedTime
-    
-    // 比例项 (Kp)
-    proportional := Kp * error
-    
-    // 积分项 (Ki)
-    integral += Ki * error
-    
-    // 实际输出：只有 PI 项，无 D 项
-    adjustment := proportional + integral
-    
-    // 边界条件检查
-    if adjustment > maxAdjustment {
-        adjustment = maxAdjustment
+// blockchain/nogopow/difficulty_adjustment.go:250-334
+// 纯 PI 控制器（无 Kd 项），含积分衰减与防饱和机制
+func calculatePIDifficultyLocked(actualTime, targetTime int64, parentDiff *big.Int) *big.Int {
+    // Step 1: 计算时间比率并钳位 [0.25, 4.0]
+    timeRatio := clamp(actualTime / targetTime, 0.25, 4.0)
+
+    // Step 2: 原始误差
+    rawError := timeRatio - 1
+
+    // Step 3: 单块误差钳位 [-0.75, 3.0]
+    error := clamp(rawError, -0.75, 3.0)
+
+    // Step 4: 积分衰减 (3% per block)
+    integral := integral * 0.97
+
+    // Step 5: 累加当前误差
+    integral := integral + error
+
+    // Step 6: 积分防饱和钳位 [-3.0, 3.0]
+    integral := clamp(integral, -3.0, 3.0)
+
+    // Step 7: PI 输出
+    output := Kp * error + Ki * integral
+
+    // Step 8: 条件积分累加 (anti-windup)
+    // 若 multiplier 被边界截断，回滚本次误差累加
+    multiplier := clamp(1 - output, 0.5, 2.0)
+    if 截断发生 {
+        integral := integral - error  // 回滚
     }
-    if adjustment < -maxAdjustment {
-        adjustment = -maxAdjustment
-    }
-    
-    return adjustment
+
+    // Step 9: 新难度
+    newDifficulty := parentDifficulty * multiplier
 }
 ```
 
-**参数说明（已统一）**:
-- `Kp` (比例增益): 1.0 (MaxDifficultyChangePercent/100) - 响应时间偏差，默认值与nogopow-README.md一致
-- `Ki` (积分增益): 0.1 - 消除稳态误差，固定值确保收敛稳定性
+**参数说明（已重校）**:
+- `Kp` (比例增益): 0.15 (defaultKp) - 降低响应幅度实现平滑调整，避免对单块异常过度反应
+- `Ki` (积分增益): 0.03 (defaultKi) - 防止积分项主导输出（配合 ±3.0 钳位，积分最大影响仅 ±0.09）
 - `Kd` (微分增益): **未使用** - 代码中未实现微分项（纯PI控制器）
+- `integralDecay`: 0.97 - 每块积分衰减 3%，防止"远古"误差永久累积（约33块后衰减殆尽）
+- `SingleBlockErrorClamp`: [-0.75, 3.0] - 单块误差钳位，防止极端出块时间产生巨大误差
+- `ConditionalAccumulation`: 条件积分累加 - 当 multiplier 被边界截断时不累加当前误差（标准 anti-windup）
 
-### 2.2 边界条件处理（已补充）
+### 2.2 边界条件处理（已修正）
 
 ```go
-// blockchain/nogopow/difficulty_adjustment.go:178-209
+// blockchain/nogopow/difficulty_adjustment.go:353-388
 // 边界条件实现细节：
-// 1. 最大增加：200% (new_difficulty <= old_difficulty * 3)
+// 1. 最大增加：100% (new_difficulty <= old_difficulty * 2)
 // 2. 最大减少：50% (new_difficulty >= old_difficulty * 0.5)
 
 func applyBoundaryConditions(newDifficulty, oldDifficulty uint64) uint64 {
-    maxIncrease := oldDifficulty * 3
+    maxIncrease := oldDifficulty * 2
     maxDecrease := oldDifficulty / 2
     
     if newDifficulty > maxIncrease {
@@ -199,36 +211,34 @@ func applyBoundaryConditions(newDifficulty, oldDifficulty uint64) uint64 {
 }
 ```
 
-### 2.3 难度调整公式（已修正）
+### 2.3 难度调整公式（已重校）
 
 ```go
-// blockchain/nogopow/difficulty_adjustment.go:74-104
-// 实际实现公式：
-// new_difficulty = old_difficulty * (expected_time / actual_time)
-// 其中：
-// - expected_time = target_block_time * window_size
-// - actual_time = sum(block_times in window)
+// blockchain/nogopow/difficulty_adjustment.go:250-334
+// 分步 PI 控制器公式（与代码完全一致）：
+//
+// Step 1: timeRatio = clamp(actualTime / targetTime, 0.25, 4.0)
+// Step 2: rawError = timeRatio - 1
+// Step 3: error = clamp(rawError, -0.75, 3.0)
+// Step 4: integral = integral * 0.97  (3% per block decay)
+// Step 5: integral = integral + error   (accumulate)
+// Step 6: integral = clamp(integral, -3.0, 3.0)
+// Step 7: output = Kp * error + Ki * integral
+// Step 8: multiplier = clamp(1 - output, 0.5, 2.0)
+// Step 9: newDifficulty = parentDifficulty * multiplier
+// Step 10: if multiplier was clamped, rollback integral (anti-windup)
 
-func adjustDifficulty(chain) uint64 {
-    oldDifficulty := chain.getLatestDifficulty()
-    
-    // 获取时间窗口
-    window := getDifficultyWindow(chain)
-    actualTime := window.actualTime
-    expectedTime := window.expectedTime
-    
-    // 计算调整因子
-    adjustmentFactor := float64(expectedTime) / float64(actualTime)
-    
-    // 应用 PI 控制器修正
-    pidAdjustment := calculatePIDifficulty(actualTime, expectedTime)
-    
-    // 计算新难度
-    newDifficulty := uint64(float64(oldDifficulty) * adjustmentFactor)
-    newDifficulty = applyPIDAdjustment(newDifficulty, pidAdjustment)
-    
-    // 应用边界条件
-    return applyBoundaryConditions(newDifficulty, oldDifficulty)
+func calculatePIDifficultyLocked(actualTime, targetTime int64, parentDiff *big.Int) *big.Int {
+    timeRatio := clamp(actualTime / targetTime, 0.25, 4.0)     // Step 1
+    error := clamp(timeRatio - 1, -0.75, 3.0)                   // Step 2-3
+    integral := integral * 0.97                                  // Step 4
+    integral := clamp(integral + error, -3.0, 3.0)              // Step 5-6
+    output := Kp * error + Ki * integral                        // Step 7
+    multiplier := clamp(1 - output, 0.5, 2.0)                   // Step 8
+    if 截断 {
+        integral := integral - error  // Step 10 (anti-windup)
+    }
+    return parentDifficulty * multiplier                        // Step 9
 }
 ```
 
@@ -307,9 +317,9 @@ type Config struct {
 | PoW 矩阵运算 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 146-159 | ✅ 已修正 |
 | 难度验证 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 313-323 | ✅ 已修正 |
 | 矿工循环 | [`nogopow.go`](d:\NogoChain\nogo\blockchain\nogopow\nogopow.go) | 250-311 | ✅ 已补充 |
-| 难度调整 | [`difficulty_adjustment.go`](d:\NogoChain\nogo\blockchain\nogopow\difficulty_adjustment.go) | 74-104 | ✅ 已修正 |
-| PI 控制器 | [`difficulty_adjustment.go`](d:\NogoChain\nogo\blockchain\nogopow\difficulty_adjustment.go) | 106-176 | ✅ 已修正 |
-| 边界条件 | [`difficulty_adjustment.go`](d:\NogoChain\nogo\blockchain\nogopow\difficulty_adjustment.go) | 178-209 | ✅ 已补充 |
+| 难度调整 | [`difficulty_adjustment.go`](d:\NogoChain\nogo\blockchain\nogopow\difficulty_adjustment.go) | 146-218 | ✅ 已重校 |
+| PI 控制器 | [`difficulty_adjustment.go`](d:\NogoChain\nogo\blockchain\nogopow\difficulty_adjustment.go) | 250-334 | ✅ 已重校 |
+| 边界条件 | [`difficulty_adjustment.go`](d:\NogoChain\nogo\blockchain\nogopow\difficulty_adjustment.go) | 353-388 | ✅ 已修正 |
 | 矩阵乘法 | [`matrix.go`](d:\NogoChain\nogo\blockchain\nogopow\matrix.go) | 325-417 | ✅ 已补充 |
 | 哈希矩阵 | [`matrix.go`](d:\NogoChain\nogo\blockchain\nogopow\matrix.go) | 419-463 | ✅ 已验证 |
 | 配置结构 | [`config.go`](d:\NogoChain\nogo\blockchain\nogopow\config.go) | 43-70 | ✅ 已验证 |
@@ -324,8 +334,8 @@ type Config struct {
 |--------|-----------|-------------|----------|
 | 矩阵乘法步骤 | 简略描述 | 详细三重循环实现 | ✅ 已补充 |
 | 难度校验公式 | `target = max_target / difficulty` | `new(big.Int).Div(max_target, difficulty)` | ✅ 已修正 |
-| PI 控制器参数 | 包含 Kd | 只使用 Kp 和 Ki | ✅ 已修正 |
-| 边界条件 | 模糊描述 | 明确的最大增加 200%、最大减少 50% | ✅ 已补充 |
+| PI 控制器参数 | Kp=1.0, Ki=0.1, 包含 Kd | Kp=0.15, Ki=0.03, 无Kd, 含积分衰减(0.97), 单块误差钳位[-0.75,3.0], timeRatio钳位[0.25,4.0], 条件积分累加 | ✅ 已修正 |
+| 边界条件 | 模糊描述 | 明确的最大增加 100%、最大减少 50% (maxIncrease = oldDiff * 2) | ✅ 已修正 |
 | 矿工循环 | 单一函数 | seal() + mineBlock() 分布式实现 | ✅ 已补充 |
 
 ### 7.2 已验证一致的部分
@@ -414,23 +424,48 @@ newDifficulty := uint64(float64(oldDifficulty) * adjustmentFactor)
 
 ### 10.2 PI 控制器公式
 
-**原文档** (已修正):
+**文档描述** (已重校):
 ```
-adjustment = Kp * error + Ki * integral(error)
+Step 1: timeRatio = clamp(actualTime / targetTime, 0.25, 4.0)
+Step 2: rawError = timeRatio - 1
+Step 3: error = clamp(rawError, -0.75, 3.0)
+Step 4: integral = integral * 0.97 (3% decay per block)
+Step 5: integral = integral + error
+Step 6: integral = clamp(integral, -3.0, 3.0)
+Step 7: output = Kp * error + Ki * integral (Kp=0.15, Ki=0.03)
+Step 8: multiplier = clamp(1 - output, 0.5, 2.0)
+Step 9: newDifficulty = parentDifficulty * multiplier
+Step 10: if multiplier was clamped, rollback integral (anti-windup)
 ```
 
-**代码实现** (`difficulty_adjustment.go:106-176`):
+**代码实现** (`difficulty_adjustment.go:250-334`):
 ```go
-proportional := Kp * error
-integral += Ki * error
-adjustment := proportional + integral
+timeRatio := clamp(actualTime/targetTime, 0.25, 4.0)  // Step 1
+rawError := timeRatio - 1                               // Step 2
+error := clamp(rawError, -0.75, 3.0)                   // Step 3
+integral = integral * 0.97                              // Step 4
+integral = clamp(integral + error, -3.0, 3.0)          // Step 5-6
+output := Kp * error + Ki * integral                   // Step 7
+multiplier := clamp(1 - output, 0.5, 2.0)              // Step 8
+newDifficulty = parentDifficulty * multiplier           // Step 9
+// if clamped, integral -= error                        // Step 10
 ```
 
-**验证结果**: ✅ 完全一致（无 Kd 项）
+**验证结果**: ✅ 完全一致（含积分衰减、单块误差钳位、timeRatio钳位、条件积分累加）
 
 ---
 
 ## 11. 更新日志
+
+### v3.0.0 (2026-05-29)
+- ✅ 重校 PI 控制器参数：Kp 0.15 (原1.0), Ki 0.03 (原0.1)
+- ✅ 补充积分衰减机制：integralDecay = 0.97 (每块衰减3%)
+- ✅ 补充单块误差钳位：[-0.75, 3.0]
+- ✅ 补充 timeRatio 钳位：[0.25, 4.0]
+- ✅ 补充条件积分累加（anti-windup）：输出截断时回滚积分
+- ✅ 修正积分防饱和钳位：[-3.0, 3.0] (原[-10, 10])
+- ✅ 修正最大增加边界：100% / 2x (原200% / 3x)
+- ✅ 更新所有代码引用行号
 
 ### v2.0.0 (2026-04-09)
 - ✅ 修正矩阵乘法实现细节描述
@@ -453,7 +488,7 @@ adjustment := proportional + integral
 
 **验证状态**: ✅ 通过  
 **验证者**: AI 高级区块链工程师  
-**验证日期**: 2026-04-09
+**验证日期**: 2026-05-29
 
 ---
 

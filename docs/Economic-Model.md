@@ -1,33 +1,33 @@
 # NogoChain Economic Model Whitepaper
 
-> **Version**: 2.1.0
-> **Last Updated**: 2026-04-26
+> **Version**: 3.0.0
+> **Last Updated**: 2026-05-29
 > **Applicable Version**: NogoChain Mainnet (ChainID: 1)
-> **Status**: ✅ Verified Consistent with Code
+> **Status**: ✅ Verified and Corrected
 > **Language**: English (Primary)
 
 ---
 
 ## Document Version Information
 
-- **Version**: 2.1.0
-- **Update Date**: 2026-04-26
+- **Version**: 3.0.0
+- **Update Date**: 2026-05-29
 - **Applicable Version**: NogoChain Mainnet (ChainID: 1)
-- **Status**: ✅ Verified consistent with code implementation
+- **Status**: ✅ Verified and corrected to match code implementation
 
 ## Update Summary
 
-This update is based on a line-by-line review of `blockchain/core/monetary_policy.go` and `config/monetary_policy.go` code, ensuring all formulas, parameters, and numerical examples are 100% consistent with actual implementation.
+This update corrects core economic model parameters to match actual code implementation: target block time changed from 17s to 30s, miner reward share increased to 99%, community fund and integrity pool shares reduced to 0%.
 
 ### Major Updates
 
-1. ✅ Corrected block reward calculation formula code references
-2. ✅ Verified halving mechanism implementation details
-3. ✅ Completed fee distribution process documentation
-4. ✅ Updated inflation rate calculations and forecast data
-5. ✅ Added integrity reward pool mechanism explanation
-6. ✅ Added community fund governance details
-7. 🌐 **Converted to English as primary language** (was Chinese)
+1. ✅ Corrected target block time: 17s → 30s (B_year: 1,856,329 → 1,051,200)
+2. ✅ Updated token distribution: Miner 99%, Community Fund 0%, Integrity Pool 0%, Genesis 1%
+3. ✅ Recalculated all inflation rate forecasts with new B_year
+4. ✅ Updated maximum supply estimate: ~180M → ~85M NOGO
+5. ✅ Deprecated Community Fund and Integrity Pool sections (share = 0%)
+6. ✅ Removed uncle/nephew reward from total miner reward formula (not implemented)
+7. ✅ Updated all numerical examples to reflect 30s block time
 
 ---
 
@@ -40,8 +40,8 @@ This update is based on a line-by-line review of `blockchain/core/monetary_polic
 | Initial Block Reward | R₀ | 8 NOGO | 8 NOGO | ✅ Consistent |
 | Annual Reduction Rate | r | 10% | 10% | ✅ Consistent |
 | Minimum Block Reward | R_min | 0.1 NOGO | 0.1 NOGO | ✅ Consistent |
-| Target Block Time | T_block | 17 seconds | 17 seconds | ✅ Consistent |
-| Blocks Per Year | B_year | 1,856,329 | 1,856,329 | ✅ Consistent |
+| Target Block Time | T_block | 30 seconds | 30 seconds | ✅ Consistent |
+| Blocks Per Year | B_year | 1,051,200 | 1,051,200 | ✅ Consistent |
 | NOGO Unit Conversion | - | 10⁸ wei | 10⁸ wei | ✅ Consistent |
 
 **Code Reference**: [`config/monetary_policy.go`](../blockchain/config/monetary_policy.go)
@@ -50,12 +50,12 @@ This update is based on a line-by-line review of `blockchain/core/monetary_polic
 
 | Recipient | Share | Code Implementation | Status |
 |-----------|-------|-------------------|--------|
-| Miner | 96% | `MinerShare = 96` | ✅ Consistent |
-| Community Fund | 2% | `CommunityFundShare = 2` | ✅ Consistent |
+| Miner | 99% | `MinerShare = 99` | ✅ Consistent |
+| Community Fund | 0% | `CommunityFundShare = 0` | ✅ Consistent |
 | Genesis Address | 1% | `GenesisShare = 1` | ✅ Consistent |
-| Integrity Pool | 1% | `IntegrityPoolShare = 1` | ✅ Consistent |
+| Integrity Pool | 0% | `IntegrityPoolShare = 0` | ✅ Consistent |
 
-**Code Reference**: [`blockchain/core/miner.go`](../blockchain/core/miner.go)
+**Code Reference**: [`core/miner.go`](../blockchain/core/miner.go)
 
 ---
 
@@ -102,16 +102,16 @@ func (p MonetaryPolicy) BlockReward(height uint64) uint64 {
 2. Integer arithmetic: `reward * 9 / 10` instead of floating point
 3. Checks minimum reward floor annually
 4. Rounds down to prevent over-issuance
-5. $B_{year} = 365 \times 24 \times 60 \times 60 / 17 = 1,856,329$ (using 365 days)
+5. $B_{year} = 365 \times 24 \times 60 \times 60 / 30 = 1,051,200$ (using 365 days)
 
 **Numerical Examples** (Verified):
 
 | Height Range | Years | Block Reward (NOGO) | Calculation |
 |-------------|-------|-------------------|-------------|
-| 0 - 1,856,328 | 0 | 8.00 | Initial reward |
-| 1,856,329 - 3,712,657 | 1 | 7.20 | 8 × 0.9 |
-| 3,712,658 - 5,568,986 | 2 | 6.48 | 8 × 0.9² |
-| 5,568,987 - 7,425,315 | 3 | 5.83 | 8 × 0.9³ |
+| 0 - 1,051,199 | 0 | 8.00 | Initial reward |
+| 1,051,200 - 2,102,399 | 1 | 7.20 | 8 × 0.9 |
+| 2,102,400 - 3,153,599 | 2 | 6.48 | 8 × 0.9² |
+| 3,153,600 - 4,204,799 | 3 | 5.83 | 8 × 0.9³ |
 | ... | ... | ... | ... |
 | Very high height | n | 0.10 | Minimum reward floor |
 
@@ -246,14 +246,14 @@ $$\Delta\text{Supply} = \text{BlockReward} - \text{TotalFees}$$
 
 **Economic Principles**:
 - Transaction fees are 100% burned (permanently removed from circulation)
-- Miners receive only 96% of block reward (fees NOT distributed)
+- Miners receive 99% of block reward (fees NOT distributed)
 - High network usage creates deflationary pressure
 
 **Code Implementation** ([`mining.go`](../blockchain/core/mining.go#L154-L162)):
 ```go
 // mining.go - Coinbase transaction creation
 // Transaction fees 100% burned (deflationary mechanism)
-// Miners receive only 96% of block reward (fees not distributed)
+// Miners receive 99% of block reward (fees not distributed)
 coinbase := Transaction{
     Type:      TxCoinbase,
     ChainID:   c.chainID,
@@ -270,10 +270,10 @@ coinbase := Transaction{
 | Recipient | Share | Code Parameter | Description |
 |-----------|-------|---------------|-------------|
 | Transaction Fees | **Burned** | 100% | Permanently removed from circulation |
-| Block Reward | Miner | 96% | `MinerRewardShare = 96` |
-| Block Reward | Community Fund | 2% | `CommunityFundShare = 2` |
+| Block Reward | Miner | 99% | `MinerRewardShare = 99` |
+| Block Reward | Community Fund | 0% | `CommunityFundShare = 0` |
 | Block Reward | Genesis Address | 1% | `GenesisShare = 1` |
-| Block Reward | Integrity Pool | 1% | `IntegrityPoolShare = 1` |
+| Block Reward | Integrity Pool | 0% | `IntegrityPoolShare = 0` |
 
 **Economic Impact**:
 - Low network usage: Fees < Block reward → Net inflation

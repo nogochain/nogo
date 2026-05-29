@@ -2,7 +2,7 @@
 
 This document provides complete deployment instructions for the NogoChain blockchain, covering development, testnet, and production environments.
 
-**Last Updated**: 2026-04-26
+**Last Updated**: 2026-05-29
 **Audit Status**: ✅ Configuration options verified against code
 **Language**: English (Primary)
 **Code References:**
@@ -336,10 +336,10 @@ Create `config.json`:
       "initialBlockReward": 800000000,
       "annualReductionPercent": 10,
       "minimumBlockReward": 10000000,
-      "minerRewardShare": 96,
-      "communityFundShare": 2,
+      "minerRewardShare": 99,
+      "communityFundShare": 0,
       "genesisShare": 1,
-      "integrityPoolShare": 1,
+      "integrityPoolShare": 0,
       "minerFeeShare": 0
     }
   },
@@ -1261,5 +1261,5 @@ curl -X POST http://localhost:8080/tx/submit \
 
 ---
 
-**Last Updated**: 2026-04-10
+**Last Updated**: 2026-05-29
 **Version**: 1.0.0

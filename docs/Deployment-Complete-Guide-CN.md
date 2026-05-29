@@ -1,7 +1,7 @@
 # NogoChain 完整部署指南
 
 > **版本**: 1.0.0  
-> **最后更�?*: 2026-04-09  
+> **最后更�?*: 2026-05-29  
 > **适用版本**: NogoChain v1.0.0+  
 > **审计状�?*: �?生产就绪
 
@@ -402,10 +402,10 @@ docker compose down
       "initialBlockReward": 800000000,
       "annualReductionPercent": 10,
       "minimumBlockReward": 10000000,
-      "minerRewardShare": 96,
-      "communityFundShare": 2,
+      "minerRewardShare": 99,
+      "communityFundShare": 0,
       "genesisShare": 1,
-      "integrityPoolShare": 1,
+      "integrityPoolShare": 0,
       "minerFeeShare": 0
     }
   },
@@ -1334,6 +1334,6 @@ curl -X POST http://localhost:8080/tx/submit \
 
 ---
 
-**最后更�?*: 2026-04-09  
+**最后更�?*: 2026-05-29  
 **版本**: 1.0.0  
 **维护�?*: NogoChain 开发团�
