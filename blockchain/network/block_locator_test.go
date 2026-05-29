@@ -179,7 +179,7 @@ func (m *locatorMockBC) SetOnMissingBlock(cb func(hash []byte, height uint64)) {
 func (m *locatorMockBC) TxByID(txid string) (*core.Transaction, *core.TxLocation, bool) {
 	return nil, nil, false
 }
-func (m *locatorMockBC) AddressTxs(addr string, limit, cursor int) ([]core.AddressTxEntry, int, bool) {
+func (m *locatorMockBC) AddressTxs(addr string, limit, cursor int, sortDesc bool) ([]core.AddressTxEntry, int, bool) {
 	return nil, 0, false
 }
 func (m *locatorMockBC) Balance(addr string) (core.Account, bool) { return core.Account{}, false }

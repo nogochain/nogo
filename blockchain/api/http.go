@@ -1350,7 +1350,10 @@ func (s *Server) handleAddressTxs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	txs, nextCursor, more := s.bc.AddressTxs(addr, limit, cursor)
+	sort := r.URL.Query().Get("sort")
+	sortDesc := sort == "desc"
+
+	txs, nextCursor, more := s.bc.AddressTxs(addr, limit, cursor, sortDesc)
 	_ = writeJSON(w, http.StatusOK, map[string]any{
 		"address":    addr,
 		"txs":        txs,

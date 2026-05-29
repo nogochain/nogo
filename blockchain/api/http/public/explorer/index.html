@@ -407,6 +407,68 @@ body {
   word-break: break-all;
 }
 
+/* ==================== Pagination Controls ==================== */
+.pagination-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 0;
+  border-top: 1px solid var(--border-color);
+  margin-top: 20px;
+}
+.pagination-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 10px 24px;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 14px;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.pagination-btn:hover:not(:disabled) {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  color: white;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(88, 166, 255, 0.3);
+}
+.pagination-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.pagination-info {
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  min-width: 100px;
+  text-align: center;
+}
+.tx-hash-clickable {
+  color: var(--accent-blue);
+  cursor: pointer;
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tx-hash-clickable:hover {
+  color: var(--accent-green);
+  text-decoration: underline;
+}
+.tx-list-inline {
+  display: grid;
+  gap: 12px;
+  margin-top: 15px;
+}
+
 /* ==================== Error & Toast ==================== */
 .error { 
   background: rgba(248, 81, 73, 0.1); 
@@ -572,6 +634,7 @@ body {
   <div class="container">
     <div class="logo">NogoChain</div>
     <nav class="nav">
+      <a href="https://nogochain.org/" target="_blank">Web</a>
       <a href="#" onclick="showBlocks(); return false;">Blocks</a>
       <a href="#" onclick="showMempool(); return false;">Mempool</a>
       <a href="#" onclick="showPeers(); return false;">Peers</a>
@@ -1151,8 +1214,21 @@ async function showBlock(height) {
   detail.scrollIntoView({ behavior: 'smooth' });
 }
 
-// Show address details
-function showAddressDetails(address, balance) {
+// --- Address Transaction History ---
+const ADDRESS_TX_PAGE_SIZE = 20;
+
+// Per-address pagination state (cursor-based)
+// cursorHistory tracks cursors for previous page navigation
+let addressPaginationState = {
+  address: '',
+  cursorHistory: [0],
+  currentPage: 1,
+  hasMore: false,
+  totalTxs: 0
+};
+
+// Show address details with balance AND transaction history
+async function showAddressDetails(address, balance) {
   const blockDetail = document.getElementById('blockDetail');
   const addressDetail = document.getElementById('addressDetail');
   const addressInfo = document.getElementById('addressInfo');
@@ -1166,10 +1242,168 @@ function showAddressDetails(address, balance) {
     <div class="detail-row"><span class="detail-label">Address</span><span class="detail-value">${address} <button class="copy-btn" onclick="copyToClipboard('${address}', 'Address')">📋</button></span></div>
     <div class="detail-row"><span class="detail-label">Balance</span><span class="detail-value" style="color:var(--accent-green);font-size:20px;font-weight:700">${balNOGO.toFixed(8)} NOGO</span></div>
     <div class="detail-row"><span class="detail-label">Nonce</span><span class="detail-value">${nonce}</span></div>
+    <div style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border-color);" id="addressTxSection">
+      <h4 style="color:var(--text-primary);font-size:16px;margin-bottom:12px;display:flex;align-items:center;gap:8px;">
+        <span>📜 Transaction History</span>
+        <span id="addressTxCount" style="font-size:13px;color:var(--text-secondary);font-weight:400;"></span>
+      </h4>
+      <div id="addressTxList" class="tx-list-inline">
+        <div style="color:var(--text-secondary);text-align:center;padding:20px;">Loading transactions...</div>
+      </div>
+      <div id="addressTxPagination" style="display:none;"></div>
+    </div>
   `;
   
   addressDetail.classList.add('show');
   addressDetail.scrollIntoView({ behavior: 'smooth' });
+  
+  // Reset pagination state for this address
+  addressPaginationState = {
+    address: address,
+    cursorHistory: [0],
+    currentPage: 1,
+    hasMore: false,
+    totalTxs: 0
+  };
+  
+  // Load first page of transactions
+  await loadAddressTxs(address, 0);
+}
+
+// Load address transactions with cursor-based pagination
+async function loadAddressTxs(address, cursor) {
+  const txList = document.getElementById('addressTxList');
+  
+  if (!txList) return;
+  
+  txList.innerHTML = '<div style="color:var(--text-secondary);text-align:center;padding:20px;">Loading transactions...</div>';
+  
+  const data = await api('/address/' + address + '/txs?limit=' + ADDRESS_TX_PAGE_SIZE + '&cursor=' + cursor + '&sort=desc');
+  
+  if (!data || !data.txs) {
+    txList.innerHTML = '<div style="color:var(--text-secondary);text-align:center;padding:20px;">Failed to load transactions</div>';
+    return;
+  }
+  
+  if (data.txs.length === 0) {
+    txList.innerHTML = '<div style="color:var(--text-secondary);text-align:center;padding:30px;">No transactions found for this address</div>';
+    const paginationDiv = document.getElementById('addressTxPagination');
+    if (paginationDiv) paginationDiv.style.display = 'none';
+    const txCount = document.getElementById('addressTxCount');
+    if (txCount) txCount.textContent = '';
+    return;
+  }
+  
+  // Update pagination state
+  addressPaginationState.hasMore = data.more || false;
+
+  // Render transaction cards + pagination
+  renderAddressTxsUI(data.txs, addressPaginationState.currentPage, data.more || false);
+}
+
+// Load previous page of address transactions
+async function loadAddressTxsPrevPage() {
+  const state = addressPaginationState;
+  if (state.currentPage <= 1) return;
+  
+  // Pop current cursor and go back one page
+  state.cursorHistory.pop();
+  const prevCursor = state.cursorHistory[state.cursorHistory.length - 1];
+  state.currentPage--;
+  
+  await loadAddressTxs(state.address, prevCursor);
+}
+
+// Load next page of address transactions
+async function loadAddressTxsNextPage() {
+  const state = addressPaginationState;
+  if (!state.hasMore) return;
+
+  const cursor = state.cursorHistory[state.cursorHistory.length - 1];
+  const data = await api(
+    '/address/' + state.address + '/txs?limit=' + ADDRESS_TX_PAGE_SIZE + '&cursor=' + cursor + '&sort=desc'
+  );
+
+  if (!data || !data.txs) return;
+
+  state.cursorHistory.push(data.nextCursor || 0);
+  state.currentPage++;
+  state.hasMore = data.more || false;
+
+  renderAddressTxsUI(data.txs, state.currentPage, state.hasMore);
+}
+
+// Render address transaction cards (compact: TX Hash + amount + fee + timestamp)
+function renderAddressTxList(txs) {
+  const txList = document.getElementById('addressTxList');
+  if (!txList) return;
+  
+  let html = '';
+  for (const tx of txs) {
+    const isCoinbase = tx.type === 'coinbase';
+    const amount = (tx.amount || 0) / 1e8;
+    const fee = (tx.fee || 0) / 1e8;
+    const txId = tx.txId || '-';
+    const txIdShort = txId !== '-' ? txId.substring(0, 20) + '...' : '-';
+    const height = tx.location ? tx.location.height : (tx.height || '-');
+    const timestamp = tx.timestamp ? new Date(tx.timestamp * 1000).toLocaleString() : '-';
+    
+    html += `
+      <div class="tx-card">
+        <div class="tx-card-header">
+          <span class="tx-type-badge ${isCoinbase ? 'coinbase' : ''}">${isCoinbase ? 'Coinbase' : 'Transfer'}</span>
+          <span style="color:var(--text-secondary);font-size:12px;">Block #${height} · ${timestamp}</span>
+        </div>
+        <div class="tx-hash-row">
+          <span class="tx-hash-label">TX Hash:</span>
+          <span class="tx-hash-value">
+            <span class="tx-hash-clickable" onclick="loadTxDetailFromAddress('${txId}')" title="Click to view transaction details">${txIdShort}</span>
+            <button class="copy-btn" onclick="event.stopPropagation(); copyToClipboard('${txId}', 'TX Hash')">📋</button>
+          </span>
+        </div>
+        <div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;">
+          <span style="color:var(--text-secondary);font-size:12px;">${isCoinbase ? '' : 'Fee: ' + fee.toFixed(8) + ' NOGO'}</span>
+          <span class="tx-amount">${amount.toFixed(8)} NOGO</span>
+        </div>
+      </div>
+    `;
+  }
+  
+  txList.innerHTML = html;
+}
+
+// Render address transactions list + pagination controls
+function renderAddressTxsUI(txs, page, hasMore) {
+  renderAddressTxList(txs);
+
+  const txCount = document.getElementById('addressTxCount');
+  if (txCount) txCount.textContent = '(' + txs.length + ' on this page)';
+
+  const paginationDiv = document.getElementById('addressTxPagination');
+  if (paginationDiv) {
+    paginationDiv.innerHTML = `
+      <div class="pagination-container">
+        <button class="pagination-btn" onclick="loadAddressTxsPrevPage()" ${page <= 1 ? 'disabled' : ''}>
+          ◀ Previous
+        </button>
+        <span class="pagination-info">Page ${page}</span>
+        <button class="pagination-btn" onclick="loadAddressTxsNextPage()" ${!hasMore ? 'disabled' : ''}>
+          Next ▶
+        </button>
+      </div>
+    `;
+    paginationDiv.style.display = 'block';
+  }
+}
+
+// Load transaction details from address view (reuses existing showTransactionDetails)
+async function loadTxDetailFromAddress(txId) {
+  if (!txId) return;
+  
+  const data = await api('/tx/' + txId);
+  if (data && data.transaction) {
+    showTransactionDetails(data);
+  }
 }
 
 // Navigation functions

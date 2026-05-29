@@ -137,7 +137,7 @@ func (m *mockBlockchainForIntegration) BlocksFrom(height uint64, count uint64) [
 	return m.blocks[height:end]
 }
 
-func (m *mockBlockchainForIntegration) AddressTxs(addr string, limit int, cursor int) ([]core.AddressTxEntry, int, bool) {
+func (m *mockBlockchainForIntegration) AddressTxs(addr string, limit int, cursor int, sortDesc bool) ([]core.AddressTxEntry, int, bool) {
 	return nil, 0, false
 }
 

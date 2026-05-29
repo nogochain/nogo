@@ -235,8 +235,8 @@ func (w *chainWrapper) AddBlock(block *core.Block) (bool, error) {
 }
 
 // AddressTxs returns transactions for an address (for network.BlockchainInterface)
-func (w *chainWrapper) AddressTxs(addr string, limit, cursor int) ([]core.AddressTxEntry, int, bool) {
-	return w.chain.AddressTxs(addr, limit, cursor)
+func (w *chainWrapper) AddressTxs(addr string, limit, cursor int, sortDesc bool) ([]core.AddressTxEntry, int, bool) {
+	return w.chain.AddressTxs(addr, limit, cursor, sortDesc)
 }
 
 // Balance returns account balance (for network.BlockchainInterface)
@@ -541,9 +541,8 @@ func (w *networkChainWrapper) TxByID(txid string) (*core.Transaction, *core.TxLo
 }
 
 // AddressTxs returns transactions for an address
-func (w *networkChainWrapper) AddressTxs(addr string, limit, cursor int) ([]core.AddressTxEntry, int, bool) {
-	txs, nextCursor, more := w.chain.AddressTxs(addr, limit, cursor)
-	return txs, nextCursor, more
+func (w *networkChainWrapper) AddressTxs(addr string, limit, cursor int, sortDesc bool) ([]core.AddressTxEntry, int, bool) {
+	return w.chain.AddressTxs(addr, limit, cursor, sortDesc)
 }
 
 // Balance returns account balance

@@ -640,7 +640,7 @@ func DefaultConfig() *Config {
 **Recommended Settings**:
 - **CacheSize**: 1000 entries (adjust based on memory)
 - **ReuseObjects**: true (for production)
-- **TargetBlockTime**: 17 seconds
+- **TargetBlockTime**: 30 seconds
 
 ---
 
@@ -803,4 +803,4 @@ hitRate := cache.HitRate()
 ---
 
 *This document is based on actual code implementation*  
-*Last updated: 2026-04-15*
+*Last updated: 2026-05-29*

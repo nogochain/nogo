@@ -166,7 +166,7 @@ func (m *fastSyncMockBC) SetOnMissingBlock(cb func(hash []byte, height uint64)) 
 func (m *fastSyncMockBC) TxByID(txid string) (*core.Transaction, *core.TxLocation, bool) {
 	return nil, nil, false
 }
-func (m *fastSyncMockBC) AddressTxs(addr string, limit, cursor int) ([]core.AddressTxEntry, int, bool) {
+func (m *fastSyncMockBC) AddressTxs(addr string, limit, cursor int, sortDesc bool) ([]core.AddressTxEntry, int, bool) {
 	return nil, 0, false
 }
 func (m *fastSyncMockBC) Balance(addr string) (core.Account, bool)  { return core.Account{}, false }

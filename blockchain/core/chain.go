@@ -5016,7 +5016,7 @@ func (c *Chain) TxByID(txid string) (*Transaction, *TxLocation, bool) {
 
 // AddressTxs returns transactions for an address with pagination
 // Concurrency safety: thread-safe read-only operation
-func (c *Chain) AddressTxs(addr string, limit, cursor int) ([]AddressTxEntry, int, bool) {
+func (c *Chain) AddressTxs(addr string, limit, cursor int, sortDesc bool) ([]AddressTxEntry, int, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -5025,15 +5025,46 @@ func (c *Chain) AddressTxs(addr string, limit, cursor int) ([]AddressTxEntry, in
 		return nil, 0, false
 	}
 
-	if cursor >= len(entries) {
+	total := len(entries)
+
+	if sortDesc {
+		start := total - cursor - limit
+		if start < 0 {
+			start = 0
+		}
+		end := total - cursor
+		if end <= 0 || start >= total {
+			return nil, cursor, false
+		}
+
+		result := make([]AddressTxEntry, 0, end-start)
+		for i := end - 1; i >= start; i-- {
+			entry := entries[i]
+			block, exists := c.blocksByHash[entry.Location.BlockHashHex]
+			if !exists {
+				continue
+			}
+			if entry.Location.Index < len(block.Transactions) {
+				entryWithTime := entry
+				entryWithTime.Timestamp = block.Header.TimestampUnix
+				result = append(result, entryWithTime)
+			}
+		}
+
+		nextCursor := cursor + limit
+		more := nextCursor < total
+		return result, nextCursor, more
+	}
+
+	if cursor >= total {
 		return nil, cursor, false
 	}
 
 	end := cursor + limit
 	more := false
-	if end > len(entries) {
-		end = len(entries)
-	} else if end < len(entries) {
+	if end > total {
+		end = total
+	} else if end < total {
 		more = true
 	}
 

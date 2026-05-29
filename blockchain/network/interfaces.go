@@ -84,7 +84,7 @@ type BlockchainInterface interface {
 
 	// Transaction queries
 	TxByID(txid string) (*core.Transaction, *core.TxLocation, bool)
-	AddressTxs(addr string, limit, cursor int) ([]core.AddressTxEntry, int, bool)
+	AddressTxs(addr string, limit, cursor int, sortDesc bool) ([]core.AddressTxEntry, int, bool)
 	Balance(addr string) (core.Account, bool)
 	HasTransaction(txHash []byte) bool
 

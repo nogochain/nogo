@@ -94,7 +94,7 @@ func (s *SimpleServer) handleAddressBalance(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Get transaction count for address
-	txs, _, _ := s.bc.AddressTxs(address, 1000, 0)
+	txs, _, _ := s.bc.AddressTxs(address, 1000, 0, false)
 
 	balance := &AddressBalance{
 		Address:     address,

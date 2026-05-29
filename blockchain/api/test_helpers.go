@@ -159,7 +159,7 @@ func (m *mockBlockchain) TxByID(txid string) (*core.Transaction, *core.TxLocatio
 	return &tx, loc, true
 }
 
-func (m *mockBlockchain) AddressTxs(addr string, limit, cursor int) ([]core.AddressTxEntry, int, bool) {
+func (m *mockBlockchain) AddressTxs(addr string, limit, cursor int, sortDesc bool) ([]core.AddressTxEntry, int, bool) {
 	return nil, 0, false
 }
 

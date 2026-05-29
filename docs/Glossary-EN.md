@@ -325,7 +325,7 @@ Protocol for real-time pushing of blockchain events.
 
 **Consensus Related**: NogoPow, Difficulty Adjustment, PI Controller, Median Time Past, Checkpoint
 
-**Economic Model**: Block Reward, Monetary Policy, Halving, Community Fund, Integrity Pool, Uncle Block
+**Economic Model**: Block Reward, Monetary Policy, Annual Reduction, Community Fund, Integrity Pool, Uncle Block
 
 **Network Related**: P2P, Boot Nodes, Seed Nodes, DNS Discovery, Sync Loop, Orphan Pool
 
