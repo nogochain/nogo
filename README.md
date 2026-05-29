@@ -10,7 +10,7 @@ For consensus, sync, and P2P internals (including fork handling aligned with Byt
 ## Features
 
 - **NogoPow Consensus**: Innovative proof-of-work algorithm with AI hash verification support
-- **PI Controller Difficulty Adjustment**: Stable block time control, target 17 seconds
+- **PI Controller Difficulty Adjustment**: Stable block time control, target 30 seconds
 - **Ed25519 Signatures**: RFC 8032 compliant cryptographic signatures
 - **BoltDB Storage**: High-performance embedded database
 - **P2P Network**: Connection pooling, heartbeat detection, NAT traversal support
@@ -119,7 +119,7 @@ This project is licensed under LGPL-3.0, see [LICENSE](./LICENSE).
 ## 特性
 
 - **NogoPow 共识**: 创新的工作量证明算法，支持 AI 哈希验证
-- **PI 控制器难度调整**: 稳定的区块时间控制，目标 17 秒
+- **PI 控制器难度调整**: 稳定的区块时间控制，目标 30 秒
 - **Ed25519 签名**: 符合 RFC 8032 标准的加密签名
 - **BoltDB 存储**: 高性能嵌入式数据库
 - **P2P 网络**: 支持连接池、心跳检测、NAT 穿透
