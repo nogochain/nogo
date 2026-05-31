@@ -491,7 +491,7 @@ curl http://localhost:8080/chain/info
   "nextHalvingHeight": 0,
   "difficultyBits": 11,
   "difficultyEnable": true,
-  "difficultyTargetMs": 17000,
+  "difficultyTargetMs": 30000,
   "difficultyWindow": 10,
   "difficultyMinBits": 1,
   "difficultyMaxBits": 32,
@@ -510,7 +510,7 @@ curl http://localhost:8080/chain/info
   },
   "consensusParams": {
     "difficultyEnable": true,
-    "difficultyTargetMs": 17000,
+    "difficultyTargetMs": 30000,
     "difficultyWindow": 10,
     "difficultyMinBits": 1,
     "difficultyMaxBits": 32,

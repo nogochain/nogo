@@ -436,7 +436,7 @@ curl http://localhost:8080/chain/info
   "nextHalvingHeight": 0,
   "difficultyBits": 11,
   "difficultyEnable": true,
-  "difficultyTargetMs": 17000,
+  "difficultyTargetMs": 30000,
   "difficultyWindow": 10,
   "difficultyMinBits": 1,
   "difficultyMaxBits": 32,
@@ -455,7 +455,7 @@ curl http://localhost:8080/chain/info
   },
   "consensusParams": {
     "difficultyEnable": true,
-    "difficultyTargetMs": 17000,
+    "difficultyTargetMs": 30000,
     "difficultyWindow": 10,
     "difficultyMinBits": 1,
     "difficultyMaxBits": 32,
@@ -511,12 +511,12 @@ curl http://localhost:8080/chain/special_addresses
     "purpose": "Genesis block reward (one-time allocation)"
   },
   "rewardDistribution": {
-    "minerShare": 96,
-    "communityShare": 2,
+    "minerShare": 99,
+    "communityShare": 0,
     "genesisShare": 1,
-    "integrityShare": 1,
-    "minerFeeShare": 100,
-    "description": "Block reward: 96% miner, 2% community fund, 1% genesis, 1% integrity pool. Fees: 100% burned."
+    "integrityShare": 0,
+    "minerFeeShare": 0,
+    "description": "Block reward: 99% miner, 0% community fund, 1% genesis, 0% integrity pool. Fees: 100% burned."
   }
 }
 ```
