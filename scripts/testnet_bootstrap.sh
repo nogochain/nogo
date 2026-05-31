@@ -38,11 +38,14 @@ ADMIN_TOKEN="$(rand_hex)"
 
 CHAIN_ID="${CHAIN_ID:-2}"
 GENESIS_SUPPLY="${GENESIS_SUPPLY:-10000000000000}"
-GENESIS_TIMESTAMP_UNIX="${GENESIS_TIMESTAMP_UNIX:-1735689600}"
-GENESIS_MESSAGE="${GENESIS_MESSAGE:-NogoChain Testnet - Development and Experiments - 2025}"
-INITIAL_BLOCK_REWARD="${INITIAL_BLOCK_REWARD:-5000000000}"
-HALVING_INTERVAL="${HALVING_INTERVAL:-210000}"
-MINER_FEE_SHARE="${MINER_FEE_SHARE:-100}"
+GENESIS_TIMESTAMP_UNIX="${GENESIS_TIMESTAMP_UNIX:-1775044800}"
+GENESIS_MESSAGE="${GENESIS_MESSAGE:-NogoChain Testnet - Development and Experiments - 2026}"
+INITIAL_BLOCK_REWARD="${INITIAL_BLOCK_REWARD:-800000000}"        # 8 NOGO in wei (1 NOGO = 10^8 wei)
+ANNUAL_REDUCTION_PERCENT="${ANNUAL_REDUCTION_PERCENT:-10}"       # 10% annual reduction
+MINIMUM_BLOCK_REWARD="${MINIMUM_BLOCK_REWARD:-10000000}"        # 0.1 NOGO minimum reward
+MINER_REWARD_SHARE="${MINER_REWARD_SHARE:-99}"                  # 99% of block reward to miner
+GENESIS_SHARE="${GENESIS_SHARE:-1}"                             # 1% of block reward to genesis address
+MINER_FEE_SHARE="${MINER_FEE_SHARE:-0}"                         # 0% - all fees are burned
 TAIL_EMISSION="${TAIL_EMISSION:-0}"
 
 DIFFICULTY_ENABLE="${DIFFICULTY_ENABLE:-true}"
@@ -78,17 +81,22 @@ cat >"$GENESIS_PATH" <<EOF
   "genesisMessage": "$GENESIS_MESSAGE",
   "monetaryPolicy": {
     "initialBlockReward": "$INITIAL_BLOCK_REWARD",
-    "halvingInterval": $HALVING_INTERVAL,
+    "minimumBlockReward": "$MINIMUM_BLOCK_REWARD",
+    "annualReductionPercent": $ANNUAL_REDUCTION_PERCENT,
+    "minerRewardShare": $MINER_REWARD_SHARE,
+    "genesisShare": $GENESIS_SHARE,
     "minerFeeShare": $MINER_FEE_SHARE,
+    "communityFundShare": 0,
+    "integrityPoolShare": 0,
     "tailEmission": "$TAIL_EMISSION"
   },
   "consensusParams": {
     "difficultyEnable": $(bool_json "$DIFFICULTY_ENABLE"),
-    "difficultyTargetMs": $DIFFICULTY_TARGET_MS,
+    "targetBlockTime": $DIFFICULTY_TARGET_MS,
     "difficultyWindow": $DIFFICULTY_WINDOW,
-    "difficultyMaxStepBits": $DIFFICULTY_MAX_STEP_BITS,
-    "difficultyMinBits": $DIFFICULTY_MIN_BITS,
-    "difficultyMaxBits": $DIFFICULTY_MAX_BITS,
+    "difficultyMaxStep": ${DIFFICULTY_MAX_STEP_BITS:-4},
+    "minDifficultyBits": $DIFFICULTY_MIN_BITS,
+    "maxDifficultyBits": $DIFFICULTY_MAX_BITS,
     "genesisDifficultyBits": $GENESIS_DIFFICULTY_BITS,
     "medianTimePastWindow": $MTP_WINDOW,
     "maxTimeDrift": $MAX_TIME_DRIFT,

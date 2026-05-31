@@ -867,10 +867,10 @@ func init() {
 var MainnetGenesisConfig = GenesisConfiguration{
 	Network:             "nogochain-mainnet",
 	ChainID:             1,
-	Timestamp:           1775044800, // 2026-04-01 12:00:00 UTC
+	Timestamp:           1775044800, // 2026-06-01 00:00:00 UTC
 	GenesisMinerAddress: "NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c",
 	InitialSupply:       100000000000000,
-	GenesisMessage:      "NogoChain Mainnet Launch - A new era of decentralized finance - 2026-04-01 12:00:00 UTC",
+	GenesisMessage:      "NogoChain Mainnet Launch - A new era of decentralized finance - 2026-06-01 00:00:00 UTC",
 	MonetaryPolicy: MonetaryPolicy{
 		InitialBlockReward:     800000000, // 8 NOGO in wei (1 NOGO = 10^8 wei)
 		MinimumBlockReward:     10000000,  // 0.1 NOGO minimum reward
@@ -913,10 +913,10 @@ var TestnetGenesisConfig = GenesisConfiguration{
 		MinimumBlockReward:     10000000,   // 0.1 NOGO minimum reward
 		AnnualReductionPercent: 10,         // 10% annual reduction
 		MinerFeeShare:          0,          // 0% of fees to miner (fees are burned)
-		MinerRewardShare:       99,   // 99% of block reward to miner
-		CommunityFundShare:     0,    // community fund allocation removed
-		GenesisShare:           1,    // 1% of block reward to genesis address
-		IntegrityPoolShare:     0,    // integrity pool allocation removed
+		MinerRewardShare:       99,         // 99% of block reward to miner
+		CommunityFundShare:     0,          // community fund allocation removed
+		GenesisShare:           1,          // 1% of block reward to genesis address
+		IntegrityPoolShare:     0,          // integrity pool allocation removed
 	},
 	ConsensusParams: ConsensusParams{
 		DifficultyEnable:               true,

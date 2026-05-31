@@ -480,7 +480,7 @@ curl http://localhost:8080/chain/info
   "height": 105,
   "latestHash": "bbba903f8a8c06e1f170d91aeab8eb11234a1ffa88a709d71323bfb41b31f3e2",
   "genesisHash": "0000000000000000000000000000000000000000000000000000000000000001",
-  "genesisTimestampUnix": 1712000000,
+  "genesisTimestampUnix": 1775044800,  # 2026-06-01 00:00:00 UTC
   "genesisMinerAddress": "NOGO...",
   "minerAddress": "NOGO...",
   "peersCount": 5,
@@ -566,12 +566,12 @@ curl http://localhost:8080/chain/special_addresses
     "purpose": "Genesis block reward (one-time allocation)"
   },
   "rewardDistribution": {
-    "minerShare": 96,
-    "communityShare": 2,
+    "minerShare": 99,
+    "communityShare": 0,
     "genesisShare": 1,
-    "integrityShare": 1,
-    "minerFeeShare": 100,
-    "description": "Block reward: 96% miner, 2% community fund, 1% genesis, 1% integrity pool. Fees: 100% burned."
+    "integrityShare": 0,
+    "minerFeeShare": 0,
+    "description": "Block reward: 99% miner, 0% community fund, 1% genesis, 0% integrity pool. Fees: 100% burned."
   }
 }
 ```
