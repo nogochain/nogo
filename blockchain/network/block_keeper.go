@@ -19,6 +19,8 @@ package network
 import (
 	"container/list"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -48,7 +50,6 @@ const (
 
 	// NogoChain-style sync type classification for intelligent strategy selection
 	syncTypeNone    = iota // no peer available or already synced
-	syncTypeFast           // fast sync via checkpoint skeleton download
 	syncTypeRegular        // regular sequential block download
 )
 
@@ -366,101 +367,6 @@ func (bk *blockKeeper) blockLocator() [][]byte {
 	return locator
 }
 
-func (bk *blockKeeper) fastBlockSync(checkpoint *config.TrustedCheckpoint) error {
-	bk.resetHeaderState()
-
-	bestHeader, err := bk.chain.BestBlockHeader()
-	if err != nil {
-		return fmt.Errorf("fastBlockSync get best header: %w", err)
-	}
-
-	if bestHeader == nil {
-		return errors.New("fastBlockSync: best header is nil")
-	}
-
-	lastHeader := bestHeader
-	checkpointHash, decodeErr := hex.DecodeString(checkpoint.Hash)
-	if decodeErr != nil {
-		return fmt.Errorf("fastBlockSync decode checkpoint hash: %w", decodeErr)
-	}
-
-	for ; !equalBytes(lastHeader.Header.PrevHash, checkpointHash); lastHeader = bk.headerList.Back().Value.(*HeaderLocator) {
-		if lastHeader.Height >= checkpoint.Height {
-			return fmt.Errorf("%w: peer is not in the checkpoint branch", errPeerMisbehave)
-		}
-
-		var lastHash []byte
-		block, ok := bk.chain.BlockByHeight(lastHeader.Height)
-		if !ok || block == nil {
-			lastHash = lastHeader.Header.PrevHash
-		} else {
-			lastHash = block.GetHash()
-		}
-
-		if lastHash == nil {
-			return fmt.Errorf("%w: cannot determine last hash for height %d", errPeerMisbehave, lastHeader.Height)
-		}
-
-		headers, err := bk.requireHeaders([][]byte{lastHash}, checkpointHash)
-		if err != nil {
-			return fmt.Errorf("fastBlockSync requireHeaders: %w", err)
-		}
-
-		if len(headers) == 0 {
-			return fmt.Errorf("%w: requireHeaders return empty list", errPeerMisbehave)
-		}
-
-		if err := bk.appendHeaderList(headers); err != nil {
-			return fmt.Errorf("fastBlockSync appendHeaderList: %w", err)
-		}
-	}
-
-	fastHeader := bk.headerList.Front()
-	for bk.chain.LatestBlock().GetHeight() < checkpoint.Height {
-		locator := bk.blockLocator()
-		blocks, err := bk.requireBlocks(locator, checkpointHash)
-		if err != nil {
-			return fmt.Errorf("fastBlockSync requireBlocks: %w", err)
-		}
-
-		if len(blocks) == 0 {
-			return fmt.Errorf("%w: requireBlocks return empty list", errPeerMisbehave)
-		}
-
-		for _, block := range blocks {
-			if fastHeader == nil {
-				return errors.New("get block that is higher than checkpoint")
-			}
-
-			fastHeader = fastHeader.Next()
-			if fastHeader == nil {
-				return errors.New("get block that is higher than checkpoint")
-			}
-
-			expectedHeader := fastHeader.Value.(*HeaderLocator)
-			blockHash := block.GetHash()
-			expectedBlock, ok := bk.chain.BlockByHeight(expectedHeader.Height)
-			if !ok {
-				return fmt.Errorf("%w: expected block not found at height %d", errPeerMisbehave, expectedHeader.Height)
-			}
-
-			if !equalBytes(blockHash, expectedBlock.GetHash()) {
-				return errPeerMisbehave
-			}
-
-			isOrphan, processErr := bk.chain.AddBlock(block)
-			if processErr != nil {
-				return fmt.Errorf("fastBlockSync process block at height %d: %w", block.GetHeight(), processErr)
-			}
-
-			if isOrphan {
-				log.Printf("[BlockKeeper] Warning: orphan block during fast sync at height %d", block.GetHeight())
-			}
-		}
-	}
-	return nil
-}
-
 func (bk *blockKeeper) locateBlocks(locator [][]byte, stopHash []byte) ([]*core.Block, error) {
 	headers, err := bk.locateHeaders(locator, stopHash)
 	if err != nil {
@@ -574,19 +480,40 @@ func (bk *blockKeeper) regularBlockSync(targetHeight uint64, batchLimit uint64) 
 	i := bk.chain.LatestBlock().GetHeight() + 1
 	startHeight := i
 
+	const fixedBatchSize = uint64(100)
+
 	if bk.logLimiter.shouldLog("batch_sync_start") {
-		log.Printf("[BlockKeeper] Starting batch sync: h=%d → target=%d (gap=%d, batchSize=%d)",
-			startHeight, targetHeight, targetHeight-startHeight+1, batchLimit)
+		log.Printf("[BlockKeeper] Starting batch sync: h=%d → target=%d (gap=%d, fixed batchSize=%d)",
+			startHeight, targetHeight, targetHeight-startHeight+1, fixedBatchSize)
 	}
 
 	for i <= targetHeight {
 		batchSize := targetHeight - i + 1
-		if batchSize > batchLimit {
-			batchSize = batchLimit
+		if batchSize > fixedBatchSize {
+			batchSize = fixedBatchSize
 		}
 
 		blocks, batchErr := bk.requireBlocksBatch(i, batchSize)
+
+		if batchErr == nil && len(blocks) > 0 && len(blocks) < int(batchSize) {
+			if bk.logLimiter.shouldLog("partial_batch") {
+				log.Printf("[BlockKeeper] Partial batch received: requested %d blocks [%d-%d], got %d",
+					batchSize, i, i+batchSize-1, len(blocks))
+			}
+
+			maxReceivedHeight := uint64(0)
+			for h := range blocks {
+				if h > maxReceivedHeight {
+					maxReceivedHeight = h
+				}
+			}
+			batchSize = maxReceivedHeight - i + 1
+		}
+
 		if batchErr != nil || len(blocks) == 0 {
+			log.Printf("[BlockKeeper] Batch request failed [%d-%d], falling back to single block: %v",
+				i, i+batchSize-1, batchErr)
+
 			block, err := bk.requireBlock(i)
 			if err != nil {
 				return fmt.Errorf("regularBlockSync requireBlock at height %d: %w", i, err)
@@ -634,27 +561,59 @@ func (bk *blockKeeper) regularBlockSync(targetHeight uint64, batchLimit uint64) 
 	return nil
 }
 
+func (bk *blockKeeper) getSyncPeers() []PeerInterface {
+	var peers []PeerInterface
+	if bk.peers != nil {
+		peerIDs := bk.peers.GetAllPeerIDs()
+		for _, peerID := range peerIDs {
+			if peer := bk.peers.PeerByID(peerID); peer != nil {
+				peers = append(peers, peer)
+			}
+		}
+	}
+	if bk.syncPeer != nil {
+		found := false
+		for _, p := range peers {
+			if p.ID() == bk.syncPeer.ID() {
+				found = true
+				break
+			}
+		}
+		if !found {
+			peers = append(peers, bk.syncPeer)
+		}
+	}
+	return peers
+}
+
 func (bk *blockKeeper) requireBlock(height uint64) (*core.Block, error) {
-	if bk.syncPeer == nil {
-		return nil, fmt.Errorf("%w: syncPeer is nil", errPeerDropped)
+	peers := bk.getSyncPeers()
+	if len(peers) == 0 {
+		return nil, fmt.Errorf("%w: no available sync peers", errPeerDropped)
 	}
 
-	log.Printf("[BlockKeeper] requireBlock: requesting block h=%d from peer=%s sessionSeq=%d",
-		height, bk.syncPeer.ID()[:min(12, len(bk.syncPeer.ID()))], bk.syncSessionSeq)
+	var lastErr error
+	for _, peer := range peers {
+		log.Printf("[BlockKeeper] requireBlock: requesting block h=%d from peer=%s",
+			height, peer.ID()[:min(12, len(peer.ID()))])
 
-	ctx, cancel := context.WithTimeout(context.Background(), syncTimeout)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), syncTimeout)
+		defer cancel()
 
-	block, err := bk.syncPeer.fetchBlock(ctx, height)
-	if err != nil {
-		log.Printf("[BlockKeeper] requireBlock: fetchBlock failed h=%d from peer=%s: %v",
-			height, bk.syncPeer.ID()[:min(12, len(bk.syncPeer.ID()))], err)
-		return nil, fmt.Errorf("%w: requireBlock height=%d: %w", errRequestTimeout, height, err)
+		block, err := peer.fetchBlock(ctx, height)
+		if err != nil {
+			log.Printf("[BlockKeeper] requireBlock: fetchBlock failed h=%d from peer=%s: %v",
+				height, peer.ID()[:min(12, len(peer.ID()))], err)
+			lastErr = err
+			continue
+		}
+
+		log.Printf("[BlockKeeper] requireBlock: received block h=%d from peer=%s",
+			height, peer.ID()[:min(12, len(peer.ID()))])
+		return block, nil
 	}
 
-	log.Printf("[BlockKeeper] requireBlock: received block h=%d from peer=%s",
-		height, bk.syncPeer.ID()[:min(12, len(bk.syncPeer.ID()))])
-	return block, nil
+	return nil, fmt.Errorf("%w: requireBlock height=%d: all peers failed, last error: %w", errRequestTimeout, height, lastErr)
 }
 
 func (bk *blockKeeper) requireBlockFast(height uint64) (*core.Block, error) {
@@ -772,7 +731,6 @@ func (bk *blockKeeper) resetHeaderState() {
 func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 	blockHeight := bk.chain.LatestBlock().GetHeight()
 	localWork := bk.chain.CanonicalWork()
-	checkpoint := bk.nextCheckpoint()
 
 	if localWork == nil {
 		localWork = big.NewInt(0)
@@ -923,52 +881,6 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 		}
 	}
 
-	// Priority 1: fast sync when hardcoded checkpoint is ahead and peer supports it.
-	if checkpoint != nil && peerHeight >= checkpoint.Height {
-		const minGap = uint64(128)
-		if checkpoint.Height >= blockHeight+minGap {
-			return syncTypeFast, bestByWork
-		}
-	}
-
-	// Priority 2: fast sync when BoltDB checkpoint is ahead and peer supports it.
-	if checkpoint == nil && peerHeight > blockHeight {
-		boltCheckpointH, _ := bk.nextCheckpointHeight(peerHeight)
-		const boltMinGap = uint64(128)
-		if boltCheckpointH >= blockHeight+boltMinGap {
-			log.Printf("[BlockKeeper] checkSyncType: fast sync via BoltDB checkpoint h=%d (local=%d, peer=%d)",
-				boltCheckpointH, blockHeight, peerHeight)
-			return syncTypeFast, bestByWork
-		}
-	}
-
-	// Priority 3: fast sync for very large gaps without checkpoints.
-	if checkpoint == nil && peerHeight > blockHeight {
-		const largeGap = uint64(5000)
-		if peerHeight-blockHeight >= largeGap {
-			boltCheckpointH, _ := bk.nextCheckpointHeight(peerHeight)
-			if boltCheckpointH > blockHeight && boltCheckpointH <= peerHeight {
-				log.Printf("[BlockKeeper] checkSyncType: fast sync for large gap (gap=%d, boltCp=%d)",
-					peerHeight-blockHeight, boltCheckpointH)
-				return syncTypeFast, bestByWork
-			}
-		}
-	}
-
-	// Priority 4: fast sync via P2P received checkpoint (new node).
-	if checkpoint == nil && peerHeight > blockHeight {
-		if bk.getReceivedCheckpoint != nil {
-			if cp := bk.getReceivedCheckpoint(); cp != nil && cp.Height > blockHeight {
-				const p2pMinGap = uint64(128)
-				if cp.Height >= blockHeight+p2pMinGap {
-					log.Printf("[BlockKeeper] checkSyncType: fast sync via P2P checkpoint h=%d (local=%d, peer=%d)",
-						cp.Height, blockHeight, peerHeight)
-					return syncTypeFast, bestByWork
-				}
-			}
-		}
-	}
-
 	// Work comparison: heaviest chain wins.
 	if peerWork.Cmp(localWork) > 0 {
 		if peerHeight > blockHeight {
@@ -1053,9 +965,6 @@ func (bk *blockKeeper) startSync() bool {
 	blockHeight := bk.chain.LatestBlock().GetHeight()
 
 	switch syncType {
-	case syncTypeFast:
-		return bk.dispatchFastSync(peer, blockHeight)
-
 	case syncTypeRegular:
 		return bk.dispatchRegularSync(peer, blockHeight)
 
@@ -1079,55 +988,6 @@ func (bk *blockKeeper) startSync() bool {
 		}
 		return false
 	}
-}
-
-// dispatchFastSync executes fast synchronization via checkpoint skeleton download.
-// NogoChain-style pattern: single responsibility dispatch with clear error handling.
-func (bk *blockKeeper) dispatchFastSync(peer PeerInterface, localHeight uint64) bool {
-	if _, isSimple := peer.(*simplePeer); isSimple {
-		if realPeer := bk.peers.bestPeer(SFFullNode); realPeer != nil && realPeer.ID() == peer.ID() {
-			peer = realPeer
-		} else {
-			log.Printf("[BlockKeeper] dispatchFastSync: work-optimal peer %s not found via bestPeer, skipping", peer.ID())
-			return false
-		}
-	}
-
-	checkpoint := bk.nextCheckpoint()
-	if checkpoint == nil {
-		if boltH, boltHash, err := bk.chain.LatestCheckpoint(); err == nil && boltH > localHeight {
-			checkpoint = &config.TrustedCheckpoint{Height: boltH, Hash: boltHash}
-			log.Printf("[BlockKeeper] dispatchFastSync: using BoltDB checkpoint h=%d (local=%d)", boltH, localHeight)
-		}
-	}
-	if checkpoint == nil {
-		if bk.getReceivedCheckpoint != nil {
-			if cp := bk.getReceivedCheckpoint(); cp != nil && cp.Height > localHeight {
-				checkpoint = &config.TrustedCheckpoint{Height: cp.Height, Hash: cp.BlockHash}
-				log.Printf("[BlockKeeper] dispatchFastSync: using P2P checkpoint h=%d (local=%d)", cp.Height, localHeight)
-			}
-		}
-	}
-	if checkpoint == nil {
-		return false
-	}
-
-	bk.syncPeer = peer
-	log.Printf("[BlockKeeper] FAST sync to checkpoint h=%d via peer %s (peerH=%d)",
-		checkpoint.Height, peer.ID(), peer.Height())
-
-	if err := bk.fastBlockSync(checkpoint); err != nil {
-		log.Printf("[BlockKeeper] fastBlockSync failed: %v", err)
-		bk.peers.ProcessIllegal(peer.ID(), LevelMsgIllegal, err.Error())
-		bk.peers.DecSyncLoad(peer.ID())
-		return false
-	}
-
-	newHeight := bk.chain.LatestBlock().GetHeight()
-	log.Printf("[BlockKeeper] Fast sync completed (peer=%s, now at h=%d)", peer.ID(), newHeight)
-	bk.recordSyncProgress(newHeight)
-	bk.peers.DecSyncLoad(peer.ID())
-	return true
 }
 
 // resolveRealPeer attempts to get the real PeerInterface for the given peer wrapper.
@@ -1724,4 +1584,66 @@ type PeerInterface interface {
 // blockKeeper can clear stale references to the disconnected peer.
 type PeerDisconnectNotifier interface {
 	OnPeerDisconnected(peerID string)
+}
+
+// decodeMinerAddress decodes a miner address from hex string to 32-byte format
+func decodeMinerAddress(addrHex string) ([32]byte, error) {
+	var out [32]byte
+	if len(addrHex) > 4 && addrHex[:4] == core.AddressPrefix {
+		encoded := addrHex[4:]
+		b, err := hex.DecodeString(encoded)
+		if err != nil {
+			return out, fmt.Errorf("decode NOGO address: %w", err)
+		}
+		if len(b) < 33 {
+			return out, errors.New("NOGO address too short")
+		}
+		if len(b) == 37 {
+			copy(out[:], b[1:33])
+		} else {
+			return out, errors.New("invalid NOGO address length")
+		}
+	} else {
+		b, err := hex.DecodeString(addrHex)
+		if err != nil {
+			return out, fmt.Errorf("decode hex: %w", err)
+		}
+		if len(b) != 32 {
+			return out, fmt.Errorf("expected 32 bytes, got %d", len(b))
+		}
+		copy(out[:], b)
+	}
+	return out, nil
+}
+
+// computeHeaderHash computes the hash of a block header using SHA256
+func computeHeaderHash(h *core.BlockHeader, height uint64, minerAddress string) ([]byte, error) {
+	hasher := sha256.New()
+	hasher.Write(h.PrevHash)
+
+	timestampBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(timestampBytes, uint64(h.TimestampUnix))
+	hasher.Write(timestampBytes)
+
+	difficultyBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(difficultyBytes, h.DifficultyBits)
+	hasher.Write(difficultyBytes)
+
+	nonceBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(nonceBytes, h.Nonce)
+	hasher.Write(nonceBytes)
+
+	hasher.Write(h.MerkleRoot)
+
+	heightBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(heightBytes, height)
+	hasher.Write(heightBytes)
+
+	miner, err := decodeMinerAddress(minerAddress)
+	if err != nil {
+		return nil, fmt.Errorf("decode miner address: %w", err)
+	}
+	hasher.Write(miner[:])
+
+	return hasher.Sum(nil), nil
 }

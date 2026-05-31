@@ -3380,6 +3380,11 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 
 	c.cleanupExpiredOrphansLocked()
 
+	// NOTE: PrevHash validation is intentionally SKIPPED here
+	// ValidatePrevHashLocked only checks format (nil, length, all-zeros)
+	// Parent existence is checked later in the orphan/fork handling logic
+	// This ensures orphan blocks can be received and stored for later processing
+
 	if err := c.validateBlockConsensusLocked(block); err != nil {
 		return false, fmt.Errorf("block consensus validation failed: %w", err)
 	}
@@ -3454,8 +3459,13 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 		if len(c.blocks) > 0 {
 			currentTip := c.blocks[len(c.blocks)-1]
 			if !bytes.Equal(block.Header.PrevHash, currentTip.Hash) {
+				// Add diagnostic log: print complete PrevHash info
 				log.Printf("[Chain] Block %d has wrong PrevHash: expected %x, got %x",
 					block.GetHeight(), currentTip.Hash[:8], block.Header.PrevHash[:8])
+				log.Printf("[Chain] DEBUG: currentTip.Hash (full): %x", currentTip.Hash)
+				log.Printf("[Chain] DEBUG: block.PrevHash (full): %x", block.Header.PrevHash)
+				log.Printf("[Chain] DEBUG: block.Hash: %x", block.Hash)
+				log.Printf("[Chain] DEBUG: block.Height: %d", block.GetHeight())
 				return c.addForkBlockLocked(block, hashHex)
 			}
 		}

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -36,6 +37,8 @@ import (
 	"github.com/nogochain/nogo/blockchain/network/security"
 	"github.com/nogochain/nogo/blockchain/utils"
 )
+
+var errNilChain = errors.New("nil chain interface")
 
 // =============================================================================
 // SYNC TIMING CONSTANTS - Aligned with Bitcoin protocol
@@ -124,22 +127,21 @@ type peerStateManager struct {
 // SyncLoop manages blockchain synchronization with peers
 // REFACTORED: Stateful isSyncing removed - now uses stateless blockKeeper/blockFetcher architecture
 type SyncLoop struct {
-	mu             sync.RWMutex
-	pm             PeerAPI
-	bc             BlockchainInterface
-	miner          Miner
-	metrics        *metrics.Metrics
-	orphanPool     *utils.OrphanPool
-	validator      *consensus.BlockValidator
-	scorer         *AdvancedPeerScorer
-	retryExec      *RetryExecutor
-	downloader     *BlockDownloader
-	peerStates     *peerStateManager
-	fastSyncEngine *FastSyncEngine
-	syncConfig     config.SyncConfig
-	securityMgr    *security.SecurityManager
-	progressStore  *SyncProgressStore
-	activeWorkers  atomic.Int32 // live goroutine count for block download/validation
+	mu            sync.RWMutex
+	pm            PeerAPI
+	bc            BlockchainInterface
+	miner         Miner
+	metrics       *metrics.Metrics
+	orphanPool    *utils.OrphanPool
+	validator     *consensus.BlockValidator
+	scorer        *AdvancedPeerScorer
+	retryExec     *RetryExecutor
+	downloader    *BlockDownloader
+	peerStates    *peerStateManager
+	syncConfig    config.SyncConfig
+	securityMgr   *security.SecurityManager
+	progressStore *SyncProgressStore
+	activeWorkers atomic.Int32 // live goroutine count for block download/validation
 
 	// UNIFIED FORK RESOLUTION (core-main based architecture)
 	// ForkResolver serves as chain's ReorgExecutor (injected via node.go).
@@ -193,19 +195,18 @@ func NewSyncLoop(pm PeerAPI, bc BlockchainInterface, miner Miner,
 	downloader := NewBlockDownloader(pm, bc, validator, metrics, syncConfig)
 
 	sm := &SyncLoop{
-		pm:             pm,
-		bc:             bc,
-		miner:          miner,
-		metrics:        metrics,
-		orphanPool:     orphanPool,
-		validator:      validator,
-		scorer:         scorer,
-		retryExec:      retryExec,
-		downloader:     downloader,
-		syncConfig:     syncConfig,
-		securityMgr:    secMgr,
-		fastSyncEngine: NewFastSyncEngine(bc, syncConfig.BatchSize),
-		syncStatusCh:   make(chan SyncStatusEvent, syncStatusChBufferSize),
+		pm:           pm,
+		bc:           bc,
+		miner:        miner,
+		metrics:      metrics,
+		orphanPool:   orphanPool,
+		validator:    validator,
+		scorer:       scorer,
+		retryExec:    retryExec,
+		downloader:   downloader,
+		syncConfig:   syncConfig,
+		securityMgr:  secMgr,
+		syncStatusCh: make(chan SyncStatusEvent, syncStatusChBufferSize),
 	}
 
 	// NEW: Create stateless sync components
@@ -1214,14 +1215,6 @@ func (s *SyncLoop) performSyncStep() {
 	s.syncRoundInProgress = true
 	s.mu.Unlock()
 
-	if s.attemptFastSync(maxPeerHeight, bestPeer) {
-		log.Printf("[Sync] Fast sync attempted")
-		s.mu.Lock()
-		s.syncRoundInProgress = false
-		s.mu.Unlock()
-		return
-	}
-
 	// CRITICAL FIX: Removed the dual sync mechanism (go SyncWithPeer goroutine).
 	// Previously, SyncWithPeer used sendAndWait() while blockKeeper used raw Send()
 	// + syncBlockCh. Both paths competed for the same peer's response messages,
@@ -1250,109 +1243,7 @@ func (s *SyncLoop) performSyncStep() {
 	s.mu.Unlock()
 }
 
-func (s *SyncLoop) attemptFastSync(maxPeerHeight uint64, bestPeer string) bool {
-	if s.fastSyncEngine == nil {
-		return false
-	}
-	if s.pm == nil {
-		return false
-	}
-
-	s.mu.RLock()
-	engine := s.fastSyncEngine
-	fastSyncMinGap := s.syncConfig.FastSyncMinGap
-	s.mu.RUnlock()
-
-	engine.SetPeerAPI(s.pm)
-
-	localHeight := s.getLocalHeight()
-	if localHeight >= maxPeerHeight {
-		return false
-	}
-
-	gap := maxPeerHeight - localHeight
-	if gap < fastSyncMinGap {
-		log.Printf("[Sync] FastSync: gap %d below threshold %d, using regular sync", gap, fastSyncMinGap)
-		return false
-	}
-
-	checkpointHeight, checkpointHash := s.resolveCheckpoint(maxPeerHeight)
-	if checkpointHeight == 0 || len(checkpointHash) == 0 {
-		log.Printf("[Sync] FastSync: no valid checkpoint available, using regular sync")
-		return false
-	}
-
-	if !engine.CheckFastSyncEligible(localHeight, checkpointHeight, checkpointHash) {
-		log.Printf("[Sync] FastSync: not eligible (local=%d, checkpoint=%d), using regular sync",
-			localHeight, checkpointHeight)
-		return false
-	}
-
-	log.Printf("[Sync] FastSync: attempting fast sync to checkpoint %d (local=%d, gap=%d, peer=%s)",
-		checkpointHeight, localHeight, gap, bestPeer)
-
-	if err := engine.SyncToCheckpoint(checkpointHeight, checkpointHash); err != nil {
-		log.Printf("[Sync] FastSync: failed, falling back to regular sync: %v", err)
-		return false
-	}
-
-	newHeight := s.getLocalHeight()
-	log.Printf("[Sync] FastSync: completed successfully, new height=%d", newHeight)
-
-	s.mu.Lock()
-	s.syncProgress = 1.0
-	// NOTE: Removed isSyncing=false here
-	// New architecture: IsSynced() only checks syncProgress
-	s.lastUpdateTime = time.Now()
-	s.mu.Unlock()
-
-	// Broadcast current status after fast sync completion
-	s.broadcastCurrentStatus()
-
-	return true
-}
-
-func (s *SyncLoop) resolveCheckpoint(maxPeerHeight uint64) (uint64, []byte) {
-	if s.bc == nil {
-		return 0, nil
-	}
-
-	tip := s.bc.LatestBlock()
-	if tip == nil {
-		return 0, nil
-	}
-
-	localHeight := tip.GetHeight()
-
-	checkpoint := config.NextCheckpoint(localHeight, config.ActiveCheckpoints())
-	if checkpoint == nil {
-		cp := s.GetReceivedCheckpoint()
-		if cp != nil && cp.Height > localHeight {
-			checkpointHash, decodeErr := hex.DecodeString(cp.BlockHash)
-			if decodeErr == nil {
-				log.Printf("[Sync] Using P2P received checkpoint: height=%d hash=%s", cp.Height, cp.BlockHash[:16])
-				return cp.Height, checkpointHash
-			}
-		}
-		log.Printf("[Sync] No trusted checkpoint available beyond local height %d, skipping fast sync", localHeight)
-		return 0, nil
-	}
-
-	checkpointHeight := checkpoint.Height
-	checkpointHash, decodeErr := hex.DecodeString(checkpoint.Hash)
-	if decodeErr != nil {
-		log.Printf("[Sync] Invalid checkpoint hash at height %d: %v", checkpointHeight, decodeErr)
-		return 0, nil
-	}
-
-	if checkpointHeight <= localHeight {
-		return 0, nil
-	}
-
-	hashDisplayLen := min(16, len(checkpoint.Hash))
-	log.Printf("[Sync] Using trusted checkpoint: height=%d hash=%s", checkpointHeight, checkpoint.Hash[:hashDisplayLen])
-	return checkpointHeight, checkpointHash
-}
+// Fast sync has been removed. Regular sync handles all synchronization scenarios.
 
 // handleNewBlock processes incoming block events with automatic fork resolution
 // This handles forks discovered during active synchronization
@@ -2117,58 +2008,6 @@ func (s *SyncLoop) fetchBlockByHeightWithRetry(ctx context.Context, peer string,
 	return block, nil
 }
 
-// FastSync performs fast sync from checkpoint using FastSyncEngine
-func (s *SyncLoop) FastSync(ctx context.Context, checkpointHeight uint64) error {
-	s.mu.RLock()
-	engine := s.fastSyncEngine
-	s.mu.RUnlock()
-
-	if engine == nil {
-		return fmt.Errorf("fast sync engine not initialized")
-	}
-
-	if s.pm == nil {
-		return fmt.Errorf("peer manager not available")
-	}
-
-	engine.SetPeerAPI(s.pm)
-
-	localHeight := s.getLocalHeight()
-	if localHeight >= checkpointHeight {
-		return fmt.Errorf("local height %d already >= checkpoint height %d", localHeight, checkpointHeight)
-	}
-
-	checkpointHash, err := s.resolveCheckpointHash(checkpointHeight)
-	if err != nil {
-		return fmt.Errorf("resolve checkpoint hash: %w", err)
-	}
-
-	if !engine.CheckFastSyncEligible(localHeight, checkpointHeight, checkpointHash) {
-		return fmt.Errorf("not eligible for fast sync: local=%d checkpoint=%d", localHeight, checkpointHeight)
-	}
-
-	log.Printf("[Sync] FastSync: starting from checkpoint %d (local=%d)", checkpointHeight, localHeight)
-
-	if syncErr := engine.SyncToCheckpoint(checkpointHeight, checkpointHash); syncErr != nil {
-		return fmt.Errorf("fast sync to checkpoint %d: %w", checkpointHeight, syncErr)
-	}
-
-	newHeight := s.getLocalHeight()
-	log.Printf("[Sync] FastSync: completed, new height=%d", newHeight)
-
-	s.mu.Lock()
-	s.syncProgress = 1.0
-	// NOTE: Removed isSyncing=false here
-	// New architecture: stateless, only syncProgress matters
-	s.lastUpdateTime = time.Now()
-	s.mu.Unlock()
-
-	// Broadcast current status after fast sync completion
-	s.broadcastCurrentStatus()
-
-	return nil
-}
-
 // resolveCheckpointHash fetches the block hash at the given checkpoint height
 func (s *SyncLoop) resolveCheckpointHash(checkpointHeight uint64) ([]byte, error) {
 	if s.pm == nil {
@@ -2180,7 +2019,7 @@ func (s *SyncLoop) resolveCheckpointHash(checkpointHeight uint64) ([]byte, error
 		return nil, fmt.Errorf("no active peers")
 	}
 
-	fetchCtx, cancel := context.WithTimeout(context.Background(), headerDownloadTimeout)
+	fetchCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	for _, peer := range peers {

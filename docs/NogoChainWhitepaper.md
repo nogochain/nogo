@@ -551,23 +551,85 @@ The master controller integrating the following subsystems:
 
 #### Sync Strategies
 
-| Strategy | Use Case | Batch Size | Timeout |
-|---|---|---|---|
-| Fast Sync | New node joining, significantly behind | Skeleton + batch download | 15 s |
-| Regular Sync | Slightly behind, daily maintenance | 512 blocks, 2,048 headers | 10 s |
-| Batch Sync | Batch download with known parent | 512 × 4 = 2,048 | 60 s |
+| Strategy | Use Case | Batch Size | Timeout | Status |
+|---|---|---|---|---|
+| Regular Sync | All scenarios (new node joining, slightly behind, daily maintenance) | Fixed 100 blocks | 60 s | **Production Ready** |
+| Fast Sync | Significantly behind | Skeleton + batch download | 15 s | **Removed** |
+| Skeleton Sync | Significantly behind | Skeleton download | 15 s | **Removed** |
+
+> **Architecture Note**: Only the Regular Sync strategy is currently used in production. Fast Sync and Skeleton Sync have been removed from the codebase due to incomplete implementation.
 
 #### Sync Parameters
 
 | Parameter | Value |
 |---|---|
 | Sync Loop Interval | 3 seconds |
-| Max Blocks Per Request | 512 |
-| Max Headers Per Request | 2,048 |
+| Fixed Batch Size | 100 blocks |
+| Batch Request Timeout | 60 seconds |
+| Single Block Request Timeout | 15 seconds |
 | Buffer Channel Capacity | 1,024 / 128 / 1,024 |
 | Sync Failure Cooldown | Exponential backoff, max 5 min |
 | Consecutive Empty Sync Threshold | 3 triggers backoff |
 | Stuck Node Threshold | 5 min no activity |
+
+#### Batch Synchronization Flow
+
+NogoChain's regular sync employs a **fixed batch size + fallback on failure** strategy:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Regular Sync Main Loop                      │
+├─────────────────────────────────────────────────────────────────┤
+│  for currentHeight <= targetHeight:                            │
+│      │                                                         │
+│      ▼                                                         │
+│  ┌─────────────────────────────┐                               │
+│  │ Request 100 blocks in batch │                               │
+│  │ requireBlocksBatch(start, 100) │                            │
+│  └────────────┬────────────────┘                               │
+│               │                                                │
+│     ┌─────────┴─────────┐                                      │
+│     │                   │                                      │
+│     ▼                   ▼                                      │
+│  Success (>0)        Failure/Empty                             │
+│     │                   │                                      │
+│     ▼                   ▼                                      │
+│  Add blocks one by one  Fallback to single block request       │
+│  Continue next batch    requireBlock(start)                    │
+│                         │                                      │
+│                         ▼                                      │
+│                     Success/Failure                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Core Design Features:**
+
+1. **Fixed Batch Size**: Each batch request fetches exactly 100 blocks, avoiding timeouts from oversized batches
+2. **Failure Fallback Mechanism**: When batch request fails, automatically falls back to single block request to ensure sync continuity
+3. **Multi-Peer Retry**: When one peer fails, automatically attempts other available sync peers
+4. **Immediate Looping**: After successfully adding a batch, immediately requests the next batch without waiting
+
+#### Core Sync Logic
+
+```go
+// Fallback to single block on batch failure
+if batchErr != nil || len(blocks) == 0 {
+    block, err := bk.requireBlock(i)
+    if err != nil {
+        return fmt.Errorf("requireBlock at height %d: %w", i, err)
+    }
+    bk.chain.AddBlock(block)
+    i = bk.chain.LatestBlock().GetHeight() + 1
+    continue
+}
+
+// Process all blocks on batch success
+for h := i; h < i+batchSize; h++ {
+    block := blocks[h]
+    bk.chain.AddBlock(block)
+}
+i = bk.chain.LatestBlock().GetHeight() + 1
+```
 
 ### 6.4 Fork Handling
 

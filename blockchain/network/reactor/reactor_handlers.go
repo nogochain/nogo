@@ -17,6 +17,7 @@ const broadcastTimeout = 10 * time.Second
 
 const recentBlockDedupWindow = 10 * time.Second
 const maxRecentBlockDedupSize = 512
+const maxBlocksPerResponse = 100 // Maximum blocks per GetBlocks response
 
 // ReactorHandlers holds the concrete implementations of all reactor handler
 // interfaces. It bridges the reactor message-parsing layer to the actual
@@ -292,8 +293,6 @@ func (h *SyncReactorHandler) OnGetBlocks(peerID string, heights []uint64) error 
 	log.Printf("[SyncHandler] OnGetBlocks: peer=%s requested %d blocks [%d-%d], dispatching async",
 		peerID[:min(12, len(peerID))], len(heights), heights[0], heights[len(heights)-1])
 
-	const maxBlocksPerResponse = 100
-
 	go func() {
 		blocks := make([]*core.Block, 0, len(heights))
 		missing := make([]string, 0)
@@ -322,29 +321,19 @@ func (h *SyncReactorHandler) OnGetBlocks(peerID string, heights []uint64) error 
 			return
 		}
 
-		sentCount := 0
-		for i := 0; i < len(blocks); i += maxBlocksPerResponse {
-			end := i + maxBlocksPerResponse
-			if end > len(blocks) {
-				end = len(blocks)
-			}
-			batch := blocks[i:end]
-
-			blocksJSON := marshalBlocksToJSONRaw(batch)
-			msg, err := BuildBlocksMsg(blocksJSON)
-			if err != nil {
-				log.Printf("[SyncHandler] build blocks msg batch %d-%d for peer %s: %v",
-					i, end, peerID, err)
-				return
-			}
-
-			if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, msg) {
-				log.Printf("[SyncHandler] failed to send batch %d-%d (%d blocks) to peer %s",
-					i, end, len(batch), peerID)
-				return
-			}
-			sentCount += len(batch)
+		// Send all blocks in single message (fix: sendAndWait only receives 1st batch)
+		blocksJSON := marshalBlocksToJSONRaw(blocks)
+		msg, err := BuildBlocksMsg(blocksJSON)
+		if err != nil {
+			log.Printf("[SyncHandler] build blocks msg for peer %s: %v", peerID, err)
+			return
 		}
+
+		if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, msg) {
+			log.Printf("[SyncHandler] failed to send %d blocks to peer %s", len(blocks), peerID)
+			return
+		}
+		sentCount := len(blocks)
 
 		if len(missing) > 0 {
 			notFoundMsg, nfErr := buildNotFoundMsgForSync(SyncMsgBlocks, missing)
@@ -1196,6 +1185,70 @@ func (h *BlockReactorHandler) OnBlock(peerID string, blocks []*core.Block) error
 			continue
 		}
 
+		// Add diagnostic log: print received block details
+		// Production-grade: safely handle empty slices to prevent panic
+		hashShort := ""
+		if len(block.Hash) >= 8 {
+			hashShort = fmt.Sprintf("%x", block.Hash[:8])
+		} else if len(block.Hash) > 0 {
+			hashShort = fmt.Sprintf("%x", block.Hash)
+		}
+		
+		prevHashShort := ""
+		if len(block.Header.PrevHash) >= 8 {
+			prevHashShort = fmt.Sprintf("%x", block.Header.PrevHash[:8])
+		} else if len(block.Header.PrevHash) > 0 {
+			prevHashShort = fmt.Sprintf("%x", block.Header.PrevHash)
+		}
+		
+		minerShort := ""
+		if len(block.MinerAddress) >= 16 {
+			minerShort = block.MinerAddress[:16]
+		} else {
+			minerShort = block.MinerAddress
+		}
+		
+		log.Printf("[BlockHandler] RECEIVED BLOCK from peer %s: height=%d, hash=%s, prevHash=%s, miner=%s",
+			peerID, block.GetHeight(), hashShort, prevHashShort, minerShort)
+		
+		// PrevHash validation: check if PrevHash is valid before processing
+		// Critical: detects corrupted or malicious blocks with invalid PrevHash
+		if block.GetHeight() > 0 {
+			// Check if PrevHash is all zeros (invalid for non-genesis blocks)
+			allZeros := true
+			for _, b := range block.Header.PrevHash {
+				if b != 0 {
+					allZeros = false
+					break
+				}
+			}
+			if allZeros {
+				log.Printf("[BlockHandler] REJECTED block %d from peer %s: PrevHash is all zeros (invalid for non-genesis)",
+					block.GetHeight(), peerID)
+				continue
+			}
+			
+			// Check if PrevHash matches a known block
+			// Production-grade: safely handle short hex strings to prevent panic
+			prevHashHex := hex.EncodeToString(block.Header.PrevHash)
+			_, parentExists := h.handlers.chain.BlockByHash(prevHashHex)
+			
+			// Safely truncate hex string for logging
+			prevHashDisplay := prevHashHex
+			if len(prevHashHex) > 16 {
+				prevHashDisplay = prevHashHex[:16]
+			}
+			
+			if !parentExists {
+				log.Printf("[BlockHandler] WARNING: block %d from peer %s has unknown PrevHash=%s",
+					block.GetHeight(), peerID, prevHashDisplay)
+				// Don't reject - parent might be in fork blocks or coming soon
+			} else {
+				log.Printf("[BlockHandler] PrevHash validation OK: block %d parent=%s exists",
+					block.GetHeight(), prevHashDisplay)
+			}
+		}
+
 		hashHex := hex.EncodeToString(block.Hash)
 		if h.isRecentBlock(hashHex) {
 			continue
@@ -1204,8 +1257,14 @@ func (h *BlockReactorHandler) OnBlock(peerID string, blocks []*core.Block) error
 
 		accepted, addErr := h.handlers.chain.AddBlock(block)
 		if addErr != nil {
-			log.Printf("[BlockHandler] Failed to add block %d (hash=%x) from peer %s: %v",
-				block.GetHeight(), block.Hash, peerID, addErr)
+			// Production-grade: safely handle empty hash slice to prevent panic
+			hashHex := hex.EncodeToString(block.Hash)
+			hashDisplay := hashHex
+			if len(hashHex) > 16 {
+				hashDisplay = hashHex[:16]
+			}
+			log.Printf("[BlockHandler] Failed to add block %d (hash=%s) from peer %s: %v",
+				block.GetHeight(), hashDisplay, peerID, addErr)
 			continue
 		}
 		if accepted {

@@ -3778,6 +3778,7 @@ func (sw *Switch) sendAndWait(ctx context.Context, peerID string, chID byte, exp
 	// This can happen when context deadline is in the past
 	timeUntilTimeout := timeout.Sub(time.Now())
 	if timeUntilTimeout <= 0 {
+		log.Printf("[Switch] sendAndWait: INVALID timeout for peer %s (deadline in past, timeout=%v)", peerID, timeout)
 		sw.syncPendingReqMtx.Lock()
 		delete(sw.syncPendingReqs, reqID)
 		sw.syncPendingReqMtx.Unlock()
@@ -3792,22 +3793,29 @@ func (sw *Switch) sendAndWait(ctx context.Context, peerID string, chID byte, exp
 	}
 	sw.syncPendingReqMtx.Unlock()
 
+	log.Printf("[Switch] sendAndWait: START peer=%s msgType=%d timeout=%v", peerID, expectedMsgType, timeUntilTimeout)
+
 	if !sw.Send(peerID, chID, reqMsg) {
+		log.Printf("[Switch] sendAndWait: SEND FAILED to peer %s", peerID)
 		sw.syncPendingReqMtx.Lock()
 		delete(sw.syncPendingReqs, reqID)
 		sw.syncPendingReqMtx.Unlock()
 		return nil, fmt.Errorf("switch: send request to %s failed", peerID)
 	}
+	log.Printf("[Switch] sendAndWait: SENT to peer %s, waiting response...", peerID)
 
 	select {
 	case resp := <-respCh:
+		log.Printf("[Switch] sendAndWait: RECEIVED response from peer %s (size=%d bytes)", peerID, len(resp))
 		return resp, nil
 	case <-ctx.Done():
+		log.Printf("[Switch] sendAndWait: CONTEXT CANCELED for peer %s: %v", peerID, ctx.Err())
 		sw.syncPendingReqMtx.Lock()
 		delete(sw.syncPendingReqs, reqID)
 		sw.syncPendingReqMtx.Unlock()
 		return nil, fmt.Errorf("switch: request to %s timed out: %w", peerID, ctx.Err())
 	case <-time.After(timeUntilTimeout):
+		log.Printf("[Switch] sendAndWait: TIMEOUT for peer %s after %v", peerID, timeUntilTimeout)
 		sw.syncPendingReqMtx.Lock()
 		delete(sw.syncPendingReqs, reqID)
 		sw.syncPendingReqMtx.Unlock()
@@ -4506,8 +4514,20 @@ func (p *switchPeerAdapter) fetchHeadersByLocator(ctx context.Context, locator [
 	}
 
 	from := uint64(0)
-	count := uint64(128)
-	if p.height > 0 {
+	count := uint64(maxBlockHeadersPerMsg)
+
+	// Use locator to determine starting height
+	if len(locator) > 0 {
+		for _, loc := range locator {
+			if len(loc) >= 8 {
+				h := binary.BigEndian.Uint64(loc[len(loc)-8:])
+				if h > from {
+					from = h
+				}
+			}
+		}
+		from++
+	} else if p.height > 0 {
 		from = p.height + 1
 	}
 

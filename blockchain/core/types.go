@@ -19,7 +19,6 @@ package core
 import (
 	"crypto/ed25519"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -189,6 +188,60 @@ func (h *BlockHeader) HashHex(blockHash []byte) string {
 	return hex.EncodeToString(blockHash)
 }
 
+// MarshalJSON implements custom JSON marshaling for BlockHeader
+// Production-grade: uses hex encoding for byte slices instead of base64
+// Security: prevents data corruption during network transmission
+func (h *BlockHeader) MarshalJSON() ([]byte, error) {
+	type Alias BlockHeader
+	return json.Marshal(&struct {
+		PrevHash   string `json:"prevHash"`
+		MerkleRoot string `json:"merkleRoot,omitempty"`
+		*Alias
+	}{
+		PrevHash:    hex.EncodeToString(h.PrevHash),
+		MerkleRoot: hex.EncodeToString(h.MerkleRoot),
+		Alias:       (*Alias)(h),
+	})
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for BlockHeader
+// Production-grade: uses hex decoding for byte slices instead of base64
+// Error handling: returns descriptive error for invalid hex strings
+func (h *BlockHeader) UnmarshalJSON(data []byte) error {
+	type Alias BlockHeader
+	aux := &struct {
+		PrevHash   string `json:"prevHash"`
+		MerkleRoot string `json:"merkleRoot,omitempty"`
+		*Alias
+	}{
+		Alias: (*Alias)(h),
+	}
+	
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return fmt.Errorf("unmarshal block header: %w", err)
+	}
+	
+	// Decode PrevHash from hex
+	if aux.PrevHash != "" {
+		prevHash, err := hex.DecodeString(aux.PrevHash)
+		if err != nil {
+			return fmt.Errorf("decode prevHash: %w", err)
+		}
+		h.PrevHash = prevHash
+	}
+	
+	// Decode MerkleRoot from hex
+	if aux.MerkleRoot != "" {
+		merkleRoot, err := hex.DecodeString(aux.MerkleRoot)
+		if err != nil {
+			return fmt.Errorf("decode merkleRoot: %w", err)
+		}
+		h.MerkleRoot = merkleRoot
+	}
+	
+	return nil
+}
+
 // HeaderLocator bundles a block header with its height for chain traversal
 // BlockHeader does not store height internally in all contexts, so this struct carries both
 type HeaderLocator struct {
@@ -200,10 +253,11 @@ type HeaderLocator struct {
 // Production-grade: includes all necessary fields for consensus
 // Concurrency safety: use mutex for write operations, safe for concurrent reads
 // Design: Header is the single source of truth for block metadata
+// CRITICAL: Hash field must NOT have omitempty - hash must be transmitted over network
 type Block struct {
 	mu sync.RWMutex
 
-	Hash         []byte        `json:"hash,omitempty"`
+	Hash         []byte        `json:"hash"`
 	Height       uint64        `json:"height"`
 	Header       BlockHeader   `json:"header"`
 	Transactions []Transaction `json:"transactions"`
@@ -381,7 +435,7 @@ func (b *Block) GetTransactions() []Transaction {
 // blockLegacyJSON represents the legacy JSON format with top-level fields
 // Used for backward compatibility when deserializing from older nodes
 type blockLegacyJSON struct {
-	Hash           []byte        `json:"hash"`
+	Hash           string        `json:"hash"`           // Hex-encoded in JSON
 	Height         uint64        `json:"height"`
 	Header         BlockHeader   `json:"header"`
 	Transactions   []Transaction `json:"transactions"`
@@ -393,7 +447,7 @@ type blockLegacyJSON struct {
 	DifficultyBits uint32        `json:"difficultyBits"`
 	Difficulty     uint32        `json:"difficulty"`
 	Nonce          uint64        `json:"nonce"`
-	PrevHash       []byte        `json:"prevHash"`
+	PrevHash       string        `json:"prevHash"`      // Hex-encoded in JSON
 }
 
 // UnmarshalJSON implements custom JSON unmarshaling for backward compatibility
@@ -401,10 +455,18 @@ type blockLegacyJSON struct {
 func (b *Block) UnmarshalJSON(data []byte) error {
 	var legacy blockLegacyJSON
 	if err := json.Unmarshal(data, &legacy); err != nil {
-		return err
+		return fmt.Errorf("unmarshal block JSON: %w", err)
 	}
 
-	b.Hash = legacy.Hash
+	// Decode hex-encoded Hash
+	if legacy.Hash != "" {
+		hash, err := hex.DecodeString(legacy.Hash)
+		if err != nil {
+			return fmt.Errorf("decode block hash: %w", err)
+		}
+		b.Hash = hash
+	}
+
 	b.Height = legacy.Height
 	b.Transactions = legacy.Transactions
 	b.CoinbaseTx = legacy.CoinbaseTx
@@ -419,9 +481,18 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 	if legacy.Version != 0 && b.Header.Version == 0 {
 		b.Header.Version = legacy.Version
 	}
-	if len(legacy.PrevHash) > 0 && len(b.Header.PrevHash) == 0 {
-		b.Header.PrevHash = legacy.PrevHash
+
+	// Decode hex-encoded PrevHash from legacy field
+	if legacy.PrevHash != "" {
+		prevHash, err := hex.DecodeString(legacy.PrevHash)
+		if err != nil {
+			return fmt.Errorf("decode prevHash: %w", err)
+		}
+		if len(b.Header.PrevHash) == 0 {
+			b.Header.PrevHash = prevHash
+		}
 	}
+
 	if legacy.TimestampUnix != 0 && b.Header.TimestampUnix == 0 {
 		b.Header.TimestampUnix = legacy.TimestampUnix
 	}
@@ -700,6 +771,7 @@ func (t Transaction) verifyTransfer() error {
 
 // MarshalJSON implements custom JSON marshaling for Block
 // Production-grade: includes all fields needed for block explorers and wallets
+// Security: uses hex encoding for byte slices instead of base64 to prevent data corruption
 func (b *Block) MarshalJSON() ([]byte, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -709,14 +781,17 @@ func (b *Block) MarshalJSON() ([]byte, error) {
 	copy(txs, b.Transactions)
 
 	// Build response with all fields exposed
+	// Critical: use hex encoding for hash and prevHash to ensure correct deserialization
 	response := map[string]interface{}{
 		"version":        b.Header.Version,
 		"height":         b.GetHeight(),
-		"hash":           base64.StdEncoding.EncodeToString(b.Hash),
-		"prevHash":       base64.StdEncoding.EncodeToString(b.Header.PrevHash),
+		"hash":           hex.EncodeToString(b.Hash),
+		"prevHash":       hex.EncodeToString(b.Header.PrevHash),
 		"timestampUnix":  b.Header.TimestampUnix,
 		"difficultyBits": b.Header.DifficultyBits,
+		"difficulty":     b.Header.Difficulty,
 		"nonce":          b.Header.Nonce,
+		"merkleRoot":    hex.EncodeToString(b.Header.MerkleRoot),
 		"minerAddress":   b.MinerAddress,
 		"transactions":   txs,
 		"coinbaseTx":     b.CoinbaseTx,
