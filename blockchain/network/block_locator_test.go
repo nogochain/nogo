@@ -55,7 +55,7 @@ func newLocatorMockBC(blockCount int) *locatorMockBC {
 			header: core.BlockHeader{
 				Version:        1,
 				PrevHash:       append([]byte{}, prevHash...),
-				TimestampUnix:  1775044800 + int64(i)*10,
+				TimestampUnix:  1780272000 + int64(i)*10,
 				DifficultyBits: uint32(1 << 20),
 				Difficulty:     1 << 20,
 				Nonce:          uint64(i),

@@ -767,7 +767,8 @@ func stringToAddress(addr string) nogopow.Address {
 }
 
 // CreateGenesisBlock creates the genesis block with the given configuration
-// Production-grade: mines the genesis block using NogoPow engine
+// Uses ModeFake for instant genesis creation - genesis block does not require real PoW
+// All nodes produce identical genesis blocks from the same configuration
 // Math & numeric safety: uses big.Int for difficulty calculations
 // Concurrency safety: thread-safe, can be called from multiple goroutines
 func CreateGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, error) {
@@ -796,8 +797,8 @@ func CreateGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, 
 		},
 	}
 
-	// Create nogopow config with actual consensus params (same as mining and validation)
 	powConfig := nogopow.DefaultConfig()
+	powConfig.PowMode = nogopow.ModeFake
 	powConfig.ConsensusParams = &consensus
 	engine := nogopow.New(powConfig)
 	defer engine.Close()

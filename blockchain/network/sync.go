@@ -2434,8 +2434,8 @@ func (s *SyncLoop) isCorruptedBlock(block *core.Block) bool {
 	}
 
 	// All blocks must have valid timestamp (after genesis)
-	// Genesis timestamp is around 1775044800 (April 2026)
-	if block.Header.TimestampUnix < 1775044800 && block.GetHeight() > 0 {
+	// Genesis timestamp is around 1780272000 (June 2026)
+	if block.Header.TimestampUnix < 1780272000 && block.GetHeight() > 0 {
 		return true
 	}
 

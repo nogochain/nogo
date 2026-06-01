@@ -480,7 +480,7 @@ curl http://localhost:8080/chain/info
   "height": 105,
   "latestHash": "bbba903f8a8c06e1f170d91aeab8eb11234a1ffa88a709d71323bfb41b31f3e2",
   "genesisHash": "0000000000000000000000000000000000000000000000000000000000000001",
-  "genesisTimestampUnix": 1775044800,  # 2026-06-01 00:00:00 UTC
+  "genesisTimestampUnix": 1780272000,  # 2026-06-01 00:00:00 UTC
   "genesisMinerAddress": "NOGO...",
   "minerAddress": "NOGO...",
   "peersCount": 5,

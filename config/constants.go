@@ -867,7 +867,7 @@ func init() {
 var MainnetGenesisConfig = GenesisConfiguration{
 	Network:             "nogochain-mainnet",
 	ChainID:             1,
-	Timestamp:           1775044800, // 2026-06-01 00:00:00 UTC
+	Timestamp:           1780272000, // 2026-06-01 00:00:00 UTC
 	GenesisMinerAddress: "NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c",
 	InitialSupply:       100000000000000,
 	GenesisMessage:      "NogoChain Mainnet Launch - A new era of decentralized finance - 2026-06-01 00:00:00 UTC",
