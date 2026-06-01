@@ -108,10 +108,21 @@ golangci-lint run
 
 This project is licensed under LGPL-3.0, see [LICENSE](./LICENSE).
 
+## Community & Resources
+
+- **GitHub**: https://github.com/nogochain/nogo
+- **Discord**: https://discord.gg/HxEFPqJMEV
+- **Telegram**: https://t.me/nogochain
+- **Explorer**: https://explorer.nogochain.org/explorer/
+- **Explorer**: https://ex.nogochain.org/explorer/
+- **Web**: https://nogochain.org/
+- **Desktop Wallet**: https://github.com/nogochain/NogoWallet/releases/download/v1.0.0/NogoWallet.zip
+- **Whitepaper**: https://nogochain.org/whitepaper.html
+
 ## Contact
 
-- GitHub Issues: https://github.com/nogochain/nogo/issues
-- Email: dev@nogochain.org
+- Email: hello@eiyaro.org
+- Email: nogo@eiyaro.org
 
 ---
 
@@ -217,7 +228,18 @@ golangci-lint run
 
 本项目采用 LGPL-3.0 许可证，详见 [LICENSE](./LICENSE)。
 
+## 社区与资源
+
+- **GitHub**: https://github.com/nogochain/nogo
+- **Discord**: https://discord.gg/HxEFPqJMEV
+- **Telegram**: https://t.me/nogochain
+- **Explorer**: https://explorer.nogochain.org/explorer/
+- **Explorer**: https://ex.nogochain.org/explorer/
+- **Web**: https://nogochain.org/
+- **Desktop Wallet**: https://github.com/nogochain/NogoWallet/releases/download/v1.0.0/NogoWallet.zip
+- **Whitepaper**: https://nogochain.org/whitepaper.html
+
 ## 联系方式
 
-- GitHub Issues: https://github.com/nogochain/nogo/issues
-- Email: dev@nogochain.org
+- Email: hello@eiyaro.org
+- Email: nogo@eiyaro.org
