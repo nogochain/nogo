@@ -890,13 +890,35 @@ go test ./blockchain/... -race -vet=all
 
 ### 11.4 运行节点
 
+#### 一键启动（推荐）
+
+无需任何配置文件，一条命令即可启动：
+
 ```bash
-# 启动全节点
-./bin/nogo --chain-id 1 --data-dir ./data
+# 构建
+go build -o nogo ./blockchain/cmd
+
+# 启动全节点（自动生成创世块，自动连接 P2P 网络）
+./nogo server
 
 # 启动挖矿节点
-./bin/nogo --chain-id 1 --data-dir ./data --mining-enabled --miner-address "NOGO..."
+./nogo server YOUR_NOGO_ADDRESS mine
 ```
+
+示例：
+```bash
+./nogo server NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048 mine
+```
+
+节点全自动完成：
+- 自动生成创世块（首次启动）
+- 自动连接种子节点和 P2P 网络
+- 自动开始 NogoPow 挖矿
+- 自动通过 PI 控制器调整难度
+
+#### 环境变量配置（可选）
+
+如需自定义配置，可通过环境变量覆盖：
 
 ### 11.5 代码质量标准
 

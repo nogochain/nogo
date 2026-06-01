@@ -437,38 +437,49 @@ Start with configuration file:
 
 ### Development Environment
 
-#### Method 1: Quick Start Scripts
+#### Method 1: One-Command Start (Recommended)
 
-**Windows:**
-```batch
-cd nogo
-start.bat
-```
+The simplest way to start NogoChain - no configuration required:
 
-**Linux/Mac:**
 ```bash
 cd nogo
-./run.sh
+go build -o nogo ./blockchain/cmd
+
+# Start a full node (auto-generates genesis, connects to P2P)
+./nogo server
+
+# Start a mining node with your address
+./nogo server YOUR_NOGO_ADDRESS mine
 ```
 
-#### Method 2: Manual Start
+Example:
+```bash
+./nogo server NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048 mine
+```
+
+The node auto-configures everything:
+- Auto-generates genesis block if not present
+- Auto-connects to seed nodes
+- Auto-starts NogoPow mining
+- Auto-adjusts difficulty via PI controller
+
+#### Method 2: Manual Start with Env Vars
 
 ```bash
 # 1. Build
 cd nogo
 go build -o nogo ./blockchain/cmd
 
-# 2. Set environment variables
+# 2. Set environment variables (optional)
 export CHAIN_ID=2
 export DATA_DIR=./data
-export MINING_ENABLE=true
 export MINER_ADDRESS=NOGO0049c3cf477a9fce2622d18245d04f011f788f7b2e248bdeb38d4ef459c37857be3d0293c3
 export P2P_MAX_PEERS=100
 export WS_ENABLE=true
 export LOG_LEVEL=debug
 
 # 3. Start node
-./nogo server
+./nogo server mine
 ```
 
 #### Method 3: Docker Compose
@@ -489,18 +500,26 @@ docker compose logs -f blockchain
 
 #### Single Node Testnet
 
+One-command start (testnet auto-detected from chain config):
+
 ```bash
-# 1. Set environment variables
+cd nogo
+go build -o nogo ./blockchain/cmd
+
+# Start testnet mining node
+./nogo server YOUR_NOGO_ADDRESS mine
+```
+
+Or with explicit env vars:
+
+```bash
 export CHAIN_ID=2
 export DATA_DIR=./data-testnet
 export MINER_ADDRESS=NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048
 export ADMIN_TOKEN=your_testnet_admin_token
 export BOOT_NODES=test.nogochain.org:9090
-export MINING_ENABLE=true
-export MINE_INTERVAL_MS=15000
 export LOG_LEVEL=info
 
-# 2. Start node
 ./nogo server mine
 ```
 
