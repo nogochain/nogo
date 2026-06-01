@@ -8,7 +8,7 @@ NogoChain is a blockchain project based on the NogoPow consensus algorithm, usin
 
 ## Features
 
-- **NogoPow Consensus**: Innovative proof-of-work algorithm with AI hash verification support
+- **NogoPow Consensus**: Innovative proof-of-work algorithm with memory-hard matrix operations and SHA3 hashing
 - **PI Controller Difficulty Adjustment**: Stable block time control, target 30 seconds
 - **Ed25519 Signatures**: RFC 8032 compliant cryptographic signatures
 - **BoltDB Storage**: High-performance embedded database
@@ -32,19 +32,32 @@ cd nogo
 # Build
 go build -o nogo ./blockchain/cmd
 
-# Run
-./nogo
+# Run a full node (auto-generates wallet and mines genesis block)
+./nogo server
+
+# Run a mining node (one-command start)
+./nogo server YOUR_NOGO_ADDRESS mine
 ```
 
-### Configuration
+### One-Command Start
 
-Copy the configuration template:
+The simplest way to start a mining node:
 
 ```bash
-cp env.mainnet.example .env
+# Generate a wallet (first time only)
+./nogo wallet new
+
+# Start mining with your address - everything auto-configured
+./nogo server NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048 mine
 ```
 
-Edit the `.env` file to configure node parameters.
+The node will:
+- Auto-generate the genesis block if not present
+- Auto-connect to seed nodes and P2P network
+- Auto-start mining with NogoPow
+- Auto-adjust difficulty via PI controller
+
+No configuration files required. Works out of the box.
 
 ## Project Structure
 
@@ -129,7 +142,7 @@ This project is licensed under LGPL-3.0, see [LICENSE](./LICENSE).
 
 ## 特性
 
-- **NogoPow 共识**: 创新的工作量证明算法，支持 AI 哈希验证
+- **NogoPow 共识**: 创新的工作量证明算法，基于内存密集型矩阵运算和 SHA3 哈希
 - **PI 控制器难度调整**: 稳定的区块时间控制，目标 30 秒
 - **Ed25519 签名**: 符合 RFC 8032 标准的加密签名
 - **BoltDB 存储**: 高性能嵌入式数据库
@@ -153,19 +166,32 @@ cd nogo
 # 构建
 go build -o nogo ./blockchain/cmd
 
-# 运行
-./nogo
+# 运行全节点（自动生成钱包并挖矿创世块）
+./nogo server
+
+# 运行挖矿节点（一键启动）
+./nogo server YOUR_NOGO_ADDRESS mine
 ```
 
-### 配置
+### 一键启动
 
-复制配置文件模板：
+启动挖矿节点的最简单方式：
 
 ```bash
-cp env.mainnet.example .env
+# 生成钱包（仅首次需要）
+./nogo wallet new
+
+# 用你的地址启动挖矿 - 全自动配置
+./nogo server NOGO0094bc928c08baf466e75fc617f10569a25b1e455caaa421b7f0da239fd5a252b67e070048 mine
 ```
 
-编辑 `.env` 文件配置节点参数。
+节点会自动：
+- 自动生成创世块（如果不存在）
+- 自动连接种子节点和 P2P 网络
+- 自动开始 NogoPow 挖矿
+- 自动通过 PI 控制器调整难度
+
+无需配置文件，开箱即用。
 
 ## 项目结构
 
