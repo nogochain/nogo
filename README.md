@@ -118,6 +118,7 @@ This project is licensed under LGPL-3.0, see [LICENSE](./LICENSE).
 - **Web**: https://nogochain.org/
 - **Desktop Wallet**: https://github.com/nogochain/NogoWallet/releases/download/v1.0.0/NogoWallet.zip
 - **Whitepaper**: https://nogochain.org/whitepaper.html
+- **X**: https://twitter.com/nogochain
 
 ## Contact
 
@@ -238,6 +239,7 @@ golangci-lint run
 - **Web**: https://nogochain.org/
 - **Desktop Wallet**: https://github.com/nogochain/NogoWallet/releases/download/v1.0.0/NogoWallet.zip
 - **Whitepaper**: https://nogochain.org/whitepaper.html
+- **X**: https://twitter.com/nogochain
 
 ## 联系方式
 
