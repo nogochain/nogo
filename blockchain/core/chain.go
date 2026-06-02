@@ -64,6 +64,10 @@ const (
 	// MaxReorgDepth limits how far back findBestChainTipLocked scans fork blocks
 	// Prevents infinite oscillation by ignoring forks too deep below canonical tip
 	MaxReorgDepth = 100
+
+	// MinAutoReorgInterval is the minimum time between auto-reorg checks.
+	// Debounces autoReorgIfNeededLocked to prevent O(N) scans on every fork block.
+	MinAutoReorgInterval = 200 * time.Millisecond
 )
 
 // SyncNotifier defines the interface for notifying sync loop about chain events
@@ -259,6 +263,10 @@ type Chain struct {
 	// Key: height, Value: list of blocks at that height (including canonical)
 	forkBlocks map[uint64][]*Block
 
+	// Fork block hash index for O(1) duplicate detection
+	// Maps hash to block for fork blocks only (not canonical)
+	forkBlocksByHash map[string]*Block
+
 	// Cumulative work cache: block hash hex -> cumulative work
 	// Avoids O(N) recalculation for frequently accessed fork blocks
 	workCache map[string]*big.Int
@@ -308,9 +316,10 @@ type Chain struct {
 	scoreCalculator      *ScoreCalculator
 
 	// Reorg protection - prevent template generation during reorg
-	reorgInProgress bool
-	reorgMu         sync.Mutex
-	lastReorgTime   time.Time
+	reorgInProgress   bool
+	reorgMu           sync.Mutex
+	lastReorgTime     time.Time
+	lastAutoReorgTime time.Time
 
 	// Contract management
 	contractManager *ContractManager
@@ -575,6 +584,7 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 		blocksByHash:            make(map[string]*Block),
 		blocks:                  make([]*Block, 0),
 		forkBlocks:              make(map[uint64][]*Block),
+		forkBlocksByHash:        make(map[string]*Block),
 		workCache:               make(map[string]*big.Int),
 		txIndex:                 make(map[string]TxLocation),
 		addressIndex:            make(map[string][]AddressTxEntry),
@@ -1769,11 +1779,11 @@ func (c *Chain) connectBlockLocked(block *Block) error {
 // removeFromForkLocked removes a block from fork blocks map
 func (c *Chain) removeFromForkLocked(block *Block) {
 	height := block.GetHeight()
+	hashHex := hex.EncodeToString(block.Hash)
 
 	if blocks, exists := c.forkBlocks[height]; exists {
 		for i, b := range blocks {
 			if bytes.Equal(b.Hash, block.Hash) {
-				// Remove this block
 				blocks = append(blocks[:i], blocks[i+1:]...)
 				if len(blocks) == 0 {
 					delete(c.forkBlocks, height)
@@ -1784,6 +1794,8 @@ func (c *Chain) removeFromForkLocked(block *Block) {
 			}
 		}
 	}
+
+	delete(c.forkBlocksByHash, hashHex)
 }
 
 // validateBlockLocked performs comprehensive block validation
@@ -2454,6 +2466,11 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	if c.forkBlocks != nil {
 		for forkHeight := range c.forkBlocks {
 			if forkHeight > newHeight {
+				if forkBlocksAtHeight, ok := c.forkBlocks[forkHeight]; ok {
+					for _, fb := range forkBlocksAtHeight {
+						delete(c.forkBlocksByHash, hex.EncodeToString(fb.Hash))
+					}
+				}
 				delete(c.forkBlocks, forkHeight)
 			}
 		}
@@ -3595,6 +3612,11 @@ func (c *Chain) addBlockReconnectLocked(block *Block, hashHex string) (bool, err
 	height := block.GetHeight()
 	expectedHeight := uint64(len(c.blocks))
 
+	// Ensure block is in blocksByHash for parent lookup consistency
+	if _, exists := c.blocksByHash[hashHex]; !exists {
+		c.blocksByHash[hashHex] = block
+	}
+
 	if height == expectedHeight {
 		if len(c.blocks) > 0 {
 			currentTip := c.blocks[len(c.blocks)-1]
@@ -3669,6 +3691,17 @@ func (c *Chain) autoReorgIfNeededLocked() {
 	}
 }
 
+// debouncedAutoReorgLocked calls autoReorgIfNeededLocked but limits frequency
+// to MinAutoReorgInterval to prevent O(N) scans on every fork block arrival.
+// Caller must hold c.mu lock.
+func (c *Chain) debouncedAutoReorgLocked() {
+	if time.Since(c.lastAutoReorgTime) < MinAutoReorgInterval {
+		return
+	}
+	c.lastAutoReorgTime = time.Now()
+	c.autoReorgIfNeededLocked()
+}
+
 func (c *Chain) findBestChainTipLocked() *Block {
 	if len(c.blocks) == 0 {
 		return nil
@@ -3684,11 +3717,30 @@ func (c *Chain) findBestChainTipLocked() *Block {
 	bestHeight := currentCanonicalHeight
 	bestWork := new(big.Int).Set(canonicalWork)
 
+	// Build a set of parent hashes from all fork blocks.
+	// Only fork tips (blocks not referenced as parents) need evaluation.
+	// This avoids O(N*D) per-fork-chain-block traversal by evaluating
+	// each complete fork chain exactly once at its tip.
+	forkParentSet := make(map[string]bool, len(c.forkBlocks)*2)
+	for _, blocks := range c.forkBlocks {
+		for _, block := range blocks {
+			parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+			forkParentSet[parentHashHex] = true
+		}
+	}
+
 	for _, blocks := range c.forkBlocks {
 		for _, block := range blocks {
 			forkHeight := block.GetHeight()
 
 			if currentCanonicalHeight > MaxReorgDepth && forkHeight < currentCanonicalHeight-MaxReorgDepth {
+				continue
+			}
+
+			// Only evaluate fork tips to avoid redundant chain traversal.
+			// A fork tip is a block not referenced as a parent by any other fork block.
+			blockHashHex := hex.EncodeToString(block.Hash)
+			if forkParentSet[blockHashHex] {
 				continue
 			}
 
@@ -3743,6 +3795,9 @@ func (c *Chain) findBestChainTipLocked() *Block {
 //	Block 301's PrevHash = b2a8, which is NOT in canonical (canonical has e1ff).
 //	But block 300's parent (299) IS in canonical, so the fork chain is complete.
 //
+// CRITICAL: Only considers parent as canonical if its hash matches the canonical block
+// at that height. This prevents fork blocks in blocksByHash from being mistaken for
+// canonical parents.
 // Caller must hold c.mu lock.
 func (c *Chain) isForkChainCompleteLocked(tip *Block) bool {
 	current := tip
@@ -3752,7 +3807,6 @@ func (c *Chain) isForkChainCompleteLocked(tip *Block) bool {
 	for steps := uint64(0); steps < maxSteps; steps++ {
 		hashHex := hex.EncodeToString(current.Hash)
 		if visited[hashHex] {
-			// Cycle detected, chain is complete (already validated)
 			return true
 		}
 		visited[hashHex] = true
@@ -3763,45 +3817,24 @@ func (c *Chain) isForkChainCompleteLocked(tip *Block) bool {
 
 		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
 
-		// Check if parent is in blocksByHash
-		if parent, exists := c.blocksByHash[parentHashHex]; exists {
-			parentHeight := parent.GetHeight()
-
-			// Check if parent's height is within canonical chain range
-			// If yes, we found the fork point's parent in canonical chain
-			// NOTE: We do NOT check hash equality here! Fork point has different hash by definition.
+		// Check if parent is on canonical chain by verifying hash match
+		if parentInBBH, exists := c.blocksByHash[parentHashHex]; exists {
+			parentHeight := parentInBBH.GetHeight()
 			if parentHeight < uint64(len(c.blocks)) {
-				// Parent height is within canonical range
-				// This means we can reorg from this point
-				// The fork chain is complete
-				return true
-			}
-		}
-
-		// Look for parent in fork blocks
-		foundInFork := false
-		for _, fbList := range c.forkBlocks {
-			for _, fb := range fbList {
-				if hex.EncodeToString(fb.Hash) == parentHashHex {
-					current = fb
-					foundInFork = true
-					break
+				canonicalBlock := c.blocks[parentHeight]
+				if canonicalBlock != nil && hex.EncodeToString(canonicalBlock.Hash) == parentHashHex {
+					return true
 				}
 			}
-			if foundInFork {
-				break
-			}
 		}
 
-		if !foundInFork {
-			parentHeight := current.GetHeight() - 1
-			if len(c.blocks) > 0 && parentHeight == uint64(len(c.blocks)-1) {
-				log.Printf("[Chain] Fork chain parent at canonical tip height %d (parent=%s), treating as complete — direct fork at tip",
-					parentHeight, parentHashHex[:16])
-				return true
-			}
-			return false
+		// O(1) lookup using forkBlocksByHash instead of O(N) scan of forkBlocks
+		if parent, found := c.forkBlocksByHash[parentHashHex]; found {
+			current = parent
+			continue
 		}
+
+		return false
 	}
 
 	return true
@@ -4008,15 +4041,8 @@ func (c *Chain) isParentInForkBlocksLocked(parentHashHex string) bool {
 		}
 	}
 
-	for _, forkBlocksAtHeight := range c.forkBlocks {
-		for _, forkBlock := range forkBlocksAtHeight {
-			if hex.EncodeToString(forkBlock.Hash) == parentHashHex {
-				return true
-			}
-		}
-	}
-
-	return false
+	_, exists = c.forkBlocksByHash[parentHashHex]
+	return exists
 }
 
 // isParentOnActiveChainLocked checks if parent hash exists on the active canonical chain
@@ -4345,7 +4371,9 @@ func (c *Chain) extractTransactionIDs(txs []Transaction) []string {
 }
 
 // addForkBlockLocked adds a block as an alternative fork
-// Caller must hold c.mu lock
+// Caller must hold c.mu lock.
+// NOTE: does NOT add to blocksByHash — AppendBlock already adds all blocks to blocksByHash.
+// addBlockReconnectLocked also adds to blocksByHash before calling this function.
 func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 	height := block.GetHeight()
 
@@ -4374,19 +4402,18 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 			}
 
 			c.processOrphanDescendantsLocked(hashHex)
-			c.autoReorgIfNeededLocked()
+			c.debouncedAutoReorgLocked()
 			return false, nil
 		}
 	}
 
 	c.forkBlocks[height] = append(c.forkBlocks[height], block)
-	c.blocksByHash[hashHex] = block
 
 	// Enforce per-height fork block limit to prevent unbounded memory growth
 	if len(c.forkBlocks[height]) > MaxForkBlocksPerHeight {
 		removed := c.forkBlocks[height][:len(c.forkBlocks[height])-MaxForkBlocksPerHeight]
 		for _, rb := range removed {
-			delete(c.blocksByHash, hex.EncodeToString(rb.Hash))
+			delete(c.forkBlocksByHash, hex.EncodeToString(rb.Hash))
 		}
 		c.forkBlocks[height] = c.forkBlocks[height][len(c.forkBlocks[height])-MaxForkBlocksPerHeight:]
 	}
@@ -4409,7 +4436,7 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 			}
 			if forkBlocksAtHeight, ok := c.forkBlocks[h]; ok {
 				for _, fb := range forkBlocksAtHeight {
-					delete(c.blocksByHash, hex.EncodeToString(fb.Hash))
+					delete(c.forkBlocksByHash, hex.EncodeToString(fb.Hash))
 				}
 			}
 			removed := len(c.forkBlocks[h])
@@ -4417,6 +4444,9 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 			totalForkBlocks -= removed
 		}
 	}
+
+	// Track fork block hash for fast duplicate detection
+	c.forkBlocksByHash[hashHex] = block
 
 	var canonicalHash string
 	if int(height) < len(c.blocks) && c.blocks[height] != nil {
@@ -4454,7 +4484,7 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 	}
 
 	c.processOrphanDescendantsLocked(hashHex)
-	c.autoReorgIfNeededLocked()
+	c.debouncedAutoReorgLocked()
 
 	return false, nil
 }
@@ -4683,14 +4713,7 @@ func (c *Chain) CalculateCumulativeWork(block *Block) *big.Int {
 // difficulty, making fork chains unable to win a reorg against the canonical chain.
 // Caller must hold c.mu lock.
 func (c *Chain) lookupBlockInForkBlocksLocked(hashHex string) *Block {
-	for _, blocks := range c.forkBlocks {
-		for _, block := range blocks {
-			if hex.EncodeToString(block.Hash) == hashHex {
-				return block
-			}
-		}
-	}
-	return nil
+	return c.forkBlocksByHash[hashHex]
 }
 
 // enforceWorkCacheSize ensures the work cache does not exceed MaxWorkCacheSize
