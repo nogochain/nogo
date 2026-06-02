@@ -19,7 +19,6 @@ package core
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -2370,7 +2369,7 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 			return ErrOrphanBlock
 		}
 
-		if err := verifyBlockPoWSeal(c.consensus, current, parent, c.powEngine); err != nil {
+		if err := verifyBlockPoWSeal(c.consensus, current, parent, c.getPowEngine()); err != nil {
 			return fmt.Errorf("fork block height %d hash=%s PoW verification failed: %w",
 				current.GetHeight(), hex.EncodeToString(current.Hash)[:16], err)
 		}
@@ -3005,61 +3004,31 @@ func verifyBlockPoWSeal(consensus ConsensusParams, block *Block, parent *Block, 
 		return errors.New("invalid block for POW verification")
 	}
 
-	// Genesis block already validated
 	if block.GetHeight() == 0 {
 		return nil
 	}
 
-	// NogoPow verification requires parent
 	if parent == nil {
 		return errors.New("parent block is nil for POW verification")
 	}
 
-	// Use shared engine from Chain — same instance as mining ensures
-	// identical DAG cache, matrix pool, and diffAdjuster state.
 	if engine == nil {
 		return errors.New("NogoPow engine is nil for POW verification")
 	}
 
-	// Reconstruct header from block fields
 	var parentHash nogopow.Hash
 	copy(parentHash[:], parent.Hash)
 
-	// Prepare coinbase address for POW header
-	var powCoinbase nogopow.Address
-	minerAddr := block.MinerAddress
-	start := 0
-	if len(minerAddr) >= 4 && minerAddr[:4] == "NOGO" {
-		start = 4
-	}
-	for i := 0; i < 20 && start+i*2+2 <= len(minerAddr); i++ {
-		var byteVal byte
-		fmt.Sscanf(minerAddr[start+i*2:start+i*2+2], "%02x", &byteVal)
-		powCoinbase[i] = byteVal
-	}
+	var blockHash nogopow.Hash
+	copy(blockHash[:], block.Hash)
 
-	// CRITICAL FIX: Include MerkleRoot in header for correct SealHash calculation
-	// Without MerkleRoot, the SealHash would be computed incorrectly and PoW verification would fail
-	var merkleRoot nogopow.Hash
-	if len(block.Header.MerkleRoot) > 0 {
-		copy(merkleRoot[:], block.Header.MerkleRoot)
-	}
-
-	// Reconstruct header with all fields including MerkleRoot
 	header := &nogopow.Header{
 		Number:     big.NewInt(int64(block.GetHeight())),
-		Time:       uint64(block.Header.TimestampUnix),
 		ParentHash: parentHash,
 		Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
-		Coinbase:   powCoinbase,
-		Root:       merkleRoot, // CRITICAL: Include MerkleRoot for correct hash
 	}
 
-	// Set nonce (32 bytes, little-endian)
-	binary.LittleEndian.PutUint64(header.Nonce[:8], block.Header.Nonce)
-
-	// Verify seal using NogoPow engine
-	if err := engine.VerifySealOnly(header); err != nil {
+	if err := engine.VerifySealWithBlockHash(header, blockHash); err != nil {
 		return fmt.Errorf("NogoPow seal verification failed for block %d: %w", block.GetHeight(), err)
 	}
 
