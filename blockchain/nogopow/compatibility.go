@@ -18,6 +18,7 @@ package nogopow
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 
 	"github.com/nogochain/nogo/blockchain/config"
@@ -72,10 +73,9 @@ func (dc *DifficultyCalculator) CalcNextDifficulty(parent *BlockHeader, currentT
 	// Calculate new difficulty using PI controller
 	newDifficulty := dc.adjuster.CalcDifficulty(currentTime, parentHeader)
 
-	// Convert to uint32, ensuring it fits within bounds
 	bits := newDifficulty.Uint64()
-	if bits > 256 {
-		bits = 256
+	if bits > math.MaxUint32 {
+		bits = math.MaxUint32
 	}
 	if bits < 1 {
 		bits = 1
@@ -127,4 +127,4 @@ func (dc *DifficultyCalculator) GetMaximumDifficulty() uint32 {
 }
 
 // Constants for compatibility
-const maxDifficultyBits = uint32(256)
+const maxDifficultyBits = uint32(math.MaxUint32)

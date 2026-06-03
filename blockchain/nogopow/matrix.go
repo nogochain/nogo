@@ -27,9 +27,9 @@ import (
 )
 
 const (
-	FixedPointFactor = 1 << 30
-	FixedPointHalf   = 1 << 29
-	FixedPointShift  = 30
+	FixedPointFactor = 1 << 24
+	FixedPointHalf   = 1 << 23
+	FixedPointShift  = 24
 )
 
 func toFixed(val float64) int64 {

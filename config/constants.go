@@ -906,29 +906,29 @@ var TestnetGenesisConfig = GenesisConfiguration{
 	ChainID:             2,
 	Timestamp:           1735689600, // 2025-01-01 00:00:00 UTC
 	GenesisMinerAddress: "NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c",
-	InitialSupply:       10000000000000, // 10 trillion initial supply
-	GenesisMessage:      "Follow the white rabbit - NogoChain Testnet",
+	InitialSupply:       100000000000000, // 100 trillion initial supply (aligned with mainnet)
+	GenesisMessage:      "NogoChain Testnet - Development and Experiments - 2026",
 	MonetaryPolicy: MonetaryPolicy{
-		InitialBlockReward:     5000000000, // 50 NOGO initial reward
-		MinimumBlockReward:     10000000,   // 0.1 NOGO minimum reward
-		AnnualReductionPercent: 10,         // 10% annual reduction
-		MinerFeeShare:          0,          // 0% of fees to miner (fees are burned)
-		MinerRewardShare:       99,         // 99% of block reward to miner
-		CommunityFundShare:     0,          // community fund allocation removed
-		GenesisShare:           1,          // 1% of block reward to genesis address
-		IntegrityPoolShare:     0,          // integrity pool allocation removed
+		InitialBlockReward:     800000000, // 8 NOGO in wei (1 NOGO = 10^8 wei) (aligned with mainnet)
+		MinimumBlockReward:     10000000,  // 0.1 NOGO minimum reward
+		AnnualReductionPercent: 10,        // 10% annual reduction
+		MinerFeeShare:          0,         // 0% of fees to miner (fees are burned)
+		MinerRewardShare:       99,        // 99% of block reward to miner
+		CommunityFundShare:     0,         // community fund allocation removed
+		GenesisShare:           1,         // 1% of block reward to genesis address
+		IntegrityPoolShare:     0,         // integrity pool allocation removed
 	},
 	ConsensusParams: ConsensusParams{
 		DifficultyEnable:               true,
-		TargetBlockTime:                15 * time.Second, // 15 seconds for testnet
-		DifficultyWindow:               20,
-		DifficultyMaxStep:              4, // Allow faster adjustment
+		TargetBlockTime:                30 * time.Second, // 30 second block time (aligned with mainnet)
+		DifficultyWindow:               10,               // PI controller window (aligned with mainnet)
+		DifficultyMaxStep:              4,                // Allow faster adjustment
 		MinDifficultyBits:              1,
 		MaxDifficultyBits:              255,
 		GenesisDifficultyBits:          100, // CPU-minable genesis, PI controller auto-adjusts
 		MedianTimePastWindow:           11,
 		MaxTimeDrift:                   7200,
-		MaxBlockSize:                   1000000, // 1MB for testnet
+		MaxBlockSize:                   4000000, // 4MB (aligned with mainnet)
 		MerkleEnable:                   true,
 		MerkleActivationHeight:         0,
 		BinaryEncodingEnable:           false,

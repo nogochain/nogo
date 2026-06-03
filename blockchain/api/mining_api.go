@@ -19,6 +19,7 @@ package api
 import (
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"time"
@@ -168,34 +169,113 @@ func (s *SimpleServer) handleGetBlockTemplate(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, template)
 }
 
-// handleSubmitWork handles mining work submissions
+// handleSubmitWork handles mining work submissions from standalone miners
+// Production-grade: verifies PoW by constructing and submitting block via AddBlock,
+// which internally validates the NogoPow seal through the consensus engine.
 func (s *SimpleServer) handleSubmitWork(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Decode request
+	// Decode and validate request
 	var req SubmitWorkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid request body",
+		writeJSON(w, http.StatusBadRequest, SubmitWorkResponse{
+			Accepted: false,
+			Message:  "invalid request body",
 		})
 		return
 	}
 
-	// Validate request
 	if req.Height == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid height",
+		writeJSON(w, http.StatusBadRequest, SubmitWorkResponse{
+			Accepted: false,
+			Message:  "invalid height",
 		})
 		return
 	}
 
-	// Accept the share (in production, would verify PoW and add block)
+	if req.Miner == "" {
+		writeJSON(w, http.StatusBadRequest, SubmitWorkResponse{
+			Accepted: false,
+			Message:  "miner address required",
+		})
+		return
+	}
+
+	if req.BlockHash == "" {
+		writeJSON(w, http.StatusBadRequest, SubmitWorkResponse{
+			Accepted: false,
+			Message:  "block hash required",
+		})
+		return
+	}
+
+	// Get latest block for context
+	latest := s.bc.LatestBlock()
+	if latest == nil {
+		writeJSON(w, http.StatusInternalServerError, SubmitWorkResponse{
+			Accepted: false,
+			Message:  "latest block not found",
+		})
+		return
+	}
+
+	// Collect mempool transactions for block construction
+	var mempoolTxs []core.Transaction
+	if s.mp != nil {
+		entries := s.mp.EntriesSortedByFeeDesc()
+		maxTxs := config.DefaultMaxTransactionsPerBlock
+		for i, entry := range entries {
+			if i >= maxTxs {
+				break
+			}
+			mempoolTxs = append(mempoolTxs, entry.Tx())
+		}
+	}
+
+	// Get consensus parameters
+	consensus := config.GetConsensusParams()
+
+	// Build complete block from current template
+	block, err := miner.CreateBlockTemplate(
+		latest,
+		mempoolTxs,
+		req.Miner,
+		s.bc.GetChainID(),
+		consensus,
+	)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, SubmitWorkResponse{
+			Accepted: false,
+			Message:  fmt.Sprintf("failed to create block: %v", err),
+		})
+		return
+	}
+
+	// Set miner's found nonce and timestamp
+	block.Header.Nonce = req.Nonce
+	block.Header.TimestampUnix = req.Timestamp
+
+	// Submit block to chain via AddBlock — validates PoW internally
+	// through the consensus engine's VerifyHeader -> verifySeal
+	_, err = s.bc.AddBlock(block)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, SubmitWorkResponse{
+			Accepted: false,
+			Message:  fmt.Sprintf("block rejected: %v", err),
+		})
+		return
+	}
+
+	// Calculate reward for response
+	reward, _, _ := miner.CalculateMiningReward(req.Height, 0, consensus)
+
 	writeJSON(w, http.StatusOK, SubmitWorkResponse{
 		Accepted: true,
-		Message:  "share accepted",
+		Message:  "block accepted",
+		Reward:   reward,
 	})
 }
 
