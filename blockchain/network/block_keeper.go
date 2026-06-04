@@ -17,6 +17,7 @@
 package network
 
 import (
+	"bytes"
 	"container/list"
 	"context"
 	"crypto/sha256"
@@ -269,9 +270,29 @@ func (bk *blockKeeper) appendHeaderList(headers []*HeaderLocator) error {
 	}
 
 	prevHeight := prevLoc.Height
-	prevHash, err := computeHeaderHash(&prevLoc.Header, prevLoc.Height, prevLoc.Header.MinerAddress)
-	if err != nil {
-		return fmt.Errorf("%w: compute previous header hash: %v", errAppendHeaders, err)
+
+	// Genesis block (height=0) has an empty MerkleRoot that is dynamically
+	// computed from the coinbase transaction by the consensus engine.
+	// computeHeaderHash cannot replicate this consensus hash, so use the
+	// actual block hash from the canonical chain when the previous header
+	// is the genesis block.
+	var prevHash []byte
+	if prevHeight == 0 {
+		genesisBlock, ok := bk.chain.BlockByHeight(0)
+		if !ok || genesisBlock == nil {
+			return fmt.Errorf("%w: genesis block not found", errAppendHeaders)
+		}
+		if len(genesisBlock.Hash) != core.HashLen {
+			return fmt.Errorf("%w: invalid genesis block hash length: %d", errAppendHeaders, len(genesisBlock.Hash))
+		}
+		prevHash = make([]byte, core.HashLen)
+		copy(prevHash, genesisBlock.Hash)
+	} else {
+		var err error
+		prevHash, err = computeHeaderHash(&prevLoc.Header, prevLoc.Height, prevLoc.Header.MinerAddress)
+		if err != nil {
+			return fmt.Errorf("%w: compute previous header hash: %v", errAppendHeaders, err)
+		}
 	}
 
 	// Validate and append headers in order.
@@ -294,10 +315,26 @@ func (bk *blockKeeper) appendHeaderList(headers []*HeaderLocator) error {
 			return fmt.Errorf("%w: prevHash mismatch at height %d", errAppendHeaders, h.Height)
 		}
 
-		// Compute this header hash for next-step linkage.
-		curHash, hashErr := computeHeaderHash(&h.Header, h.Height, h.Header.MinerAddress)
-		if hashErr != nil {
-			return fmt.Errorf("%w: compute header hash at height %d: %v", errAppendHeaders, h.Height, hashErr)
+		// Genesis block (height=0): use actual block hash from chain since
+		// computeHeaderHash cannot replicate the consensus hash.
+		// Non-genesis blocks: compute hash directly from header fields.
+		var curHash []byte
+		if h.Height == 0 {
+			genesisBlock, ok := bk.chain.BlockByHeight(0)
+			if !ok || genesisBlock == nil {
+				return fmt.Errorf("%w: genesis block not found at height 0", errAppendHeaders)
+			}
+			if len(genesisBlock.Hash) != core.HashLen {
+				return fmt.Errorf("%w: invalid genesis block hash length: %d", errAppendHeaders, len(genesisBlock.Hash))
+			}
+			curHash = make([]byte, core.HashLen)
+			copy(curHash, genesisBlock.Hash)
+		} else {
+			var hashErr error
+			curHash, hashErr = computeHeaderHash(&h.Header, h.Height, h.Header.MinerAddress)
+			if hashErr != nil {
+				return fmt.Errorf("%w: compute header hash at height %d: %v", errAppendHeaders, h.Height, hashErr)
+			}
 		}
 
 		bk.headerList.PushBack(h)
@@ -607,9 +644,6 @@ func (bk *blockKeeper) requireBlock(height uint64) (*core.Block, error) {
 
 	var lastErr error
 	for _, peer := range peers {
-		log.Printf("[BlockKeeper] requireBlock: requesting block h=%d from peer=%s",
-			height, peer.ID()[:min(12, len(peer.ID()))])
-
 		ctx, cancel := context.WithTimeout(context.Background(), syncTimeout)
 		defer cancel()
 
@@ -621,8 +655,6 @@ func (bk *blockKeeper) requireBlock(height uint64) (*core.Block, error) {
 			continue
 		}
 
-		log.Printf("[BlockKeeper] requireBlock: received block h=%d from peer=%s",
-			height, peer.ID()[:min(12, len(peer.ID()))])
 		return block, nil
 	}
 
@@ -653,10 +685,6 @@ func (bk *blockKeeper) requireBlocksBatch(startHeight uint64, count uint64) (map
 	}
 
 	peerID := syncPeer.ID()
-	sessionSeq := bk.syncSessionSeq
-
-	log.Printf("[BlockKeeper] requireBlocksBatch: fetching [%d-%d] (count=%d) from peer=%s sessionSeq=%d",
-		startHeight, startHeight+count-1, count, peerID[:min(12, len(peerID))], sessionSeq)
 
 	ctx, cancel := context.WithTimeout(context.Background(), batchSyncTimeout)
 	defer cancel()
@@ -674,9 +702,6 @@ func (bk *blockKeeper) requireBlocksBatch(startHeight uint64, count uint64) (map
 			result[b.GetHeight()] = b
 		}
 	}
-
-	log.Printf("[BlockKeeper] requireBlocksBatch: received %d/%d blocks [%d-%d] from peer=%s",
-		len(result), int(count), startHeight, startHeight+count-1, peerID[:min(12, len(peerID))])
 
 	return result, nil
 }
@@ -1073,8 +1098,6 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 				if peerWork != nil && localWork != nil && peerWork.Cmp(localWork) > 0 {
 					peer = realPeer
 					resolved = true
-					log.Printf("[BlockKeeper] dispatchRegularSync: resolved work-optimal peer %s via PeerByID (h=%d)",
-						realPeer.ID(), realPeer.Height())
 				}
 			}
 		}
@@ -1305,9 +1328,6 @@ func (bk *blockKeeper) checkStuckEscape() bool {
 			if err := broadcaster.broadcastMinedBlock(latestBlock); err != nil {
 				log.Printf("[BlockKeeper] stuck escape: re-broadcast failed h=%d: %v",
 					latestBlock.GetHeight(), err)
-			} else {
-				log.Printf("[BlockKeeper] stuck escape: re-broadcasted block h=%d to peers",
-					latestBlock.GetHeight())
 			}
 		}
 	}
@@ -1505,12 +1525,7 @@ func (bk *blockKeeper) syncLaggingPeers(localHeight uint64) {
 				log.Printf("[BlockKeeper] failed to send INV to peer %s", peerID)
 				continue
 			}
-
-			log.Printf("[BlockKeeper] Sent INV with %d block hashes [%d..%d] to peer %s",
-				len(hashes), fromHeight+offset, fromHeight+offset+uint64(len(hashes))-1, peerID)
 		}
-
-		log.Printf("[BlockKeeper] INV notification complete for peer %s (%d blocks announced)", peerID, totalMissing)
 	}
 }
 
@@ -1637,34 +1652,67 @@ func decodeMinerAddress(addrHex string) ([32]byte, error) {
 	return out, nil
 }
 
-// computeHeaderHash computes the hash of a block header using SHA256
+// headerEncodingVersionV1 is the version byte matching core.binaryEncodingVersionV1.
+const headerEncodingVersionV1 = uint8(1)
+
+// computeHeaderHash computes the consensus-compatible hash for header continuity checks.
+// It mirrors blockHeaderPreimageBinaryV1 encoding from the core package to ensure
+// that the computed hash matches the actual block hash used in chain validation.
+// For the genesis block (height=0) where MerkleRoot is derived from transactions,
+// an empty MerkleRoot is treated as 32 zero bytes, allowing the caller to handle
+// the genesis edge case separately.
 func computeHeaderHash(h *core.BlockHeader, height uint64, minerAddress string) ([]byte, error) {
-	hasher := sha256.New()
-	hasher.Write(h.PrevHash)
+	if h == nil {
+		return nil, errors.New("nil header")
+	}
 
-	timestampBytes := make([]byte, 8)
-	binary.LittleEndian.PutUint64(timestampBytes, uint64(h.TimestampUnix))
-	hasher.Write(timestampBytes)
+	var root [32]byte
+	if len(h.MerkleRoot) == 32 {
+		copy(root[:], h.MerkleRoot)
+	}
+	// When MerkleRoot is nil/empty (genesis block), root stays as [32]byte{0}
+	// which matches the encoding structure, though the consensus hash uses
+	// the actual MerkleRoot computed from the coinbase transaction.
+	// The caller must handle height==0 separately for this reason.
 
-	difficultyBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(difficultyBytes, h.DifficultyBits)
-	hasher.Write(difficultyBytes)
-
-	nonceBytes := make([]byte, 8)
-	binary.LittleEndian.PutUint64(nonceBytes, h.Nonce)
-	hasher.Write(nonceBytes)
-
-	hasher.Write(h.MerkleRoot)
-
-	heightBytes := make([]byte, 8)
-	binary.LittleEndian.PutUint64(heightBytes, height)
-	hasher.Write(heightBytes)
+	var prev [32]byte
+	if len(h.PrevHash) == 32 {
+		copy(prev[:], h.PrevHash)
+	}
 
 	miner, err := decodeMinerAddress(minerAddress)
 	if err != nil {
 		return nil, fmt.Errorf("decode miner address: %w", err)
 	}
-	hasher.Write(miner[:])
 
+	var buf bytes.Buffer
+	buf.WriteByte(headerEncodingVersionV1)
+	if err := binary.Write(&buf, binary.LittleEndian, h.Version); err != nil {
+		return nil, fmt.Errorf("write version: %w", err)
+	}
+	if err := binary.Write(&buf, binary.LittleEndian, height); err != nil {
+		return nil, fmt.Errorf("write height: %w", err)
+	}
+	if err := binary.Write(&buf, binary.LittleEndian, h.TimestampUnix); err != nil {
+		return nil, fmt.Errorf("write timestamp: %w", err)
+	}
+	if _, err := buf.Write(prev[:]); err != nil {
+		return nil, fmt.Errorf("write prevHash: %w", err)
+	}
+	if _, err := buf.Write(root[:]); err != nil {
+		return nil, fmt.Errorf("write merkleRoot: %w", err)
+	}
+	if err := binary.Write(&buf, binary.LittleEndian, h.DifficultyBits); err != nil {
+		return nil, fmt.Errorf("write difficultyBits: %w", err)
+	}
+	if _, err := buf.Write(miner[:]); err != nil {
+		return nil, fmt.Errorf("write minerAddress: %w", err)
+	}
+	if err := binary.Write(&buf, binary.LittleEndian, h.Nonce); err != nil {
+		return nil, fmt.Errorf("write nonce: %w", err)
+	}
+
+	hasher := sha256.New()
+	hasher.Write(buf.Bytes())
 	return hasher.Sum(nil), nil
 }

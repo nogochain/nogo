@@ -353,6 +353,13 @@ type Chain struct {
 	powEngine     *nogopow.NogopowEngine
 	powEngineOnce sync.Once
 
+	// Difficulty cache for block template API
+	// Prevents PI controller recalculation on every template poll
+	// Only recalculates when parent block height changes (once per block)
+	diffCacheHeight uint64
+	diffCacheValue  uint32
+	diffCacheMu     sync.Mutex
+
 	// Checkpoint voter for multi-sig checkpoint consensus
 	checkpointVoter   *CheckpointVoter
 	checkpointVoteMu  sync.RWMutex
@@ -514,21 +521,36 @@ func (c *Chain) GetOnMissingBlock() func(parentHash []byte, height uint64) {
 // Returns:
 //   - uint32: difficulty bits for the next block
 func (c *Chain) CalcNextDifficulty(latest *Block, currentTime int64) uint32 {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	// Guard clause: no parent block, return minimum difficulty
 	if latest == nil {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
 		return uint32(c.consensus.MinDifficulty)
 	}
 
-	// Create difficulty calculator with consensus parameters
-	// CRITICAL: Must use same parameters as consensus engine to ensure consistency
+	// Difficulty cache: only recalculate when parent block height changes.
+	// Fixes "difficulty death spiral": the pool polls /block/template every 3
+	// seconds. Previously each call created a fresh PI controller with time.Now(),
+	// causing timeDiff to grow and difficulty to spiral down continuously.
+	// Now difficulty is computed once per block height and cached — matching the
+	// node's own mining pattern where the persistent diffAdjuster is called
+	// once per Prepare().
+	c.diffCacheMu.Lock()
+	if latest.GetHeight() == c.diffCacheHeight {
+		cached := c.diffCacheValue
+		c.diffCacheMu.Unlock()
+		return cached
+	}
+	c.diffCacheMu.Unlock()
+
+	// Cache miss: calculate next difficulty using PI controller
+	c.mu.RLock()
 	calc := nogopow.NewDifficultyCalculator(&config.ConsensusParams{
 		BlockTimeTargetSeconds:     c.consensus.BlockTimeTargetSeconds,
 		MaxDifficultyChangePercent: c.consensus.MaxDifficultyChangePercent,
 		MinDifficulty:              c.consensus.MinDifficulty,
 	})
+	c.mu.RUnlock()
 
 	// Convert block to BlockHeader format
 	parentHeader := &nogopow.BlockHeader{
@@ -541,6 +563,12 @@ func (c *Chain) CalcNextDifficulty(latest *Block, currentTime int64) uint32 {
 
 	// Calculate next difficulty using PI controller
 	nextDifficulty := calc.CalcNextDifficulty(parentHeader, uint64(currentTime))
+
+	// Cache the result for subsequent calls at same height
+	c.diffCacheMu.Lock()
+	c.diffCacheHeight = latest.GetHeight()
+	c.diffCacheValue = nextDifficulty
+	c.diffCacheMu.Unlock()
 
 	return nextDifficulty
 }

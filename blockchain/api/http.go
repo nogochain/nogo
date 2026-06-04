@@ -1229,7 +1229,11 @@ func (s *Server) handleAddBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.candidatePool != nil {
+	if r.URL.Query().Get("direct") == "true" {
+		// Bypass candidate pool for admin-authenticated direct block submissions
+		// This mirrors the node's internal MineOnce which calls bc.AddBlock directly
+		log.Printf("[API] direct=true: bypassing candidate pool, adding block at height %d directly", b.GetHeight())
+	} else if s.candidatePool != nil {
 		if s.candidatePool.ShouldPool(b.GetHeight()) {
 			if submitErr := s.candidatePool.SubmitCandidate(&b, "api-submission", time.Now()); submitErr != nil {
 				log.Printf("[API] candidate pool rejected block: %v", submitErr)
