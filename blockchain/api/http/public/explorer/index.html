@@ -671,15 +671,6 @@ body {
     </div>
   </div>
   
-  <!-- Candidate Pool Competition -->
-  <div class="stats-grid" id="candidatePoolSection" style="margin-top: 30px;">
-    <div class="stat-card" style="grid-column: span 4; background: linear-gradient(135deg, var(--bg-secondary), var(--bg-tertiary));">
-      <div class="stat-label" style="font-size: 18px;">🏟️ Candidate Pool Competition</div>
-      <div class="stat-value" id="poolCount" style="font-size: 14px;">Loading...</div>
-      <div class="stat-subtext" id="poolList" style="font-size: 12px;"></div>
-    </div>
-  </div>
-  
   <!-- Error Message -->
   <div class="error" id="error"></div>
   
@@ -717,6 +708,16 @@ body {
         </thead>
         <tbody id="blocksBody"></tbody>
       </table>
+      <!-- Pagination Controls -->
+      <div class="pagination-container" id="blockPagination">
+        <button class="pagination-btn" id="prevPageBtn" onclick="prevPage()" disabled>
+          ◀ Previous
+        </button>
+        <span class="pagination-info" id="pageInfo">Page 1</span>
+        <button class="pagination-btn" id="nextPageBtn" onclick="nextPage()">
+          Next ▶
+        </button>
+      </div>
     </div>
   </div>
   
@@ -858,92 +859,108 @@ function createBlockRow(height, block) {
   return row;
 }
 
+// Load blocks for the current page
+async function loadBlocksForPage() {
+  const tbody = document.getElementById('blocksBody');
+  if (!tbody) return;
+  
+  tbody.innerHTML = '';
+  
+  // Compute block range for current page
+  const startHeight = maxHeight - (currentPage - 1) * PAGE_SIZE;
+  const endHeight = Math.max(0, startHeight - PAGE_SIZE + 1);
+  
+  // Load blocks sequentially from top to bottom
+  for (let h = startHeight; h >= endHeight; h--) {
+    if (h < 0) break;
+    const block = await api('/block/height/' + h);
+    if (block) {
+      const row = createBlockRow(h, block);
+      tbody.appendChild(row);
+    }
+  }
+  
+  // Update pagination buttons
+  updatePaginationUI();
+}
+
+// Update pagination button states and page info
+function updatePaginationUI() {
+  const prevBtn = document.getElementById('prevPageBtn');
+  const nextBtn = document.getElementById('nextPageBtn');
+  const pageInfo = document.getElementById('pageInfo');
+  
+  if (prevBtn) prevBtn.disabled = currentPage <= 1;
+  if (pageInfo) pageInfo.textContent = 'Page ' + currentPage;
+  
+  // "Next" is disabled when we're at the earliest page (block 0)
+  if (nextBtn) {
+    const oldestOnPage = Math.max(0, maxHeight - currentPage * PAGE_SIZE + 1);
+    nextBtn.disabled = oldestOnPage <= 0;
+  }
+}
+
+// Navigate to previous page
+function prevPage() {
+  if (currentPage <= 1) return;
+  currentPage--;
+  loadBlocksForPage();
+}
+
+// Navigate to next page
+function nextPage() {
+  const oldestOnPage = Math.max(0, maxHeight - currentPage * PAGE_SIZE + 1);
+  if (oldestOnPage <= 0) return;
+  currentPage++;
+  loadBlocksForPage();
+}
+
 // Load stats and blocks
 async function loadStats() {
   hideError();
   const info = await api('/chain/info');
   if (!info) return;
   
-  // Update last known height
-  lastKnownHeight = info.height || 0;
+  const height = info.height || 0;
   
-  document.getElementById('height').textContent = info.height?.toLocaleString() || '-';
+  // Update last known height
+  lastKnownHeight = height;
+  
+  document.getElementById('height').textContent = height.toLocaleString() || '-';
   document.getElementById('supply').textContent = ((info.totalSupply || 0) / 1e8).toFixed(8) + ' NOGO';
   document.getElementById('difficulty').textContent = info.difficultyBits?.toLocaleString() || '-';
   document.getElementById('peers').textContent = (info.peersCount || 0).toLocaleString();
   
-  // Load candidate pool competition stats
-  loadPoolStats();
+  // If maxHeight changed (e.g., new blocks arrived while on page 1), reload blocks
+  const prevMaxHeight = maxHeight;
+  maxHeight = height;
   
-  const tbody = document.getElementById('blocksBody');
-  
-  if (isInitialLoad) {
-    // Initial load: build the entire table
-    tbody.innerHTML = '';
-    displayedBlockHeights.clear();
-    
-    const startHeight = info.height;
-    const endHeight = Math.max(0, startHeight - (MAX_BLOCKS_DISPLAY - 1));
-    
-    for (let h = startHeight; h >= endHeight; h--) {
-      const block = await api('/block/height/' + h);
-      if (block) {
-        const row = createBlockRow(h, block);
-        tbody.appendChild(row);
-        displayedBlockHeights.add(h);
-      }
-    }
-    
-    isInitialLoad = false;
+  if (currentPage === 1) {
+    // Always refresh page 1 (latest blocks)
+    await loadBlocksForPage();
+  } else if (height > prevMaxHeight) {
+    // On a non-first page, silently update maxHeight
+    // "Next" might now reach more pages
+    updatePaginationUI();
   }
 }
 
-// Load candidate pool competition stats
-async function loadPoolStats() {
-  const data = await api('/pool/stats');
-  if (!data || !data.pools) return;
-  
-  const activePools = data.pools.filter(p => p.windowState === 'open' || p.windowState === 'active');
-  const totalPools = data.pools.length;
-  
-  document.getElementById('poolCount').textContent = 
-    activePools.length > 0 
-      ? `${activePools.length} active / ${totalPools} total pools`
-      : 'No active competitions';
-  
-  if (data.pools.length === 0) {
-    document.getElementById('poolList').innerHTML = '<span style="color:var(--text-secondary);">No candidate pools</span>';
+// Incrementally add new block at the top (only works on page 1)
+async function addNewBlock(height) {
+  if (currentPage !== 1) {
+    // Not on page 1 — just update maxHeight silently; user can navigate
+    maxHeight = Math.max(maxHeight, height);
+    updatePaginationUI();
     return;
   }
   
-  // Show recent pools (last 10)
-  const recentPools = data.pools.slice(0, 10);
-  let html = '';
-  for (const p of recentPools) {
-    const stateIcon = p.windowState === 'open' ? '🟢' : p.windowState === 'closed' ? '🏁' : '⏱️';
-    const candidates = p.candidateCount || 0;
-    html += `<div style="margin:3px 0;display:flex;justify-content:space-between;">
-      <span>${stateIcon} Height ${p.height}</span>
-      <span style="color:${candidates > 1 ? 'var(--accent-green)' : 'var(--text-secondary)'};">${candidates} candidate${candidates !== 1 ? 's' : ''}</span>
-    </div>`;
-  }
-  document.getElementById('poolList').innerHTML = html;
-}
-
-// Incrementally add new block at the top
-async function addNewBlock(height) {
-  if (displayedBlockHeights.has(height)) {
-    return; // Already displayed
-  }
-  
+  const tbody = document.getElementById('blocksBody');
   const block = await api('/block/height/' + height);
   if (!block) return;
   
-  const tbody = document.getElementById('blocksBody');
   const newRow = createBlockRow(height, block);
-  
-  // Insert at the top with animation
   newRow.style.animation = 'slideDown 0.3s ease-out';
+  
   const firstRow = tbody.firstChild;
   if (firstRow) {
     tbody.insertBefore(newRow, firstRow);
@@ -951,20 +968,14 @@ async function addNewBlock(height) {
     tbody.appendChild(newRow);
   }
   
-  displayedBlockHeights.add(height);
+  maxHeight = Math.max(maxHeight, height);
   
-  // Remove oldest block if exceeding limit
-  while (displayedBlockHeights.size > MAX_BLOCKS_DISPLAY) {
-    const lastRow = tbody.lastChild;
-    if (lastRow) {
-      const heightCell = lastRow.querySelector('td strong');
-      if (heightCell) {
-        const oldHeight = parseInt(heightCell.textContent.replace(/,/g, ''));
-        displayedBlockHeights.delete(oldHeight);
-      }
-      lastRow.remove();
-    }
+  // Remove oldest row if exceeding page size
+  while (tbody.children.length > PAGE_SIZE) {
+    tbody.removeChild(tbody.lastChild);
   }
+  
+  updatePaginationUI();
 }
 
 // Check for new blocks periodically
@@ -984,12 +995,17 @@ async function checkForNewBlocks() {
     document.getElementById('difficulty').textContent = info.difficultyBits?.toLocaleString() || '-';
     document.getElementById('peers').textContent = (info.peersCount || 0).toLocaleString();
     
-    // Refresh pool stats (real-time update)
-    loadPoolStats();
+    // Update maxHeight
+    maxHeight = currentHeight;
     
-    // Incrementally add new blocks from lastKnownHeight + 1 to currentHeight
-    for (let h = lastKnownHeight + 1; h <= currentHeight; h++) {
-      await addNewBlock(h);
+    if (currentPage === 1) {
+      // Incrementally add new blocks on page 1
+      for (let h = lastKnownHeight + 1; h <= currentHeight; h++) {
+        await addNewBlock(h);
+      }
+    } else {
+      // On other pages — update pagination state silently
+      updatePaginationUI();
     }
     
     lastKnownHeight = currentHeight;
@@ -1413,6 +1429,8 @@ async function showBlocks() {
   document.getElementById('blocksSection').style.display = 'block';
   document.getElementById('mempoolSection').style.display = 'none';
   document.getElementById('peersSection').style.display = 'none';
+  // Reset to page 1 to show latest blocks
+  currentPage = 1;
   await loadStats();
 }
 
@@ -1617,11 +1635,13 @@ function closeWebSocket() {
   }
 }
 
+// Pagination constants and state
+const PAGE_SIZE = 10;
+let currentPage = 1;
+let maxHeight = 0;
+
 // Global state for block polling
 let lastKnownHeight = 0;
-let isInitialLoad = true;
-let displayedBlockHeights = new Set();
-const MAX_BLOCKS_DISPLAY = 20;
 
 // WebSocket connection state
 let wsConnection = null;

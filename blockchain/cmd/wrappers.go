@@ -565,6 +565,11 @@ func (w *networkChainWrapper) GetConsensus() config.ConsensusParams {
 	return w.chain.GetConsensus()
 }
 
+// GetCurrentStateRoot returns the current state root (for block template creation)
+func (w *networkChainWrapper) GetCurrentStateRoot() ([]byte, error) {
+	return w.chain.GetCurrentStateRoot()
+}
+
 // RollbackToHeight rolls back to a given height
 func (w *networkChainWrapper) RollbackToHeight(height uint64) error {
 	return w.chain.RollbackToHeight(height)

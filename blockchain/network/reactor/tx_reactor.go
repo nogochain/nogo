@@ -3,6 +3,7 @@ package reactor
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/nogochain/nogo/blockchain/core"
@@ -24,6 +25,14 @@ const (
 	// TxMsgTx delivers one or more full transactions.
 	// Payload: JSON-encoded txTxPayload {txs: []json.RawMessage}.
 	TxMsgTx byte = 0x03
+
+	// TxMsgMempoolRequest requests a full mempool snapshot from a peer.
+	// Payload: empty (no payload needed).
+	TxMsgMempoolRequest byte = 0x04
+
+	// TxMsgMempoolResponse delivers a full mempool snapshot.
+	// Payload: JSON-encoded txMempoolPayload {txs: []json.RawMessage}.
+	TxMsgMempoolResponse byte = 0x05
 )
 
 // Minimum message size: 1 byte for message type.
@@ -42,6 +51,15 @@ type TxHandler interface {
 	// OnTx handles received full transactions from a peer.
 	// The transactions have been parsed and validated at the JSON level.
 	OnTx(peerID string, txs []core.Transaction) error
+
+	// OnMempoolRequest handles a request for a full mempool snapshot.
+	// The handler should collect all pending transactions and send them
+	// back as a MempoolResponse message.
+	OnMempoolRequest(peerID string) error
+
+	// OnMempoolResponse handles a full mempool snapshot received from a peer.
+	// The received transactions are added to the local mempool.
+	OnMempoolResponse(peerID string, txs []core.Transaction) error
 }
 
 // TxReactor handles transaction propagation protocol messages.
@@ -139,6 +157,10 @@ func (tr *TxReactor) dispatch(msgType byte, peerID string, payload []byte, handl
 		tr.handleGetTx(peerID, payload, handler)
 	case TxMsgTx:
 		tr.handleTx(peerID, payload, handler)
+	case TxMsgMempoolRequest:
+		tr.handleMempoolRequest(peerID, handler)
+	case TxMsgMempoolResponse:
+		tr.handleMempoolResponse(peerID, payload, handler)
 	default:
 		// Unknown message type - silently ignore.
 	}
@@ -218,6 +240,42 @@ func (tr *TxReactor) handleTx(peerID string, payload []byte, handler TxHandler) 
 	}
 }
 
+// handleMempoolRequest dispatches a mempool snapshot request.
+func (tr *TxReactor) handleMempoolRequest(peerID string, handler TxHandler) {
+	if err := handler.OnMempoolRequest(peerID); err != nil {
+		log.Printf("[TxReactor] MempoolRequest handler failed for peer %s: %v", peerID, err)
+	}
+}
+
+// handleMempoolResponse parses and dispatches a mempool snapshot response.
+func (tr *TxReactor) handleMempoolResponse(peerID string, payload []byte, handler TxHandler) {
+	if len(payload) == 0 {
+		return
+	}
+
+	var req txMempoolPayload
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return
+	}
+
+	txs := make([]core.Transaction, 0, len(req.Txs))
+	for _, raw := range req.Txs {
+		var tx core.Transaction
+		if err := json.Unmarshal(raw, &tx); err != nil {
+			continue
+		}
+		txs = append(txs, tx)
+	}
+
+	if len(txs) == 0 {
+		return
+	}
+
+	if err := handler.OnMempoolResponse(peerID, txs); err != nil {
+		log.Printf("[TxReactor] MempoolResponse handler failed for peer %s: %v", peerID, err)
+	}
+}
+
 // BuildTxInvMsg serializes a transaction inventory announcement message.
 func BuildTxInvMsg(txIDs []string) ([]byte, error) {
 	if txIDs == nil {
@@ -281,8 +339,40 @@ func BuildTxMsg(txs []core.Transaction) ([]byte, error) {
 	return msg, nil
 }
 
+// BuildTxMempoolRequestMsg serializes a mempool snapshot request message.
+// No payload is needed; the message type byte alone identifies the request.
+func BuildTxMempoolRequestMsg() ([]byte, error) {
+	return []byte{TxMsgMempoolRequest}, nil
+}
+
+// BuildTxMempoolResponseMsg serializes a full mempool snapshot response message.
+func BuildTxMempoolResponseMsg(txs []core.Transaction) ([]byte, error) {
+	if txs == nil {
+		txs = []core.Transaction{}
+	}
+
+	rawTxs := make([]json.RawMessage, 0, len(txs))
+	for _, tx := range txs {
+		raw, err := json.Marshal(tx)
+		if err != nil {
+			return nil, fmt.Errorf("build mempool response: marshal transaction: %w", err)
+		}
+		rawTxs = append(rawTxs, raw)
+	}
+
+	req := txMempoolPayload{Txs: rawTxs}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("build mempool response: %w", err)
+	}
+
+	msg := make([]byte, 1+len(payload))
+	msg[0] = TxMsgMempoolResponse
+	copy(msg[1:], payload)
+	return msg, nil
+}
+
 // ParseTxMessageType extracts the message type from a raw tx message.
-// Returns an error if the message is too short.
 func ParseTxMessageType(msgBytes []byte) (byte, error) {
 	if len(msgBytes) < txMinMsgSize {
 		return 0, fmt.Errorf("tx message too short: %d bytes", len(msgBytes))
@@ -301,5 +391,9 @@ type txGetPayload struct {
 }
 
 type txTxPayload struct {
+	Txs []json.RawMessage `json:"txs"`
+}
+
+type txMempoolPayload struct {
 	Txs []json.RawMessage `json:"txs"`
 }

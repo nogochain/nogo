@@ -35,447 +35,277 @@ func defaultTestConsensusParams() *config.ConsensusParams {
 	}
 }
 
-// TestPIControllerBasic tests basic PI controller functionality
-func TestPIControllerBasic(t *testing.T) {
-	consensusParams := defaultTestConsensusParams()
-	adjuster := NewDifficultyAdjuster(consensusParams)
+// TestDeterministicDifficulty_Basic tests basic deterministic difficulty calculation
+func TestDeterministicDifficulty_Basic(t *testing.T) {
+	params := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(params)
 
 	parent := &Header{
 		Difficulty: big.NewInt(1000),
 		Time:       1000,
 	}
 
-	t.Run("OnTargetBlockTime", func(t *testing.T) {
-		adjuster.ResetIntegral()
-		newDiff := adjuster.CalcDifficulty(1017, parent)
+	// Call CalcDifficulty multiple times with same inputs
+	// Without ancestor function, integral defaults to 0 (P-only control)
+	result1 := adjuster.CalcDifficulty(1030, parent)
+	result2 := adjuster.CalcDifficulty(1030, parent)
 
-		diffChange := new(big.Int).Abs(new(big.Int).Sub(newDiff, big.NewInt(1000)))
-		maxAllowedChange := big.NewInt(100)
+	// Same inputs must produce same outputs (deterministic)
+	if result1.Cmp(result2) != 0 {
+		t.Errorf("Deterministic property violated: same inputs produced different results %d vs %d",
+			result1, result2)
+	}
 
-		if diffChange.Cmp(maxAllowedChange) > 0 {
-			t.Errorf("Expected difficulty to stay near 1000 when on target, got %d (change: %d)", newDiff, diffChange)
-		}
-	})
-
-	t.Run("BlocksTooSlow", func(t *testing.T) {
-		adjuster.ResetIntegral()
-		
-		// Create fresh parent to avoid contamination from previous tests
-		freshParent := &Header{
-			Difficulty: big.NewInt(1000),
-			Time:       2000,
-		}
-		
-		// First call to populate window (use target time)
-		_ = adjuster.CalcDifficulty(2017, freshParent)
-		freshParent.Time = 2017
-		
-		// Second call with slow block time (50s vs 17s target)
-		slowTime := freshParent.Time + 50
-		newDiff := adjuster.CalcDifficulty(slowTime, freshParent)
-
-		if newDiff.Cmp(big.NewInt(1000)) >= 0 {
-			t.Logf("Difficulty adjustment: 1000 -> %d", newDiff)
-			kp, ki, integral, avgTime := adjuster.GetParameters()
-			t.Logf("PI params: kp=%f, ki=%f, integral=%f, avgTime=%d", kp, ki, integral, avgTime)
-			t.Errorf("Expected difficulty to decrease when blocks too slow, got %d", newDiff)
-		}
-	})
-
-	t.Run("BlocksTooFast", func(t *testing.T) {
-		// Create fresh adjuster to avoid window contamination
-		freshAdjuster := NewDifficultyAdjuster(consensusParams)
-		
-		freshParent := &Header{
-			Difficulty: big.NewInt(1000),
-			Time:       3000,
-		}
-		
-		// First call to populate window (use target time)
-		_ = freshAdjuster.CalcDifficulty(3017, freshParent)
-		freshParent.Time = 3017
-		
-		// Second call with fast block time (5s vs 17s target)
-		fastTime := freshParent.Time + 5
-		newDiff := freshAdjuster.CalcDifficulty(fastTime, freshParent)
-
-		if newDiff.Cmp(big.NewInt(1000)) <= 0 {
-			t.Logf("Difficulty adjustment: 1000 -> %d", newDiff)
-			kp, ki, integral, avgTime := freshAdjuster.GetParameters()
-			t.Logf("PI params: kp=%f, ki=%f, integral=%f, avgTime=%d", kp, ki, integral, avgTime)
-			t.Errorf("Expected difficulty to increase when blocks too fast, got %d", newDiff)
-		}
-	})
+	// Result must be within [0.5x, 2.0x] of parent
+	minExpected := new(big.Int).Div(parent.Difficulty, big.NewInt(2))
+	maxExpected := new(big.Int).Mul(parent.Difficulty, big.NewInt(2))
+	if result1.Cmp(minExpected) < 0 {
+		t.Errorf("Difficulty %d below minimum %d", result1, minExpected)
+	}
+	if result1.Cmp(maxExpected) > 0 {
+		t.Errorf("Difficulty %d above maximum %d", result1, maxExpected)
+	}
 }
 
-// TestPIControllerIntegralAccumulation tests integral term accumulation
-func TestPIControllerIntegralAccumulation(t *testing.T) {
-	consensusParams := defaultTestConsensusParams()
-	adjuster := NewDifficultyAdjuster(consensusParams)
-	adjuster.ResetIntegral()
+// TestDeterministicDifficulty_OnTarget tests difficulty stays near parent when on target
+func TestDeterministicDifficulty_OnTarget(t *testing.T) {
+	params := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(params)
 
 	parent := &Header{
 		Difficulty: big.NewInt(1000),
 		Time:       1000,
 	}
 
-	initialIntegral := adjuster.GetIntegralValue()
-	if initialIntegral != 0.0 {
-		t.Errorf("Expected initial integral to be 0, got %f", initialIntegral)
-	}
+	// 30s block time = target → difficulty should stay near 1000
+	newDiff := adjuster.CalcDifficulty(1030, parent)
 
-	for i := 0; i < 5; i++ {
-		parent.Time += 25
-		newDiff := adjuster.CalcDifficulty(parent.Time+25, parent)
-		parent.Difficulty = newDiff
+	// Without ancestor, integral=0, P-only control with error ≈ (30-30)/30 = 0
+	// multiplier ≈ 1 - (0.15*0 + 0.03*0) = 1.0
+	if newDiff.Cmp(big.NewInt(1000)) != 0 {
+		t.Errorf("Expected difficulty near 1000 when on target, got %d", newDiff)
 	}
-
-	finalIntegral := adjuster.GetIntegralValue()
-	if finalIntegral <= initialIntegral {
-		t.Errorf("Expected integral to accumulate when blocks consistently too slow, got %f", finalIntegral)
-	}
-
-	t.Logf("Integral accumulated from %f to %f over 5 blocks", initialIntegral, finalIntegral)
 }
 
-// TestPIControllerAntiWindup tests integral anti-windup protection
-func TestPIControllerAntiWindup(t *testing.T) {
-	consensusParams := defaultTestConsensusParams()
-	adjuster := NewDifficultyAdjuster(consensusParams)
-	adjuster.ResetIntegral()
+// TestDeterministicDifficulty_SlowBlocks tests difficulty decreases when blocks are slow
+func TestDeterministicDifficulty_SlowBlocks(t *testing.T) {
+	params := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(params)
 
 	parent := &Header{
 		Difficulty: big.NewInt(1000),
 		Time:       1000,
 	}
 
-	for i := 0; i < 100; i++ {
-		parent.Time += 50
-		newDiff := adjuster.CalcDifficulty(parent.Time+50, parent)
-		parent.Difficulty = newDiff
+	// 120s block time = 4x target → difficulty should decrease
+	newDiff := adjuster.CalcDifficulty(1120, parent)
+
+	if newDiff.Cmp(parent.Difficulty) >= 0 {
+		t.Errorf("Expected difficulty decrease for slow blocks, got increase: %d -> %d",
+			parent.Difficulty, newDiff)
 	}
 
-	integralValue := adjuster.GetIntegralValue()
-	// New anti-windup clamp is ±3.0 (was ±10.0)
-	if integralValue > 3.0 {
-		t.Errorf("Expected integral to be clamped at 3.0, got %f", integralValue)
+	// Must not drop below 50% of parent
+	minAllowed := new(big.Int).Div(parent.Difficulty, big.NewInt(2))
+	if newDiff.Cmp(minAllowed) < 0 {
+		t.Errorf("Difficulty %d dropped below 50%% floor %d", newDiff, minAllowed)
 	}
-
-	if integralValue < 2.5 {
-		t.Errorf("Expected integral to be near upper bound, got %f", integralValue)
-	}
-
-	t.Logf("Integral clamped at %f after 100 iterations", integralValue)
 }
 
-// TestPIControllerConvergence tests convergence to target block time
-func TestPIControllerConvergence(t *testing.T) {
-	consensusParams := defaultTestConsensusParams()
-	adjuster := NewDifficultyAdjuster(consensusParams)
-	adjuster.ResetIntegral()
+// TestDeterministicDifficulty_FastBlocks tests difficulty increases when blocks are fast
+func TestDeterministicDifficulty_FastBlocks(t *testing.T) {
+	params := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(params)
 
 	parent := &Header{
 		Difficulty: big.NewInt(1000),
 		Time:       1000,
 	}
 
-	targetTime := consensusParams.BlockTimeTargetSeconds
-	var difficulties []*big.Int
+	// 5s block time = faster than target → difficulty should increase
+	newDiff := adjuster.CalcDifficulty(1005, parent)
 
+	if newDiff.Cmp(parent.Difficulty) <= 0 {
+		t.Errorf("Expected difficulty increase for fast blocks, got %d -> %d",
+			parent.Difficulty, newDiff)
+	}
+
+	// Must not exceed 2x of parent
+	maxAllowed := new(big.Int).Mul(parent.Difficulty, big.NewInt(2))
+	if newDiff.Cmp(maxAllowed) > 0 {
+		t.Errorf("Difficulty %d exceeded 2x floor %d", newDiff, maxAllowed)
+	}
+}
+
+// TestDeterministicDifficulty_Genesis tests genesis block returns minimum difficulty
+func TestDeterministicDifficulty_Genesis(t *testing.T) {
+	params := defaultTestConsensusParams()
+	params.MinDifficulty = 5
+	adjuster := NewDifficultyAdjuster(params)
+
+	// Nil parent → genesis
+	result := adjuster.CalcDifficulty(100, nil)
+	expected := big.NewInt(int64(params.MinDifficulty))
+	if result.Cmp(expected) != 0 {
+		t.Errorf("Expected minimum difficulty %d for genesis, got %d", expected, result)
+	}
+}
+
+// TestDeterministicDifficulty_Boundaries tests boundary conditions
+func TestDeterministicDifficulty_Boundaries(t *testing.T) {
+	params := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(params)
+
+	// Test with minimum difficulty parent
+	minParent := &Header{
+		Difficulty: big.NewInt(1),
+		Time:       1000,
+	}
+
+	result := adjuster.CalcDifficulty(1001, minParent)
+	if result.Cmp(big.NewInt(1)) < 0 {
+		t.Errorf("Difficulty %d below minimum", result)
+	}
+
+	// Test with extreme time difference (very slow)
+	slowParent := &Header{
+		Difficulty: big.NewInt(1000),
+		Time:       1000,
+	}
+	slowResult := adjuster.CalcDifficulty(1000+3600*2, slowParent) // 2 hours
+	if slowResult.Cmp(big.NewInt(0)) <= 0 {
+		t.Errorf("Difficulty must be positive, got %d", slowResult)
+	}
+	// Must not drop below 50%
+	minAllowed := new(big.Int).Div(slowParent.Difficulty, big.NewInt(2))
+	if slowResult.Cmp(minAllowed) < 0 {
+		t.Errorf("Difficulty %d dropped below floor %d", slowResult, minAllowed)
+	}
+}
+
+// TestDeterministicDifficulty_WithChainAncestor tests full deterministic
+// difficulty calculation with a chain ancestor function.
+func TestDeterministicDifficulty_WithChainAncestor(t *testing.T) {
+	params := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(params)
+
+	// Create a mock chain: 20 blocks with ~30s spacing (on target)
+	blocks := make([]*Header, 20)
 	for i := 0; i < 20; i++ {
-		newDiff := adjuster.CalcDifficulty(parent.Time+uint64(targetTime), parent)
-		difficulties = append(difficulties, newDiff)
-		parent.Difficulty = newDiff
-		parent.Time += uint64(targetTime)
-	}
-
-	stableCount := 0
-	for i := 1; i < len(difficulties); i++ {
-		diff := new(big.Int).Abs(new(big.Int).Sub(difficulties[i], difficulties[i-1]))
-		if diff.Cmp(big.NewInt(10)) <= 0 {
-			stableCount++
-		}
-	}
-
-	if stableCount < len(difficulties)-5 {
-		t.Errorf("Expected difficulty to stabilize, but had %d unstable adjustments out of %d", len(difficulties)-stableCount, len(difficulties))
-	}
-
-	t.Logf("Difficulty stabilized after %d blocks", len(difficulties)-stableCount)
-}
-
-// TestPIControllerParameters tests PI controller parameter access
-func TestPIControllerParameters(t *testing.T) {
-	consensusParams := defaultTestConsensusParams()
-	adjuster := NewDifficultyAdjuster(consensusParams)
-
-	kp, ki, integral, avgTime := adjuster.GetParameters()
-
-	// Kp is now fixed at 0.15 (was config.MaxDifficultyChangePercent/100=0.5)
-	if kp != 0.15 {
-		t.Errorf("Expected Kp to be 0.15, got %f", kp)
-	}
-
-	// Ki is now fixed at 0.03 (was 0.1)
-	if ki != 0.03 {
-		t.Errorf("Expected Ki to be 0.03, got %f", ki)
-	}
-
-	if integral != 0.0 {
-		t.Errorf("Expected initial integral to be 0.0, got %f", integral)
-	}
-
-	if avgTime != 0 {
-		t.Errorf("Expected initial average block time to be 0, got %d", avgTime)
-	}
-
-	adjuster.SetIntegralGain(0.05)
-	_, newKi, _, _ := adjuster.GetParameters()
-	if newKi != 0.05 {
-		t.Errorf("Expected Ki to be updated to 0.05, got %f", newKi)
-	}
-}
-
-// TestPIControllerBoundaryConditions tests boundary condition enforcement
-func TestPIControllerBoundaryConditions(t *testing.T) {
-	consensusParams := defaultTestConsensusParams()
-	adjuster := NewDifficultyAdjuster(consensusParams)
-	adjuster.ResetIntegral()
-
-	t.Run("MinimumDifficulty", func(t *testing.T) {
-		parent := &Header{
-			Difficulty: big.NewInt(1),
-			Time:       1000,
-		}
-
-		newDiff := adjuster.CalcDifficulty(1050, parent)
-		if newDiff.Cmp(big.NewInt(int64(consensusParams.MinDifficulty))) < 0 {
-			t.Errorf("Expected difficulty >= minimum, got %d", newDiff)
-		}
-	})
-
-	t.Run("MaximumDifficulty", func(t *testing.T) {
-		maxDiff := new(big.Int).Lsh(big.NewInt(1), 256)
-		parentDiff := new(big.Int).Sub(maxDiff, big.NewInt(100))
-		parent := &Header{
-			Difficulty: parentDiff,
-			Time:       1000,
-		}
-
-		newDiff := adjuster.CalcDifficulty(1001, parent)
-		if newDiff.Cmp(maxDiff) > 0 {
-			t.Errorf("Expected difficulty <= maximum, got %d", newDiff)
-		}
-	})
-
-	t.Run("MaximumIncrease", func(t *testing.T) {
-		parent := &Header{
+		blocks[i] = &Header{
+			Number:     big.NewInt(int64(i)),
+			Time:       uint64(1000 + uint64(i)*30),
 			Difficulty: big.NewInt(1000),
-			Time:       1000,
 		}
+	}
 
-		newDiff := adjuster.CalcDifficulty(1001, parent)
-		maxAllowed := new(big.Int).Mul(parent.Difficulty, big.NewInt(2))
-		if newDiff.Cmp(maxAllowed) > 0 {
-			t.Errorf("Expected difficulty <= 2x parent, got %d vs max %d", newDiff, maxAllowed)
+	// Set ancestor function
+	adjuster.SetAncestorFunc(func(height uint64) *Header {
+		if height < uint64(len(blocks)) {
+			return blocks[height]
 		}
+		return nil
 	})
+
+	parent := blocks[19]
+	// 30s from parent → on target
+	result1 := adjuster.CalcDifficulty(parent.Time+30, parent)
+
+	// Without ancestor function (reset), result should differ slightly
+	// because integral is not computed from chain data
+	adjuster2 := NewDifficultyAdjuster(params)
+	result2 := adjuster2.CalcDifficulty(parent.Time+30, parent)
+
+	// With ancestor, the chain integral provides additional correction
+	// Both results must be valid (within bounds)
+	if result1.Cmp(big.NewInt(0)) <= 0 {
+		t.Errorf("Deterministic result must be positive, got %d", result1)
+	}
+	if result2.Cmp(big.NewInt(0)) <= 0 {
+		t.Errorf("Fallback result must be positive, got %d", result2)
+	}
+
+	// Both must be within [0.5x, 2.0x]
+	minExpected := new(big.Int).Div(parent.Difficulty, big.NewInt(2))
+	maxExpected := new(big.Int).Mul(parent.Difficulty, big.NewInt(2))
+	if result1.Cmp(minExpected) < 0 || result1.Cmp(maxExpected) > 0 {
+		t.Errorf("Deterministic result %d out of bounds [%d, %d]",
+			result1, minExpected, maxExpected)
+	}
 }
 
-// TestPIControllerReset tests integral reset functionality
-func TestPIControllerReset(t *testing.T) {
-	consensusParams := defaultTestConsensusParams()
-	adjuster := NewDifficultyAdjuster(consensusParams)
-	adjuster.ResetIntegral()
+// TestDeterministicDifficulty_DoubleInvocation tests that calling CalcDifficulty
+// twice with the same inputs produces the same result (no state contamination)
+func TestDeterministicDifficulty_DoubleInvocation(t *testing.T) {
+	params := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(params)
 
 	parent := &Header{
 		Difficulty: big.NewInt(1000),
 		Time:       1000,
 	}
 
-	for i := 0; i < 10; i++ {
-		parent.Time += 8
-		newDiff := adjuster.CalcDifficulty(parent.Time+8, parent)
-		parent.Difficulty = newDiff
-	}
+	// First call
+	first := adjuster.CalcDifficulty(1030, parent)
 
-	integralBefore := adjuster.GetIntegralValue()
-	if integralBefore == 0.0 {
-		t.Errorf("Expected integral to be non-zero before reset, got %f", integralBefore)
-	}
+	// Second call with SAME parent (simulating fork validation scenario)
+	second := adjuster.CalcDifficulty(1030, parent)
 
-	adjuster.ResetIntegral()
-	integralAfter := adjuster.GetIntegralValue()
-	if integralAfter != 0.0 {
-		t.Errorf("Expected integral to be 0.0 after reset, got %f", integralAfter)
+	if first.Cmp(second) != 0 {
+		t.Errorf("State contamination detected: first call=%d, second call=%d (must be identical)",
+			first, second)
 	}
-
-	t.Logf("Integral reset from %f to %f", integralBefore, integralAfter)
 }
 
-// TestPIControllerValidation tests difficulty validation
-func TestPIControllerValidation(t *testing.T) {
-	consensusParams := defaultTestConsensusParams()
-	adjuster := NewDifficultyAdjuster(consensusParams)
+// TestDeterministicDifficulty_ValidateDifficulty tests the ValidateDifficulty method
+func TestDeterministicDifficulty_ValidateDifficulty(t *testing.T) {
+	params := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(params)
 
 	parent := &Header{
 		Difficulty: big.NewInt(1000),
 		Time:       1000,
 	}
 
-	t.Run("ValidDifficulty", func(t *testing.T) {
-		valid := adjuster.ValidateDifficulty(big.NewInt(1000), parent)
-		if !valid {
-			t.Error("Expected valid difficulty to pass validation")
-		}
-	})
+	// Valid difficulty
+	if !adjuster.ValidateDifficulty(big.NewInt(1000), parent) {
+		t.Error("Difficulty 1000 should be valid")
+	}
 
-	t.Run("NilDifficulty", func(t *testing.T) {
-		valid := adjuster.ValidateDifficulty(nil, parent)
-		if valid {
-			t.Error("Expected nil difficulty to fail validation")
-		}
-	})
+	// Zero difficulty should be invalid
+	if adjuster.ValidateDifficulty(big.NewInt(0), parent) {
+		t.Error("Zero difficulty should be invalid")
+	}
 
-	t.Run("ZeroDifficulty", func(t *testing.T) {
-		valid := adjuster.ValidateDifficulty(big.NewInt(0), parent)
-		if valid {
-			t.Error("Expected zero difficulty to fail validation")
-		}
-	})
+	// Negative difficulty should be invalid
+	if adjuster.ValidateDifficulty(big.NewInt(-1), parent) {
+		t.Error("Negative difficulty should be invalid")
+	}
 
-	t.Run("BelowMinimum", func(t *testing.T) {
-		valid := adjuster.ValidateDifficulty(big.NewInt(int64(consensusParams.MinDifficulty)-1), parent)
-		if valid {
-			t.Error("Expected below-minimum difficulty to fail validation")
-		}
-	})
+	// Very high difficulty should be invalid (exceeds tolerance)
+	if adjuster.ValidateDifficulty(big.NewInt(1000000), parent) {
+		t.Error("Very high difficulty should be invalid")
+	}
+
+	// Nil parent should still validate basic checks
+	if !adjuster.ValidateDifficulty(big.NewInt(50), nil) {
+		t.Error("Difficulty 50 should be valid with nil parent")
+	}
+	if adjuster.ValidateDifficulty(big.NewInt(-5), nil) {
+		t.Error("Negative difficulty should be invalid even with nil parent")
+	}
 }
 
-// TestSlidingWindowAverage tests the sliding window average calculation
-func TestSlidingWindowAverage(t *testing.T) {
-	consensusParams := defaultTestConsensusParams()
-	adjuster := NewDifficultyAdjuster(consensusParams)
-	adjuster.ResetIntegral()
+// TestDeterministicDifficulty_Parameters tests PI controller parameters
+func TestDeterministicDifficulty_Parameters(t *testing.T) {
+	params := defaultTestConsensusParams()
+	adjuster := NewDifficultyAdjuster(params)
 
-	parent := &Header{
-		Difficulty: big.NewInt(1000),
-		Time:       1000,
+	kp, ki := adjuster.GetParameters()
+	if kp != defaultKp {
+		t.Errorf("Expected Kp=%f, got %f", defaultKp, kp)
 	}
-
-	size, fill, avgTime := adjuster.GetWindowStats()
-	if size != 10 {
-		t.Errorf("Expected window size 10, got %d", size)
+	if ki != defaultKi {
+		t.Errorf("Expected Ki=%f, got %f", defaultKi, ki)
 	}
-	if fill != 0 {
-		t.Errorf("Expected initial fill 0, got %d", fill)
-	}
-	if avgTime != 0 {
-		t.Errorf("Expected initial average time 0, got %d", avgTime)
-	}
-
-	currentTime := parent.Time
-	for i := 0; i < 5; i++ {
-		currentTime += 20
-		adjuster.CalcDifficulty(currentTime, parent)
-		parent.Time = currentTime
-	}
-
-	size, fill, avgTime = adjuster.GetWindowStats()
-	if fill != 5 {
-		t.Errorf("Expected fill 5 after 5 blocks, got %d", fill)
-	}
-	if avgTime != 20 {
-		t.Errorf("Expected average time 20, got %d", avgTime)
-	}
-
-	for i := 0; i < 10; i++ {
-		currentTime += 15
-		adjuster.CalcDifficulty(currentTime, parent)
-		parent.Time = currentTime
-	}
-
-	size, fill, avgTime = adjuster.GetWindowStats()
-	if fill != 10 {
-		t.Errorf("Expected fill 10 (window size), got %d", fill)
-	}
-	if avgTime < 15 || avgTime > 20 {
-		t.Errorf("Expected average time between 15 and 20, got %d", avgTime)
-	}
-
-	t.Logf("Window stats: size=%d, fill=%d, avgTime=%d", size, fill, avgTime)
-}
-
-// TestDifficultySmoothTransition tests that difficulty transitions smoothly
-func TestDifficultySmoothTransition(t *testing.T) {
-	consensusParams := defaultTestConsensusParams()
-	adjuster := NewDifficultyAdjuster(consensusParams)
-	adjuster.ResetIntegral()
-
-	parent := &Header{
-		Difficulty: big.NewInt(1000),
-		Time:       1000,
-	}
-
-	prevDiff := parent.Difficulty
-	maxJump := big.NewInt(0)
-	currentTime := parent.Time
-
-	for i := 0; i < 20; i++ {
-		currentTime += 17
-		newDiff := adjuster.CalcDifficulty(currentTime, parent)
-		
-		jump := new(big.Int).Abs(new(big.Int).Sub(newDiff, prevDiff))
-		if jump.Cmp(maxJump) > 0 {
-			maxJump = jump
-		}
-		
-		parent.Difficulty = newDiff
-		parent.Time = currentTime
-		prevDiff = newDiff
-	}
-
-	maxAllowedJump := big.NewInt(1000)
-	if maxJump.Cmp(maxAllowedJump) > 0 {
-		t.Errorf("Difficulty jump too large: %d (max allowed: %d)", maxJump, maxAllowedJump)
-	}
-
-	t.Logf("Maximum difficulty jump: %d over 20 blocks", maxJump)
-}
-
-// TestBoundaryConditions tests boundary condition enforcement
-func TestBoundaryConditions(t *testing.T) {
-	consensusParams := defaultTestConsensusParams()
-	adjuster := NewDifficultyAdjuster(consensusParams)
-	adjuster.ResetIntegral()
-
-	t.Run("MaximumDecrease", func(t *testing.T) {
-		parent := &Header{
-			Difficulty: big.NewInt(1000),
-			Time:       1000,
-		}
-
-		parent.Time += 100
-		newDiff := adjuster.CalcDifficulty(parent.Time, parent)
-
-		minAllowed := new(big.Int).Div(parent.Difficulty, big.NewInt(2))
-		if newDiff.Cmp(minAllowed) < 0 {
-			t.Errorf("Expected difficulty >= 50%% of parent, got %d vs %d", newDiff, minAllowed)
-		}
-	})
-
-	t.Run("MaximumIncrease", func(t *testing.T) {
-		parent := &Header{
-			Difficulty: big.NewInt(1000),
-			Time:       1000,
-		}
-
-		parent.Time += 1
-		newDiff := adjuster.CalcDifficulty(parent.Time, parent)
-
-		maxAllowed := new(big.Int).Mul(parent.Difficulty, big.NewInt(2))
-		if newDiff.Cmp(maxAllowed) > 0 {
-			t.Errorf("Expected difficulty <= 200%% of parent, got %d vs %d", newDiff, maxAllowed)
-		}
-	})
 }

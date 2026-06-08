@@ -19,6 +19,7 @@ package core
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -543,14 +544,34 @@ func (c *Chain) CalcNextDifficulty(latest *Block, currentTime int64) uint32 {
 	}
 	c.diffCacheMu.Unlock()
 
-	// Cache miss: calculate next difficulty using PI controller
+	// Cache miss: calculate next difficulty using deterministic PI controller
 	c.mu.RLock()
-	calc := nogopow.NewDifficultyCalculator(&config.ConsensusParams{
+	params := &config.ConsensusParams{
 		BlockTimeTargetSeconds:     c.consensus.BlockTimeTargetSeconds,
 		MaxDifficultyChangePercent: c.consensus.MaxDifficultyChangePercent,
 		MinDifficulty:              c.consensus.MinDifficulty,
-	})
+	}
 	c.mu.RUnlock()
+
+	calc := nogopow.NewDifficultyCalculator(params)
+
+	// Set ancestor function for deterministic difficulty calculation.
+	// This ensures all nodes compute the exact same difficulty from the
+	// same chain state, preventing validator state contamination.
+	calc.SetAncestorFunc(func(height uint64) *nogopow.Header {
+		block, ok := c.GetBlock(height)
+		if !ok || block == nil {
+			return nil
+		}
+		var prevHash nogopow.Hash
+		copy(prevHash[:], block.Header.PrevHash)
+		return &nogopow.Header{
+			Number:     big.NewInt(int64(block.GetHeight())),
+			Time:       uint64(block.Header.TimestampUnix),
+			Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
+			ParentHash: prevHash,
+		}
+	})
 
 	// Convert block to BlockHeader format
 	parentHeader := &nogopow.BlockHeader{
@@ -735,6 +756,19 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 	if err := chain.initAddressIndexLocked(); err != nil {
 		return nil, fmt.Errorf("init address index: %w", err)
 	}
+
+	// CRITICAL: Recalculate canonical work and set TotalWork on all blocks
+	// After loading from storage, canonicalWork=0 and blocks have empty TotalWork.
+	// Without this, the node reports work=0 to peers, causing TieBreaker to always
+	// prefer other chains and permanently lose fork resolution competitions.
+	// This is the same logic as reorganizeChainLocked (line 2496-2501).
+	chain.canonicalWork = big.NewInt(0)
+	for _, block := range chain.blocks {
+		work := WorkForDifficultyBits(block.Header.DifficultyBits)
+		chain.canonicalWork.Add(chain.canonicalWork, work)
+		block.TotalWork = chain.canonicalWork.String()
+	}
+	log.Printf("[Chain] Initialized chain work from %d blocks: totalWork=%s", len(chain.blocks), chain.canonicalWork.String())
 
 	// Process any orphan blocks loaded from storage
 	// This connects blocks that were downloaded but not yet added to canonical chain
@@ -1037,6 +1071,8 @@ func (c *Chain) currentHeight() uint64 {
 }
 
 // convertToNogopowHeader converts BlockHeader to nogopow.Header format
+// CRITICAL: Root must be StateRoot (world state MPT root), NOT zero value
+// This ensures SealHash calculation matches between miner and node
 func convertToNogopowHeader(h *BlockHeader, block *Block) *nogopow.Header {
 	if h == nil {
 		return nil
@@ -1060,11 +1096,19 @@ func convertToNogopowHeader(h *BlockHeader, block *Block) *nogopow.Header {
 		copy(txHash[:], h.MerkleRoot)
 	}
 
+	// CRITICAL: Load state root from BlockHeader.StateRoot
+	// This is essential for PoW verification - SealHash must match miner's calculation
+	var stateRoot nogopow.Hash
+	if len(h.StateRoot) > 0 {
+		copy(stateRoot[:], h.StateRoot)
+	}
+	// Note: If StateRoot is empty, stateRoot remains zero value (acceptable for genesis block)
+
 	return &nogopow.Header{
 		ParentHash: parentHash,
 		Coinbase:   coinbaseAddr,
-		Root:       nogopow.Hash{}, // State root not stored in BlockHeader
-		TxHash:     txHash,
+		Root:       stateRoot,      // FIXED: Use stateRoot, not zero value
+		TxHash:     txHash,         // Transactions root (Merkle tree root)
 		Number:     big.NewInt(int64(block.GetHeight())),
 		GasLimit:   0,
 		Time:       uint64(h.TimestampUnix),
@@ -2292,6 +2336,12 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	ancestorHeight := ancestor.GetHeight()
 	currentChainLen := len(c.blocks)
 
+	// Pre-allocate reverted/new block lists for chain_reorg event
+	var revertedBlocks []string
+	var revertedHeights []uint64
+	var newBlocks []string
+	var newHeights []uint64
+
 	if currentChainLen == 0 {
 		return fmt.Errorf("cannot reorganize empty chain")
 	}
@@ -2420,7 +2470,12 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	removeStart := int(ancestorHeight) + 1
 	if removeStart < currentChainLen {
 		oldCanonical := c.blocks[removeStart:]
-		for range oldCanonical {
+		// Save reverted block list for chain_reorg event
+		revertedBlocks = make([]string, 0, len(oldCanonical))
+		revertedHeights = make([]uint64, 0, len(oldCanonical))
+		for _, block := range oldCanonical {
+			revertedBlocks = append(revertedBlocks, hex.EncodeToString(block.Hash))
+			revertedHeights = append(revertedHeights, block.GetHeight())
 			// CRITICAL FIX: Do NOT delete old canonical blocks from blocksByHash.
 			// Children of these blocks (e.g., blocks from miners who built on
 			// this chain before the reorg) must be able to trace their parent
@@ -2514,6 +2569,32 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 	if c.syncNotifier != nil {
 		tip := c.blocks[len(c.blocks)-1]
 		go c.syncNotifier.OnChainReorganized(tip)
+	}
+
+	// Publish chain_reorg event - notify external systems (e.g. pool)
+	// Production-grade: event notification for pool reward rollback
+	if c.events != nil {
+		// Build new chain block list (from ancestor+1 to new tip)
+		newBlocks = make([]string, 0, len(newChain)-1)
+		newHeights = make([]uint64, 0, len(newChain)-1)
+		for i := 1; i < len(newChain); i++ { // skip ancestor
+			newBlocks = append(newBlocks, hex.EncodeToString(newChain[i].Hash))
+			newHeights = append(newHeights, newChain[i].GetHeight())
+		}
+
+		c.events.Publish(WSEvent{
+			Type: "chain_reorg",
+			Data: map[string]any{
+				"reverted_blocks":  revertedBlocks,
+				"reverted_heights": revertedHeights,
+				"new_blocks":       newBlocks,
+				"new_heights":      newHeights,
+				"reorg_depth":      len(revertedBlocks),
+				"new_tip_hash":     c.bestTipHash,
+				"new_tip_height":   c.blocks[len(c.blocks)-1].GetHeight(),
+				"ancestor_height":  ancestor.GetHeight(),
+			},
+		})
 	}
 
 	return nil
@@ -3064,16 +3145,54 @@ func verifyBlockPoWSeal(consensus ConsensusParams, block *Block, parent *Block, 
 	var parentHash nogopow.Hash
 	copy(parentHash[:], parent.Hash)
 
-	var blockHash nogopow.Hash
-	copy(blockHash[:], block.Hash)
+	// CRITICAL: Build complete header matching the miner's rlpEncode bytes.
+	// rlpEncode serializes ALL fields: ParentHash, Coinbase, Root, TxHash,
+	// Number, GasLimit, Time, Extra, Nonce, Difficulty.
+	// Missing any field produces a wrong SealHash, causing PoW verification
+	// to fail because the hash being verified differs from the miner's hash.
+	// CRITICAL: Use core.StringToAddress which correctly parses "NOGO..." addresses.
+	// Do NOT use nogopow.StringToAddress — it's a stub that returns a zero address,
+	// causing SealHash mismatch and PoW verification failure for all fork blocks.
+	addr, err := StringToAddress(block.MinerAddress)
+	if err != nil {
+		return fmt.Errorf("invalid miner address for PoW seal: %w", err)
+	}
+	powCoinbase := nogopow.Address(addr)
 
-	header := &nogopow.Header{
-		Number:     big.NewInt(int64(block.GetHeight())),
-		ParentHash: parentHash,
-		Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
+	var powMerkleRoot nogopow.Hash
+	copy(powMerkleRoot[:], block.Header.MerkleRoot)
+
+	// Load state root from block header
+	var stateRoot nogopow.Hash
+	if len(block.Header.StateRoot) == 32 {
+		copy(stateRoot[:], block.Header.StateRoot)
+	} else {
+		log.Printf("[Chain] WARNING: block %d has invalid StateRoot (len=%d), using zero value", block.GetHeight(), len(block.Header.StateRoot))
 	}
 
-	if err := engine.VerifySealWithBlockHash(header, blockHash); err != nil {
+	// Convert uint64 nonce to BlockNonce ([32]byte, little-endian first 8 bytes)
+	var nonce nogopow.BlockNonce
+	binary.LittleEndian.PutUint64(nonce[:8], block.Header.Nonce)
+
+	powHeader := &nogopow.Header{
+		ParentHash: parentHash,
+		Coinbase:   powCoinbase,
+		Root:       stateRoot,       // State root (World State MPT root)
+		TxHash:     powMerkleRoot,  // Transactions root (Merkle tree root)
+		Number:     big.NewInt(int64(block.GetHeight())),
+		Time:       uint64(block.Header.TimestampUnix),
+		Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
+		Nonce:      nonce,
+	}
+
+	// CRITICAL: Use SealHash (Keccak256 + RLP) for PoW verification, NOT block.Hash.
+	// block.Hash uses SHA256(header binary encoding) which is different from
+	// the Keccak256(RLP-encoded header) that miners use for proof-of-work.
+	// Using block.Hash here always produces a different PoW hash, causing
+	// all fork blocks to fail verification with "invalid seal".
+	blockHash := powHeader.Hash()
+
+	if err := engine.VerifySealWithBlockHash(powHeader, blockHash); err != nil {
 		return fmt.Errorf("NogoPow seal verification failed for block %d: %w", block.GetHeight(), err)
 	}
 
@@ -3455,7 +3574,8 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 			}
 			log.Printf("[Chain] Block %d (hash=%s) exists but differs from canonical at same height, treating as fork",
 				block.GetHeight(), hashHex[:16])
-			return c.intelligentForkDetectionLocked(block, hashHex)
+			// Directly use addForkBlockLocked, remove unsafe timestamp-based detection
+			return c.addForkBlockLocked(block, hashHex)
 		}
 
 		if block.GetHeight() == expectedHeight {
@@ -3520,8 +3640,10 @@ func (c *Chain) AddBlock(block *Block) (bool, error) {
 				block.GetHeight(), parentHashHex[:16])
 			return c.addForkBlockLocked(block, hashHex)
 		}
-		log.Printf("[Chain] Block %d < expected %d, using intelligent fork detection", block.GetHeight(), expectedHeight)
-		return c.intelligentForkDetectionLocked(block, hashHex)
+		log.Printf("[Chain] Block %d < expected %d, treating as fork",
+			block.GetHeight(), expectedHeight)
+		// Directly use addForkBlockLocked, remove unsafe timestamp-based detection
+		return c.addForkBlockLocked(block, hashHex)
 	} else if block.GetHeight() == expectedHeight+1 {
 		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 		_, parentExists := c.blocksByHash[parentHashHex]
@@ -3835,7 +3957,10 @@ func (c *Chain) isForkChainCompleteLocked(tip *Block) bool {
 	for steps := uint64(0); steps < maxSteps; steps++ {
 		hashHex := hex.EncodeToString(current.Hash)
 		if visited[hashHex] {
-			return true
+			// Cycle detected: data corruption or malicious blocks
+			// Log error and return false to reject invalid fork chain
+			log.Printf("[Chain] CRITICAL: fork chain has cycle at block %s, possible data corruption or malicious blocks", hashHex[:16])
+			return false // Chain is incomplete, reject processing
 		}
 		visited[hashHex] = true
 
@@ -4373,6 +4498,23 @@ func (c *Chain) addCanonicalBlockLocked(block *Block, hashHex string) (bool, err
 
 	log.Printf("[Chain] Block %d added to canonical chain (height: %d, hash: %s)", block.GetHeight(), height, hashHex[:16])
 
+	// CRITICAL: Publish new_block event for ALL blocks entering the canonical chain.
+	// Without this, WebSocket subscribers (e.g., mining pools) never receive
+	// notifications for HTTP-submitted blocks, only for P2P-synced blocks.
+	// This causes pools to mine on stale tips until the next 3s poll cycle.
+	if c.events != nil {
+		c.events.Publish(WSEvent{
+			Type: "new_block",
+			Data: map[string]any{
+				"height":         block.GetHeight(),
+				"hash":           hashHex,
+				"prevHash":       hex.EncodeToString(block.Header.PrevHash),
+				"difficultyBits": block.Header.DifficultyBits,
+				"txCount":        len(block.Transactions),
+			},
+		})
+	}
+
 	// Call onBlockAdded callback if set (e.g., for broadcasting blocks from mining pool)
 	if callback := c.GetOnBlockAdded(); callback != nil {
 		go callback(block)
@@ -4402,8 +4544,45 @@ func (c *Chain) extractTransactionIDs(txs []Transaction) []string {
 // Caller must hold c.mu lock.
 // NOTE: does NOT add to blocksByHash — AppendBlock already adds all blocks to blocksByHash.
 // addBlockReconnectLocked also adds to blocksByHash before calling this function.
+//
+// CRITICAL: Verifies PoW seal before storing. This prevents invalid blocks from
+// polluting forkBlocks and causing reorg failures downstream. Without this check,
+// unverified blocks from P2P peers accumulate in forkBlocks and fail reorg.
+// Parent lookup order: blocksByHash (main chain) → forkBlocks (fork chain).
+// If parent is not found (orphan scenario), PoW verification is deferred; the
+// block is stored but will be verified during reorg execution.
 func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 	height := block.GetHeight()
+
+	// CRITICAL: Verify PoW seal before storing to prevent invalid fork blocks
+	if height > 0 && len(block.Header.PrevHash) > 0 {
+		parentHashHex := hex.EncodeToString(block.Header.PrevHash)
+		parent, exists := c.blocksByHash[parentHashHex]
+		if !exists {
+			parentHeight := height - 1
+			if forkBlocksAtHeight, ok := c.forkBlocks[parentHeight]; ok {
+				for _, fb := range forkBlocksAtHeight {
+					if hex.EncodeToString(fb.Hash) == parentHashHex {
+						parent = fb
+						exists = true
+						break
+					}
+				}
+			}
+		}
+		if exists {
+			if err := verifyBlockPoWSeal(c.consensus, block, parent, c.getPowEngine()); err != nil {
+				log.Printf("[Chain] REJECTED fork block %d (hash=%s): PoW verification failed at storage: %v",
+					height, hashHex[:16], err)
+				return false, fmt.Errorf("fork block %d PoW verification failed: %w", height, err)
+			}
+			log.Printf("[Chain] Fork block %d (hash=%s) PoW verified during storage",
+				height, hashHex[:16])
+		} else {
+			log.Printf("[Chain] Fork block %d (hash=%s) parent not found, storing without immediate PoW verification (will verify during reorg)",
+				height, hashHex[:16])
+		}
+	}
 
 	existingForks := c.forkBlocks[height]
 	for _, existing := range existingForks {
@@ -4517,84 +4696,6 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 	return false, nil
 }
 
-// intelligentForkDetectionLocked implements intelligent fork detection logic.
-// Instead of immediately marking a lower-height block as a fork, it considers:
-// 1. Block work (does it have significant cumulative work?)
-// 2. Block timing (was it received within acceptable delay window?)
-// 3. Block validity (does it fit into known fork chains?)
-// This prevents false fork detection due to network latency.
-// Caller must hold c.mu lock
-func (c *Chain) intelligentForkDetectionLocked(block *Block, hashHex string) (bool, error) {
-	height := block.GetHeight()
-
-	log.Printf("[Chain] IntelligentForkDetection: block %d, current tip height=%d", height, len(c.blocks)-1)
-
-	// Check if this block could be part of a known fork chain
-	if c.isPartOfKnownForkLocked(block, hashHex) {
-		log.Printf("[Chain] Block %d is part of known fork chain, adding to fork blocks", height)
-		return c.addForkBlockLocked(block, hashHex)
-	}
-
-	// Check if block arrived within acceptable delay window (e.g., 2 block times)
-	// This accounts for network latency and prevents false fork detection
-	blockTime := time.Unix(block.Header.TimestampUnix, 0)
-	timeSinceBlock := time.Since(blockTime)
-	acceptableDelay := c.getBlockTime() * 2 // Allow 2 block times delay
-
-	if timeSinceBlock < acceptableDelay {
-		// Block is recent - likely a valid late-arriving block, not a fork
-		// Check if it has significant work to be considered
-		currentWork := c.canonicalWork
-		newWork := c.calculateCumulativeWorkLocked(block)
-
-		// If new block has comparable or more work, treat as potential fork
-		// Otherwise, it's likely just a stale/orphan block from network delay
-		// Use big.Int comparison to avoid overflow issues
-		// Calculate 90% threshold: threshold = currentWork * 90 / 100
-		threshold := new(big.Int).Mul(currentWork, big.NewInt(90))
-		threshold.Div(threshold, big.NewInt(100))
-
-		if newWork.Cmp(currentWork) >= 0 || newWork.Cmp(threshold) >= 0 {
-			// Has significant work (>= 90% of current chain or more)
-			// Treat as potential fork for proper handling
-			log.Printf("[Chain] Block %d received late (%v ago) but has significant work, treating as fork",
-				height, timeSinceBlock)
-			return c.addForkBlockLocked(block, hashHex)
-		} else {
-			// Low work block - likely stale, don't treat as fork
-			log.Printf("[Chain] Block %d received late (%v ago) with low work, treating as stale",
-				height, timeSinceBlock)
-			return false, nil
-		}
-	} else {
-		// Block is old - check if it's from a known fork or truly a new fork
-		log.Printf("[Chain] Block %d is old (%v ago), checking if it's a valid fork",
-			height, timeSinceBlock)
-
-		// For old blocks, always treat as fork to maintain chain integrity
-		// But log the event for monitoring
-		return c.addForkBlockLocked(block, hashHex)
-	}
-}
-
-// isPartOfKnownForkLocked checks if a block belongs to an existing fork chain.
-// Caller must hold c.mu lock
-func (c *Chain) isPartOfKnownForkLocked(block *Block, hashHex string) bool {
-	height := block.GetHeight()
-
-	// Check if we already have fork blocks at this height
-	if forks, exists := c.forkBlocks[height]; exists {
-		for _, fork := range forks {
-			if bytes.Equal(fork.Header.PrevHash, block.Header.PrevHash) {
-				// Same parent - likely part of this fork chain
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
 // getBlockTime returns the average block time in seconds.
 // This is used for timing-based fork detection.
 func (c *Chain) getBlockTime() time.Duration {
@@ -4604,60 +4705,75 @@ func (c *Chain) getBlockTime() time.Duration {
 // shouldSwitchBasedOnTieBreakerLocked determines if we should switch chains when work is equal
 // CRITICAL: Uses deterministic rules that produce the same result on all nodes
 // Rules (in order of priority):
-// 1. Older block timestamp wins (first-seen rule)
-// 2. Lower block hash wins (Bitcoin/Ethereum standard)
-// 3. More transactions wins (economic activity)
-// 4. Stay on current chain (default)
+// 1. Lower block hash wins (Bitcoin/Ethereum standard) - deterministic rule
+// 2. Total transaction fees wins (economic activity) - prevents miner manipulation
+// 3. Stay on current chain (default) - provides stability
 // Caller must hold c.mu lock
 func (c *Chain) shouldSwitchBasedOnTieBreakerLocked(newBlock, currentTip *Block) bool {
 	if newBlock == nil || currentTip == nil {
 		return false
 	}
 
-	// Rule 1: Older block timestamp wins (first-seen rule)
-	// The block that was created first is more likely to have propagated
-	if newBlock.Header.TimestampUnix < currentTip.Header.TimestampUnix {
-		log.Printf("[TieBreaker] Rule 1: new block is older (timestamp %d < %d), switching",
-			newBlock.Header.TimestampUnix, currentTip.Header.TimestampUnix)
-		return true
-	} else if currentTip.Header.TimestampUnix < newBlock.Header.TimestampUnix {
-		log.Printf("[TieBreaker] Rule 1: current block is older (timestamp %d < %d), staying",
-			currentTip.Header.TimestampUnix, newBlock.Header.TimestampUnix)
-		return false
-	}
-
-	// Rule 2: Lower block hash wins (Bitcoin/Ethereum standard)
+	// Rule 1: Lower block hash wins (Bitcoin/Ethereum standard)
 	// This is deterministic - all nodes will compute the same result
+	// Deterministic algorithm ensures all nodes reach consensus
 	newHash := newBlock.Hash
 	currentHash := currentTip.Hash
 	for i := 0; i < len(newHash) && i < len(currentHash); i++ {
 		if newHash[i] < currentHash[i] {
-			log.Printf("[TieBreaker] Rule 2: new block has lower hash (byte %d: %d < %d), switching",
+			log.Printf("[TieBreaker] Rule 1: new block has lower hash (byte %d: %d < %d), switching",
 				i, newHash[i], currentHash[i])
 			return true
 		} else if currentHash[i] < newHash[i] {
-			log.Printf("[TieBreaker] Rule 2: current block has lower hash (byte %d: %d < %d), staying",
+			log.Printf("[TieBreaker] Rule 1: current block has lower hash (byte %d: %d < %d), staying",
 				i, currentHash[i], newHash[i])
 			return false
 		}
 	}
 
-	// Rule 3: More transactions wins (economic activity)
-	// Block with more transactions represents more economic activity
-	if len(newBlock.Transactions) > len(currentTip.Transactions) {
-		log.Printf("[TieBreaker] Rule 3: new block has more transactions (%d > %d), switching",
-			len(newBlock.Transactions), len(currentTip.Transactions))
+	// Rule 2: Total transaction fees wins (economic activity)
+	// Using total fees instead of transaction count to prevent miner manipulation
+	// Prevents miner from manipulating transaction count to trigger reorg
+	newBlockFees := c.calculateTotalFeesLocked(newBlock)
+	currentTipFees := c.calculateTotalFeesLocked(currentTip)
+	if newBlockFees > currentTipFees {
+		log.Printf("[TieBreaker] Rule 2: new block has higher total fees (%d > %d), switching",
+			newBlockFees, currentTipFees)
 		return true
-	} else if len(currentTip.Transactions) > len(newBlock.Transactions) {
-		log.Printf("[TieBreaker] Rule 3: current block has more transactions (%d > %d), staying",
-			len(currentTip.Transactions), len(newBlock.Transactions))
+	} else if currentTipFees > newBlockFees {
+		log.Printf("[TieBreaker] Rule 2: current block has higher total fees (%d > %d), staying",
+			currentTipFees, newBlockFees)
 		return false
 	}
 
-	// Rule 4: Stay on current chain (default)
+	// Rule 3: Stay on current chain (default)
 	// This provides stability and prevents unnecessary reorgs
-	log.Printf("[TieBreaker] Rule 4: all rules equal, staying on current chain")
+	// Default rule prevents infinite reorgs when all tie-breakers are equal
+	log.Printf("[TieBreaker] Rule 3: all rules equal, staying on current chain")
 	return false
+}
+
+// calculateTotalFeesLocked calculates the total transaction fees in a block
+// This is used for tie-breaker decision to prevent miner manipulation
+// Caller must hold c.mu lock
+func (c *Chain) calculateTotalFeesLocked(block *Block) uint64 {
+	if block == nil || len(block.Transactions) == 0 {
+		return 0
+	}
+
+	totalFees := uint64(0)
+	for _, tx := range block.Transactions {
+		// NogoChain uses simple Fee field instead of Ethereum's GasPrice * GasLimit model
+		// Direct summation of all transaction fees in the block
+		fee := tx.Fee
+		// Prevent totalFees overflow
+		if fee > (math.MaxUint64 - totalFees) {
+			log.Printf("[Chain] WARNING: totalFees overflow, capping at max")
+			return math.MaxUint64
+		}
+		totalFees += fee
+	}
+	return totalFees
 }
 
 // calculateCumulativeWorkLocked calculates the cumulative work from genesis to the given block

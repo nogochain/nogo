@@ -106,8 +106,8 @@ const (
 	// defaultChainID is the default chain ID for NogoChain mainnet
 	defaultChainID = uint64(1)
 	// defaultDifficultyBits is the default difficulty bits for genesis block
-	// Set to 100 for CPU-minable genesis, PI controller will auto-adjust
-	defaultDifficultyBits = uint32(100)
+	// Set to 10 for easier CPU mining, PI controller will auto-adjust
+	defaultDifficultyBits = uint32(10)
 	// maxDifficultyBits is the maximum difficulty bits value (uint32 max)
 	// Mathematical safety: prevents overflow in difficulty calculations
 	maxDifficultyBits = uint32(4294967295)
@@ -174,10 +174,17 @@ type BlockHeader struct {
 	DifficultyBits uint32 `json:"difficultyBits"`
 	Difficulty     uint32 `json:"difficulty"`
 	Nonce          uint64 `json:"nonce"`
-	MerkleRoot     []byte `json:"merkleRoot,omitempty"`
+	StateRoot      []byte `json:"stateRoot"`  // State root hash (World State MPT root) - CRITICAL: no omitempty
+	MerkleRoot     []byte `json:"merkleRoot"` // Transactions root hash (Merkle tree root) - CRITICAL: no omitempty
 	Height         uint64 `json:"height,omitempty"`
 	MinerAddress   string `json:"minerAddress,omitempty"`
 }
+
+// NOTE: StateRoot and MerkleRoot MUST NOT use omitempty.
+// If they are empty (e.g., genesis block), they will be serialized as "" (empty string),
+// which deserializes to []byte{} (empty slice), which is the correct behavior.
+// Using omitempty causes these fields to be MISSING from JSON, leading to
+// SealHash mismatch and PoW verification failure for fork blocks.
 
 // HashHex returns the block hash as hex string
 // Note: BlockHeader doesn't store hash, this requires block context
@@ -191,15 +198,19 @@ func (h *BlockHeader) HashHex(blockHash []byte) string {
 // MarshalJSON implements custom JSON marshaling for BlockHeader
 // Production-grade: uses hex encoding for byte slices instead of base64
 // Security: prevents data corruption during network transmission
+// CRITICAL: StateRoot and MerkleRoot MUST be included even when empty.
+// Omitting them causes SealHash mismatch and PoW verification failure.
 func (h *BlockHeader) MarshalJSON() ([]byte, error) {
 	type Alias BlockHeader
 	return json.Marshal(&struct {
 		PrevHash   string `json:"prevHash"`
-		MerkleRoot string `json:"merkleRoot,omitempty"`
+		MerkleRoot string `json:"merkleRoot"` // NO omitempty - must always include
+		StateRoot  string `json:"stateRoot"` // NO omitempty - must always include
 		*Alias
 	}{
 		PrevHash:    hex.EncodeToString(h.PrevHash),
 		MerkleRoot: hex.EncodeToString(h.MerkleRoot),
+		StateRoot:  hex.EncodeToString(h.StateRoot), // CRITICAL: always include
 		Alias:       (*Alias)(h),
 	})
 }
@@ -207,11 +218,13 @@ func (h *BlockHeader) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON implements custom JSON unmarshaling for BlockHeader
 // Production-grade: uses hex decoding for byte slices instead of base64
 // Error handling: returns descriptive error for invalid hex strings
+// CRITICAL: Must decode StateRoot - omitting it causes SealHash mismatch and PoW verification failure
 func (h *BlockHeader) UnmarshalJSON(data []byte) error {
 	type Alias BlockHeader
 	aux := &struct {
 		PrevHash   string `json:"prevHash"`
-		MerkleRoot string `json:"merkleRoot,omitempty"`
+		MerkleRoot string `json:"merkleRoot"` // NO omitempty - must always decode
+		StateRoot  string `json:"stateRoot"` // NO omitempty - must always decode
 		*Alias
 	}{
 		Alias: (*Alias)(h),
@@ -237,6 +250,19 @@ func (h *BlockHeader) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("decode merkleRoot: %w", err)
 		}
 		h.MerkleRoot = merkleRoot
+	}
+	
+	// CRITICAL: Decode StateRoot from hex - MUST NOT be omitted
+	// If StateRoot is empty string, DecodeString returns nil, which is correct for genesis block
+	if aux.StateRoot != "" {
+		stateRoot, err := hex.DecodeString(aux.StateRoot)
+		if err != nil {
+			return fmt.Errorf("decode stateRoot: %w", err)
+		}
+		h.StateRoot = stateRoot
+	} else {
+		// Explicitly set to empty slice (not nil) for genesis block
+		h.StateRoot = []byte{}
 	}
 	
 	return nil
@@ -448,6 +474,8 @@ type blockLegacyJSON struct {
 	Difficulty     uint32        `json:"difficulty"`
 	Nonce          uint64        `json:"nonce"`
 	PrevHash       string        `json:"prevHash"`      // Hex-encoded in JSON
+	StateRoot      string        `json:"stateRoot"`      // CRITICAL: for PoW fork verification
+	MerkleRoot     string        `json:"merkleRoot"`     // Hex-encoded in JSON
 }
 
 // UnmarshalJSON implements custom JSON unmarshaling for backward compatibility
@@ -504,6 +532,26 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 	}
 	if legacy.Nonce != 0 && b.Header.Nonce == 0 {
 		b.Header.Nonce = legacy.Nonce
+	}
+
+	// CRITICAL: Migrate StateRoot from top-level to Header
+	// This is essential for PoW fork verification - without it, fork blocks
+	// have empty StateRoot, causing SealHash mismatch and verification failure.
+	if legacy.StateRoot != "" && len(b.Header.StateRoot) == 0 {
+		stateRoot, err := hex.DecodeString(legacy.StateRoot)
+		if err != nil {
+			return fmt.Errorf("decode stateRoot: %w", err)
+		}
+		b.Header.StateRoot = stateRoot
+	}
+
+	// Migrate MerkleRoot from top-level to Header if not already set
+	if legacy.MerkleRoot != "" && len(b.Header.MerkleRoot) == 0 {
+		merkleRoot, err := hex.DecodeString(legacy.MerkleRoot)
+		if err != nil {
+			return fmt.Errorf("decode merkleRoot: %w", err)
+		}
+		b.Header.MerkleRoot = merkleRoot
 	}
 
 	return nil
@@ -772,6 +820,7 @@ func (t Transaction) verifyTransfer() error {
 // MarshalJSON implements custom JSON marshaling for Block
 // Production-grade: includes all fields needed for block explorers and wallets
 // Security: uses hex encoding for byte slices instead of base64 to prevent data corruption
+// CRITICAL: Must include stateRoot for P2P broadcast and fork block verification
 func (b *Block) MarshalJSON() ([]byte, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -782,6 +831,7 @@ func (b *Block) MarshalJSON() ([]byte, error) {
 
 	// Build response with all fields exposed
 	// Critical: use hex encoding for hash and prevHash to ensure correct deserialization
+	// CRITICAL: stateRoot must be included for P2P block propagation and fork verification
 	response := map[string]interface{}{
 		"version":        b.Header.Version,
 		"height":         b.GetHeight(),
@@ -791,6 +841,7 @@ func (b *Block) MarshalJSON() ([]byte, error) {
 		"difficultyBits": b.Header.DifficultyBits,
 		"difficulty":     b.Header.Difficulty,
 		"nonce":          b.Header.Nonce,
+		"stateRoot":     hex.EncodeToString(b.Header.StateRoot), // CRITICAL: for PoW fork verification
 		"merkleRoot":    hex.EncodeToString(b.Header.MerkleRoot),
 		"minerAddress":   b.MinerAddress,
 		"transactions":   txs,

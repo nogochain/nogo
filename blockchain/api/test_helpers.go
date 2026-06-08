@@ -228,6 +228,12 @@ func (m *mockBlockchain) GetConsensus() config.ConsensusParams {
 	return config.DefaultConfig().Consensus
 }
 
+// GetCurrentStateRoot returns empty state root for mock
+func (m *mockBlockchain) GetCurrentStateRoot() ([]byte, error) {
+	// Mock implementation: return zero hash as state root
+	return make([]byte, 32), nil
+}
+
 // SetOnMissingBlock sets the missing block callback (no-op for mock)
 func (m *mockBlockchain) SetOnMissingBlock(callback func(parentHash []byte, height uint64)) {
 }

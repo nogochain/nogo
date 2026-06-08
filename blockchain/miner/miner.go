@@ -500,8 +500,8 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 	}
 
 	if m.syncLoop != nil && !m.syncLoop.IsSynced() {
-		logf(colorBrightYellow, "⏸️ ", "Mining tick: node not fully synced (progress=%.2f%%), skipping mining to prevent orphan blocks",
-			m.syncLoop.SyncProgress()*100)
+		logf(colorBrightYellow, "⏸️ ", fmt.Sprintf("Mining tick: node not fully synced (progress=%.2f%%), skipping mining to prevent orphan blocks",
+			m.syncLoop.SyncProgress()*100))
 		return
 	}
 
@@ -530,8 +530,8 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 		timeSinceLastBlock := time.Since(time.Unix(int64(latestTimestamp), 0))
 		minInterval := time.Duration(config.DefaultTargetBlockTime*config.MinBlockIntervalFraction/100) * time.Second
 		if timeSinceLastBlock < minInterval {
-			logf(colorBrightYellow, "⏸️ ", "Mining tick: last block was %.1fs ago (minimum %.1fs), waiting...",
-				timeSinceLastBlock.Seconds(), minInterval.Seconds())
+			logf(colorBrightYellow, "⏸️ ", fmt.Sprintf("Mining tick: last block was %.1fs ago (minimum %.1fs), waiting...",
+				timeSinceLastBlock.Seconds(), minInterval.Seconds()))
 			return
 		}
 	}
@@ -565,8 +565,8 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 
 		if peersResponded && peerWork != nil {
 			if peerHeight > localHeight && peerWork.Cmp(localWork) > 0 {
-				logf(colorBrightYellow, "⏸️ ", "Mining tick: layer 2 fork (peer_h=%d work=%s > local=%s), deferring",
-					peerHeight, peerWork.String(), localWork.String())
+				logf(colorBrightYellow, "⏸️ ", fmt.Sprintf("Mining tick: layer 2 fork (peer_h=%d work=%s > local=%s), deferring",
+					peerHeight, peerWork.String(), localWork.String()))
 				if m.syncLoop != nil {
 					m.syncLoop.TriggerSyncCheck()
 				}
@@ -576,7 +576,7 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 			m.mu.Lock()
 			m.miningPermittedUntil = time.Now().Add(miningCooldownDuration)
 			m.mu.Unlock()
-			logf(colorBrightGreen, "✅ ", "Mining tick: layer 2 confirmed safe, granting %v permission", miningCooldownDuration)
+			logf(colorBrightGreen, "✅ ", fmt.Sprintf("Mining tick: layer 2 confirmed safe, granting %v permission", miningCooldownDuration))
 		} else {
 			peerTimeoutExceeded := time.Since(m.lastPeerResponseTime) > syncEventMaxGap
 			if !peerTimeoutExceeded {
@@ -584,8 +584,8 @@ func (m *Miner) handleMiningTick(ctx context.Context, force bool) {
 				m.prunePeerWorkCache()
 				return
 			}
-			logf(colorBrightYellow, "⚠️ ", "Mining tick: peers unresponsive for %.1f min, partition safeguard, mining anyway",
-				time.Since(m.lastPeerResponseTime).Minutes())
+			logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Mining tick: peers unresponsive for %.1f min, partition safeguard, mining anyway",
+				time.Since(m.lastPeerResponseTime).Minutes()))
 		}
 	} else {
 		logf(colorBrightYellow, "⚠️ ", "Mining tick: no peer API available, mining as solitary node")
@@ -858,11 +858,11 @@ func (m *Miner) MineOnce(ctx context.Context) (*core.Block, error) {
 	b, err := m.bc.MineTransfers(ctx, selected)
 	if err != nil {
 		if b != nil {
-			logf(colorBrightYellow, "⚠️ ", "Mined block stored as fork/error: %v (broadcasting anyway for reorg)", err)
+			logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Mined block stored as fork/error: %v (broadcasting anyway for reorg)", err))
 			go m.broadcastBlock(ctx, b)
 			return b, err
 		}
-		logf(colorRed, "❌ ", "Mine failed: %v", err)
+		logf(colorRed, "❌ ", fmt.Sprintf("Mine failed: %v", err))
 		return nil, err
 	}
 
@@ -873,9 +873,9 @@ func (m *Miner) MineOnce(ctx context.Context) (*core.Block, error) {
 	// Add mined block to local chain first before P2P broadcast.
 	// then broadcast to peers. PoW longest-chain resolves forks.
 	if accepted, addErr := m.bc.AddBlock(b); addErr != nil {
-		logf(colorBrightYellow, "⚠️ ", "Self-mined block add failed height %d: %v (broadcasting anyway)", b.Header.Height, addErr)
+		logf(colorBrightYellow, "⚠️ ", fmt.Sprintf("Self-mined block add failed height %d: %v (broadcasting anyway)", b.Header.Height, addErr))
 	} else if accepted {
-		logf(colorGreen, "✅ ", "Self-mined block added: height=%d hash=%x", b.Header.Height, b.Hash[:8])
+		logf(colorGreen, "✅ ", fmt.Sprintf("Self-mined block added: height=%d hash=%x", b.Header.Height, b.Hash[:8]))
 	}
 	go m.broadcastBlock(ctx, b)
 

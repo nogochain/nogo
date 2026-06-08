@@ -232,14 +232,27 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 	var powMerkleRoot nogopow.Hash
 	copy(powMerkleRoot[:], merkleRoot)
 
+	// Calculate state root from current chain state
+	stateRootBytes, err := c.store.CalculateStateRoot(c.state)
+	if err != nil {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("calculate state root: %w", err)
+	}
+	var stateRoot nogopow.Hash
+	copy(stateRoot[:], stateRootBytes)
+
 	header := &nogopow.Header{
 		Number:     big.NewInt(int64(newBlock.GetHeight())),
 		Time:       uint64(newBlock.Header.TimestampUnix),
 		ParentHash: parentHash,
 		Difficulty: nextDifficulty,
 		Coinbase:   powCoinbase,
-		Root:       powMerkleRoot,
+		Root:       stateRoot,      // State root (World State MPT root)
+		TxHash:     powMerkleRoot, // Transactions root (Merkle tree root)
 	}
+
+	// Store state root in block header
+	newBlock.Header.StateRoot = stateRootBytes
 
 	newBlock.Header.DifficultyBits = uint32(header.Difficulty.Uint64())
 
@@ -369,4 +382,17 @@ func addressesForBlock(b *Block) []string {
 		addresses = append(addresses, addr)
 	}
 	return addresses
+}
+
+// GetCurrentStateRoot returns the current state root (for block template creation)
+// This is used by the mining API to include StateRoot in the block template.
+// Production-grade: thread-safe, uses RLock for concurrent access.
+func (c *Chain) GetCurrentStateRoot() ([]byte, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Calculate state root from current state
+	// This is the StateRoot of the PREVIOUS block (before executing new transactions)
+	// The miner needs this to calculate the correct SealHash.
+	return c.store.CalculateStateRoot(c.state)
 }

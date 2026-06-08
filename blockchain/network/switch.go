@@ -118,13 +118,15 @@ type SwitchConfig struct {
 
 // NodeInfo holds metadata about a node for handshake and identification.
 // Extended with NAT awareness fields for relay support.
+// GenesisHash is used to prevent network splits due to different genesis configurations.
 type NodeInfo struct {
-	PubKey     string `json:"pubKey"`
-	Moniker    string `json:"moniker"`
-	Network    string `json:"network"`
-	Version    string `json:"version"`
-	ListenAddr string `json:"listenAddr"`
-	Channels   string `json:"channels"`
+	PubKey      string `json:"pubKey"`
+	Moniker     string `json:"moniker"`
+	Network     string `json:"network"`
+	Version     string `json:"version"`
+	ListenAddr  string `json:"listenAddr"`
+	Channels    string `json:"channels"`
+	GenesisHash string `json:"genesisHash"` // Genesis block hash for network isolation
 
 	// NAT awareness (for relay support)
 	NATType   string `json:"natType"`   // "Public", "NAT", or "" (unknown)
@@ -220,6 +222,7 @@ type Switch struct {
 	peers        *PeerSet
 	nodeID       string
 	chainID      string
+	genesisHash  string // Genesis block hash for network isolation
 	version      string
 	peerFilter   func(string) bool
 	listeners    []net.Listener
@@ -1797,6 +1800,32 @@ func (sw *Switch) handshakePeerWithTimeout(conn net.Conn, isInitiator bool, time
 		}
 	}
 
+	// Validate genesis hash to prevent network splits
+	// Nodes with different genesis blocks cannot communicate
+	sw.mu.RLock()
+	localGenesisHash := sw.genesisHash
+	sw.mu.RUnlock()
+
+	if localGenesisHash != "" && peerNI.GenesisHash != "" {
+		// Both have genesis hash, must match
+		if localGenesisHash != peerNI.GenesisHash {
+			log.Printf("[Switch] Genesis hash mismatch: local=%s, remote=%s",
+				localGenesisHash[:16], peerNI.GenesisHash[:16])
+			return NodeInfo{}, fmt.Errorf("genesis hash mismatch: local=%s, remote=%s",
+				localGenesisHash[:16], peerNI.GenesisHash[:16])
+		}
+		log.Printf("[Switch] Genesis hash verified: %s", localGenesisHash[:16])
+	} else if localGenesisHash != "" && peerNI.GenesisHash == "" {
+		// Peer did not send genesis hash (old node), reject connection
+		log.Printf("[Switch] Rejecting peer %s: does not support genesis hash verification (old protocol)",
+			peerNI.Moniker)
+		return NodeInfo{}, fmt.Errorf("peer does not support genesis hash verification (old protocol)")
+	} else if localGenesisHash == "" && peerNI.GenesisHash != "" {
+		// Local node doesn't have genesis hash yet (new node), accept but will verify later
+		log.Printf("[Switch] WARNING: local genesis hash not set yet, accepting peer %s with genesis hash %s",
+			peerNI.Moniker, peerNI.GenesisHash[:16])
+	}
+
 	return peerNI, nil
 }
 
@@ -2902,6 +2931,15 @@ func (sw *Switch) SetNodeInfo(nodeID, chainID, version string) {
 	sw.version = version
 }
 
+// SetGenesisHash sets the genesis block hash for network isolation.
+// This should be called before starting the switch to enable genesis hash verification.
+func (sw *Switch) SetGenesisHash(hash string) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	sw.genesisHash = hash
+	log.Printf("[Switch] Genesis hash set: %s", hash[:16])
+}
+
 // ID returns the local node's unique identifier.
 func (sw *Switch) ID() string {
 	sw.mu.RLock()
@@ -2918,6 +2956,7 @@ func (sw *Switch) SetPeerFilter(filter func(string) bool) {
 
 // filterPeer delegates to the user-defined filter or applies default logic.
 // buildLocalNodeInfo constructs our NodeInfo for the handshake.
+// Includes GenesisHash for network isolation.
 func (sw *Switch) buildLocalNodeInfo() NodeInfo {
 	pubKeyHex := hex.EncodeToString(sw.nodePrivKey.Public().(ed25519.PublicKey))
 	channels := sw.buildChannelsString()
@@ -2925,17 +2964,19 @@ func (sw *Switch) buildLocalNodeInfo() NodeInfo {
 	sw.mu.RLock()
 	nodeType := sw.nodeType
 	relayAddr := sw.relayAddr
+	genesisHash := sw.genesisHash
 	sw.mu.RUnlock()
 
 	return NodeInfo{
-		PubKey:     pubKeyHex,
-		Moniker:    sw.nodeID,
-		Network:    sw.chainID,
-		Version:    sw.version,
-		ListenAddr: sw.config.ExternalAddr,
-		Channels:   channels,
-		NATType:    nodeType.String(),
-		RelayAddr:  relayAddr,
+		PubKey:      pubKeyHex,
+		Moniker:     sw.nodeID,
+		Network:     sw.chainID,
+		Version:     sw.version,
+		ListenAddr:  sw.config.ExternalAddr,
+		Channels:    channels,
+		GenesisHash: genesisHash,
+		NATType:     nodeType.String(),
+		RelayAddr:   relayAddr,
 	}
 }
 
@@ -3843,6 +3884,31 @@ func (sw *Switch) Peers() []string {
 // GetActivePeers returns the list of connected peer addresses.
 func (sw *Switch) GetActivePeers() []string {
 	return sw.Peers()
+}
+
+// RequestMempoolSnapshot sends a mempool snapshot request to a connected peer.
+// The response is handled asynchronously by TxReactorHandler.OnMempoolResponse.
+// If no peers are connected, this is a no-op.
+func (sw *Switch) RequestMempoolSnapshot(ctx context.Context) error {
+	peers := sw.GetActivePeers()
+	if len(peers) == 0 {
+		log.Printf("[Switch] Mempool snapshot request skipped: no connected peers")
+		return nil
+	}
+
+	msg, err := reactor.BuildTxMempoolRequestMsg()
+	if err != nil {
+		return fmt.Errorf("build mempool request message: %w", err)
+	}
+
+	// Send to the first connected peer
+	peerID := peers[0]
+	if !sw.Send(peerID, mconnection.ChannelTx, msg) {
+		return fmt.Errorf("failed to send mempool request to peer %s", peerID)
+	}
+
+	log.Printf("[Switch] Mempool snapshot requested from peer %s", peerID)
+	return nil
 }
 
 // RemovePeer removes a peer by ID, satisfying the PeerAPI interface.

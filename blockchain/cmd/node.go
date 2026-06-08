@@ -55,6 +55,7 @@ type NodeConfig struct {
 	EnableRelayServer    bool
 	RelayServerPort      int
 	RelayServers         string
+	GenesisHash          string // Genesis block hash for network isolation
 }
 
 type Node struct {
@@ -80,8 +81,6 @@ type Node struct {
 	securityMgr *security.SecurityManager
 	discoverMgr *discover.Discover
 
-	pool *core.CandidatePool
-
 	networkChainWrapper *networkChainWrapper
 	syncReactorHandler  *reactor.SyncReactorHandler
 	txReactorHandler    *reactor.TxReactorHandler
@@ -92,6 +91,8 @@ type Node struct {
 	handlers            *reactor.ReactorHandlers
 
 	seedConsensus *forkresolution.SeedConsensusEngine
+
+	wsHub  *api.WSHub // WebSocket hub for real-time event notifications
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -119,6 +120,10 @@ func (n *Node) Start() error {
 
 	log := GetGlobalFormatter()
 
+	// Create WebSocket hub for real-time event notifications
+	// CRITICAL: Use the same instance for chain events and HTTP server
+	n.wsHub = api.NewWSHub(100)
+
 	if err := n.initializeComponents(); err != nil {
 		return fmt.Errorf("initialize components: %w", err)
 	}
@@ -140,8 +145,37 @@ func (n *Node) Start() error {
 		n.Shutdown()
 	}()
 
+	// Start background goroutine to wait for genesis block and set genesis hash
+	// This is needed for new nodes that don't have genesis block yet
+	n.wg.Add(1)
+	go n.waitForGenesisBlock()
+
 	<-n.ctx.Done()
 	return nil
+}
+
+// waitForGenesisBlock waits for the genesis block to be available and sets the genesis hash.
+// This is used for new nodes that join the network and don't have the genesis block yet.
+func (n *Node) waitForGenesisBlock() {
+	defer n.wg.Done()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			if genesisBlock, ok := n.chain.GetBlockByHeight(0); ok {
+				genesisHash := hex.EncodeToString(genesisBlock.Hash)
+				n.p2pSwitch.SetGenesisHash(genesisHash)
+				log.Printf("Node: genesis block received, set genesis hash: %s", genesisHash[:16])
+				return
+			}
+			log.Printf("Node: waiting for genesis block from network...")
+		}
+	}
 }
 
 func (n *Node) initializeComponents() error {
@@ -188,10 +222,6 @@ func (n *Node) initializeComponents() error {
 
 	n.orphanPool = utils.NewOrphanPool(100, 1*time.Hour)
 	n.validator = consensus.NewBlockValidator(chain.GetConsensus(), n.config.ChainID, nil)
-
-	candidatePool := core.NewCandidatePool()
-	candidatePool.SetChainReference(chain, core.NewWorkCalculator())
-	n.pool = candidatePool
 
 	mpSize := config.DefaultMempoolMax
 	n.mempool = mempool.NewMempool(
@@ -271,6 +301,41 @@ func (n *Node) initializeComponents() error {
 	n.p2pSwitch.SetSecurityManager(securityMgr)
 	n.p2pSwitch.SetNodeInfo(nodeID, fmt.Sprintf("%d", n.config.ChainID), config.NodeVersion)
 
+	// Set genesis hash for network isolation
+	// Priority: 1. Config file, 2. Database
+	var genesisHash string
+	var hashSource string
+
+	// 1. Try config file first
+	if n.config.GenesisHash != "" {
+		genesisHash = n.config.GenesisHash
+		hashSource = "config file"
+		log.Printf("Node: using genesis hash from config: %s", genesisHash[:16])
+	} else {
+		// 2. Try database
+		if genesisBlock, ok := n.chain.GetBlockByHeight(0); ok {
+			genesisHash = hex.EncodeToString(genesisBlock.Hash)
+			hashSource = "database"
+			log.Printf("Node: using genesis hash from database: %s", genesisHash[:16])
+		}
+	}
+
+	// 3. Validate and set genesis hash
+	if genesisHash != "" {
+		// Validate genesis hash format (should be 64 hex characters)
+		if len(genesisHash) != 64 {
+			return fmt.Errorf("invalid genesis hash length: expected 64 hex characters, got %d", len(genesisHash))
+		}
+		n.p2pSwitch.SetGenesisHash(genesisHash)
+		log.Printf("Node: genesis hash set (source: %s): %s", hashSource, genesisHash[:16])
+	} else {
+		// No genesis hash available, reject startup for mainnet (require explicit configuration)
+		if !n.isTestnet {
+			return fmt.Errorf("genesis hash not found: please specify GenesisHash in config file for mainnet nodes")
+		}
+		log.Printf("Node: WARNING - genesis hash not found (testnet mode), will try to receive from network")
+	}
+
 	// Initialize P2P peer discovery (DHT + DNS + mDNS)
 	n.initDiscovery(seeds)
 
@@ -280,10 +345,6 @@ func (n *Node) initializeComponents() error {
 	}
 	n.handlers = handlers
 
-	if n.pool != nil {
-		handlers.SetCandidatePool(n.pool)
-	}
-
 	n.syncReactorHandler = reactor.NewSyncReactorHandler(handlers)
 	n.txReactorHandler = reactor.NewTxReactorHandler(handlers)
 	n.blockReactorHandler = reactor.NewBlockReactorHandler(handlers)
@@ -291,12 +352,6 @@ func (n *Node) initializeComponents() error {
 	n.syncReactor, err = reactor.NewSyncReactor(n.syncReactorHandler)
 	if err != nil {
 		return fmt.Errorf("create sync reactor: %w", err)
-	}
-
-	if n.pool != nil {
-		if setErr := n.syncReactor.SetCandidatePool(n.pool); setErr != nil {
-			log.Printf("Node: warning - failed to set candidate pool on sync reactor: %v", setErr)
-		}
 	}
 
 	// Initialize seed consensus engine for inter-seed block finalization.
@@ -360,10 +415,6 @@ func (n *Node) initializeComponents() error {
 		n.securityMgr,
 	)
 
-	if n.pool != nil {
-		n.syncLoop.SetCandidatePool(n.pool)
-	}
-
 	n.networkChainWrapper.SetSyncLoop(n.syncLoop)
 
 	n.syncReactorHandler.SetSyncLoop(n.syncLoop)
@@ -400,10 +451,6 @@ func (n *Node) initializeComponents() error {
 		)
 		n.miner = minerImpl
 
-		if n.pool != nil {
-			minerImpl.SetCandidatePool(n.pool)
-		}
-
 		// CRITICAL: Set miner to reactor handlers after creation
 		// This enables verification coordination for P2P block processing
 		if n.blockReactorHandler != nil {
@@ -411,7 +458,11 @@ func (n *Node) initializeComponents() error {
 		}
 	}
 
-	n.chain.SetEventSink(api.NewWSHub(100))
+	// Set event sink for real-time notifications (e.g., chain_reorg events for mining pool)
+	// CRITICAL: Use the same WSHub instance created in Start() to ensure chain events reach WebSocket clients
+	if n.wsHub != nil {
+		n.chain.SetEventSink(n.wsHub)
+	}
 
 	n.chain.SetMempool(n.mempool)
 
@@ -483,7 +534,13 @@ func (n *Node) createHandler(switchAPI network.PeerAPI) http.Handler {
 	limiter := api.NewIPRateLimiter(n.config.RateLimitReqs, n.config.RateLimitBurst)
 	trustProxy := false
 	wsEnable := true
-	wsHub := api.NewWSHub(100)
+
+	// Use the same WSHub instance created in Start() to ensure chain events reach WebSocket clients
+	wsHub := n.wsHub
+	if wsHub == nil {
+		// Fallback: create new instance if not initialized (should not happen in production)
+		wsHub = api.NewWSHub(100)
+	}
 
 	txGossip := n.p2pSwitch != nil
 
@@ -502,9 +559,6 @@ func (n *Node) createHandler(switchAPI network.PeerAPI) http.Handler {
 		wsHub,
 	)
 
-	if n.pool != nil {
-		srv.SetCandidatePool(n.pool)
-	}
 	return srv.Routes()
 }
 
@@ -655,10 +709,6 @@ func (n *Node) Shutdown() {
 	if n.discoverMgr != nil {
 		n.discoverMgr.Stop()
 		log.Info("P2P discovery stopped")
-	}
-
-	if n.pool != nil {
-		n.pool.Stop()
 	}
 
 	if n.syncLoop != nil {

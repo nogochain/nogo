@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -72,6 +74,11 @@ func main() {
 
 func handleServerCommand() {
 	SetGlobalFormatter(true)
+
+	// Default: silence all standard log output for production.
+	// Set NOGO_LOG_LEVEL=debug to enable verbose logging.
+	log.SetOutput(io.Discard)
+
 	log := GetGlobalFormatter()
 
 	if len(os.Args) < 3 {

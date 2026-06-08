@@ -434,23 +434,29 @@ func validateBlockPoWNogoPow(consensus ConsensusParams, block *Block, parent *Bl
 		copy(merkleRoot[:], block.Header.MerkleRoot)
 	}
 
+	// CRITICAL: Root must be StateRoot (world state MPT root), NOT MerkleRoot (tx root)
+	// This must match exactly what the miner uses in nogopow.Header.Root
+	var stateRoot nogopow.Hash
+	if len(block.Header.StateRoot) > 0 {
+		copy(stateRoot[:], block.Header.StateRoot)
+	}
+
 	header := &nogopow.Header{
 		Number:     big.NewInt(int64(block.GetHeight())),
 		Time:       uint64(block.Header.TimestampUnix),
 		ParentHash: parentHash,
 		Difficulty: big.NewInt(int64(block.Header.DifficultyBits)),
 		Coinbase:   powCoinbase,
-		Root:       merkleRoot,
+		Root:       stateRoot,       // State root (World State MPT root) - FIXED
+		TxHash:     merkleRoot,     // Tx hash (Merkle tree root) - ADDED
 	}
 
 	binary.LittleEndian.PutUint64(header.Nonce[:8], block.Header.Nonce)
 
-	var blockHash nogopow.Hash
-	if len(block.Hash) == 32 {
-		copy(blockHash[:], block.Hash)
-	} else {
-		return fmt.Errorf("invalid block hash length: %d", len(block.Hash))
-	}
+	// CRITICAL: Use SealHash (Keccak256 + RLP) for PoW verification, NOT block.Hash.
+	// block.Hash uses SHA256(header binary encoding) which differs from the
+	// Keccak256(RLP-encoded header) that miners use for proof-of-work.
+	blockHash := header.Hash()
 
 	if err := engine.VerifySealWithBlockHash(header, blockHash); err != nil {
 		return fmt.Errorf("NogoPow seal verification failed for block %d: %w", block.GetHeight(), err)

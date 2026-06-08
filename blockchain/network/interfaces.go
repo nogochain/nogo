@@ -56,6 +56,7 @@ type BlockchainInterface interface {
 	GetMinerAddress() string
 	TotalSupply() uint64
 	GetConsensus() config.ConsensusParams
+	GetCurrentStateRoot() ([]byte, error) // Get state root for PoW calculation
 
 	// Block operations
 	AddBlock(block *core.Block) (bool, error)

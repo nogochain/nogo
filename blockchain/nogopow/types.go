@@ -18,6 +18,7 @@ package nogopow
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 
@@ -204,9 +205,25 @@ func BigToHash(b *big.Int) Hash {
 	return BytesToHash(b.Bytes())
 }
 
-// StringToAddress converts string to address
+// StringToAddress converts NOGO-prefixed or raw hex string to Address.
+// Production-grade: strips "NOGO" prefix, hex-decodes, and validates length.
+// Security: returns zero address on invalid input instead of panic.
 func StringToAddress(s string) Address {
 	var a Address
-	// Simple conversion for demo
+	encoded := s
+
+	// Strip "NOGO" prefix if present
+	if len(s) >= 4 && s[:4] == "NOGO" {
+		encoded = s[4:]
+	}
+
+	// Hex-decode and copy first 20 bytes
+	decoded, err := hex.DecodeString(encoded)
+	if err != nil || len(decoded) < 20 {
+		// Return zero address on invalid input
+		return a
+	}
+
+	copy(a[:], decoded[:20])
 	return a
 }

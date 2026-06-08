@@ -520,6 +520,17 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 		event.HeavierPeerID = bestByWorkPeerID
 	} else {
 		event.SyncCompleted = true
+
+		// CRITICAL: Request mempool snapshot from a peer after sync completes.
+		// This ensures the local mempool has all pending transactions, preventing
+		// forks caused by different nodes mining blocks with different transaction sets.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.pm.RequestMempoolSnapshot(ctx); err != nil {
+				log.Printf("[Sync] Mempool snapshot request failed after sync: %v", err)
+			}
+		}()
 	}
 	select {
 	case s.syncStatusCh <- event:

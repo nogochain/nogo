@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -210,14 +211,15 @@ type LogFormatter struct {
 
 // NewLogFormatter creates a new log formatter
 func NewLogFormatter(useColors bool) *LogFormatter {
-	levelStr := strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL")))
-	if levelStr == "" {
-		levelStr = "info"
+	levelStr := "info"
+	output := io.Writer(io.Discard) // Default: silent for production
+	if os.Getenv("NOGO_LOG_LEVEL") == "debug" {
+		output = os.Stdout
 	}
 	return &LogFormatter{
 		useColors: useColors,
 		level:     parseLogLevel(levelStr),
-		logger:    log.New(os.Stdout, "", 0),
+		logger:    log.New(output, "", 0),
 	}
 }
 

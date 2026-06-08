@@ -38,6 +38,7 @@ type BlockTemplate struct {
 	Height         uint64        `json:"height"`
 	PrevHash       string        `json:"prevHash"`
 	MerkleRoot     string        `json:"merkleRoot"`
+	StateRoot      string        `json:"stateRoot"` // State root hash for PoW calculation
 	Timestamp      int64         `json:"timestamp"`
 	DifficultyBits uint32        `json:"difficultyBits"`
 	MinerAddress   string        `json:"minerAddress"`
@@ -59,11 +60,13 @@ type SubmitWorkRequest struct {
 }
 
 // SubmitWorkResponse represents a mining work submission response
+// Production-grade: includes block hash for pool to display in frontend
 type SubmitWorkResponse struct {
 	Accepted bool   `json:"accepted"`
 	Message  string `json:"message,omitempty"`
 	Error    string `json:"error,omitempty"`
 	Reward   uint64 `json:"reward,omitempty"`
+	Hash     string `json:"hash,omitempty"` // Block hash for pool frontend display
 }
 
 // MiningInfo represents current mining information
@@ -148,6 +151,15 @@ func (s *SimpleServer) handleGetBlockTemplate(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// CRITICAL: Calculate StateRoot for PoW consistency
+	// Without this, miner's SealHash differs from node's verification → fork
+	stateRoot, err := s.bc.GetCurrentStateRoot()
+	if err != nil {
+		http.Error(w, "failed to calculate state root: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	block.Header.StateRoot = stateRoot
+
 	// Calculate difficulty for next block using PI controller
 	currentTime := time.Now().Unix()
 	nextDifficulty := s.bc.CalcNextDifficulty(latest, currentTime)
@@ -157,6 +169,7 @@ func (s *SimpleServer) handleGetBlockTemplate(w http.ResponseWriter, r *http.Req
 		Height:         block.Height,
 		PrevHash:       hex.EncodeToString(block.Header.PrevHash),
 		MerkleRoot:     hex.EncodeToString(block.Header.MerkleRoot),
+		StateRoot:      hex.EncodeToString(block.Header.StateRoot), // State root hash
 		Timestamp:      block.Header.TimestampUnix,
 		DifficultyBits: nextDifficulty,
 		MinerAddress:   minerAddress,
@@ -254,6 +267,17 @@ func (s *SimpleServer) handleSubmitWork(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// CRITICAL: Set StateRoot before submitting block - same fix as Server.handleSubmitWork
+	stateRoot, err := s.bc.GetCurrentStateRoot()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, SubmitWorkResponse{
+			Accepted: false,
+			Message:  fmt.Sprintf("failed to calculate state root: %v", err),
+		})
+		return
+	}
+	block.Header.StateRoot = stateRoot
+
 	// Set miner's found nonce and timestamp
 	block.Header.Nonce = req.Nonce
 	block.Header.TimestampUnix = req.Timestamp
@@ -272,11 +296,16 @@ func (s *SimpleServer) handleSubmitWork(w http.ResponseWriter, r *http.Request) 
 	// Calculate reward for response
 	reward, _, _ := miner.CalculateMiningReward(req.Height, 0, consensus)
 
+	// CRITICAL: Return block hash for pool to display in frontend
+	// Production-grade: block.Hash is the canonical block hash computed by Keccak-256
+	blockHash := hex.EncodeToString(block.Hash)
 	writeJSON(w, http.StatusOK, SubmitWorkResponse{
 		Accepted: true,
 		Message:  "block accepted",
 		Reward:   reward,
+		Hash:     blockHash, // Return block hash for pool frontend
 	})
+	fmt.Printf("[SubmitWork] ✅ Block accepted: height=%d, hash=%s\n", req.Height, blockHash)
 }
 
 // handleGetMiningInfo handles mining info requests

@@ -30,4 +30,8 @@ type PeerAPI interface {
 	BroadcastCandidateWithDeadline(block *core.Block, sourceID string, minedAt time.Time, deadline time.Time) error
 	BroadcastNewStatus(ctx context.Context, height uint64, work *big.Int, latestHash string)
 	EnsureAncestors(ctx context.Context, bc BlockchainInterface, missingHashHex string) error
+
+	// RequestMempoolSnapshot requests a full mempool snapshot from a connected peer.
+	// The response is handled asynchronously by the TxReactorHandler.
+	RequestMempoolSnapshot(ctx context.Context) error
 }

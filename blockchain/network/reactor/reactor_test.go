@@ -266,6 +266,14 @@ func (m *mockTxHandler) OnTx(peerID string, txs []core.Transaction) error {
 	return nil
 }
 
+func (m *mockTxHandler) OnMempoolRequest(peerID string) error {
+	return nil
+}
+
+func (m *mockTxHandler) OnMempoolResponse(peerID string, txs []core.Transaction) error {
+	return nil
+}
+
 // mockBlockHandler implements BlockHandler for testing.
 type mockBlockHandler struct {
 	mu      sync.Mutex

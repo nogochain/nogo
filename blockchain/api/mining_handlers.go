@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -84,15 +85,27 @@ func (s *Server) handleGetBlockTemplate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// CRITICAL FIX: Calculate StateRoot for PoW consistency
+	// The miner needs StateRoot to calculate the correct SealHash.
+	// Without this, SealHash differs between node and miner → fork.
+	stateRoot, err := s.bc.GetCurrentStateRoot()
+	if err != nil {
+		http.Error(w, "failed to calculate state root: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	block.Header.StateRoot = stateRoot
+
 	// Calculate difficulty for next block using PI controller
 	currentTime := time.Now().Unix()
 	nextDifficulty := s.bc.CalcNextDifficulty(latest, currentTime)
 
 	// Build response template with complete transaction list
+	// CRITICAL: Must include StateRoot for PoW calculation consistency
 	template := &BlockTemplate{
 		Height:         block.Height,
 		PrevHash:       hex.EncodeToString(block.Header.PrevHash),
 		MerkleRoot:     hex.EncodeToString(block.Header.MerkleRoot),
+		StateRoot:      hex.EncodeToString(block.Header.StateRoot), // ✅ ADDED: State root for PoW
 		Timestamp:      block.Header.TimestampUnix,
 		DifficultyBits: nextDifficulty,
 		MinerAddress:   minerAddress,
@@ -101,6 +114,10 @@ func (s *Server) handleGetBlockTemplate(w http.ResponseWriter, r *http.Request) 
 		ExtraNonce:     hex.EncodeToString(make([]byte, 4)),
 		Transactions:   block.Transactions,
 	}
+
+	// Log template details for debugging
+	log.Printf("✅ Block template: height=%d, stateRoot=%s, merkleRoot=%s",
+		block.Height, hex.EncodeToString(block.Header.StateRoot), hex.EncodeToString(block.Header.MerkleRoot))
 
 	writeJSON(w, http.StatusOK, template)
 }
@@ -191,6 +208,18 @@ func (s *Server) handleSubmitWork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// CRITICAL: Set StateRoot before submitting block
+	// Without this, AddBlock computes SealHash with empty StateRoot → PoW verification fails
+	stateRoot, err := s.bc.GetCurrentStateRoot()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, SubmitWorkResponse{
+			Accepted: false,
+			Message:  fmt.Sprintf("failed to calculate state root: %v", err),
+		})
+		return
+	}
+	block.Header.StateRoot = stateRoot
+
 	// Set miner's found nonce and timestamp
 	block.Header.Nonce = req.Nonce
 	block.Header.TimestampUnix = req.Timestamp
@@ -209,10 +238,14 @@ func (s *Server) handleSubmitWork(w http.ResponseWriter, r *http.Request) {
 	// Calculate reward for response
 	reward, _, _ := miner.CalculateMiningReward(req.Height, 0, consensus)
 
+	// CRITICAL: Return block hash for pool to display in frontend
+	// Production-grade: block.Hash is the canonical block hash computed by Keccak-256
+	blockHash := hex.EncodeToString(block.Hash)
 	writeJSON(w, http.StatusOK, SubmitWorkResponse{
 		Accepted: true,
 		Message:  "block accepted",
 		Reward:   reward,
+		Hash:     blockHash, // Return block hash for pool frontend
 	})
 }
 

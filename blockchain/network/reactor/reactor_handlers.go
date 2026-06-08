@@ -31,15 +31,7 @@ type ReactorHandlers struct {
 	mempool         Mempool
 	sw              Switch
 	miner           Miner
-	candidatePool   CandidatePoolRouter
 	checkpointVoter *core.CheckpointVoter
-}
-
-// CandidatePoolRouter defines the minimal interface for routing blocks through the candidate pool
-// This avoids importing core package directly in reactor handlers
-type CandidatePoolRouter interface {
-	ShouldPool(height uint64) bool
-	SubmitCandidate(block *core.Block, sourceID string, minedAt time.Time) error
 }
 
 // Chain defines the subset of blockchain methods required by the reactor
@@ -62,6 +54,7 @@ type Mempool interface {
 	HasSenderNonce(fromAddr string, nonce uint64) bool
 	GetTx(txID string) (*core.Transaction, bool)
 	GetTxIDs() []string
+	GetAll() []core.Transaction
 	Add(tx core.Transaction) (string, error)
 }
 
@@ -71,6 +64,7 @@ type Switch interface {
 	Send(peerID string, chID byte, msg []byte) bool
 	Broadcast(chID byte, msg []byte)
 	BroadcastBlockExcluding(ctx context.Context, block *core.Block, excludePeer string) error
+	RequestMempoolSnapshot(ctx context.Context) error
 }
 
 // Miner defines the miner interface for verification coordination
@@ -104,10 +98,6 @@ func NewReactorHandlers(chain Chain, mempool Mempool, sw Switch, miner Miner) (*
 // This is needed because miner is created after ReactorHandlers in node initialization
 func (h *ReactorHandlers) SetMiner(miner Miner) {
 	h.miner = miner
-}
-
-func (h *ReactorHandlers) SetCandidatePool(pool CandidatePoolRouter) {
-	h.candidatePool = pool
 }
 
 // SetCheckpointVoter assigns the checkpoint voter for multi-sig consensus.
@@ -402,14 +392,7 @@ func (h *SyncReactorHandler) OnBlocks(peerID string, blocks []byte) error {
 			}
 			h.recordBlockSeen(hashHex)
 
-			if h.handlers.candidatePool != nil && h.handlers.candidatePool.ShouldPool(block.GetHeight()) {
-				if submitErr := h.handlers.candidatePool.SubmitCandidate(&block, "peer-"+peerID, time.Now()); submitErr != nil {
-					log.Printf("[SyncHandler] candidate pool rejected block %d from peer %s: %v",
-						block.GetHeight(), peerID, submitErr)
-				} else {
-					deliveredCount++
-				}
-			} else {
+			{
 				accepted, addErr := h.handlers.chain.AddBlock(&block)
 				if addErr != nil {
 					log.Printf("[SyncHandler] Failed to add block %d from peer %s: %v",
@@ -993,6 +976,66 @@ func (h *TxReactorHandler) OnTx(peerID string, txs []core.Transaction) error {
 
 	log.Printf("[TxHandler] Processed %d transactions from peer %s: added=%d, skipped=%d, gap_rejected=%d",
 		len(txs), peerID, addedCount, skippedCount, gapRejected)
+
+	return nil
+}
+
+// OnMempoolRequest handles a request for a full mempool snapshot from a peer.
+// Collects all pending transactions from the local mempool and sends them
+// back as a MempoolResponse message on the tx channel.
+func (h *TxReactorHandler) OnMempoolRequest(peerID string) error {
+	if h.handlers == nil || h.handlers.mempool == nil {
+		return fmt.Errorf("tx handler: mempool not available")
+	}
+	if h.handlers.sw == nil {
+		return fmt.Errorf("tx handler: switch not available")
+	}
+
+	allTxs := h.handlers.mempool.GetAll()
+	if len(allTxs) == 0 {
+		log.Printf("[TxHandler] Mempool snapshot requested by peer %s: no pending transactions", peerID)
+		return nil
+	}
+
+	msg, err := BuildTxMempoolResponseMsg(allTxs)
+	if err != nil {
+		return fmt.Errorf("tx handler: build mempool response for peer %s: %w", peerID, err)
+	}
+
+	if !h.handlers.sw.Send(peerID, mconnection.ChannelTx, msg) {
+		return fmt.Errorf("tx handler: failed to send mempool response to peer %s", peerID)
+	}
+
+	log.Printf("[TxHandler] Sent mempool snapshot with %d transactions to peer %s",
+		len(allTxs), peerID)
+
+	return nil
+}
+
+// OnMempoolResponse handles a full mempool snapshot received from a peer.
+// Adds all received transactions to the local mempool, skipping duplicates.
+func (h *TxReactorHandler) OnMempoolResponse(peerID string, txs []core.Transaction) error {
+	if h.handlers == nil || h.handlers.mempool == nil {
+		return fmt.Errorf("tx handler: mempool not available")
+	}
+	if len(txs) == 0 {
+		return nil
+	}
+
+	added := 0
+	skipped := 0
+	for _, tx := range txs {
+		txID, err := h.handlers.mempool.Add(tx)
+		if err != nil {
+			skipped++
+			continue
+		}
+		_ = txID
+		added++
+	}
+
+	log.Printf("[TxHandler] Mempool snapshot received from peer %s: %d added, %d skipped",
+		peerID, added, skipped)
 
 	return nil
 }

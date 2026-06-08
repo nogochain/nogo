@@ -803,12 +803,25 @@ func CreateGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, 
 	engine := nogopow.New(powConfig)
 	defer engine.Close()
 
+	// Load state root and tx hash from genesis header
+	var stateRoot nogopow.Hash
+	if len(genesis.Header.StateRoot) > 0 {
+		copy(stateRoot[:], genesis.Header.StateRoot)
+	}
+
+	var txHash nogopow.Hash
+	if len(genesis.Header.MerkleRoot) > 0 {
+		copy(txHash[:], genesis.Header.MerkleRoot)
+	}
+
 	genesisHeader := &nogopow.Header{
 		ParentHash: nogopow.BytesToHash(genesis.Header.PrevHash),
 		Coinbase:   stringToAddress(genesis.MinerAddress),
 		Number:     big.NewInt(int64(genesis.GetHeight())),
 		Time:       uint64(genesis.Header.TimestampUnix),
 		Difficulty: big.NewInt(int64(genesis.Header.DifficultyBits)),
+		Root:       stateRoot,   // ADDED: State root (World State MPT root)
+		TxHash:     txHash,      // ADDED: Transactions root (Merkle tree root)
 	}
 
 	genesisBlock := nogopow.NewBlock(genesisHeader, nil, nil, nil)
@@ -832,6 +845,11 @@ func CreateGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, 
 	hashBytes := sealedHeader.Hash().Bytes()
 	genesis.Hash = hashBytes
 	genesis.Header.PrevHash = make([]byte, 0)
+
+	// NOTE: Genesis block has empty state (no accounts).
+	// StateRoot will be zero value ([]byte{}), which is acceptable for genesis block.
+	// For non-genesis blocks, StateRoot is calculated in mining.go:254-255.
+	// The miner should allow empty StateRoot for genesis block (height=0).
 
 	// Note: Do not lock here if called from initializeGenesisLocked which already holds locks
 	// genesisMu.Lock()
@@ -944,6 +962,17 @@ func validateGenesisPoWNogoPow(consensus ConsensusParams, b *Block) error {
 	engine := nogopow.New(powConfig)
 	defer engine.Close()
 
+	// Load state root and tx hash from block header
+	var stateRoot nogopow.Hash
+	if len(b.Header.StateRoot) > 0 {
+		copy(stateRoot[:], b.Header.StateRoot)
+	}
+
+	var txHash nogopow.Hash
+	if len(b.Header.MerkleRoot) > 0 {
+		copy(txHash[:], b.Header.MerkleRoot)
+	}
+
 	header := &nogopow.Header{
 		ParentHash: nogopow.BytesToHash(b.Header.PrevHash),
 		Coinbase:   stringToAddress(b.MinerAddress),
@@ -952,6 +981,8 @@ func validateGenesisPoWNogoPow(consensus ConsensusParams, b *Block) error {
 		Difficulty: big.NewInt(int64(b.Header.DifficultyBits)),
 		Nonce:      nogopow.BlockNonce{},
 		Extra:      []byte{},
+		Root:       stateRoot,   // ADDED: State root (World State MPT root)
+		TxHash:     txHash,      // ADDED: Transactions root (Merkle tree root)
 	}
 
 	binary.LittleEndian.PutUint64(header.Nonce[:8], b.Header.Nonce)

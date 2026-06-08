@@ -58,9 +58,10 @@ DefaultMinerPollIntervalSec = 1
 	// This ensures smoother difficulty adjustments and better block time stability
 	DefaultDifficultyMaxStep = 20
 	// DefaultGenesisDifficultyBits is the genesis block difficulty bits
-	DefaultGenesisDifficultyBits = uint32(0x1d00ffff)
+	// Changed from 0x1d00ffff to 10 for easier CPU mining
+	DefaultGenesisDifficultyBits = uint32(10)
 	// DefaultMinimumDifficulty is the minimum difficulty
-	DefaultMinimumDifficulty = uint32(0x1d00ffff)
+	DefaultMinimumDifficulty = uint32(10)
 )
 
 // Config is the main configuration structure

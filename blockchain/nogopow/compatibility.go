@@ -57,6 +57,13 @@ func NewDifficultyCalculator(consensusParams *config.ConsensusParams) *Difficult
 	}
 }
 
+// SetAncestorFunc sets the ancestor lookup function for deterministic
+// difficulty computation. When set, the calculator computes difficulty
+// from chain data rather than using a running accumulator.
+func (dc *DifficultyCalculator) SetAncestorFunc(fn GetAncestorFunc) {
+	dc.adjuster.SetAncestorFunc(fn)
+}
+
 // CalcNextDifficulty calculates difficulty for next block given parent block
 func (dc *DifficultyCalculator) CalcNextDifficulty(parent *BlockHeader, currentTime uint64) uint32 {
 	if parent == nil {

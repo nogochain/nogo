@@ -57,7 +57,6 @@ type Server struct {
 
 	mp            *MempoolImpl
 	miner         *MinerImpl
-	candidatePool *core.CandidatePool
 
 	peers    network.PeerAPI
 	txGossip bool
@@ -132,10 +131,6 @@ func NewServer(bc Blockchain, aiAuditorURL string, mp *MempoolImpl, miner *Miner
 	}
 
 	return s
-}
-
-func (s *Server) SetCandidatePool(pool *core.CandidatePool) {
-	s.candidatePool = pool
 }
 
 // Routes returns the HTTP handler with all routes configured
@@ -235,8 +230,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/proposals/vote", mw.Wrap("vote_proposal", false, 0, s.handleVoteProposal))
 	mux.HandleFunc("/api/proposals/deposit", mw.Wrap("create_deposit", false, 0, s.handleCreateDeposit))
 
-	// Candidate pool statistics for explorer visualization
-	mux.HandleFunc("/pool/stats", mw.Wrap("pool_stats", false, 0, s.handlePoolStats))
+	// Candidate pool removed — /pool/stats endpoint removed
 
 	// Community proposals page
 	mux.HandleFunc("/proposals/", mw.Wrap("proposals_page", false, 0, s.handleProposalsPage))
@@ -1229,45 +1223,9 @@ func (s *Server) handleAddBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Query().Get("direct") == "true" {
-		// Bypass candidate pool for admin-authenticated direct block submissions
-		// This mirrors the node's internal MineOnce which calls bc.AddBlock directly
-		log.Printf("[API] direct=true: bypassing candidate pool, adding block at height %d directly", b.GetHeight())
-	} else if s.candidatePool != nil {
-		if s.candidatePool.ShouldPool(b.GetHeight()) {
-			if submitErr := s.candidatePool.SubmitCandidate(&b, "api-submission", time.Now()); submitErr != nil {
-				log.Printf("[API] candidate pool rejected block: %v", submitErr)
-				_ = writeJSON(w, http.StatusBadRequest, map[string]any{"accepted": false, "message": submitErr.Error()})
-				return
-			}
-			_ = writeJSON(w, http.StatusOK, map[string]any{
-				"accepted": true,
-				"message":  "block submitted to candidate pool for fair competition",
-				"height":   b.GetHeight(),
-			})
-			return
-		}
-
-		tipBlock := s.bc.LatestBlock()
-		tipHeight := uint64(0)
-		if tipBlock != nil {
-			tipHeight = tipBlock.GetHeight()
-		}
-
-		if b.GetHeight() >= tipHeight {
-			log.Printf("[API] REJECTED: block at height %d is at or above tip (%d) but ShouldPool returned false, rejecting to prevent bypass",
-				b.GetHeight(), tipHeight)
-			_ = writeJSON(w, http.StatusForbidden, map[string]any{
-				"accepted": false,
-				"message":  "blocks at competition height must go through candidate pool",
-				"height":   b.GetHeight(),
-				"tipHeight": tipHeight,
-			})
-			return
-		}
-
-		log.Printf("[API] allowing direct AddBlock for historical block at height %d (tip=%d)", b.GetHeight(), tipHeight)
-	}
+	// All block submissions go directly to AddBlock.
+	// Candidate pool removed — Nakamoto consensus (forkBlocks + TieBreaker)
+	// handles competition correctly without this redundant layer.
 
 	reorged, err := s.bc.AddBlock(&b)
 	if err != nil && errors.Is(err, consensus.ErrUnknownParent) && s.peers != nil {
@@ -1305,7 +1263,14 @@ func (s *Server) handleAddBlock(w http.ResponseWriter, r *http.Request) {
 
 	// Mempool cleanup is now handled centrally in Chain.addCanonicalBlockLocked
 
-	_ = writeJSON(w, http.StatusOK, map[string]any{"accepted": true, "reorged": reorged})
+	// Return block hash and height for mining pool to record
+	// Production-grade: pool needs block hash to display in frontend
+	_ = writeJSON(w, http.StatusOK, map[string]any{
+		"accepted": true,
+		"reorged": reorged,
+		"hash":     fmt.Sprintf("%x", b.Hash),
+		"height":   b.GetHeight(),
+	})
 }
 
 func (s *Server) handleBalance(w http.ResponseWriter, r *http.Request) {
@@ -2130,51 +2095,6 @@ func (s *Server) handleProposalsPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
-}
-
-// handlePoolStats returns candidate pool statistics for explorer visualization.
-// Shows active pools, candidate counts, window deadlines, and selection results.
-func (s *Server) handlePoolStats(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.candidatePool == nil {
-		_ = writeJSON(w, http.StatusOK, map[string]any{
-			"message": "candidate pool not initialized",
-			"pools":   []any{},
-		})
-		return
-	}
-
-	stats := s.candidatePool.GetPoolStats()
-	type poolEntry struct {
-		Height         uint64 `json:"height"`
-		CandidateCount int    `json:"candidateCount"`
-		WindowState    string `json:"windowState"`
-		Deadline       int64  `json:"deadline"`
-	}
-
-	pools := make([]poolEntry, 0, len(stats))
-	for height, s := range stats {
-		pools = append(pools, poolEntry{
-			Height:         height,
-			CandidateCount: s.CandidateCount,
-			WindowState:    s.WindowState,
-			Deadline:       s.Deadline.Unix(),
-		})
-	}
-	// Sort by height descending for recent-first display
-	for i := 0; i < len(pools)/2; i++ {
-		j := len(pools) - 1 - i
-		pools[i], pools[j] = pools[j], pools[i]
-	}
-
-	_ = writeJSON(w, http.StatusOK, map[string]any{
-		"totalPools": len(pools),
-		"pools":      pools,
-	})
 }
 
 func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
