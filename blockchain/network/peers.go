@@ -217,10 +217,11 @@ func (ci *chainInfo) UnmarshalJSON(data []byte) error {
 }
 
 func (pm *PeerManager) FetchChainInfo(ctx context.Context, peer string) (*chainInfo, error) {
-	// Convert P2P address (port 9090) to HTTP address (port 8080)
-	httpPeer := convertP2PToHTTP(peer)
+	// Convert P2P address (port 9090) to HTTPS address (port 8080)
+	// FIXED: Use HTTPS instead of HTTP to prevent plaintext transmission
+	httpsPeer := convertP2PToHTTPS(peer)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, httpPeer+"/chain/info", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, httpsPeer+"/chain/info", nil)
 	if err != nil {
 		return nil, fmt.Errorf("create chain info request: %w", err)
 	}

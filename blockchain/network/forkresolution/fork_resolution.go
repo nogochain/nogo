@@ -400,44 +400,54 @@ func (fr *ForkResolver) detectOscillation(newBlock *core.Block) bool {
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
 
+	// Check if oscillation protection is active
 	if fr.oscillationProtected && time.Now().Before(fr.oscillationProtectedUntil) {
 		log.Printf("[ForkResolver] Oscillation protection active until %v, rejecting reorg",
 			fr.oscillationProtectedUntil)
 		return true
 	}
 
+	// Clear protection if expired
 	if fr.oscillationProtected && time.Now().After(fr.oscillationProtectedUntil) {
 		log.Printf("[ForkResolver] Oscillation protection expired, clearing")
 		fr.oscillationProtected = false
 		fr.oscillationCount = 0
 	}
 
+	// Need at least 2 recent reorgs to detect oscillation
 	if len(fr.recentReorgs) < 2 {
 		return false
 	}
 
-	currentTip := fr.chain.LatestBlock()
-	if currentTip == nil {
-		return false
-	}
-
-	remoteWork := fr.chain.CalculateCumulativeWork(newBlock)
-	localWork := fr.chain.CanonicalWork()
-	if remoteWork == nil || localWork == nil {
-		return false
-	}
-
-	// Only detect oscillation if remote work is NOT greater than local work.
-	// If remote has more work, the reorg is legitimate and should proceed.
-	if remoteWork.Cmp(localWork) > 0 {
-		return false
-	}
-
-	// Check for alternating tips (ping-pong effect)
+	// FIXED: Detect oscillation by checking if we're switching between SAME tips
+	// This works regardless of work difference
+	newTipHeight := newBlock.GetHeight()
+	
+	// Count how many times we've switched to this new tip
+	switchCount := 0
 	for _, record := range fr.recentReorgs {
-		if newBlock.GetHeight() == record.OldTip {
-			log.Printf("[ForkResolver] Oscillation detected: switching back to previous tip (height %d, remote_work=%s <= local_work=%s)",
-				record.OldTip, remoteWork.String(), localWork.String())
+		if record.NewTip == newTipHeight {
+			switchCount++
+		}
+	}
+
+	// If we've switched to this tip more than once in recent history, it's oscillation
+	if switchCount >= 2 {
+		log.Printf("[ForkResolver] Oscillation detected: switching to tip %d multiple times",
+			newTipHeight)
+		fr.activateOscillationProtection()
+		return true
+	}
+
+	// Additional check: ping-pong between two tips
+	if len(fr.recentReorgs) >= 3 {
+		lastTip := fr.recentReorgs[len(fr.recentReorgs)-1].NewTip
+		prevTip := fr.recentReorgs[len(fr.recentReorgs)-2].NewTip
+		
+		// If we're switching back to a previous tip (ping-pong)
+		if newTipHeight == prevTip && newTipHeight != lastTip {
+			log.Printf("[ForkResolver] Ping-pong oscillation detected: %d -> %d -> %d",
+				prevTip, lastTip, newTipHeight)
 			fr.activateOscillationProtection()
 			return true
 		}

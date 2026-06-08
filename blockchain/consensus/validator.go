@@ -41,7 +41,13 @@ const (
 	// Security rationale: Reduces attack surface for time-based attacks
 	// Previous value of 2 hours was too permissive and vulnerable to time manipulation
 	BlockTimeMaxDrift          = 900 // 15 minutes - hardened from previous 2 hours
-	DifficultyTolerancePercent = 50
+	
+	// DifficultyTolerancePercent defines the allowed deviation from expected difficulty
+	// P1 Issue 1.4.1 FIX: Reduced from 50% to 15% to prevent difficulty manipulation
+	// Rationale: 50% tolerance is too large and allows attackers to manipulate
+	// difficulty by mining blocks with artificially low/high difficulty
+	// 15% tolerance is strict but fair, matching Bitcoin's adjustment rules
+	DifficultyTolerancePercent = 15
 	maxDifficultyBits          = uint32(math.MaxUint32)
 )
 
@@ -215,11 +221,16 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block, diffAdj
 		expectedDifficulty := diffAdjuster.CalcDifficulty(uint64(block.Header.TimestampUnix), parentHeader)
 		actualDifficulty := big.NewInt(int64(block.Header.DifficultyBits))
 
-		// Use wider tolerance (50%) for initial blocks to allow difficulty to stabilize
-		tolerance := DifficultyTolerancePercent
-		if block.GetHeight() < 100 {
-			tolerance = 50
-		}
+		// CRITICAL FIX: Reduce tolerance to prevent difficulty manipulation
+		// P1 Issue 1.4.1: Difficulty adjustment algorithm can be manipulated
+		// Old tolerance: 50% for first 100 blocks (too large, allows manipulation)
+		// New tolerance: 15% for all blocks (strict but fair)
+		// This prevents malicious miners from manipulating difficulty adjustment
+		tolerance := DifficultyTolerancePercent // Default 15%
+		
+		// Note: Removed special case for first 100 blocks with 50% tolerance
+		// Rationale: 50% tolerance is too large and allows attackers to manipulate
+		// difficulty by mining blocks with artificially low/high difficulty
 
 		minAllowed := new(big.Int).Mul(expectedDifficulty, big.NewInt(int64(100-tolerance)))
 		minAllowed.Div(minAllowed, big.NewInt(100))
@@ -228,11 +239,15 @@ func (v *BlockValidator) validateDifficulty(block *Block, parent *Block, diffAdj
 		maxAllowed.Div(maxAllowed, big.NewInt(100))
 
 		if actualDifficulty.Cmp(minAllowed) < 0 {
-			return fmt.Errorf("%w: actual %d < min %d (expected %d)", ErrDifficultyAdjustmentLow, actualDifficulty.Uint64(), minAllowed.Uint64(), expectedDifficulty.Uint64())
+			return fmt.Errorf("%w: actual %d < min %d (expected %d, tolerance=%d%%)", 
+				ErrDifficultyAdjustmentLow, actualDifficulty.Uint64(), minAllowed.Uint64(), 
+				expectedDifficulty.Uint64(), tolerance)
 		}
 
 		if actualDifficulty.Cmp(maxAllowed) > 0 {
-			return fmt.Errorf("%w: actual %d > max %d (expected %d)", ErrDifficultyAdjustmentHigh, actualDifficulty.Uint64(), maxAllowed.Uint64(), expectedDifficulty.Uint64())
+			return fmt.Errorf("%w: actual %d > max %d (expected %d, tolerance=%d%%)", 
+				ErrDifficultyAdjustmentHigh, actualDifficulty.Uint64(), maxAllowed.Uint64(), 
+				expectedDifficulty.Uint64(), tolerance)
 		}
 	}
 

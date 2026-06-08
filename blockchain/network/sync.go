@@ -461,7 +461,35 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 			maxPeerHeight = info.Height
 		}
 
-		if info.Work != nil {
+		// P1 Issue 1.2.1 FIX: Verify TotalWork to prevent malicious peers from forging work values
+		// A malicious peer could report extremely high Work to trick us into syncing from them
+		if info.Work != nil && info.Height > 0 {
+			// Verify that the reported Work is reasonable for the given height
+			// Maximum possible work per block is when difficulty = 1 (easiest target)
+			// Minimum difficulty bits = 0xFFFFF (approx 24 bits of leading zeros)
+			// Maximum work per block ≈ 2^24 (when difficulty is minimum)
+			// So maximum total work for height H is H * 2^24
+			
+			maxWorkPerBlock := new(big.Int).Exp(big.NewInt(2), big.NewInt(24), nil) // 2^24
+			maxTotalWork := new(big.Int).Mul(maxWorkPerBlock, big.NewInt(int64(info.Height)))
+			
+			if info.Work.Cmp(maxTotalWork) > 0 {
+				// Peer is reporting impossible work value - likely malicious
+				log.Printf("[Sync] Peer %s reports impossible Work=%s for height=%d (maxPossible=%s), ignoring",
+					peer, info.Work.String(), info.Height, maxTotalWork.String())
+				continue // Skip this peer's Work value
+			}
+			
+			// Also check minimum work (each block must have at least work=1)
+			minTotalWork := big.NewInt(int64(info.Height))
+			if info.Work.Cmp(minTotalWork) < 0 {
+				// Peer is reporting too low work value - suspicious
+				log.Printf("[Sync] Peer %s reports suspiciously low Work=%s for height=%d (minExpected=%s), ignoring",
+					peer, info.Work.String(), info.Height, minTotalWork.String())
+				continue
+			}
+			
+			// Work value passes basic sanity checks
 			if bestByWork == nil || info.Work.Cmp(bestByWork) > 0 {
 				bestByWork = info.Work
 				bestByWorkPeerID = peer
@@ -488,16 +516,38 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	// Nakamoto consensus: the chain with the most cumulative work is canonical.
 	// Fork resolution is handled inside chain.AddBlock — we do NOT trigger
 	// any reorg here. This function computes progress only.
+	
+	// CRITICAL FIX: Properly handle fork scenarios
+	// P1 Issue 1.2.1: Sync progress calculation defect can lead to improper fork handling
 	var progress float64
+	
+	// Case 1: Local has equal or more work - we're synced (even if on a fork)
 	if localWork.Cmp(bestByWork) >= 0 {
 		progress = 1.0
-	} else if maxPeerHeight <= localHeight+MaxSyncHeightGap && localHeight <= maxPeerHeight {
-		// Peer is slightly ahead (within MaxSyncHeightGap blocks) — normal
-		// sync lag on the same chain. Only treat as synced when local is NOT ahead.
-		// If local is ahead but has less work, it is a fork — do NOT set progress=1.0.
-		progress = 1.0
 	} else {
-		progress = maxSyncProgressWithPartialPeers
+		// Case 2: Local has less work - check if we're on a fork or just behind
+		workRatio := new(big.Rat).SetFrac(localWork, bestByWork)
+		workRatioFloat, _ := workRatio.Float64()
+		
+		// If local work is within 1% of best work, we might be on a short fork
+		// In this case, we should NOT report progress=1.0
+		if workRatioFloat > 0.99 {
+			// Very close in work - likely a fork scenario
+			// Check if heights are close (within MaxSyncHeightGap)
+			if maxPeerHeight <= localHeight+MaxSyncHeightGap && localHeight <= maxPeerHeight {
+				// Heights are close but work is different - this is a fork
+				// Do NOT set progress=1.0, keep syncing to resolve fork
+				progress = maxSyncProgressWithPartialPeers
+				log.Printf("[Sync] Fork detected: localWork=%.6f%% of bestWork, heights close (local=%d, best=%d), NOT marking synced",
+					workRatioFloat*100, localHeight, bestByWorkHeight)
+			} else {
+				// Heights are not close - we're just behind
+				progress = maxSyncProgressWithPartialPeers
+			}
+		} else {
+			// Work difference is significant - we're clearly behind
+			progress = maxSyncProgressWithPartialPeers
+		}
 	}
 
 	log.Printf("[Sync] Progress: localH=%d maxPeerH=%d bestByWorkH=%d localWork>=bestByWork=%v progress=%.2f",
@@ -1722,6 +1772,24 @@ func (s *SyncLoop) fetchHeadersWithRetry(ctx context.Context, peer string, fromH
 			}
 			return nil, err
 		}
+		
+			// P2-1 FIX: Basic validation for headers to prevent malicious headers
+		// TODO: Add full PoW validation using consensus engine
+		for i := range headers {
+			// Basic validation: check for zero difficulty or invalid timestamp
+			if headers[i].Difficulty == 0 {
+				log.Printf("[Sync] Invalid header %d from %s: zero difficulty", 
+					headers[i].Height, peer)
+				return nil, fmt.Errorf("invalid header from %s: zero difficulty", peer)
+			}
+			// Check timestamp is not too far in future (15 minutes)
+			if headers[i].TimestampUnix > time.Now().Add(15*time.Minute).Unix() {
+				log.Printf("[Sync] Invalid header %d from %s: timestamp too far in future", 
+					headers[i].Height, peer)
+				return nil, fmt.Errorf("invalid header from %s: timestamp too far in future", peer)
+			}
+		}
+		
 		// Convert to pointer slice
 		result := make([]*core.BlockHeader, len(headers))
 		for i := range headers {

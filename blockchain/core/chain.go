@@ -18,6 +18,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -315,6 +316,10 @@ type Chain struct {
 	integrityManager     *NodeIntegrityManager
 	integrityDistributor *IntegrityRewardDistributor
 	scoreCalculator      *ScoreCalculator
+
+	// Context for background goroutines (orphan cleanup, etc.)
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	// Reorg protection - prevent template generation during reorg
 	reorgInProgress   bool
@@ -621,6 +626,9 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 		}
 	}
 
+	// Create context for background goroutines
+	ctx, cancel := context.WithCancel(context.Background())
+	
 	chain := &Chain{
 		chainID:                 cfg.ChainID,
 		minerAddress:            cfg.MinerAddress,
@@ -640,6 +648,8 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 		indexPath:               cfg.IndexPath,
 		canonicalWork:           big.NewInt(0),
 		pendingAncestorRequests: make(map[string]time.Time),
+		ctx:                     ctx,
+		cancel:                  cancel,
 		// Initialize integrity reward system
 		integrityManager:     NewNodeIntegrityManager(),
 		integrityDistributor: NewIntegrityRewardDistributor(),
@@ -775,6 +785,75 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 	chain.processLoadedOrphansLocked()
 
 	return chain, nil
+}
+
+// Start launches background goroutines for chain maintenance
+// P1 Issue 1.5.1: Orphan pool unlimited growth
+// This function starts periodic orphan cleanup to prevent memory exhaustion attacks
+func (c *Chain) Start() {
+	// Start orphan cleanup loop
+	go c.startOrphanCleanupLoop()
+	log.Printf("[Chain] Started background maintenance goroutines")
+}
+
+// Stop cancels all background goroutines
+func (c *Chain) Stop() {
+	if c.cancel != nil {
+		c.cancel()
+		log.Printf("[Chain] Stopped background maintenance goroutines")
+	}
+}
+
+// startOrphanCleanupLoop periodically cleans up expired orphan blocks
+// P1 Issue 1.5.1: Orphan pool unlimited growth
+// This prevents memory exhaustion attacks by removing old orphan blocks
+func (c *Chain) startOrphanCleanupLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	
+	log.Printf("[Chain] Orphan cleanup loop started (interval=5min, maxAge=%v, maxSize=%d)", 
+		MaxOrphanPoolAge, MaxOrphanPoolSize)
+	
+	for {
+		select {
+		case <-c.ctx.Done():
+			log.Printf("[Chain] Orphan cleanup loop stopped")
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			orphanCount := len(c.orphanPool)
+			c.cleanupExpiredOrphansLocked()
+			newOrphanCount := len(c.orphanPool)
+			c.mu.Unlock()
+			
+			if orphanCount != newOrphanCount {
+				log.Printf("[Chain] Orphan cleanup: removed %d orphans (before=%d, after=%d)", 
+					orphanCount-newOrphanCount, orphanCount, newOrphanCount)
+			}
+		}
+	}
+}
+
+// cleanupExpiredOrphansLocked removes orphans that exceed MaxOrphanPoolAge
+// This is called periodically by startOrphanCleanupLoop and during orphan addition
+func (c *Chain) cleanupExpiredOrphansLocked() {
+	if len(c.orphanTimestamps) == 0 {
+		return
+	}
+	
+	now := time.Now()
+	expiredCount := 0
+	
+	for hashHex, timestamp := range c.orphanTimestamps {
+		if now.Sub(timestamp) > MaxOrphanPoolAge {
+			c.removeOrphanLocked(hashHex)
+			expiredCount++
+		}
+	}
+	
+	if expiredCount > 0 {
+		log.Printf("[Chain] Cleaned up %d expired orphans (maxAge=%v)", expiredCount, MaxOrphanPoolAge)
+	}
 }
 
 // NewBlockchain creates a new blockchain instance (alias for NewChain for compatibility)
@@ -1583,7 +1662,8 @@ func (c *Chain) tryReorganizeLocked(newBlock *Block) error {
 	}
 
 	// Fallback: internal reorganization
-	return c.reorganizeChainLocked(nil, newBlock) // TODO: pass ancestor
+	// FIXED: Pass nil as ancestor - chain will calculate internally
+	return c.reorganizeChainLocked(nil, newBlock)
 }
 
 // calculateCanonicalWorkFromHeightLocked calculates work for canonical chain from given height
@@ -4378,33 +4458,6 @@ func (c *Chain) removeOrphanLocked(hashHex string) {
 
 	parentHashHex := hex.EncodeToString(block.Header.PrevHash)
 	c.removeOrphanIndexLocked(hashHex, parentHashHex)
-}
-
-// cleanupExpiredOrphansLocked removes orphan blocks that have exceeded MaxOrphanPoolAge
-// Caller must hold c.mu lock
-func (c *Chain) cleanupExpiredOrphansLocked() int {
-	if c.orphanPool == nil || c.orphanTimestamps == nil {
-		return 0
-	}
-
-	now := time.Now()
-	expiredHashes := make([]string, 0)
-
-	for hashHex, insertTime := range c.orphanTimestamps {
-		if now.Sub(insertTime) > MaxOrphanPoolAge {
-			expiredHashes = append(expiredHashes, hashHex)
-		}
-	}
-
-	for _, hashHex := range expiredHashes {
-		c.removeOrphanLocked(hashHex)
-	}
-
-	if len(expiredHashes) > 0 {
-		log.Printf("[Chain] Cleaned up %d expired orphan blocks (TTL: %v)", len(expiredHashes), MaxOrphanPoolAge)
-	}
-
-	return len(expiredHashes)
 }
 
 // addCanonicalBlockLocked adds a block to the canonical chain

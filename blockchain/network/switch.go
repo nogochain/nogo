@@ -317,6 +317,19 @@ type Switch struct {
 	peerDisconnectNotifier PeerDisconnectNotifier
 }
 
+// Lock hierarchy (MUST follow this order to avoid deadlocks):
+// 1. mu (main switch lock)
+// 2. dialingMu
+// 3. peerErrorsMtx
+// 4. peerAddrMtx
+// 5. peerHeightCacheMu
+// 6. peerRateLimiterMu
+// 7. reconnectQueueMu
+// 8. peerActivityMu
+// 9. ancestorFetchCooldownMu
+// 10. slowPeersMu
+// NEVER acquire a higher-level lock while holding a lower-level lock.
+
 // cachedPeerHeight stores a peer's chain height with an expiry to prevent stale data.
 type cachedPeerHeight struct {
 	Height    uint64
@@ -493,6 +506,7 @@ func (sw *Switch) initPeerDiscovery() {
 // buildDHTSeedNodes converts P2P TCP seed addresses into DHT bootstrap nodes.
 // Each seed domain is resolved via DNS and a DHT Node is created with the
 // configured DHT UDP discovery port.
+
 func (sw *Switch) buildDHTSeedNodes(dhtPort uint16) []*dht.Node {
 	seeds := sw.config.Seeds
 	if len(seeds) == 0 {
@@ -513,6 +527,12 @@ func (sw *Switch) buildDHTSeedNodes(dhtPort uint16) []*dht.Node {
 		}
 
 		for _, ip := range ips {
+			// FIXED: Validate IP address to prevent DNS rebinding attacks
+			if isPrivateIP(ip) {
+				log.Printf("Switch: rejecting DHT seed %s with private IP %s", host, ip.String())
+				continue
+			}
+
 			ipv4 := ip.To4()
 			if ipv4 == nil {
 				continue
@@ -524,6 +544,26 @@ func (sw *Switch) buildDHTSeedNodes(dhtPort uint16) []*dht.Node {
 
 	log.Printf("Switch: resolved %d DHT seed nodes from %d P2P seeds", len(dhtSeeds), len(seeds))
 	return dhtSeeds
+}
+
+// convertP2PToHTTPS converts a P2P address to HTTPS address.
+// P1 Issue 1.1.2 FIX: Use HTTPS instead of HTTP to prevent plaintext transmission.
+// P2P uses port 9090, HTTPS API uses port 8080.
+func convertP2PToHTTPS(peer string) string {
+	// Parse peer address (format: "host:port" or "enode://...@host:port")
+	host, port, err := net.SplitHostPort(peer)
+	if err != nil {
+		// Maybe it's just "host" without port
+		// Assume P2P port 9090, convert to HTTPS port 8080
+		return "https://" + peer + ":8080"
+	}
+	
+	// Convert port from P2P (9090) to HTTPS (8080)
+	if port == "9090" {
+		port = "8080"
+	}
+	
+	return "https://" + net.JoinHostPort(host, port)
 }
 
 func (cfg *SwitchConfig) applyDefaults() {
@@ -2509,6 +2549,9 @@ func (sw *Switch) handlePeerError(peerID, addr string, err error) {
 
 // clearPeerErrorState removes error tracking for a peer
 func (sw *Switch) clearPeerErrorState(peerID string) {
+	sw.peerErrorsMtx.Lock()
+	defer sw.peerErrorsMtx.Unlock()
+	
 	delete(sw.peerErrors, peerID)
 }
 
