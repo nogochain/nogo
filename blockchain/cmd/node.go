@@ -590,10 +590,10 @@ func (n *Node) startComponents() error {
 
 	if n.autoMine && n.miner != nil {
 		go func() {
-			interval := time.Duration(n.config.MineIntervalMs) * time.Millisecond
-			if interval <= 0 {
-				interval = 30 * time.Second
-			}
+		interval := time.Duration(n.config.MineIntervalMs) * time.Millisecond
+		if interval <= 0 {
+			interval = 1 * time.Second // Default 1s tick, MinBlockIntervalFraction enforces actual spacing
+		}
 
 			// REFACTORED: Parallel startup (like core-main node.go Line 210-218)
 			// No timeout, no waiting - syncLoop and miner run concurrently

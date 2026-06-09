@@ -368,11 +368,11 @@ const DefaultTargetBlockTime = int64(30)
 
 // MinBlockIntervalFraction is the minimum fraction (percentage) of target block time
 // that must elapse before a new block can be mined. Prevents rapid-fire mining.
-// Production rationale: 35% balances security (prevents multi-miner race conditions)
+// Production rationale: 5% balances security (prevents multi-miner race conditions)
 // and decentralization (allows multiple miners to compete within the window).
-// Calculation: 30s target × 35% = 10.5s minimum interval.
+// Calculation: 30s target × 5% = 10.5s minimum interval.
 // Previous value 50% (15s) caused single-miner dominance in low-hashrate networks.
-const MinBlockIntervalFraction = int64(35)
+const MinBlockIntervalFraction = int64(5)
 
 // GetBlocksPerYear calculates blocks per year based on target block time
 func GetBlocksPerYear() uint64 {

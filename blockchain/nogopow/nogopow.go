@@ -421,6 +421,11 @@ func (t *NogopowEngine) CalcDifficulty(chain ChainHeaderReader, time uint64, par
 	adjuster := t.diffAdjuster
 	newDifficulty := adjuster.CalcDifficulty(time, parent)
 
+	// Get targetTime for logging
+	targetTime := int64(30) // default
+	if t.diffAdjuster != nil && t.config.ConsensusParams != nil {
+		targetTime = t.config.ConsensusParams.BlockTimeTargetSeconds
+	}
 	t.config.Log.Info("NogoPow CalcDifficulty (PI Controller)",
 		"parentNumber", parent.Number.Uint64(),
 		"parentDifficulty", parent.Difficulty.Uint64(),
@@ -428,6 +433,7 @@ func (t *NogopowEngine) CalcDifficulty(chain ChainHeaderReader, time uint64, par
 		"time", time,
 		"parentTime", parent.Time,
 		"timeDiff", time-parent.Time,
+		"targetTime", targetTime,
 	)
 
 	return newDifficulty

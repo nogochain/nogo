@@ -270,26 +270,32 @@ func (da *DifficultyAdjuster) calculateDeterministicDifficulty(avgTime int64, ta
 	// Step 4: Double exponential smoothing (resists oscillation)
 	smoothedOutput := da.calculateDoubleExponentialSmoothing(avgTime, targetTime)
 
-	// Step 5: Weighted combination: 30% PI + 70% double exponential
+	// Step 5: Weighted combination: 70% PI + 30% double exponential
 	// PI responds to current error; double exponential tracks trend
-	multiplier := 1.0 + 0.3*piOutput + 0.7*smoothedOutput
+	// CRITICAL: Use 70% PI weight so that when blocks are too fast,
+	// piOutput > 0 dominates and multiplier > 1.0 (increases difficulty).
+	// Previously 30% PI + 70% smoothed caused smoothedOutput (negative)
+	// to cancel piOutput, making multiplier < 1.0 and difficulty never increased.
+	multiplier := 1.0 + 0.7*piOutput + 0.3*smoothedOutput
 
 	// Step 6: Clamp to [0.75, 1.25] — max ±25% per block for stability
 	multiplier = clampFloat64(multiplier, 0.75, 1.25)
 
-	// Step 7: Apply multiplier
+	// Step 7: Apply multiplier — use ceiling for increase, floor for decrease
+	// CRITICAL FIX: big.Float.Int() truncates (1.25 → 1), causing difficulty
+	// to never increase from 1 when parentDifficulty=1 and multiplier≈1.25.
+	//
+	// Solution: add 0.999999 before Int() so that any multiplier > 1.0
+	// reliably rounds up (1.25 → 2.249999 → Int() = 2).
 	newDiffFloat := new(big.Float).Mul(
 		new(big.Float).SetInt(parentDiff),
 		big.NewFloat(multiplier),
 	)
-	newDifficulty, _ := newDiffFloat.Int(nil)
+	// Add 0.999999 then truncate = ceiling for positive numbers
+	ceiled := new(big.Float).Add(newDiffFloat, big.NewFloat(0.999999))
+	newDifficulty, _ := ceiled.Int(nil)
 
-	// Apply ceiling for increase case
-	if multiplier > 1.0 && newDifficulty.Cmp(parentDiff) <= 0 {
-		newDiffFloatCeil := new(big.Float).Add(newDiffFloat, big.NewFloat(0.999999))
-		newDifficulty, _ = newDiffFloatCeil.Int(nil)
-	}
-
+	// safety: must be non-negative
 	if newDifficulty.Sign() < 0 {
 		newDifficulty = big.NewInt(0)
 	}
