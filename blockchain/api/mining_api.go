@@ -55,6 +55,7 @@ type SubmitWorkRequest struct {
 	BlockHash  string `json:"blockHash"`
 	PrevHash   string `json:"prevHash"`
 	MerkleRoot string `json:"merkleRoot"`
+	StateRoot  string `json:"stateRoot"`
 	Timestamp  int64  `json:"timestamp"`
 	Miner      string `json:"miner"`
 }
@@ -80,6 +81,64 @@ type MiningInfo struct {
 	Generate       bool    `json:"generate"`
 	GenProcLimit   int     `json:"genProcLimit"`
 	HashesPerSec   float64 `json:"hashesPerSec"`
+}
+
+// cachedTemplate holds a complete block template for pool submission.
+// The block is deep-copied before use to prevent concurrent modification.
+type cachedTemplate struct {
+	block     *core.Block
+	createdAt time.Time
+	miner     string
+}
+
+const (
+	// templateTTL is the time-to-live for cached templates.
+	// Miners typically find a share within 30-60s.
+	templateTTL = 60 * time.Second
+
+	// templateCleanInterval is how often expired templates are purged.
+	templateCleanInterval = 30 * time.Second
+
+	// maxCacheSize limits the template cache to prevent memory leak.
+	maxCacheSize = 50
+)
+
+// deepCopyBlock creates an independent copy of a Block for safe concurrent use.
+// The copy shares no pointer references with the original, so the caller
+// can safely modify Header.Nonce, Header.TimestampUnix without races.
+func deepCopyBlock(src *core.Block) *core.Block {
+	if src == nil {
+		return nil
+	}
+	dst := &core.Block{
+		Hash:         append([]byte(nil), src.Hash...),
+		Height:       src.Height,
+		MinerAddress: src.MinerAddress,
+		TotalWork:    src.TotalWork,
+		Header: core.BlockHeader{
+			Version:        src.Header.Version,
+			PrevHash:       append([]byte(nil), src.Header.PrevHash...),
+			TimestampUnix:  src.Header.TimestampUnix,
+			DifficultyBits: src.Header.DifficultyBits,
+			Difficulty:     src.Header.Difficulty,
+			Nonce:          src.Header.Nonce,
+			StateRoot:      append([]byte(nil), src.Header.StateRoot...),
+			MerkleRoot:     append([]byte(nil), src.Header.MerkleRoot...),
+			Height:         src.Header.Height,
+			MinerAddress:   src.Header.MinerAddress,
+		},
+	}
+	// Deep copy transactions
+	if len(src.Transactions) > 0 {
+		dst.Transactions = make([]core.Transaction, len(src.Transactions))
+		copy(dst.Transactions, src.Transactions)
+	}
+	// Deep copy coinbaseTx
+	if src.CoinbaseTx != nil {
+		cb := *src.CoinbaseTx
+		dst.CoinbaseTx = &cb
+	}
+	return dst
 }
 
 // handleGetBlockTemplate handles block template requests from miners

@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nogochain/nogo/blockchain/config"
@@ -71,6 +72,13 @@ type Server struct {
 	auditLog   *AuditLogger
 
 	peerManager network.PeerAPI
+
+	// Template cache for mining pool block submissions
+	// Ensures PoW verification consistency: miner's merkleRoot matches submission
+	templateCache     map[string]*cachedTemplate
+	templateCacheMu   sync.RWMutex
+	templateCacheOnce sync.Once       // Ensures cleanup goroutine started once
+	templateCacheDone chan struct{}   // Signal to stop cleanup goroutine
 }
 
 const (
@@ -105,6 +113,8 @@ func NewServer(bc Blockchain, aiAuditorURL string, mp *MempoolImpl, miner *Miner
 		limiter:     limiter,
 		trustProxy:  trustProxy,
 		auditLog:    auditLog,
+		templateCache:     make(map[string]*cachedTemplate),
+		templateCacheDone: make(chan struct{}),
 	}
 	if peers != nil {
 		s.peerManager = peers
