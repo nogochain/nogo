@@ -415,10 +415,15 @@ func (t *NogopowEngine) CalcDifficulty(chain ChainHeaderReader, time uint64, par
 		return big.NewInt(int64(minDifficulty))
 	}
 
-	// Use PI controller difficulty calculation (same as validation).
-	// The diffAdjuster is persistent — integral accumulator and sliding
-	// window carry over across blocks for true PI convergence.
+	// Lazily initialize ancestor function on first call with valid chain + parent.
+	// This enables deterministic difficulty with median block times and chain integral
+	// instead of the fallback single-block proportional-only mode.
 	adjuster := t.diffAdjuster
+	if adjuster.GetAncestorFunc() == nil && chain != nil && parent != nil && parent.Number != nil {
+		t.initAncestorFunc(chain, parent)
+	}
+
+	// Use PI controller difficulty calculation (same as validation).
 	newDifficulty := adjuster.CalcDifficulty(time, parent)
 
 	// Get targetTime for logging
@@ -437,6 +442,42 @@ func (t *NogopowEngine) CalcDifficulty(chain ChainHeaderReader, time uint64, par
 	)
 
 	return newDifficulty
+}
+
+// initAncestorFunc builds a height→header cache by walking backwards from parent
+// through parent hashes, then sets it on the difficulty adjuster.
+// Thread-safe: uses double-checked locking via t.lock.
+func (t *NogopowEngine) initAncestorFunc(chain ChainHeaderReader, parent *Header) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
+	// Double-check after acquiring write lock
+	if t.diffAdjuster.GetAncestorFunc() != nil {
+		return
+	}
+
+	cache := make(map[uint64]*Header)
+	current := parent
+	for current != nil && current.Number != nil {
+		h := current.Number.Uint64()
+		if _, exists := cache[h]; exists {
+			break // prevent infinite loop on corrupted chain
+		}
+		cache[h] = current
+		if h == 0 {
+			break
+		}
+		current = chain.GetHeaderByHash(current.ParentHash)
+	}
+
+	t.diffAdjuster.SetAncestorFunc(func(height uint64) *Header {
+		return cache[height]
+	})
+
+	t.config.Log.Info("Difficulty adjuster: ancestor func initialized",
+		"cacheSize", len(cache),
+		"fromHeight", parent.Number.Uint64(),
+	)
 }
 
 // APIs returns the RPC APIs this consensus engine provides

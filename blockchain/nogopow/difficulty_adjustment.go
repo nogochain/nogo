@@ -47,13 +47,16 @@ const (
 	integralClampMin = -3.0
 	integralClampMax = 3.0
 
-	// Max/min timeRatio clamp before computing error.
-	maxTimeRatio = 4.0
-	minTimeRatio = 0.25
-
 	// scanDepth is the number of blocks to scan back for integral computation.
 	// With decay=0.97, contributions beyond 100 blocks are negligible (<0.05).
 	scanDepth = 100
+
+	// Double exponential smoothing coefficients (deterministic).
+	smoothingAlpha = 0.3 // Level smoothing coefficient
+	smoothingBeta  = 0.1 // Trend smoothing coefficient
+
+	// maxSmoothingWindow limits the number of blocks scanned for smoothing.
+	maxSmoothingWindow = 50
 )
 
 // GetAncestorFunc retrieves a block header by its height on the canonical chain.
@@ -73,19 +76,12 @@ type GetAncestorFunc func(height uint64) *Header
 //     running accumulator. This prevents validator state contamination
 //     when processing fork blocks.
 type DifficultyAdjuster struct {
-	mu sync.Mutex // Protects CalcDifficulty and smoothing state
+	mu sync.Mutex // Protects CalcDifficulty state
 
 	consensusParams  *config.ConsensusParams
 	integralGain     float64 // Ki coefficient
 	proportionalGain float64 // Kp coefficient
 	windowSize       int     // Number of blocks for average time window
-
-	// Double exponential smoothing state (protected by mu)
-	level        float64 // Level component (short-term)
-	trend       float64 // Trend component (long-term)
-	alpha        float64 // Level smoothing coefficient
-	beta         float64 // Trend smoothing coefficient
-	smoothingInit sync.Once
 
 	// getAncestor provides access to ancestor block headers for deterministic
 	// difficulty computation. Must be set before calling CalcDifficulty.
@@ -114,8 +110,6 @@ func NewDifficultyAdjuster(consensusParams *config.ConsensusParams) *DifficultyA
 		integralGain:     defaultKi,
 		proportionalGain: defaultKp,
 		windowSize:       windowSize,
-		alpha:            0.3, // Level smoothing coefficient
-		beta:             0.1, // Trend smoothing coefficient
 	}
 }
 
@@ -123,6 +117,13 @@ func NewDifficultyAdjuster(consensusParams *config.ConsensusParams) *DifficultyA
 // CalcDifficulty when using deterministic mode.
 func (da *DifficultyAdjuster) SetAncestorFunc(fn GetAncestorFunc) {
 	da.getAncestor = fn
+}
+
+// GetAncestorFunc returns the current ancestor lookup function.
+// Returns nil if not set, in which case CalcDifficulty falls back to
+// a simplified proportional-only calculation.
+func (da *DifficultyAdjuster) GetAncestorFunc() GetAncestorFunc {
+	return da.getAncestor
 }
 
 // CalcDifficulty calculates difficulty for the next block using a deterministic
@@ -268,7 +269,7 @@ func (da *DifficultyAdjuster) calculateDeterministicDifficulty(avgTime int64, ta
 	piOutput := da.proportionalGain*error + da.integralGain*integral
 
 	// Step 4: Double exponential smoothing (resists oscillation)
-	smoothedOutput := da.calculateDoubleExponentialSmoothing(avgTime, targetTime)
+	smoothedOutput := da.calculateDoubleExponentialSmoothing(avgTime, targetTime, parent)
 
 	// Step 5: Weighted combination: 70% PI + 30% double exponential
 	// PI responds to current error; double exponential tracks trend
@@ -353,9 +354,8 @@ func (da *DifficultyAdjuster) computeChainIntegral(parent *Header) float64 {
 			timeDiff = targetTime * 4
 		}
 
-		ratio := float64(timeDiff) / float64(targetTime)
-		ratio = clampFloat64(ratio, minTimeRatio, maxTimeRatio)
-		err := ratio - 1.0
+		// Compute error with sign consistency: positive = too fast.
+		err := float64(targetTime-timeDiff) / float64(targetTime)
 		err = clampFloat64(err, -0.75, 3.0)
 
 		// Apply decay: older blocks contribute less
@@ -377,89 +377,80 @@ func (da *DifficultyAdjuster) computeChainIntegral(parent *Header) float64 {
 	return integral
 }
 
-// calculateDoubleExponentialSmoothing implements double exponential smoothing.
-// Level tracks short-term error, trend tracks long-term direction.
-// This converges to true value and resists oscillation.
-func (da *DifficultyAdjuster) calculateDoubleExponentialSmoothing(avgTime int64, targetTime int64) float64 {
-	da.smoothingInit.Do(func() {
-		// Initialize on first call
-		if avgTime > 0 && targetTime > 0 {
-			da.level = float64(targetTime-avgTime) / float64(targetTime)
-			da.trend = 0.0
+// calculateDoubleExponentialSmoothing computes double exponential smoothing
+// deterministically from chain history. Unlike the previous stateful version,
+// this recomputes smoothing state from recent block data, ensuring identical
+// results across all nodes given the same chain state.
+//
+// The function scans back up to windowSize blocks, collects per-block errors,
+// and applies DES iteratively from oldest to newest. With alpha=0.3, the
+// smoothing converges to the true value within ~10 blocks regardless of
+// initialization position.
+func (da *DifficultyAdjuster) calculateDoubleExponentialSmoothing(avgTime int64, targetTime int64, parent *Header) float64 {
+	if da.getAncestor == nil || parent == nil || parent.Number == nil || targetTime <= 0 {
+		// Fallback: simple proportional error when chain data unavailable
+		if avgTime > 0 {
+			return clampFloat64(float64(targetTime-avgTime)/float64(targetTime), -0.75, 3.0)
 		}
-	})
-
-	// Compute current error
-	var err float64
-	if avgTime > 0 && targetTime > 0 {
-		err = float64(targetTime-avgTime) / float64(targetTime)
+		return 0
 	}
 
-	// Double exponential smoothing formula
-	oldLevel := da.level
-	da.level = da.alpha*err + (1-da.alpha)*(da.level+da.trend)
-	da.trend = da.beta*(da.level-oldLevel) + (1-da.beta)*da.trend
+	// Collect per-block errors from chain history
+	height := parent.Number.Uint64()
+	window := da.windowSize
+	if window < 5 {
+		window = 5
+	}
+	if window > maxSmoothingWindow {
+		window = maxSmoothingWindow
+	}
 
-	// Output = level + trend
-	output := da.level + da.trend
+	errors := make([]float64, 0, window)
+	for i := uint64(0); i < uint64(window) && height > i; i++ {
+		block := da.getAncestor(height - i)
+		if block == nil {
+			break
+		}
+		var prev *Header
+		if height > i+1 {
+			prev = da.getAncestor(height - i - 1)
+		}
+		if prev == nil || prev.Time == 0 || block.Time <= prev.Time {
+			continue
+		}
+		timeDiff := int64(block.Time - prev.Time)
+		if timeDiff <= 0 || timeDiff > targetTime*10 {
+			timeDiff = targetTime // clamp extreme outliers to target
+		}
+		err := float64(targetTime-timeDiff) / float64(targetTime)
+		err = clampFloat64(err, -0.75, 3.0)
+		errors = append(errors, err)
+	}
 
-	// Clamp output
+	if len(errors) == 0 {
+		return 0
+	}
+
+	// Apply double exponential smoothing from oldest to newest.
+	// errors[0] = most recent block, errors[len-1] = oldest block.
+	// Process oldest first for proper DES convergence.
+	level := errors[len(errors)-1]
+	trend := 0.0
+
+	for i := len(errors) - 2; i >= 0; i-- {
+		oldLevel := level
+		level = smoothingAlpha*errors[i] + (1-smoothingAlpha)*(level+trend)
+		trend = smoothingBeta*(level-oldLevel) + (1-smoothingBeta)*trend
+	}
+
+	output := level + trend
 	output = clampFloat64(output, -0.75, 3.0)
 
-	log.Printf("[DoubleExpSmoothing] err=%.3f, level=%.3f, trend=%.3f, output=%.3f",
-		err, da.level, da.trend, output)
+	log.Printf("[DoubleExpSmoothing_Deterministic] errors=%d, level=%.3f, trend=%.3f, output=%.3f",
+		len(errors), level, trend, output)
 
 	return output
 }
-
-// Mathematical Stability Proof for Double Exponential Smoothing
-//
-// Assumption: Block time series {x_t} is bounded: ∃ M > 0, |x_t| ≤ M
-// Smoothing coefficients satisfy: 0 < α < 1, 0 < β < 1
-//
-// Double Exponential Smoothing formulas:
-//
-//   L_t = α·x_t + (1-α)·(L_{t-1} + T_{t-1})
-//   T_t = β·(L_t - L_{t-1}) + (1-β)·T_{t-1}
-//
-// Define error e_t = x_t - (L_{t-1} + T_{t-1}), then:
-//
-//   L_t = L_{t-1} + T_{t-1} + α·e_t
-//   T_t = T_{t-1} + α·β·e_t
-//
-// Theorem: If {x_t} converges to constant C, then:
-//
-//   lim_{t→∞} L_t = C,   lim_{t→∞} T_t = 0
-//
-// Proof:
-//   When x_t → C, then e_t → 0 (since L_{t-1} + T_{t-1} → C)
-//   Therefore: L_t → C, T_t → 0
-//
-// Convergence condition (Lyapunov stability):
-//
-//   |1 - α| < 1  →  0 < α < 2 (always true since α = 0.3)
-//   |1 - α·β| < 1  →  0 < α·β < 2 (always true since α·β = 0.03)
-//
-// Therefore the system is STABLE and CONVERGES to true value C.
-//
-// Reference: "Forecasting with Exponential Smoothing" (Hyndman et al., 2008)
-//
-// Therefore, the double exponential smoothing implementation in this file
-// is MATHEMATICALLY STABLE and CONVERGES to the true target value.
-//
-// Implementation notes:
-//   - alpha = 0.3: Moderate smoothing, responds to changes in ~3-4 blocks
-//   - beta = 0.1: Slow trend tracking, avoids over-reaction
-//   - Bound clamp: [-0.75, 3.0] prevents extreme outputs
-//   - Concurrency: protected by da.mu (Lock() in CalcDifficulty)
-//
-// Expected behavior:
-//   - After a large timeDiff (e.g, 102s), level and trend will adjust
-//     smoothly over ~10 blocks (not 50+ blocks as before)
-//   - Median filter (window=50) resists outlier blocks
-//   - ±25% single-block cap prevents oscillation
-//
-// End of Mathematical Stability Proof.
 
 // clampFloat64 clamps f to [min, max].
 func clampFloat64(f, min, max float64) float64 {
@@ -474,6 +465,8 @@ func clampFloat64(f, min, max float64) float64 {
 
 // enforceBoundaryConditionsLocked applies safety constraints.
 // Single-block adjustment capped at ±25% for stability.
+// Uses ceiling for max bound to prevent deadlock at small difficulty values
+// (e.g. parentDiff=3 → ceil(3*1.25)=4, not floor(3.75)=3).
 func (da *DifficultyAdjuster) enforceBoundaryConditionsLocked(newDifficulty, parentDiff *big.Int) *big.Int {
 	// 1. Minimum difficulty
 	minDiff := big.NewInt(int64(da.consensusParams.MinDifficulty))
@@ -488,20 +481,28 @@ func (da *DifficultyAdjuster) enforceBoundaryConditionsLocked(newDifficulty, par
 	}
 
 	// 3. Single-block adjustment cap: ±25%
-	maxSingleAdjustment := 1.25
-	minSingleAdjustment := 0.75
+	// CRITICAL: Use ceiling (add 0.999999 then truncate) for max bound
+	// to match the ceiling strategy in calculateDeterministicDifficulty.
+	// Without ceiling: parentDiff=3 → floor(3.75)=3 → deadlock (never increases).
+	// With ceiling: parentDiff=3 → ceil(3.75)=4 → can increase.
+	const maxSingleAdjustment = 1.25
+	const minSingleAdjustment = 0.75
+	const ceilOffset = 0.999999
 
-	// Compute max allowed
+	// Compute max allowed with ceiling: ceil(parentDiff * 1.25)
 	maxAllowed := new(big.Int).Set(parentDiff)
 	maxMultiplier := new(big.Float).SetFloat64(maxSingleAdjustment)
 	maxAllowedFloat := new(big.Float).Mul(new(big.Float).SetInt(maxAllowed), maxMultiplier)
-	maxAllowedInt, _ := maxAllowedFloat.Int(nil)
+	maxCeiled := new(big.Float).Add(maxAllowedFloat, big.NewFloat(ceilOffset))
+	maxAllowedInt, _ := maxCeiled.Int(nil)
 
-	// Compute min allowed
+	// Compute min allowed with ceiling: ceil(parentDiff * 0.75)
+	// Use ceiling here too so that the min bound does not overly restrict decreases.
 	minAllowed := new(big.Int).Set(parentDiff)
 	minMultiplier := new(big.Float).SetFloat64(minSingleAdjustment)
 	minAllowedFloat := new(big.Float).Mul(new(big.Float).SetInt(minAllowed), minMultiplier)
-	minAllowedInt, _ := minAllowedFloat.Int(nil)
+	minCeiled := new(big.Float).Add(minAllowedFloat, big.NewFloat(ceilOffset))
+	minAllowedInt, _ := minCeiled.Int(nil)
 
 	// Enforce single-block cap
 	if newDifficulty.Cmp(maxAllowedInt) > 0 {
@@ -513,7 +514,7 @@ func (da *DifficultyAdjuster) enforceBoundaryConditionsLocked(newDifficulty, par
 		newDifficulty.Set(minAllowedInt)
 	}
 
-	// 4. Global min difficulty
+	// 4. Global min difficulty (re-check after cap)
 	configMinDiff := big.NewInt(int64(da.consensusParams.MinDifficulty))
 	if newDifficulty.Cmp(configMinDiff) < 0 {
 		newDifficulty.Set(configMinDiff)
