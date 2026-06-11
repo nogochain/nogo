@@ -32,6 +32,8 @@ type ReactorHandlers struct {
 	sw              Switch
 	miner           Miner
 	checkpointVoter *core.CheckpointVoter
+	// P0 FIX: Pending pool for compact block reconstructions
+	pendingPool *CompactBlockPendingPool
 }
 
 // Chain defines the subset of blockchain methods required by the reactor
@@ -56,6 +58,9 @@ type Mempool interface {
 	GetTxIDs() []string
 	GetAll() []core.Transaction
 	Add(tx core.Transaction) (string, error)
+	// Size returns the number of pending transactions.
+	// O(1) operation; used by compact block salt threshold decision.
+	Size() int
 }
 
 // Switch defines the subset of switch methods required by the reactor
@@ -91,6 +96,8 @@ func NewReactorHandlers(chain Chain, mempool Mempool, sw Switch, miner Miner) (*
 		mempool: mempool,
 		sw:      sw,
 		miner:   miner,
+		// P0 FIX: Initialize pending pool (max 50 pending, 30s TTL)
+		pendingPool: NewCompactBlockPendingPool(50, 30*time.Second),
 	}, nil
 }
 
@@ -119,6 +126,12 @@ func (h *ReactorHandlers) GetCheckpointVoter() *core.CheckpointVoter {
 type SyncReactorHandler struct {
 	handlers       *ReactorHandlers
 	syncLoop       SyncLoopInterface
+	// P0 FIX: Compact block pending reconstruction pool
+	pendingPool *CompactBlockPendingPool
+	// P1 NEW: Per-peer compact block preferences (sendcmpct negotiation)
+	peerCompactPrefs *PeerCompactPreferences
+	// P3 NEW: Compact block relay metrics
+	compactMetrics *CompactBlockMetrics
 	recentBlocksMu sync.Mutex
 	recentBlocks   map[string]time.Time
 }
@@ -140,8 +153,11 @@ func (h *SyncReactorHandler) SetSyncLoop(sl SyncLoopInterface) {
 // NewSyncReactorHandler creates a sync handler backed by ReactorHandlers.
 func NewSyncReactorHandler(handlers *ReactorHandlers) *SyncReactorHandler {
 	return &SyncReactorHandler{
-		handlers:     handlers,
-		recentBlocks: make(map[string]time.Time),
+		handlers:         handlers,
+		pendingPool:      handlers.pendingPool,
+		peerCompactPrefs: NewPeerCompactPreferences(),
+		compactMetrics:   &CompactBlockMetrics{},
+		recentBlocks:     make(map[string]time.Time),
 	}
 }
 
@@ -617,77 +633,99 @@ func (h *SyncReactorHandler) OnStatusRequest(peerID string) error {
 
 // OnCompactBlock handles a received compact block by attempting to
 // reconstruct the full block from the local mempool and processing it.
-// If transactions are missing, it requests them from the sending peer.
+// If transactions are missing, it registers a pending reconstruction
+// and sends a MissingTxRequest to the sending peer.
 func (h *SyncReactorHandler) OnCompactBlock(peerID string, cb *CompactBlockMsg) error {
 	if h.handlers == nil || h.handlers.mempool == nil {
 		return fmt.Errorf("sync handler: mempool not available for compact block")
 	}
 
-	mp := h.handlers.mempool
-	allTxIDs := mp.GetTxIDs()
-	shortCollisions := make(map[string][]string)
+	cr := newCompactBlockReconstructor(NewMempoolWrapperFromReactor(h.handlers.mempool))
 
-	for _, fullID := range allTxIDs {
-		shortID := fullID
-		if len(shortID) > ShortTxIDBytes*2 {
-			shortID = shortID[:ShortTxIDBytes*2]
+	reconstructed, missingIDs, err := cr.ReconstructBlock(cb)
+	if err != nil {
+		return fmt.Errorf("reconstruct compact block: %w", err)
+	}
+
+	// All transactions found in mempool - add block immediately
+	if len(missingIDs) == 0 {
+		if _, addErr := h.handlers.chain.AddBlock(reconstructed); addErr != nil {
+			return fmt.Errorf("add reconstructed block: %w", addErr)
 		}
-		shortCollisions[shortID] = append(shortCollisions[shortID], fullID)
+		if h.compactMetrics != nil {
+			h.compactMetrics.CompactBlocksReceived.Add(1)
+			h.compactMetrics.FullReconstructions.Add(1)
+		}
+		log.Printf("[SyncHandler] Compact block H=%d fully reconstructed from mempool (%d txs)",
+			cb.Height, len(reconstructed.Transactions))
+		return nil
 	}
 
-	var foundTxs []core.Transaction
-	var missingIDs []string
-
-	if cb.CoinbaseTx != nil {
-		foundTxs = append(foundTxs, *cb.CoinbaseTx)
-	}
-
-	for _, shortID := range cb.ShortTxIDs {
-		candidates, exists := shortCollisions[shortID]
-		if !exists {
-			missingIDs = append(missingIDs, shortID)
+	// P0 FIX: Register pending reconstruction and request missing txs
+	// P2-1 fix: build txid->position map in O(N) using pre-computed lookup
+	txIDPos := make(map[string]int, len(reconstructed.Transactions))
+	for pos, tx := range reconstructed.Transactions {
+		txID, txIDErr := core.TxIDHex(tx)
+		if txIDErr != nil {
 			continue
 		}
-		matched := false
-		for _, fullID := range candidates {
-			tx, ok := mp.GetTx(fullID)
-			if ok && tx != nil {
-				foundTxs = append(foundTxs, *tx)
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			missingIDs = append(missingIDs, candidates[0])
+		txIDPos[txID] = pos
+	}
+
+	missingMap := make(map[string]int, len(missingIDs))
+	for _, txID := range missingIDs {
+		if pos, ok := txIDPos[txID]; ok {
+			missingMap[txID] = pos
 		}
 	}
 
-	blockHash, decodeErr := hex.DecodeString(cb.FullHash)
-	if decodeErr != nil {
-		return fmt.Errorf("decode block hash: %w", decodeErr)
+	pr := &PendingReconstruction{
+		Block:        reconstructed,
+		MissingIDs:   missingIDs,
+		MissingMap:   missingMap,
+		TotalMissing: len(missingIDs),
+		CreatedAt:    time.Now(),
+		PeerID:       peerID,
+		Deadline:     time.Now().Add(10 * time.Second),
 	}
 
-	reconstructed := &core.Block{
-		Hash:         blockHash,
-		Height:       cb.Height,
-		Header:       cb.Header,
-		Transactions: foundTxs,
-		CoinbaseTx:   cb.CoinbaseTx,
+	if err := h.pendingPool.Register(cb.FullHash, pr); err != nil {
+		log.Printf("[SyncHandler] Failed to register pending reconstruction H=%d: %v", cb.Height, err)
+		return fmt.Errorf("register pending: %w", err)
 	}
 
-	if _, addErr := h.handlers.chain.AddBlock(reconstructed); addErr != nil {
-		return fmt.Errorf("add reconstructed block: %w", addErr)
+	// Send MissingTxRequest to the sending peer
+	req := &MissingTxRequest{
+		BlockHeight: cb.Height,
+		BlockHash:   cb.FullHash,
+		TxIDs:       missingIDs,
 	}
 
-	if len(missingIDs) > 0 {
-		log.Printf("[SyncHandler] Compact block height=%d: %d txs reconstructed, %d missing, requesting fallback",
-			cb.Height, len(foundTxs), len(missingIDs))
+	msg := SerializeMissingTxRequest(req)
+	if msg == nil {
+		return fmt.Errorf("serialize missing tx request failed")
 	}
+
+	if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, msg) {
+		return fmt.Errorf("send missing tx request to %s failed", peerID)
+	}
+
+	if h.compactMetrics != nil {
+		h.compactMetrics.CompactBlocksReceived.Add(1)
+		h.compactMetrics.PartialReconstructions.Add(1)
+		h.compactMetrics.MissingTxRequestsSent.Add(1)
+	}
+
+	log.Printf("[SyncHandler] Compact block H=%d: %d txs from mempool, %d missing, requested from %s",
+		cb.Height, len(reconstructed.Transactions)-len(missingIDs), len(missingIDs), peerID)
+
 	return nil
 }
 
 // OnMissingTxRequest handles a request for missing transactions from a peer
 // that received an incomplete compact block.
+// P0 FIX: Uses SerializeSyncTxResponse so the receiver can route txs
+// to the correct pending reconstruction via block hash.
 func (h *SyncReactorHandler) OnMissingTxRequest(peerID string, req *MissingTxRequest) error {
 	if h.handlers == nil || h.handlers.mempool == nil {
 		return fmt.Errorf("sync handler: mempool not available")
@@ -698,23 +736,195 @@ func (h *SyncReactorHandler) OnMissingTxRequest(peerID string, req *MissingTxReq
 		return fmt.Errorf("sync handler: switch not available")
 	}
 
+	sentCount := 0
 	for _, txID := range req.TxIDs {
 		tx, ok := h.handlers.mempool.GetTx(txID)
-		if ok && tx != nil {
-			txData, err := json.Marshal(tx)
-			if err != nil {
-				continue
-			}
-			msg := make([]byte, 1+len(txData))
-			msg[0] = SyncMsgTx
-			copy(msg[1:], txData)
-			sw.Send(peerID, mconnection.ChannelSync, msg)
+		if !ok || tx == nil {
+			continue
+		}
+
+		msg, err := SerializeSyncTxResponse(req.BlockHash, tx)
+		if err != nil {
+			log.Printf("[SyncHandler] Failed to serialize SyncTxResponse for tx %s: %v",
+				txID[:min(16, len(txID))], err)
+			continue
+		}
+
+		if sw.Send(peerID, mconnection.ChannelSync, msg) {
+			sentCount++
 		}
 	}
 
-	log.Printf("[SyncHandler] Responded to missing tx request from %s for %d tx(s)",
-		peerID, len(req.TxIDs))
+	log.Printf("[SyncHandler] Responded to missing tx request from %s: sent %d/%d txs for block %s",
+		peerID, sentCount, len(req.TxIDs), req.BlockHash[:min(16, len(req.BlockHash))])
 	return nil
+}
+
+// =============================================================================
+// P0 FIX: OnSyncTxResponse - completes the previously-broken compact block protocol.
+// =============================================================================
+
+// OnSyncTxResponse handles a received missing transaction for compact block
+// reconstruction. When all missing txs arrive, the block is added to the chain.
+func (h *SyncReactorHandler) OnSyncTxResponse(peerID string, blockHash string, tx *core.Transaction) error {
+	if h.pendingPool == nil {
+		return fmt.Errorf("pending pool not initialized")
+	}
+
+	startTime := time.Now()
+
+	completeBlock, done, err := h.pendingPool.AddTx(blockHash, tx)
+	if err != nil {
+		return fmt.Errorf("add tx to pending reconstruction: %w", err)
+	}
+
+	if h.compactMetrics != nil {
+		h.compactMetrics.MissingTxResponsesRecv.Add(1)
+	}
+
+	if !done {
+		return nil
+	}
+
+	// All missing transactions received - add block to chain
+	if _, addErr := h.handlers.chain.AddBlock(completeBlock); addErr != nil {
+		if h.compactMetrics != nil {
+			h.compactMetrics.FailedReconstructions.Add(1)
+		}
+		return fmt.Errorf("add fully reconstructed block %s: %w",
+			blockHash[:min(16, len(blockHash))], addErr)
+	}
+
+	if h.compactMetrics != nil {
+		h.compactMetrics.RecordReconstruction(
+			len(completeBlock.Transactions),
+			0,
+			time.Since(startTime),
+		)
+	}
+
+	log.Printf("[SyncHandler] Compact block %s fully reconstructed and added to chain (H=%d, %d txs)",
+		blockHash[:min(16, len(blockHash))], completeBlock.GetHeight(), len(completeBlock.Transactions))
+	return nil
+}
+
+// =============================================================================
+// P1 NEW: OnSendCmpct - BIP152 sendcmpct handler.
+// =============================================================================
+
+// OnSendCmpct handles a sendcmpct negotiation from a peer.
+// Responds with our capabilities and stores the peer's preferences.
+func (h *SyncReactorHandler) OnSendCmpct(peerID string, version uint8, announce bool) error {
+	log.Printf("[SyncHandler] sendcmpct from %s: version=%d announce=%v", peerID, version, announce)
+
+	// Store peer's compact block preference
+	if h.peerCompactPrefs != nil {
+		h.peerCompactPrefs.Set(peerID, &PeerCompactPreference{
+			Version:   version,
+			HighBW:    announce,
+			UpdatedAt: time.Now(),
+		})
+	}
+
+	// Respond with our capabilities (V2 supported)
+	if h.handlers.sw != nil {
+		acceptHighBW := h.canAcceptHighBandwidth()
+		msg, err := BuildSendCmpctMsg(2, acceptHighBW)
+		if err != nil {
+			return fmt.Errorf("build sendcmpct response: %w", err)
+		}
+		if !h.handlers.sw.Send(peerID, mconnection.ChannelSync, msg) {
+			return fmt.Errorf("send sendcmpct response to %s failed", peerID)
+		}
+	}
+
+	return nil
+}
+
+// canAcceptHighBandwidth checks if we can accept another high-bandwidth peer.
+// P2-3 fix: prioritizes newer peers over stale ones when capacity is exceeded.
+func (h *SyncReactorHandler) canAcceptHighBandwidth() bool {
+	if h.peerCompactPrefs == nil {
+		return false
+	}
+	count := h.peerCompactPrefs.HighBandwidthCount()
+	if count < MaxHighBandwidthPeers {
+		return true
+	}
+	// If at capacity, allow override if there is a stale peer (>5 min since negotiation)
+	return h.peerCompactPrefs.HasStaleHighBandwidthPeer(5 * time.Minute)
+}
+
+// =============================================================================
+// Adaptive fallback decision for compact block usage.
+// =============================================================================
+
+// compactBlockDecision evaluates whether to use compact block relay for a given block.
+//
+// Decision factors:
+//  1. Peer mode: high-bandwidth peers always get compact blocks
+//  2. Block size: small blocks (<10 txs) may be faster as full blocks
+//  3. MemPool coverage: low coverage increases round-trips, negating compact benefits
+//
+// Returns: (useCompact, reason).
+func (h *SyncReactorHandler) compactBlockDecision(
+	block *core.Block, peerID string,
+) (bool, string) {
+	if h.peerCompactPrefs != nil && h.peerCompactPrefs.IsHighBandwidthPeer(peerID) {
+		return true, "high_bandwidth_peer"
+	}
+
+	if len(block.Transactions) < 10 {
+		return false, "small_block"
+	}
+
+	// P0-3 fix: use live metrics instead of hardcoded estimate
+	mempoolCoverage := h.estimateMempoolCoverage()
+	if mempoolCoverage < 0.85 && len(block.Transactions) > 50 {
+		return false, fmt.Sprintf("low_coverage: %.1f%%", mempoolCoverage*100)
+	}
+
+	return true, "compact_beneficial"
+}
+
+// estimateMempoolCoverage computes the current mempool hit rate from
+// live compact block reconstruction metrics.
+// P0-3 fix: uses actual historical data instead of a hardcoded estimate.
+func (h *SyncReactorHandler) estimateMempoolCoverage() float64 {
+	if h.compactMetrics == nil {
+		return 0.95 // conservative default before any metrics exist
+	}
+	rate := h.compactMetrics.MemPoolHitRate()
+	if rate == 0 {
+		return 0.95 // no data yet; assume optimistic
+	}
+	return rate
+}
+
+// =============================================================================
+// MempoolWrapperFromReactor adapter
+// =============================================================================
+
+// NewMempoolWrapperFromReactor creates a MempoolInterface from the reactor's
+// Mempool interface, adapting the method signatures.
+func NewMempoolWrapperFromReactor(mp Mempool) MempoolInterface {
+	return &reactorMempoolAdapter{mp: mp}
+}
+
+type reactorMempoolAdapter struct {
+	mp Mempool
+}
+
+func (a *reactorMempoolAdapter) GetTx(txID string) (*core.Transaction, bool) {
+	return a.mp.GetTx(txID)
+}
+
+func (a *reactorMempoolAdapter) GetTxIDs() []string {
+	return a.mp.GetTxIDs()
+}
+
+func (a *reactorMempoolAdapter) Size() int {
+	return a.mp.Size()
 }
 
 // === Checkpoint Handlers ===

@@ -210,6 +210,14 @@ func (m *mockSyncHandler) OnMissingTxRequest(peerID string, req *MissingTxReques
 	return nil
 }
 
+func (m *mockSyncHandler) OnSyncTxResponse(peerID string, blockHash string, tx *core.Transaction) error {
+	return nil
+}
+
+func (m *mockSyncHandler) OnSendCmpct(peerID string, version uint8, announce bool) error {
+	return nil
+}
+
 func (m *mockSyncHandler) OnCheckpointVote(peerID string, height uint64, blockHash string, validatorID string, pubKey []byte, signature []byte, timestamp int64) error {
 	return nil
 }

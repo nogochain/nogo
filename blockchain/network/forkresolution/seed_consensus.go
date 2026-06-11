@@ -32,9 +32,9 @@ const (
 	// MaxSeedConsensusWait is the maximum time a seed node will wait for
 	// peer seed confirmations before falling back to local-only processing.
 	// This prevents stalled consensus when some seeds are temporarily unreachable.
-	// 500ms is aggressive: short enough to not delay block propagation,
-	// long enough to gather confirmations from well-connected seeds.
-	MaxSeedConsensusWait = 500 * time.Millisecond
+	// 2s provides sufficient time for gossip propagation between geographically
+	// distributed seed nodes while keeping block propagation delay acceptable.
+	MaxSeedConsensusWait = 2 * time.Second
 
 	// SeedVoteExpiry is how long vote records are kept for garbage collection.
 	SeedVoteExpiry = 30 * time.Second

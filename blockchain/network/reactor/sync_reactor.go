@@ -72,6 +72,18 @@ const (
 	// Payload: JSON-encoded CheckpointRecord {height, block_hash, timestamp, prev_cp_hash, signatures, validator_count}.
 	SyncMsgCheckpointResponse byte = 0x10
 
+	// SyncMsgSendCmpct negotiates compact block relay mode between peers.
+	// Sent during or after handshake to enable compact block relay.
+	// Payload: JSON-encoded {version: uint8, announce: bool}.
+	// P1 NEW: BIP152 sendcmpct negotiation.
+	SyncMsgSendCmpct byte = 0x11
+
+	// === Message type extension space ===
+	// SyncMsgTxPreAnnounce (0x12): Defined in compact_block_preannounce.go
+	// 0x13-0x1F: Reserved for compact block protocol extensions
+	// 0x20-0x2F: Reserved for fee estimation protocol
+	// 0x30-0x3F: Reserved for state sync protocol
+
 	// SyncMsgNotFound indicates requested data is unavailable.
 	// Payload: JSON-encoded notFoundPayload {msgType: byte, ids: []string}.
 	SyncMsgNotFound byte = 0xFF
@@ -141,13 +153,21 @@ type SyncHandler interface {
 	OnStatusRequest(peerID string) error
 
 	// OnCompactBlock handles a received compact block for fast relay.
-	// The handler should attempt to reconstruct the full block from the local
-	// mempool and request missing transactions if needed.
 	OnCompactBlock(peerID string, cb *CompactBlockMsg) error
 
 	// OnMissingTxRequest handles a request for missing transactions that
 	// could not be reconstructed from a compact block.
 	OnMissingTxRequest(peerID string, req *MissingTxRequest) error
+
+	// OnSyncTxResponse handles a received missing transaction for compact
+	// block reconstruction. The blockHash identifies the pending reconstruction.
+	// P0 FIX: Required to complete compact block relay when mempool is incomplete.
+	OnSyncTxResponse(peerID string, blockHash string, tx *core.Transaction) error
+
+	// OnSendCmpct handles a sendcmpct negotiation message from a peer.
+	// The handler stores peer preferences and responds with local capabilities.
+	// P1 NEW: BIP152 sendcmpct negotiation handler.
+	OnSendCmpct(peerID string, version uint8, announce bool) error
 
 	// OnCheckpointVote handles a received checkpoint vote for multi-sig consensus.
 	OnCheckpointVote(peerID string, height uint64, blockHash string, validatorID string, pubKey []byte, signature []byte, timestamp int64) error
@@ -372,6 +392,11 @@ func (sr *SyncReactor) dispatch(msgType byte, peerID string, payload []byte, han
 	case SyncMsgRequestMissingTxs:
 		sr.handleMissingTxRequest(peerID, payload)
 	case SyncMsgTx:
+		sr.handleSyncTxResponse(peerID, payload, handler)
+	case SyncMsgSendCmpct:
+		sr.handleSendCmpct(peerID, payload, handler)
+	case SyncMsgTxPreAnnounce:
+		sr.handleTxPreAnnounce(peerID, payload, handler)
 	case SyncMsgNotFound:
 		sr.handleNotFound(peerID, payload, handler)
 	case SyncMsgCheckpointVote:
@@ -661,6 +686,77 @@ func (sr *SyncReactor) handleMissingTxRequest(from string, data []byte) {
 	}
 
 	handler.OnMissingTxRequest(from, req)
+}
+
+// handleSyncTxResponse processes an incoming SyncMsgTx carrying a missing
+// transaction for a pending compact block reconstruction.
+// P0 FIX: This replaces the empty case SyncMsgTx that previously caused
+// compact block reconstructions to permanently fail.
+func (sr *SyncReactor) handleSyncTxResponse(peerID string, data []byte, handler SyncHandler) {
+	resp, err := DeserializeSyncTxResponse(data)
+	if err != nil {
+		log.Printf("[SyncReactor] Invalid SyncTxResponse from %s: %v", peerID, err)
+		return
+	}
+
+	var tx core.Transaction
+	if err := json.Unmarshal(resp.Tx, &tx); err != nil {
+		log.Printf("[SyncReactor] Failed to unmarshal tx in SyncTxResponse from %s: %v", peerID, err)
+		return
+	}
+
+	if err := handler.OnSyncTxResponse(peerID, resp.BlockHash, &tx); err != nil {
+		log.Printf("[SyncReactor] OnSyncTxResponse failed from %s: %v", peerID, err)
+	}
+}
+
+// handleSendCmpct processes a sendcmpct negotiation message.
+// P1 NEW: Part of BIP152 compact block negotiation handshake.
+func (sr *SyncReactor) handleSendCmpct(peerID string, data []byte, handler SyncHandler) {
+	var req struct {
+		Version  uint8 `json:"version"`
+		Announce bool  `json:"announce"`
+	}
+	if err := json.Unmarshal(data, &req); err != nil {
+		log.Printf("[SyncReactor] Invalid sendcmpct from %s: %v", peerID, err)
+		return
+	}
+
+	if err := handler.OnSendCmpct(peerID, req.Version, req.Announce); err != nil {
+		log.Printf("[SyncReactor] OnSendCmpct failed from %s: %v", peerID, err)
+	}
+}
+
+// handleTxPreAnnounce processes a transaction pre-announcement message.
+func (sr *SyncReactor) handleTxPreAnnounce(peerID string, data []byte, handler SyncHandler) {
+	msg, err := ParseTxPreAnnounce(data)
+	if err != nil {
+		log.Printf("[SyncReactor] Invalid TxPreAnnounce from %s: %v", peerID, err)
+		return
+	}
+
+	// The SyncHandler is also a SyncReactorHandler which implements OnTxPreAnnounce.
+	// Use type assertion to call the method without extending the interface.
+	if txHandler, ok := handler.(interface{ OnTxPreAnnounce(string, []string) error }); ok {
+		if err := txHandler.OnTxPreAnnounce(peerID, msg.TxIDs); err != nil {
+			log.Printf("[SyncReactor] OnTxPreAnnounce failed from %s: %v", peerID, err)
+		}
+	}
+}
+
+// BuildSendCmpctMsg serializes a sendcmpct negotiation message.
+func BuildSendCmpctMsg(version uint8, announce bool) ([]byte, error) {
+	payload, err := json.Marshal(struct {
+		Version  uint8 `json:"version"`
+		Announce bool  `json:"announce"`
+	}{Version: version, Announce: announce})
+	if err != nil {
+		return nil, fmt.Errorf("marshal sendcmpct: %w", err)
+	}
+	msg := make([]byte, 1+len(payload))
+	msg[0] = SyncMsgSendCmpct
+	copy(msg[1:], payload)
+	return msg, nil
 }
 
 // BuildGetHeadersMsg serializes a GetHeaders request message.

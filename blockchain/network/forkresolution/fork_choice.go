@@ -1,3 +1,25 @@
+// DEPRECATED: This entire file is dead code.
+//
+// ForkChoice was designed as an alternative fork-selection mechanism with
+// multi-dimensional scoring (work, height, stake, timestamp). It was never
+// integrated into production code — zero instances are created in any
+// initialization path (verified: 2026-06-11 cross-validation audit).
+//
+// CRITICAL WARNING: ReorgNeeded contains a non-deterministic random
+// tiebreaker (rand.Float64() < 0.5). If this code were inadvertently
+// activated, different nodes would make DIFFERENT tiebreaking decisions,
+// causing an immediate network fork.
+//
+// Fork resolution is handled by:
+//   - ForkResolver.RequestReorg (Nakamoto consensus + oscillation detection)
+//   - core.Chain.reorganizeChainLocked (internal fallback)
+//   - SeedConsensusEngine (seed-node pre-consensus voting)
+//
+// Do NOT instantiate ForkChoice. Do NOT call any of its methods.
+// This file is kept for historical reference only and may be removed
+// in a future release once all external references (documentation, tests)
+// have been updated.
+
 package forkresolution
 
 import (

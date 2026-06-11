@@ -1537,14 +1537,18 @@ func (c *Chain) addToForkLocked(block *Block) {
 	}
 
 	c.forkBlocks[height] = append(c.forkBlocks[height], block)
-	c.blocksByHash[hex.EncodeToString(block.Hash)] = block
+	hashHex := hex.EncodeToString(block.Hash)
+	c.blocksByHash[hashHex] = block
+	c.forkBlocksByHash[hashHex] = block
 
 	// Limit fork blocks per height
 	if len(c.forkBlocks[height]) > MaxForkBlocksPerHeight {
 		// Remove oldest block (simple eviction)
 		removed := c.forkBlocks[height][0]
+		removedHex := hex.EncodeToString(removed.Hash)
+		delete(c.blocksByHash, removedHex)
+		delete(c.forkBlocksByHash, removedHex)
 		c.forkBlocks[height] = c.forkBlocks[height][1:]
-		delete(c.blocksByHash, hex.EncodeToString(removed.Hash))
 	}
 
 	// Limit total fork blocks
@@ -1578,12 +1582,20 @@ func (c *Chain) enforceForkBlocksTotalLimitLocked() {
 			break
 		}
 		blocks := c.forkBlocks[h]
+		removedFromThisHeight := 0
 		for i := 0; i < len(blocks) && removed < toRemove; i++ {
-			delete(c.blocksByHash, hex.EncodeToString(blocks[i].Hash))
+			hashHex := hex.EncodeToString(blocks[i].Hash)
+			delete(c.blocksByHash, hashHex)
+			delete(c.forkBlocksByHash, hashHex)
 			removed++
+			removedFromThisHeight++
 		}
 		if removed >= toRemove {
-			c.forkBlocks[h] = blocks[toRemove:]
+			if removedFromThisHeight < len(blocks) {
+				c.forkBlocks[h] = blocks[removedFromThisHeight:]
+			} else {
+				delete(c.forkBlocks, h)
+			}
 			break
 		}
 		delete(c.forkBlocks, h)
@@ -1597,6 +1609,7 @@ func (c *Chain) tryReorganizeLocked(newBlock *Block) error {
 	attachRev := make([]*Block, 0)
 	cur := newBlock
 	var forkHeight uint64
+	var forkAncestor *Block // Ancestor block at fork point in canonical chain
 
 	for {
 		attachRev = append(attachRev, cur)
@@ -1606,6 +1619,7 @@ func (c *Chain) tryReorganizeLocked(newBlock *Block) error {
 		if parent, exists := c.blocksByHash[parentHashHex]; exists {
 			if c.isCanonicalLocked(parent) {
 				forkHeight = parent.GetHeight()
+				forkAncestor = parent // Capture ancestor for workload comparison
 				break
 			}
 		}
@@ -1630,8 +1644,8 @@ func (c *Chain) tryReorganizeLocked(newBlock *Block) error {
 		return nil
 	}
 
-	// Calculate work for new chain
-	newChainWork := c.calculateChainWorkFromAncestorLocked(nil, newBlock) // TODO: pass ancestor
+	// Calculate work for new chain from fork ancestor
+	newChainWork := c.calculateChainWorkFromAncestorLocked(forkAncestor, newBlock)
 
 	// Calculate work for current canonical chain from fork point
 	canonicalWork := c.calculateCanonicalWorkFromHeightLocked(forkHeight)
@@ -1646,24 +1660,10 @@ func (c *Chain) tryReorganizeLocked(newBlock *Block) error {
 	log.Printf("[Chain] Reorganizing: fork point at h=%d, new work=%s, canonical work=%s",
 		forkHeight, newChainWork.String(), canonicalWork.String())
 
-	// Use unified reorg executor if available
-	if c.reorgExecutor != nil {
-		c.reorgMu.Lock()
-		c.reorgInProgress = true
-		c.reorgMu.Unlock()
-
-		defer func() {
-			c.reorgMu.Lock()
-			c.reorgInProgress = false
-			c.reorgMu.Unlock()
-		}()
-
-		return c.reorgExecutor.RequestReorg(newBlock, "Chain-tryReorganize")
-	}
-
-	// Fallback: internal reorganization
-	// FIXED: Pass nil as ancestor - chain will calculate internally
-	return c.reorganizeChainLocked(nil, newBlock)
+	// Internal reorganization: c.mu is already held by the caller.
+	// ForkResolver → executeReorg → ReorganizeToKnownFork would re-acquire
+	// c.mu and cause a self-deadlock. Use reorganizeChainLocked directly.
+	return c.reorganizeChainLocked(forkAncestor, newBlock)
 }
 
 // calculateCanonicalWorkFromHeightLocked calculates work for canonical chain from given height
@@ -1948,6 +1948,7 @@ func (c *Chain) removeFromForkLocked(block *Block) {
 	}
 
 	delete(c.forkBlocksByHash, hashHex)
+	delete(c.blocksByHash, hashHex)
 }
 
 // validateBlockLocked performs comprehensive block validation
@@ -2258,27 +2259,9 @@ func (c *Chain) handleReorganizationLocked(newBlock *Block) error {
 	log.Printf("[Chain] HandleReorg: switching to heavier chain (height=%d work=%s)",
 		newBlock.GetHeight(), newChainWork.String())
 
-	// UNIFIED ENTRY POINT: Delegate to ReorgExecutor when available
-	// This ensures preventive timing (500ms/2s/1s) and global TryLock mutex
-	if c.reorgExecutor != nil {
-		c.reorgMu.Lock()
-		c.reorgInProgress = true
-		c.reorgMu.Unlock()
-
-		defer func() {
-			c.reorgMu.Lock()
-			c.reorgInProgress = false
-			c.reorgMu.Unlock()
-		}()
-
-		err := c.reorgExecutor.RequestReorg(newBlock, "Chain-handleReorganization")
-		if err == nil {
-			log.Printf("[Chain] ✅ HandleReorg delegated to unified executor successfully")
-			return nil
-		}
-		log.Printf("[Chain] Unified executor declined (%v), using internal logic", err)
-	}
-
+	// Internal reorganization: c.mu is already held by the caller.
+	// Bypass ForkResolver to avoid self-deadlock (ForkResolver →
+	// ReorganizeToKnownFork → c.mu.Lock() while already held).
 	return c.reorganizeChainLocked(ancestor, newBlock)
 }
 
@@ -2406,9 +2389,25 @@ func (c *Chain) calculateChainWorkFromAncestorLocked(ancestor *Block, tip *Block
 // Internal fallback: called when ReorgExecutor is not set or declines delegation
 // Production-grade: updates state, indexes, and storage
 func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
+	if ancestor == nil {
+		return fmt.Errorf("reorganizeChainLocked: nil ancestor — caller must provide the fork point ancestor block")
+	}
+
 	log.Printf("[Chain] reorganizeChainLocked() executing (internal fallback path)")
 
 	log.Printf("Chain reorganization: ancestor height=%d, new tip height=%d", ancestor.GetHeight(), newTip.GetHeight())
+
+	// Signal reorg in progress so IsReorgInProgress() reports true,
+	// preventing mining operations from building on a stale chain tip.
+	c.reorgMu.Lock()
+	c.reorgInProgress = true
+	c.reorgMu.Unlock()
+
+	defer func() {
+		c.reorgMu.Lock()
+		c.reorgInProgress = false
+		c.reorgMu.Unlock()
+	}()
 
 	// Heaviest chain rule: no external coordination needed for fork resolution
 	// External reorg checker removed - deterministic consensus via cumulative work
@@ -2631,7 +2630,9 @@ func (c *Chain) reorganizeChainLocked(ancestor *Block, newTip *Block) error {
 			if forkHeight > newHeight {
 				if forkBlocksAtHeight, ok := c.forkBlocks[forkHeight]; ok {
 					for _, fb := range forkBlocksAtHeight {
-						delete(c.forkBlocksByHash, hex.EncodeToString(fb.Hash))
+						fbHex := hex.EncodeToString(fb.Hash)
+						delete(c.forkBlocksByHash, fbHex)
+						delete(c.blocksByHash, fbHex)
 					}
 				}
 				delete(c.forkBlocks, forkHeight)
@@ -3899,17 +3900,8 @@ func (c *Chain) autoReorgIfNeededLocked() {
 		bestTipHash[:16], bestTip.GetHeight(), c.calculateCumulativeWorkLocked(bestTip).String(),
 		currentTipHash[:16], uint64(len(c.blocks)-1))
 
-	// UNIFIED ENTRY POINT: Delegate to ReorgExecutor when available
-	// This ensures preventive timing and global mutex are applied
-	if c.reorgExecutor != nil {
-		err := c.reorgExecutor.RequestReorg(bestTip, "Chain-autoReorgIfNeeded")
-		if err == nil {
-			log.Printf("[Chain] ✅ Auto reorg delegated to unified executor successfully")
-			return
-		}
-		log.Printf("[Chain] Unified executor declined auto reorg (%v), using internal logic", err)
-	}
-
+	// Internal reorganization: c.mu is already held. Bypass ForkResolver
+	// to avoid self-deadlock via ReorganizeToKnownFork → c.mu.Lock().
 	ancestor, _, err := c.findCommonAncestorLocked(bestTip)
 	if err != nil || ancestor == nil {
 		log.Printf("[Chain] AUTO REORG cancelled: findCommonAncestorLocked returned err=%v ancestor=%v", err, ancestor)
@@ -4668,17 +4660,27 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 	}
 
 	c.forkBlocks[height] = append(c.forkBlocks[height], block)
+	// Insert into hash maps BEFORE cleanup: total cleanup may delete this
+	// height from forkBlocks; if the hash insertion happened after, we'd leak
+	// orphaned entries in forkBlocksByHash and blocksByHash.
+	c.forkBlocksByHash[hashHex] = block
+	c.blocksByHash[hashHex] = block
 
-	// Enforce per-height fork block limit to prevent unbounded memory growth
+	// Enforce per-height fork block limit to prevent unbounded memory growth.
+	// Removes oldest blocks (prefix); newly appended block at the end is safe.
 	if len(c.forkBlocks[height]) > MaxForkBlocksPerHeight {
 		removed := c.forkBlocks[height][:len(c.forkBlocks[height])-MaxForkBlocksPerHeight]
 		for _, rb := range removed {
-			delete(c.forkBlocksByHash, hex.EncodeToString(rb.Hash))
+			rbHex := hex.EncodeToString(rb.Hash)
+			delete(c.forkBlocksByHash, rbHex)
+			delete(c.blocksByHash, rbHex)
 		}
 		c.forkBlocks[height] = c.forkBlocks[height][len(c.forkBlocks[height])-MaxForkBlocksPerHeight:]
 	}
 
-	// Enforce total fork blocks count to prevent memory exhaustion
+	// Enforce total fork blocks count to prevent memory exhaustion.
+	// Must run AFTER hash map insertion so that if this height is deleted,
+	// the hash entries are also cleaned (see inner loop below).
 	totalForkBlocks := 0
 	for _, blocks := range c.forkBlocks {
 		totalForkBlocks += len(blocks)
@@ -4696,7 +4698,9 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 			}
 			if forkBlocksAtHeight, ok := c.forkBlocks[h]; ok {
 				for _, fb := range forkBlocksAtHeight {
-					delete(c.forkBlocksByHash, hex.EncodeToString(fb.Hash))
+					fbHex := hex.EncodeToString(fb.Hash)
+					delete(c.forkBlocksByHash, fbHex)
+					delete(c.blocksByHash, fbHex)
 				}
 			}
 			removed := len(c.forkBlocks[h])
@@ -4704,9 +4708,6 @@ func (c *Chain) addForkBlockLocked(block *Block, hashHex string) (bool, error) {
 			totalForkBlocks -= removed
 		}
 	}
-
-	// Track fork block hash for fast duplicate detection
-	c.forkBlocksByHash[hashHex] = block
 
 	var canonicalHash string
 	if int(height) < len(c.blocks) && c.blocks[height] != nil {
@@ -4941,6 +4942,10 @@ func (c *Chain) invalidateWorkCache() {
 
 // enforceBlocksByHashSize ensures blocksByHash does not exceed MaxBlocksByHashSize.
 // Evicts entries from lowest heights first when over limit.
+// Fork blocks are skipped: they have their own lifecycle management via
+// MaxForkBlocksPerHeight, MaxForkBlocksTotal, and reorg cleanup. Evicting
+// fork blocks here would orphan entries in forkBlocksByHash and break
+// fork chain traversal (isForkChainCompleteLocked, tryReorganizeLocked).
 // Caller must hold c.mu lock.
 func (c *Chain) enforceBlocksByHashSize() {
 	if len(c.blocksByHash) <= MaxBlocksByHashSize {
@@ -4961,6 +4966,13 @@ func (c *Chain) enforceBlocksByHashSize() {
 	evicted := 0
 	for _, h := range heights {
 		for _, hashHex := range heightMap[h] {
+			// Fork blocks are managed by fork-specific cleanup; evicting
+			// them from blocksByHash without also cleaning forkBlocksByHash
+			// and forkBlocks[height] would create orphaned references and
+			// break fork chain traversal in isForkChainCompleteLocked.
+			if _, isFork := c.forkBlocksByHash[hashHex]; isFork {
+				continue
+			}
 			delete(c.blocksByHash, hashHex)
 			evicted++
 			if evicted >= evictCount {
@@ -5092,20 +5104,10 @@ func (c *Chain) reorganizeToHeaviestLocked() error {
 	log.Printf("[Chain] Reorganizing to heaviest fork: height=%d work=%s (current tip height=%d)",
 		bestTip.GetHeight(), c.calculateCumulativeWorkLocked(bestTip).String(), uint64(len(c.blocks)-1))
 
-	// UNIFIED ENTRY POINT: Delegate to ReorgExecutor if set (prevents dual-track)
-	if c.reorgExecutor != nil {
-		log.Printf("[Chain] ReorgExecutor delegating (height=%d)", bestTip.GetHeight())
+	// Internal reorganization: c.mu is already held. Bypass ForkResolver
+	// to avoid self-deadlock via ReorganizeToKnownFork → c.mu.Lock().
 
-		err := c.reorgExecutor.RequestReorg(bestTip, "Chain-reorganizeToHeaviest")
-		if err == nil {
-			log.Printf("[Chain] Reorg delegated to unified executor")
-			return nil
-		}
-
-		log.Printf("[Chain] Unified executor returned: %v, falling back to internal logic", err)
-	}
-
-	// FALLBACK: Internal reorg (only when no executor or executor declined)
+	// Internal reorg path
 	return c.reorganizeToLocked(bestTip)
 }
 

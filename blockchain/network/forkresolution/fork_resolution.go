@@ -139,9 +139,10 @@ type ForkResolver struct {
 	cancel context.CancelFunc
 
 	// Reorg state management
-	reorgInProgress bool
-	lastReorgTime   time.Time
-	reorgMu         sync.Mutex
+	reorgInProgress          bool
+	lastReorgTime            time.Time
+	lastSuccessfulReorgTime  time.Time // Only updated on successful reorgs; used for interval throttling
+	reorgMu                  sync.Mutex
 
 	// Oscillation detection
 	recentReorgs              []ReorgRecord // Recent reorg history for oscillation detection
@@ -159,13 +160,14 @@ type ForkResolver struct {
 
 // ResolverStats holds fork resolution statistics
 type ResolverStats struct {
-	TotalForksDetected   int64
-	TotalReorgsPerformed int64
-	TotalReorgsFailed    int64
-	LastForkTime         time.Time
-	LastReorgTime        time.Time
-	MaxReorgDepth        uint64
-	AvgReorgDuration     time.Duration
+	TotalForksDetected      int64
+	TotalReorgsPerformed    int64
+	TotalReorgsFailed       int64
+	TotalFallbackRollbacks  int64 // Shallow rollbacks after failed common-ancestor lookup (not true reorgs)
+	LastForkTime            time.Time
+	LastReorgTime           time.Time
+	MaxReorgDepth           uint64
+	AvgReorgDuration        time.Duration
 }
 
 // NewForkResolver creates a new unified fork resolver
@@ -237,10 +239,12 @@ func (fr *ForkResolver) DetectFork(localBlock, remoteBlock *core.Block, peerID s
 	fr.mu.Lock()
 	fr.stats.TotalForksDetected++
 	fr.stats.LastForkTime = time.Now()
+	// Capture callback under lock to prevent data race with SetOnForkDetected.
+	forkCb := fr.onForkDetected
 	fr.mu.Unlock()
 
-	if fr.onForkDetected != nil {
-		go fr.onForkDetected(*event)
+	if forkCb != nil {
+		go forkCb(*event)
 	}
 
 	log.Printf("[ForkResolver] Fork detected: type=%v depth=%d local_h=%d remote_h=%d peer=%s",
@@ -346,7 +350,12 @@ func (fr *ForkResolver) RequestReorgWithDepth(newBlock *core.Block, source strin
 	}
 	defer fr.reorgMu.Unlock()
 
-	if fr.reorgInProgress {
+	// reorgInProgress is written under fr.mu.Lock() in executeReorg;
+	// protect the read with fr.mu.RLock() to prevent data race.
+	fr.mu.RLock()
+	inProgress := fr.reorgInProgress
+	fr.mu.RUnlock()
+	if inProgress {
 		return fmt.Errorf("reorganization already in progress")
 	}
 
@@ -377,7 +386,12 @@ func (fr *ForkResolver) RequestReorgWithDepth(newBlock *core.Block, source strin
 	log.Printf("[ForkResolver] Reorg requested by %s: height=%d hash=%x depth=%d severity=%v interval=%v",
 		source, newBlock.GetHeight(), newBlock.Hash[:8], forkDepth, severity, interval)
 
-	if time.Since(fr.lastReorgTime) < interval {
+	// Protected read of throttling timestamp to prevent data race with
+	// recordSuccessfulReorg which writes under fr.mu.Lock().
+	fr.mu.RLock()
+	throttleSince := time.Since(fr.lastSuccessfulReorgTime)
+	fr.mu.RUnlock()
+	if throttleSince < interval {
 		return fmt.Errorf("reorg too frequent for severity=%v: minimum interval %v not elapsed", severity, interval)
 	}
 
@@ -561,8 +575,12 @@ func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgR
 		result.ReorgDepth = 0
 		fr.recordSuccessfulReorg(0, result.Duration)
 
-		if fr.onReorgComplete != nil && accepted {
-			go fr.onReorgComplete(newBlock.GetHeight())
+		// Read callback under lock to prevent data race with SetOnReorgComplete.
+		fr.mu.RLock()
+		cb := fr.onReorgComplete
+		fr.mu.RUnlock()
+		if cb != nil && accepted {
+			go cb(newBlock.GetHeight())
 		}
 		return result
 	}
@@ -600,23 +618,16 @@ func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgR
 		// Fallback rollback is a partial recovery, NOT a complete reorg.
 		// Return Success=false with a descriptive error so the caller can
 		// deprioritize the offending peer and trigger resync from others.
+		// Do NOT record this as a successful reorg, do NOT feed oscillation
+		// detection, and do NOT fire onReorgComplete — the caller must
+		// handle resync from a DIFFERENT peer independently.
 		result.Error = fmt.Errorf("fallback rollback: no common ancestor with peer tip at h=%d, rolled back %d blocks to h=%d for recovery",
 			newBlock.GetHeight(), reorgDepth, fallbackHeight)
 		result.Success = false
 		result.Switched = true
 		result.Duration = time.Since(startTime)
 
-		fr.recordSuccessfulReorg(reorgDepth, result.Duration)
-
-		oldTipHeight := uint64(0)
-		if localTip != nil {
-			oldTipHeight = localTip.GetHeight()
-		}
-		fr.recordReorgForOscillation(oldTipHeight, newBlock.GetHeight(), reorgDepth, source)
-
-		if fr.onReorgComplete != nil {
-			go fr.onReorgComplete(fallbackHeight)
-		}
+		fr.recordFallbackRollback()
 
 		return result
 	}
@@ -683,12 +694,16 @@ func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgR
 		log.Printf("[ForkResolver] Reorg completed (ReorganizeToKnownFork): success=%v depth=%v duration=%v",
 			result.Success, reorgDepth, result.Duration)
 
-		if fr.onReorgComplete != nil {
+		// Read callback under lock to prevent data race with SetOnReorgComplete.
+		fr.mu.RLock()
+		cb := fr.onReorgComplete
+		fr.mu.RUnlock()
+		if cb != nil {
 			h := newBlock.GetHeight()
 			if result.NewTip != nil {
 				h = result.NewTip.GetHeight()
 			}
-			go fr.onReorgComplete(h)
+			go cb(h)
 		}
 		return result
 	}
@@ -738,8 +753,12 @@ func (fr *ForkResolver) executeReorg(newBlock *core.Block, source string) ReorgR
 	log.Printf("[ForkResolver] Reorg completed: success=%v switched=%v duration=%v depth=%d",
 		result.Success, result.Switched, result.Duration, reorgDepth)
 
-	if fr.onReorgComplete != nil && accepted {
-		go fr.onReorgComplete(newBlock.GetHeight())
+	// Read callback under lock to prevent data race with SetOnReorgComplete.
+	fr.mu.RLock()
+	cb := fr.onReorgComplete
+	fr.mu.RUnlock()
+	if cb != nil && accepted {
+		go cb(newBlock.GetHeight())
 	}
 
 	return result
@@ -942,8 +961,12 @@ func (fr *ForkResolver) HandleChainMismatch(peerID string, expectedPrevHash, rec
 		Depth:        localTip.GetHeight() - height,
 	}
 
-	if fr.onForkDetected != nil {
-		go fr.onForkDetected(*event)
+	// Read callback under lock to prevent data race with SetOnForkDetected.
+	fr.mu.RLock()
+	forkCb := fr.onForkDetected
+	fr.mu.RUnlock()
+	if forkCb != nil {
+		go forkCb(*event)
 	}
 
 	return nil
@@ -1036,10 +1059,25 @@ func (fr *ForkResolver) recordSuccessfulReorg(depth uint64, duration time.Durati
 
 	totalDuration := fr.stats.AvgReorgDuration*time.Duration(fr.stats.TotalReorgsPerformed-1) + duration
 	fr.stats.AvgReorgDuration = totalDuration / time.Duration(fr.stats.TotalReorgsPerformed)
+
+	// Protected by fr.mu — paired with fr.mu.RLock() at the read site
+	// in RequestReorgWithDepth to prevent data race.
+	fr.lastSuccessfulReorgTime = time.Now()
 }
 
 func (fr *ForkResolver) recordFailedReorg() {
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
 	fr.stats.TotalReorgsFailed++
+}
+
+// recordFallbackRollback records a shallow rollback triggered by a failed
+// common-ancestor lookup. These are NOT successful reorgs — they are partial
+// recoveries that shrink the local chain tip to allow resync from a different peer.
+// Separate from recordSuccessfulReorg to avoid polluting TotalReorgsPerformed,
+// MaxReorgDepth, AvgReorgDuration, and oscillation detection.
+func (fr *ForkResolver) recordFallbackRollback() {
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	fr.stats.TotalFallbackRollbacks++
 }
