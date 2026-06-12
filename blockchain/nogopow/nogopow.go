@@ -448,6 +448,22 @@ func (t *NogopowEngine) CalcDifficulty(chain ChainHeaderReader, time uint64, par
 // through parent hashes, then sets it on the difficulty adjuster.
 // Thread-safe: uses double-checked locking via t.lock.
 func (t *NogopowEngine) initAncestorFunc(chain ChainHeaderReader, parent *Header) {
+	t.initAncestorFuncWithGetter(func(hash Hash) *Header {
+		return chain.GetHeaderByHash(hash)
+	}, parent)
+}
+
+// InitAncestorFuncLocked builds the ancestor cache using a header getter function
+// that is safe to call while the caller holds its own lock. This prevents the
+// deadlock that occurs when MineTransfers holds chain.mu.Lock() and
+// GetHeaderByHash tries to acquire chain.mu.RLock().
+// Thread-safe: uses double-checked locking via t.lock.
+func (t *NogopowEngine) InitAncestorFuncLocked(getHeader func(Hash) *Header, parent *Header) {
+	t.initAncestorFuncWithGetter(getHeader, parent)
+}
+
+// initAncestorFuncWithGetter is the shared implementation that accepts a header getter function.
+func (t *NogopowEngine) initAncestorFuncWithGetter(getHeader func(Hash) *Header, parent *Header) {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 
@@ -467,7 +483,7 @@ func (t *NogopowEngine) initAncestorFunc(chain ChainHeaderReader, parent *Header
 		if h == 0 {
 			break
 		}
-		current = chain.GetHeaderByHash(current.ParentHash)
+		current = getHeader(current.ParentHash)
 	}
 
 	t.diffAdjuster.SetAncestorFunc(func(height uint64) *Header {

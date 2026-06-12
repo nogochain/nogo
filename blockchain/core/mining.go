@@ -51,11 +51,26 @@ func init() {
 	powModeCache.checked = true
 }
 
-// GetHeaderByHash returns the header by hash (for nogopow.ChainHeaderReader interface)
+// SetPowModeForTesting overrides the cached PoW mode for testing.
+// Valid modes: "fake" (skip PoW), "production" (normal).
+// MUST be called before NewChain(), otherwise the init() default will be used.
+// This is a TEST-ONLY function; never use in production code.
+func SetPowModeForTesting(mode string) {
+	powModeCache.mode = mode
+	powModeCache.checked = true
+}
+
+// GetHeaderByHash returns the header by hash (for nogopow.ChainHeaderReader interface).
+// Thread-safe: acquires RLock. Do NOT call while holding c.mu.Lock() — use getHeaderByHashLocked instead.
 func (c *Chain) GetHeaderByHash(hash nogopow.Hash) *nogopow.Header {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.getHeaderByHashLocked(hash)
+}
 
+// getHeaderByHashLocked returns the header by hash WITHOUT acquiring any lock.
+// Caller MUST hold c.mu (Lock or RLock) before calling.
+func (c *Chain) getHeaderByHashLocked(hash nogopow.Hash) *nogopow.Header {
 	hashHex := hex.EncodeToString(hash.Bytes())
 	for _, block := range c.blocks {
 		if hex.EncodeToString(block.Hash) == hashHex {
@@ -186,6 +201,12 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 		Time:       uint64(latest.Header.TimestampUnix),
 		Difficulty: big.NewInt(int64(latest.Header.DifficultyBits)),
 	}
+
+	// Pre-initialize ancestor cache using the lock-safe getter to avoid
+	// deadlock: MineTransfers holds c.mu.Lock(), and CalcDifficulty's
+	// internal initAncestorFunc would call GetHeaderByHash which tries
+	// c.mu.RLock() — a reentrant lock that Go's sync.RWMutex forbids.
+	engine.InitAncestorFuncLocked(c.getHeaderByHashLocked, parentHeader)
 
 	nextDifficulty := engine.CalcDifficulty(c, uint64(ts), parentHeader)
 

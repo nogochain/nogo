@@ -1532,17 +1532,18 @@ func (c *Chain) addToForkLocked(block *Block) {
 	c.blocksByHash[hashHex] = block
 	c.forkBlocksByHash[hashHex] = block
 
-	// Limit fork blocks per height
+	// Limit fork blocks per height (FIFO eviction)
 	if len(c.forkBlocks[height]) > MaxForkBlocksPerHeight {
-		// Remove oldest block (simple eviction)
 		removed := c.forkBlocks[height][0]
 		removedHex := hex.EncodeToString(removed.Hash)
 		delete(c.blocksByHash, removedHex)
 		delete(c.forkBlocksByHash, removedHex)
 		c.forkBlocks[height] = c.forkBlocks[height][1:]
+		log.Printf("[Chain] Fork block evicted (height %d limit %d): %s",
+			height, MaxForkBlocksPerHeight, removedHex[:16])
 	}
 
-	// Limit total fork blocks
+	// Limit total fork blocks across all heights
 	c.enforceForkBlocksTotalLimitLocked()
 }
 
@@ -1591,31 +1592,32 @@ func (c *Chain) enforceForkBlocksTotalLimitLocked() {
 		}
 		delete(c.forkBlocks, h)
 	}
+	if removed > 0 {
+		log.Printf("[Chain] Fork block total limit exceeded: evicted %d blocks, remaining %d (limit=%d)",
+			removed, total-removed, MaxForkBlocksTotal)
+	}
 }
 
-// tryReorganizeLocked attempts to reorganize the chain if the new fork is heavier
-// Following LegacyCore's tryActivateSideChainLocked pattern
+// tryReorganizeLocked attempts to reorganize the chain if the new fork is heavier.
+// Walks backwards from newBlock through fork blocks to find the common ancestor
+// on the canonical chain, then compares accumulated work to decide whether to reorg.
 func (c *Chain) tryReorganizeLocked(newBlock *Block) error {
-	// Build path from new block back to fork point
-	attachRev := make([]*Block, 0)
 	cur := newBlock
 	var forkHeight uint64
-	var forkAncestor *Block // Ancestor block at fork point in canonical chain
+	var forkAncestor *Block // Common ancestor at fork point in canonical chain
 
 	for {
-		attachRev = append(attachRev, cur)
-
 		// Check if parent is in canonical chain
 		parentHashHex := hex.EncodeToString(cur.Header.PrevHash)
 		if parent, exists := c.blocksByHash[parentHashHex]; exists {
 			if c.isCanonicalLocked(parent) {
 				forkHeight = parent.GetHeight()
-				forkAncestor = parent // Capture ancestor for workload comparison
+				forkAncestor = parent
 				break
 			}
 		}
 
-		// Check if parent is in fork blocks
+		// Check if parent is in fork blocks (continue walking backwards)
 		parentBlocks, exists := c.forkBlocks[cur.GetHeight()-1]
 		if exists {
 			found := false
@@ -1631,7 +1633,7 @@ func (c *Chain) tryReorganizeLocked(newBlock *Block) error {
 			}
 		}
 
-		// Parent not found - cannot reorganize
+		// Parent not found — fork chain is incomplete, cannot reorganize
 		return nil
 	}
 
@@ -1643,17 +1645,13 @@ func (c *Chain) tryReorganizeLocked(newBlock *Block) error {
 
 	// Compare work
 	if newChainWork.Cmp(canonicalWork) <= 0 {
-		// New chain is not heavier - no reorganization
 		return nil
 	}
 
-	// New chain is heavier - perform reorganization
+	// New chain is heavier — perform reorganization
 	log.Printf("[Chain] Reorganizing: fork point at h=%d, new work=%s, canonical work=%s",
 		forkHeight, newChainWork.String(), canonicalWork.String())
 
-	// Internal reorganization: c.mu is already held by the caller.
-	// ForkResolver → executeReorg → ReorganizeToKnownFork would re-acquire
-	// c.mu and cause a self-deadlock. Use reorganizeChainLocked directly.
 	return c.reorganizeChainLocked(forkAncestor, newBlock)
 }
 
@@ -2342,6 +2340,7 @@ func (c *Chain) calculateChainWorkLocked(blocks []*Block) *big.Int {
 }
 
 // calculateChainWorkFromAncestorLocked calculates work from ancestor to tip
+// by walking backwards from tip through fork blocks to the common ancestor.
 func (c *Chain) calculateChainWorkFromAncestorLocked(ancestor *Block, tip *Block) *big.Int {
 	totalWork := big.NewInt(0)
 
@@ -2352,21 +2351,25 @@ func (c *Chain) calculateChainWorkFromAncestorLocked(ancestor *Block, tip *Block
 
 		parentHashHex := hex.EncodeToString(current.Header.PrevHash)
 
+		// First: search fork blocks (off-chain blocks)
 		parent := c.lookupBlockInForkBlocksLocked(parentHashHex)
 		if parent != nil {
 			current = parent
 			continue
 		}
 
+		// Second: search blocksByHash (which includes both canonical and fork blocks).
+		// Must verify the block IS the canonical block at its height, not another fork.
 		parent, exists := c.blocksByHash[parentHashHex]
 		if exists {
 			parentHeight := parent.GetHeight()
-			// FIX: Do NOT check hash equality! Fork point has different hash by definition.
-			// Only check if parent's height is within canonical range.
-			if parentHeight < uint64(len(c.blocks)) {
-				current = parent
-				continue
+			if parentHeight < uint64(len(c.blocks)) &&
+				bytes.Equal(c.blocks[parentHeight].Hash, parent.Hash) {
+				// Hash matches canonical chain → safe to use as ancestor
+				break
 			}
+			// Hash mismatch: this is a fork block that shares a height with canonical
+			// but isn't canonical. Fall through to break.
 		}
 		break
 	}
