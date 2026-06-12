@@ -84,11 +84,17 @@ nogo/
 
 ## Documentation
 
-- [Technical Documentation](./docs/Technical-Documentation.md)
-- [API Documentation](./docs/API/README.md)
-- [Deployment Guide](./docs/Deployment-Guide-EN.md)
-- [Core Types](./docs/core-types-README.md)
-- [NogoPow Algorithm](./docs/nogopow-README.md)
+| Document | Description |
+|----------|-------------|
+| [Quick Start](./docs/QUICK_START.md) | One-command setup, build, and run guide |
+| [Architecture](./docs/ARCHITECTURE.md) | System architecture and module design |
+| [API Reference](./docs/API_REFERENCE.md) | JSON-RPC API, WebSocket, and admin endpoints |
+| [Component Manual](./docs/COMPONENT_MANUAL.md) | Core components: node modes, consensus, P2P, RPC |
+| [Configuration](./docs/CONFIGURATION.md) | Full configuration reference and tuning |
+| [Consensus Guide](./docs/CONSENSUS_GUIDE.md) | NogoPow consensus mechanism deep dive |
+| [NogoPow Algorithm](./docs/NOGOPOW_ALGORITHM.md) | Memory-hard proof-of-work algorithm specification |
+| [Deployment Guide](./docs/DEPLOYMENT_GUIDE.md) | Testnet and mainnet deployment procedures |
+| [Fork & Sync Testing](./tests/simulation/) | 58 scenario tests covering fork handling and sync |
 
 ## API Endpoints
 
@@ -101,7 +107,7 @@ nogo/
 | `GET /tx/{txid}` | Query transaction |
 | `GET /mempool` | Mempool status |
 
-For complete API documentation, see [API Documentation](./docs/API/README.md).
+For complete API documentation, see [API Reference](./docs/API_REFERENCE.md).
 
 ## Development
 
@@ -218,11 +224,17 @@ nogo/
 
 ## 文档
 
-- [技术文档](./docs/技术文档-CN.md)
-- [API 文档](./docs/API/README_cn.md)
-- [部署指南](./docs/Deployment-Guide-CN.md)
-- [核心类型](./docs/core-types-README.md)
-- [NogoPow 算法](./docs/nogopow-README.md)
+| 文档 | 描述 |
+|------|------|
+| [快速开始](./docs/QUICK_START.md) | 一键启动、构建和运行指南 |
+| [系统架构](./docs/ARCHITECTURE.md) | 系统架构与模块设计 |
+| [API 参考](./docs/API_REFERENCE.md) | JSON-RPC API、WebSocket 和管理端点 |
+| [组件手册](./docs/COMPONENT_MANUAL.md) | 核心组件：节点模式、共识、P2P、RPC |
+| [配置指南](./docs/CONFIGURATION.md) | 完整配置参考与调优 |
+| [共识指南](./docs/CONSENSUS_GUIDE.md) | NogoPow 共识机制深入解析 |
+| [NogoPow 算法](./docs/NOGOPOW_ALGORITHM.md) | 内存密集型工作量证明算法规范 |
+| [部署指南](./docs/DEPLOYMENT_GUIDE.md) | 测试网和主网部署流程 |
+| [分叉与同步测试](./tests/simulation/) | 58 个场景测试覆盖分叉处理与同步 |
 
 ## API 端点
 
@@ -235,7 +247,7 @@ nogo/
 | `GET /tx/{txid}` | 查询交易 |
 | `GET /mempool` | 交易池状态 |
 
-完整 API 文档请参阅 [API 文档](./docs/API/README_cn.md)。
+完整 API 文档请参阅 [API 参考](./docs/API_REFERENCE.md)。
 
 ## 开发
 
