@@ -366,7 +366,7 @@ body {
       
       <div class="info-box">
         <h4>📝 Authentication</h4>
-        <p>Most endpoints are public. Admin endpoints require <code>X-Admin-Token</code> header with valid miner address.</p>
+        <p>Most endpoints are public. Admin endpoints require <code>Authorization: Bearer &lt;ADMIN_TOKEN&gt;</code> header.</p>
       </div>
     </div>
 
@@ -388,11 +388,11 @@ body {
   "height": 12345,
   "latestHash": "abc123...",
   "genesisHash": "def456...",
-  "totalSupply": 100000000000000000,
+  "totalSupply": 841000000000000,
   "peersCount": 50,
   "difficultyBits": 123456789,
-  "blockReward": 5000000000,
-  "nextHalving": 525600
+  "blockReward": 800000000,
+  "difficultyTolerance": 15
 }</div>
         </div>
       </div>
@@ -458,9 +458,9 @@ body {
   "minerAddress": "NOGO00...",
   "transactions": [...],
   "coinbase": {
-    "minerReward": 4800000000,
-    "fee": 200000000,
-    "data": "block reward: community=100000000, genesis=50000000, integrity=50000000"
+    "minerReward": 792000000,
+    "genesisReward": 8000000,
+    "fee": 200000000
   }
 }</div>
         </div>
@@ -513,7 +513,7 @@ body {
         <p class="endpoint-description">Submit a new block to the network (for miners).</p>
         <div class="endpoint-details">
           <h4>Authentication Required</h4>
-          <p>Requires <code>X-Admin-Token</code> header with valid miner address.</p>
+          <p>Requires <code>Authorization: Bearer &lt;ADMIN_TOKEN&gt;</code> header.</p>
           <h4>Request Body</h4>
           <div class="code-block">{
   "height": 12345,
@@ -743,10 +743,9 @@ body {
           <div class="code-block">{
   "difficulty": 123456789,
   "difficultyBits": 123456789,
-  "networkHashrate": "1.5 TH/s",
-  "blockReward": 5000000000,
-  "nextDifficultyAdjustment": 1000,
-  "blocksUntilHalving": 513255
+  "blockReward": 800000000,
+  "targetBlockTime": 30,
+  "consensusAlgorithm": "NogoPow"
 }</div>
         </div>
       </div>
@@ -791,7 +790,7 @@ body {
           <h4>Response</h4>
           <div class="code-block">{
   "accepted": true,
-  "reward": 5000000000
+  "reward": 800000000
 }</div>
         </div>
       </div>
@@ -804,7 +803,7 @@ body {
         <p class="endpoint-description">Mine a single block immediately (for testing).</p>
         <div class="endpoint-details">
           <h4>Authentication Required</h4>
-          <p>Requires <code>X-Admin-Token</code> header.</p>
+          <p>Requires <code>Authorization: Bearer &lt;ADMIN_TOKEN&gt;</code> header.</p>
         </div>
       </div>
     </div>
@@ -1047,7 +1046,7 @@ body {
         <p class="endpoint-description">Audit entire blockchain integrity (admin only).</p>
         <div class="endpoint-details">
           <h4>Authentication Required</h4>
-          <p>Requires <code>X-Admin-Token</code> header.</p>
+          <p>Requires <code>Authorization: Bearer &lt;ADMIN_TOKEN&gt;</code> header.</p>
         </div>
       </div>
     </div>
