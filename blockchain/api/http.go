@@ -360,29 +360,19 @@ func (s *Server) handleSpecialAddresses(w http.ResponseWriter, r *http.Request) 
 	// Use genesis block's miner address as genesis address
 	genesisAddr := genesis.MinerAddress
 
-	// Generate community fund and integrity pool addresses using contract deployment logic
-	// These addresses are auto-generated when contracts are deployed
-	// Note: In production, these would be retrieved from the contract registry
-	// For now, we generate them using the same algorithm as the contracts
+	// Generate community fund address using contract deployment logic
 	chainID := s.bc.GetChainID()
 	timestamp := genesis.Header.TimestampUnix
 	communityFundAddr := generateContractAddress(chainID, timestamp, "COMMUNITY_FUND_GOVERNANCE")
-	integrityPoolAddr := generateContractAddress(chainID, timestamp, "INTEGRITY_REWARD_CONTRACT")
 
-	// Get balances
+	// Get balance
 	communityFundBalance, _ := s.bc.Balance(communityFundAddr)
-	integrityPoolBalance, _ := s.bc.Balance(integrityPoolAddr)
 
 	_ = writeJSON(w, http.StatusOK, map[string]any{
 		"communityFund": map[string]any{
 			"address": communityFundAddr,
 			"balance": communityFundBalance.Balance,
 			"purpose": "Community development fund governed by on-chain voting",
-		},
-		"integrityPool": map[string]any{
-			"address": integrityPoolAddr,
-			"balance": integrityPoolBalance.Balance,
-			"purpose": "Reward pool for integrity nodes (distributed every 5082 blocks)",
 		},
 		"genesis": map[string]any{
 			"address": genesisAddr,

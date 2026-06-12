@@ -98,9 +98,9 @@ const (
 // =============================================================================
 
 const (
-	// DefaultInitialBlockRewardNogo is the starting block reward in NOGO
+	// DefaultInitialBlockRewardNogo is the starting block reward in NOGO (1 NOGO = 10^8 wei).
 	// Configurable via genesis.json: monetaryPolicy.initialBlockReward
-	DefaultInitialBlockRewardNogo = 8
+	DefaultInitialBlockRewardNogo = 8 // 8 NOGO = 800,000,000 wei
 
 	// DefaultAnnualReductionPercent is the yearly reduction percentage
 	// 10% annual reduction: reward = reward * 9 / 10

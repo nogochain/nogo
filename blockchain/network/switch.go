@@ -180,7 +180,7 @@ func DefaultSwitchConfig() SwitchConfig {
 		ExternalAddr:     "",
 		Seeds:            DefaultSeedNodes,
 		SeedMode:         false,
-		UPNP:             envBool("NOGO_UPNP", true),
+		UPNP:             !envBool("NOGO_DISABLE_UPNP", false),
 		Peers:            []PeerInfo{},
 		DHTSeedPort:      envInt("NOGO_DHT_SEED_PORT", 30303),
 		AdvertisedPort:   0,
@@ -1118,7 +1118,7 @@ func (sw *Switch) parseListenAddr(addr string) (string, string, error) {
 // Failure is non-blocking — node continues in outbound-only mode.
 func (sw *Switch) initNatTraversal() {
 	if !sw.config.UPNP {
-		log.Printf("Switch: NAT traversal disabled (NOGO_UPNP=%v)", sw.config.UPNP)
+		log.Printf("Switch: NAT traversal disabled (NOGO_DISABLE_UPNP=%v)", !sw.config.UPNP)
 		return
 	}
 

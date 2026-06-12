@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
-	"sync"
 )
 
 const (
@@ -21,37 +20,6 @@ const (
 	BATCH_VERIFY_THRESHOLD = 10
 	BATCH_VERIFY_MAX_SIZE  = 1000
 )
-
-var (
-	batchVerifyPool = sync.Pool{
-		New: func() interface{} {
-			return &batchVerifyWorkspace{}
-		},
-	}
-)
-
-type batchVerifyWorkspace struct {
-	scalars    []*big.Int
-	points     [][]byte
-	tempPoints [][]byte
-}
-
-func getBatchWorkspace() *batchVerifyWorkspace {
-	ws := batchVerifyPool.Get().(*batchVerifyWorkspace)
-	if ws.scalars == nil {
-		ws.scalars = make([]*big.Int, 0, BATCH_VERIFY_MAX_SIZE*2)
-		ws.points = make([][]byte, 0, BATCH_VERIFY_MAX_SIZE*2)
-		ws.tempPoints = make([][]byte, 0, BATCH_VERIFY_MAX_SIZE*2)
-	}
-	return ws
-}
-
-func putBatchWorkspace(ws *batchVerifyWorkspace) {
-	ws.scalars = ws.scalars[:0]
-	ws.points = ws.points[:0]
-	ws.tempPoints = ws.tempPoints[:0]
-	batchVerifyPool.Put(ws)
-}
 
 type Address struct {
 	Version  byte
@@ -203,6 +171,9 @@ func Hash160(data []byte) []byte {
 type PublicKey = ed25519.PublicKey
 type Signature = []byte
 
+// VerifyBatch performs parallel per-item verification of Ed25519 signatures.
+// Signatures are verified individually using crypto/ed25519.Verify,
+// with concurrent workers for batches exceeding BATCH_VERIFY_THRESHOLD (10).
 func VerifyBatch(pubKeys []PublicKey, messages [][]byte, signatures [][]byte) ([]bool, error) {
 	if len(pubKeys) != len(messages) || len(messages) != len(signatures) {
 		return nil, fmt.Errorf("batch size mismatch: pubKeys=%d, messages=%d, signatures=%d",
@@ -320,199 +291,8 @@ var ed25519Order = new(big.Int).SetBytes([]byte{
 	0x58, 0x12, 0x63, 0x1A, 0x5C, 0xF5, 0xD3, 0xED,
 })
 
-func aggregatePoints(scalars []*big.Int, points [][]byte, randomScalars []*big.Int) []byte {
-	if len(scalars) == 0 || len(scalars) != len(points) || len(scalars) != len(randomScalars) {
-		return nil
-	}
-
-	resultX := new(big.Int)
-	resultY := new(big.Int)
-	resultX.SetInt64(0)
-	resultY.SetInt64(1)
-
-	p := new(big.Int).SetBytes([]byte{
-		0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xED,
-	})
-
-	d := new(big.Int).SetBytes([]byte{
-		0x52, 0x03, 0x3C, 0xAE, 0x49, 0x8D, 0x88, 0x3D,
-		0x68, 0x12, 0x28, 0xD6, 0x88, 0x2A, 0x92, 0x7D,
-		0x77, 0x25, 0x35, 0x3E, 0xCA, 0x40, 0x20, 0x09,
-		0x4C, 0x39, 0x3E, 0x26, 0x28, 0x1C, 0xA0, 0x98,
-	})
-
-	for i := 0; i < len(scalars); i++ {
-		if scalars[i] == nil || points[i] == nil || randomScalars[i] == nil {
-			continue
-		}
-
-		pointY := new(big.Int).SetBytes(points[i])
-		pointX := recoverX(pointY, p)
-		if pointX == nil {
-			continue
-		}
-
-		k := new(big.Int).Mul(randomScalars[i], scalars[i])
-		k.Mod(k, ed25519Order)
-
-		scaledX, scaledY := scalarMultSimple(pointX, pointY, k, p)
-
-		tmpX, tmpY := addPointsSimple(resultX, resultY, scaledX, scaledY, p, d)
-		resultX.Set(tmpX)
-		resultY.Set(tmpY)
-	}
-
-	compressed := compressPoint(resultX, resultY)
-	return compressed
-}
-
-func recoverX(y, p *big.Int) *big.Int {
-	ySquared := new(big.Int).Mul(y, y)
-	ySquared.Mod(ySquared, p)
-
-	u := new(big.Int).Sub(ySquared, big.NewInt(1))
-	u.Mod(u, p)
-
-	v := new(big.Int).Mul(y, y)
-	v.Mul(v, new(big.Int).SetBytes([]byte{
-		0x52, 0x03, 0x3C, 0xAE, 0x49, 0x8D, 0x88, 0x3D,
-		0x68, 0x12, 0x28, 0xD6, 0x88, 0x2A, 0x92, 0x7D,
-		0x77, 0x25, 0x35, 0x3E, 0xCA, 0x40, 0x20, 0x09,
-		0x4C, 0x39, 0x3E, 0x26, 0x28, 0x1C, 0xA0, 0x98,
-	}))
-	v.Sub(v, big.NewInt(1))
-	v.Mod(v, p)
-
-	if v.Sign() == 0 {
-		return big.NewInt(0)
-	}
-
-	vInv := new(big.Int).ModInverse(v, p)
-	if vInv == nil {
-		return nil
-	}
-
-	xSquared := new(big.Int).Mul(u, vInv)
-	xSquared.Mod(xSquared, p)
-
-	x := new(big.Int).ModSqrt(xSquared, p)
-	if x == nil {
-		return nil
-	}
-
-	return x
-}
-
-func scalarMultSimple(x, y, k, p *big.Int) (*big.Int, *big.Int) {
-	resultX := new(big.Int).SetInt64(0)
-	resultY := new(big.Int).SetInt64(1)
-
-	baseX := new(big.Int).Set(x)
-	baseY := new(big.Int).Set(y)
-
-	scalar := new(big.Int).Set(k)
-
-	for scalar.Sign() > 0 {
-		if scalar.Bit(0) == 1 {
-			tmpX, tmpY := addPointsSimple(resultX, resultY, baseX, baseY, p, new(big.Int).SetBytes([]byte{
-				0x52, 0x03, 0x3C, 0xAE, 0x49, 0x8D, 0x88, 0x3D,
-				0x68, 0x12, 0x28, 0xD6, 0x88, 0x2A, 0x92, 0x7D,
-				0x77, 0x25, 0x35, 0x3E, 0xCA, 0x40, 0x20, 0x09,
-				0x4C, 0x39, 0x3E, 0x26, 0x28, 0x1C, 0xA0, 0x98,
-			}))
-			resultX.Set(tmpX)
-			resultY.Set(tmpY)
-		}
-
-		baseX, baseY = doublePoint(baseX, baseY, p, new(big.Int).SetBytes([]byte{
-			0x52, 0x03, 0x3C, 0xAE, 0x49, 0x8D, 0x88, 0x3D,
-			0x68, 0x12, 0x28, 0xD6, 0x88, 0x2A, 0x92, 0x7D,
-			0x77, 0x25, 0x35, 0x3E, 0xCA, 0x40, 0x20, 0x09,
-			0x4C, 0x39, 0x3E, 0x26, 0x28, 0x1C, 0xA0, 0x98,
-		}))
-
-		scalar.Rsh(scalar, 1)
-	}
-
-	return resultX, resultY
-}
-
-func addPointsSimple(x1, y1, x2, y2, p, d *big.Int) (*big.Int, *big.Int) {
-	x1y2 := new(big.Int).Mul(x1, y2)
-	x2y1 := new(big.Int).Mul(x2, y1)
-	numX := new(big.Int).Add(x1y2, x2y1)
-	numX.Mod(numX, p)
-
-	y1y2 := new(big.Int).Mul(y1, y2)
-	x1x2 := new(big.Int).Mul(x1, x2)
-	numY := new(big.Int).Add(y1y2, x1x2)
-	numY.Mod(numY, p)
-
-	denom := new(big.Int).Mul(d, x1)
-	denom.Mul(denom, x2)
-	denom.Mul(denom, y1)
-	denom.Mul(denom, y2)
-	denom.Add(big.NewInt(1), denom)
-	denom.Mod(denom, p)
-
-	denomInv := new(big.Int).ModInverse(denom, p)
-	if denomInv == nil {
-		return big.NewInt(0), big.NewInt(1)
-	}
-
-	x := new(big.Int).Mul(numX, denomInv)
-	x.Mod(x, p)
-
-	y := new(big.Int).Mul(numY, denomInv)
-	y.Mod(y, p)
-
-	return x, y
-}
-
-func doublePoint(x, y, p, d *big.Int) (*big.Int, *big.Int) {
-	return addPointsSimple(x, y, x, y, p, d)
-}
-
-func compressPoint(x, y *big.Int) []byte {
-	result := make([]byte, 32)
-	yBytes := y.Bytes()
-	copy(result[32-len(yBytes):], yBytes)
-
-	if x.Bit(0) == 1 {
-		result[31] |= 0x80
-	}
-
-	return result
-}
-
-// generateRandomScalars generates cryptographically secure random big.Int scalars.
-// Security: Returns error on crypto/rand failure instead of falling back to deterministic sequence.
-// A deterministic fallback would compromise security in cryptographic operations.
-func generateRandomScalars(count int) ([]*big.Int, error) {
-	if count <= 0 {
-		return nil, fmt.Errorf("count must be positive, got %d", count)
-	}
-
-	scalars := make([]*big.Int, count)
-	randomBytes := make([]byte, count*64)
-
-	// Security: Use crypto/rand for cryptographically secure random numbers
-	_, err := rand.Read(randomBytes)
-	if err != nil {
-		// Security: Return error on crypto failure - never use deterministic fallback
-		return nil, fmt.Errorf("failed to generate random scalars: %w", err)
-	}
-
-	for i := 0; i < count; i++ {
-		scalars[i] = new(big.Int).SetBytes(randomBytes[i*64 : (i+1)*64])
-	}
-
-	return scalars, nil
-}
-
+// VerifyBatchSimple performs sequential per-item Ed25519 signature verification.
+// Each signature is verified individually using crypto/ed25519.Verify.
 func VerifyBatchSimple(pubKeys []PublicKey, messages [][]byte, signatures [][]byte) []bool {
 	results := make([]bool, len(pubKeys))
 

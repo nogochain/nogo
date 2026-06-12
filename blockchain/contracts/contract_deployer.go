@@ -30,8 +30,6 @@ type ContractType uint8
 const (
 	// ContractCommunityFund represents community fund governance contract
 	ContractCommunityFund ContractType = iota
-	// ContractIntegrityReward represents integrity reward contract
-	ContractIntegrityReward
 )
 
 // String returns the string representation of contract type
@@ -39,8 +37,6 @@ func (c ContractType) String() string {
 	switch c {
 	case ContractCommunityFund:
 		return "community_fund"
-	case ContractIntegrityReward:
-		return "integrity_reward"
 	default:
 		return "unknown"
 	}
@@ -115,17 +111,6 @@ func (d *ContractDeployer) DeployContracts(genesisHeight uint64) error {
 		Active:       true,
 	}
 
-	// Deploy Integrity Reward Contract
-	integrityRewardContract := NewIntegrityRewardContract()
-	d.DeployedContracts[ContractIntegrityReward] = &ContractDeployment{
-		Type:         ContractIntegrityReward,
-		Address:      integrityRewardContract.GetContractAddress(),
-		DeployedAt:   now,
-		DeployHeight: genesisHeight,
-		DeployTxHash: deployTxHash + "_integrity",
-		Active:       true,
-	}
-
 	return nil
 }
 
@@ -151,11 +136,6 @@ func (d *ContractDeployer) GetCommunityFundAddress() (string, error) {
 	return d.GetContractAddress(ContractCommunityFund)
 }
 
-// GetIntegrityRewardAddress returns the integrity reward contract address
-func (d *ContractDeployer) GetIntegrityRewardAddress() (string, error) {
-	return d.GetContractAddress(ContractIntegrityReward)
-}
-
 // IsDeployed checks if a contract is deployed
 func (d *ContractDeployer) IsDeployed(contractType ContractType) bool {
 	d.mu.RLock()
@@ -171,9 +151,7 @@ func (d *ContractDeployer) AreAllDeployed() bool {
 	defer d.mu.RUnlock()
 
 	return d.DeployedContracts[ContractCommunityFund] != nil &&
-		d.DeployedContracts[ContractCommunityFund].Active &&
-		d.DeployedContracts[ContractIntegrityReward] != nil &&
-		d.DeployedContracts[ContractIntegrityReward].Active
+		d.DeployedContracts[ContractCommunityFund].Active
 }
 
 // GetDeploymentInfo returns deployment information for a contract
@@ -305,33 +283,6 @@ func (r *ContractRegistry) GetCommunityFundContract() (*CommunityFundGovernanceC
 	if contract.GetContractAddress() != address {
 		// In production, we would load the actual contract state
 		// For now, we just create a new instance with the correct address
-		contract.ContractAddress = address
-	}
-
-	return contract, nil
-}
-
-// GetIntegrityRewardContract creates and returns a new integrity reward contract instance
-func (r *ContractRegistry) GetIntegrityRewardContract() (*IntegrityRewardContract, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	if r.deployer == nil {
-		return nil, errors.New("registry not initialized")
-	}
-
-	address, err := r.deployer.GetIntegrityRewardAddress()
-	if err != nil {
-		return nil, err
-	}
-
-	// Create new contract instance
-	// In production, this would load the contract state from the blockchain
-	contract := NewIntegrityRewardContract()
-
-	// Verify the contract address matches
-	if contract.GetContractAddress() != address {
-		// In production, we would load the actual contract state
 		contract.ContractAddress = address
 	}
 

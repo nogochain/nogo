@@ -57,10 +57,11 @@ func DefaultConfig() *Config {
 			MaxDifficultyBits:            255,
 			MaxDifficultyChangePercent:   100, // Increased for faster convergence when network hashrate changes
 			MedianTimePastWindow:         11,
-			// GenesisDifficultyBits: 100 = target 2^256/100
-			// This allows genesis block to be mined quickly on CPU
-			// PI controller will adjust upward based on actual hashrate
-			GenesisDifficultyBits: 100,
+		// GenesisDifficultyBits: 10 = target 2^256/10
+		// This allows genesis block to be mined quickly on CPU
+		// PI controller will adjust upward based on actual hashrate
+		// NOTE: Mainnet/testnet use hardcoded config in config/constants.go
+		GenesisDifficultyBits: 10,
 		},
 		UseSIMD:      false,
 		UseBitShift:  false,

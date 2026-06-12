@@ -142,9 +142,11 @@ func DefaultConfig() *Config {
 			MerkleActivationHeight:         0,
 			BinaryEncodingEnable:           false,
 			BinaryEncodingActivationHeight: 0,
-			// GenesisDifficultyBits: 100 allows CPU mining of genesis block
-			// PI controller will auto-adjust based on network hashrate
-			GenesisDifficultyBits: 100,
+		// GenesisDifficultyBits: 10 for easier CPU mining of genesis block
+		// PI controller will auto-adjust based on network hashrate
+		// NOTE: Mainnet/testnet use hardcoded config in config/constants.go
+		// This value only applies to custom chains using DefaultConfig()
+		GenesisDifficultyBits: 10,
 			MonetaryPolicy: MonetaryPolicy{
 				InitialBlockReward:     800000000,
 				AnnualReductionPercent: 10,
@@ -440,19 +442,6 @@ func deployCommunityFundGovernanceContract() string {
 	return "COMMUNITY_FUND_CONTRACT_ADDRESS"
 }
 
-// deployIntegrityRewardContract deploys integrity node reward contract
-// Returns contract address, rewards auto-distributed based on scores
-func deployIntegrityRewardContract() string {
-	// Deploy reward contract logic
-	// 1. Auto-receive 1% of block rewards
-	// 2. Auto-distribute every 5082 blocks
-	// 3. Calculate rewards based on node scores
-	// 4. Auto-distribute to qualified nodes
-	// 5. No manual intervention (code is law)
-	// Returns contract address (to be generated at deployment)
-	return "INTEGRITY_REWARD_CONTRACT_ADDRESS"
-}
-
 // Address constants for economic model
 const (
 	// BurnAddress is the fee burn address (unspendable)
@@ -466,7 +455,4 @@ const (
 	// From config/constants.go: GenesisMinerAddress
 	GenesisAddress = "NOGO006f44f4319250563c65919062932cc1cd7bae04045c355bf53bcb9d7f785c0b473fabfd7c"
 
-	// IntegrityPoolAddress is the integrity node reward pool address
-	// Controlled by reward contract, auto-distributes based on scores
-	IntegrityPoolAddress = "NOGO333333333333333333333333333333333INTEGRITY"
 )

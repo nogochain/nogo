@@ -53,15 +53,6 @@ func generateCommunityFundAddress(chainID uint64, timestamp int64) string {
 	return "NOGO" + hex.EncodeToString(hash[:20])
 }
 
-// generateIntegrityPoolAddress generates a deterministic address for integrity reward contract
-// Address is derived from chainID, timestamp, and contract type to ensure uniqueness
-// Security: uses SHA256 for collision resistance
-func generateIntegrityPoolAddress(chainID uint64, timestamp int64) string {
-	data := fmt.Sprintf("%d-%d-INTEGRITY_POOL_REWARD", chainID, timestamp)
-	hash := sha256.Sum256([]byte(data))
-	return "NOGO" + hex.EncodeToString(hash[:20])
-}
-
 // GenesisConfig represents the genesis configuration
 // Production-grade: all fields are configurable for different networks
 // Concurrency safety: immutable after initialization, safe for concurrent reads
@@ -99,10 +90,6 @@ type GenesisConfig struct {
 	// CommunityFundAddress is the auto-generated address for community fund governance contract
 	// Generated at genesis using SHA256(chainID + timestamp + "COMMUNITY_FUND")
 	CommunityFundAddress string `json:"communityFundAddress"`
-
-	// IntegrityPoolAddress is the auto-generated address for integrity reward contract
-	// Generated at genesis using SHA256(chainID + timestamp + "INTEGRITY_POOL")
-	IntegrityPoolAddress string `json:"integrityPoolAddress"`
 }
 
 // Uint64String is a custom type for flexible uint64 JSON parsing
@@ -262,10 +249,8 @@ func LoadGenesisConfigWithChainID(path string, chainID uint64) (*GenesisConfig, 
 func loadHardcodedMainnetGenesis() (*GenesisConfig, error) {
 	genesisConfig := nogoconfig.MainnetGenesisConfig
 
-	// Auto-generate community fund and integrity pool addresses
-	// These addresses are deterministic and unique for each chain
+	// Auto-generate the community fund contract address
 	communityFundAddr := generateCommunityFundAddress(genesisConfig.ChainID, genesisConfig.Timestamp)
-	integrityPoolAddr := generateIntegrityPoolAddress(genesisConfig.ChainID, genesisConfig.Timestamp)
 
 	cfg := &GenesisConfig{
 		Network:             genesisConfig.Network,
@@ -317,7 +302,6 @@ func loadHardcodedMainnetGenesis() (*GenesisConfig, error) {
 			},
 		},
 		CommunityFundAddress: communityFundAddr,
-		IntegrityPoolAddress: integrityPoolAddr,
 	}
 
 	return cfg, nil
@@ -328,9 +312,8 @@ func loadHardcodedMainnetGenesis() (*GenesisConfig, error) {
 func loadHardcodedTestnetGenesis() (*GenesisConfig, error) {
 	genesisConfig := nogoconfig.TestnetGenesisConfig
 
-	// Auto-generate community fund and integrity pool addresses
+	// Auto-generate the community fund contract address
 	communityFundAddr := generateCommunityFundAddress(genesisConfig.ChainID, genesisConfig.Timestamp)
-	integrityPoolAddr := generateIntegrityPoolAddress(genesisConfig.ChainID, genesisConfig.Timestamp)
 
 	cfg := &GenesisConfig{
 		Network:             genesisConfig.Network,
@@ -382,7 +365,6 @@ func loadHardcodedTestnetGenesis() (*GenesisConfig, error) {
 			},
 		},
 		CommunityFundAddress: communityFundAddr,
-		IntegrityPoolAddress: integrityPoolAddr,
 	}
 
 	return cfg, nil
@@ -846,9 +828,9 @@ func CreateGenesisBlock(cfg *GenesisConfig, consensus ConsensusParams) (*Block, 
 	genesis.Hash = hashBytes
 	genesis.Header.PrevHash = make([]byte, 0)
 
-	// NOTE: Genesis block has empty state (no accounts).
-	// StateRoot will be zero value ([]byte{}), which is acceptable for genesis block.
-	// For non-genesis blocks, StateRoot is calculated in mining.go:254-255.
+	// Genesis block has empty state root (no accounts).
+	// StateRoot set to empty byte slice is valid for the genesis block.
+	// For subsequent blocks, StateRoot is calculated in mining.go:254-255.
 	// The miner should allow empty StateRoot for genesis block (height=0).
 
 	// Note: Do not lock here if called from initializeGenesisLocked which already holds locks

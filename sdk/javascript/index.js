@@ -66,8 +66,8 @@ class NogoChainRPC {
     const ws = new WebSocket(this.client.defaults.baseURL.replace('http', 'ws') + '/ws');
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
-      if (msg.type === 'mempool') {
-        callback(msg.data);
+      if (msg.type === 'mempool_added' || msg.type === 'mempool_removed') {
+        callback(msg.data, msg.type);
       }
     };
     return ws;
@@ -77,8 +77,8 @@ class NogoChainRPC {
     const ws = new WebSocket(this.client.defaults.baseURL.replace('http', 'ws') + '/ws');
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
-      if (msg.type === 'block') {
-        callback(msg.data);
+      if (msg.type === 'new_block' || msg.type === 'chain_reorg') {
+        callback(msg.data, msg.type);
       }
     };
     return ws;

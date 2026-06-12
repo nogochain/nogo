@@ -1,6 +1,6 @@
 # NogoChain
 
-[![License](https://img.shields.io/badge/License-LGPL%203.0-blue.svg)](https://opensource.org/licenses/LGPL-3.0)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.22%2B-00ADD8.svg)](https://golang.org/)
 
 NogoChain is a blockchain project based on the NogoPow consensus algorithm, using a PI controller for difficulty adjustment, supporting CPU-friendly mining.
@@ -253,7 +253,7 @@ golangci-lint run
 
 ## 许可证
 
-本项目采用 LGPL-3.0 许可证，详见 [LICENSE](./LICENSE)。
+本项目采用 MIT 许可证，详见 [LICENSE](./LICENSE)。
 
 ## 社区与资源
 

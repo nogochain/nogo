@@ -168,8 +168,9 @@ func applyBlockToState(p ConsensusParams, mp MonetaryPolicy, state map[string]Ac
 		}
 
 		// Distribute block rewards according to economic model.
-		// CommunityFund and IntegrityPool allocations have been removed
-		// from the economic model (shares set to 0 in MonetaryPolicy).
+		// Reward allocation: 99% MinerRewardShare + 1% GenesisShare.
+		// CommunityFundShare(0%) and IntegrityPoolShare(0%) are permanently disabled.
+		// Transaction fees are burned (MinerFeeShare=0%).
 		blockReward := policy.BlockReward(b.GetHeight())
 
 		// Genesis Address (1%) - to preset genesis miner address
@@ -311,11 +312,6 @@ type Chain struct {
 	// skipLogCooldown suppresses duplicate "already on canonical chain" log spam
 	skipLogCooldown   time.Time
 	skipLogCooldownMu sync.Mutex
-
-	// Integrity reward system
-	integrityManager     *NodeIntegrityManager
-	integrityDistributor *IntegrityRewardDistributor
-	scoreCalculator      *ScoreCalculator
 
 	// Context for background goroutines (orphan cleanup, etc.)
 	ctx    context.Context
@@ -650,10 +646,6 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 		pendingAncestorRequests: make(map[string]time.Time),
 		ctx:                     ctx,
 		cancel:                  cancel,
-		// Initialize integrity reward system
-		integrityManager:     NewNodeIntegrityManager(),
-		integrityDistributor: NewIntegrityRewardDistributor(),
-		scoreCalculator:      NewScoreCalculator(),
 		// Initialize contract manager
 		contractManager: NewContractManager(),
 	}
@@ -661,7 +653,6 @@ func NewChain(cfg ChainConfig) (*Chain, error) {
 	// Initialize contracts at genesis
 	if err := chain.contractManager.InitializeContracts(
 		genesisCfg.CommunityFundAddress,
-		genesisCfg.IntegrityPoolAddress,
 	); err != nil {
 		return nil, fmt.Errorf("initialize contracts: %w", err)
 	}

@@ -320,50 +320,6 @@ func (c *Chain) MineTransfers(ctx context.Context, transfers []Transaction) (*Bl
 	return newBlock, nil
 }
 
-// processIntegrityRewardsLocked processes integrity node rewards for a block
-// Called after each block is added to the chain
-// Note: This function assumes the lock is already held - do NOT call directly
-func (c *Chain) processIntegrityRewardsLocked(block *Block) {
-	if c.integrityDistributor == nil || c.integrityManager == nil {
-		return
-	}
-
-	height := block.GetHeight()
-
-	// Check if it's distribution time (every 5082 blocks)
-	if c.integrityDistributor.ShouldDistribute(height) {
-		// Get all active nodes
-		nodes := c.integrityManager.GetActiveNodes()
-
-		if len(nodes) > 0 {
-			// Distribute rewards
-			rewards, err := c.integrityDistributor.DistributeRewards(nodes, height)
-			if err != nil {
-				// Log error but don't fail the block
-				fmt.Printf("Integrity reward distribution error at height %d: %v\n", height, err)
-			} else if len(rewards) > 0 {
-				// Create reward distribution transactions
-				// Note: In production, these would be special system transactions
-				// For now, we track them in the distributor's history
-				fmt.Printf("Distributed integrity rewards at height %d: %d nodes, total=%d wei\n",
-					height, len(rewards), c.integrityDistributor.GetTotalDistributed())
-			}
-		}
-
-		// Update next distribution height
-		_ = c.integrityDistributor.GetNextDistributionHeight()
-	}
-}
-
-// processIntegrityRewards processes integrity node rewards for a block
-// Called after each block is added to the chain
-// Public version that acquires the lock
-func (c *Chain) processIntegrityRewards(block *Block) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.processIntegrityRewardsLocked(block)
-}
-
 // addressesForBlock extracts all addresses involved in a block
 func addressesForBlock(b *Block) []string {
 	addrSet := make(map[string]bool)

@@ -106,7 +106,8 @@ func logf(color string, icon string, args ...interface{}) {
 }
 
 // Miner represents the mining engine for continuous block production
-// Production-grade: implements continuous mining with proper concurrency control
+// Production-grade continuous mining with 1-second ticker polling.
+// Uses dual-layer mining decision mechanism for safety.
 type Miner struct {
 	mu sync.RWMutex
 

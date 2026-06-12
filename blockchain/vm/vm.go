@@ -27,26 +27,26 @@ const (
 	OP_NOP           = 0x00
 	OP_PUSH1         = 0x01
 	OP_PUSH2         = 0x02
-	OP_PUSH32        = 0x20
+	OP_PUSH32        = 0x20 // NOT IMPLEMENTED: constant defined but no execution branch in VM switch
 	OP_DUP           = 0x30
 	OP_SWAP          = 0x31
 	OP_DROP          = 0x32
-	OP_TOALTSTACK    = 0x33
-	OP_FROMALTSTACK  = 0x34
+	OP_TOALTSTACK    = 0x33 // NOT IMPLEMENTED: constant defined but no execution branch in VM switch
+	OP_FROMALTSTACK  = 0x34 // NOT IMPLEMENTED: constant defined but no execution branch in VM switch
 	OP_ADD           = 0x40
 	OP_SUB           = 0x41
 	OP_MUL           = 0x42
 	OP_DIV           = 0x43
-	OP_MOD           = 0x44
-	OP_SHA256        = 0x50
+	OP_MOD           = 0x44 // NOT IMPLEMENTED: constant defined but no execution branch in VM switch
+	OP_SHA256        = 0x50 // NOT IMPLEMENTED: reserved for future VM extension
 	OP_EQUAL         = 0x60
 	OP_VERIFY        = 0x61
-	OP_CHECKSIG      = 0x70
-	OP_CHECKMULTISIG = 0x71
+	OP_CHECKSIG      = 0x70 // NOT IMPLEMENTED: reserved for future VM extension
+	OP_CHECKMULTISIG = 0x71 // NOT IMPLEMENTED: reserved for future VM extension
 	OP_RETURN        = 0xF0
-	OP_CALL          = 0xE0
+	OP_CALL          = 0xE0 // NOT IMPLEMENTED: reserved for future VM extension
 	OP_JUMP          = 0xE1
-	OP_JUMPI         = 0xE2
+	OP_JUMPI         = 0xE2 // NOT IMPLEMENTED: constant defined but no execution branch in VM switch
 )
 
 func NewVM(code []byte, storage map[string][]byte, gasLimit int64) *VM {
@@ -324,6 +324,8 @@ func NewMultiSigContract(required int, pubKeys []string) *MultiSigContract {
 	}
 }
 
+// ValidateSignatures counts non-empty signatures and compares to Required.
+// Actual Ed25519 verification is performed externally before calling this method.
 func (ms *MultiSigContract) ValidateSignatures(signatures [][]byte) bool {
 	validCount := 0
 	for _, sig := range signatures {

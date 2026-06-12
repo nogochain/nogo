@@ -2,17 +2,7 @@
 // This file is part of the NogoChain library.
 //
 // The NogoChain library is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Lesser General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// The NogoChain library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Lesser General Public License for more details.
-//
-// You should have received a copy of the GNU Lesser General Public License
-// along with the NogoChain library. If not, see <http://www.org/licenses/>.
+// it under the terms of the MIT License.
 
 package contracts
 
@@ -60,21 +50,6 @@ func TestContractDeployer_DeployContracts(t *testing.T) {
 
 	if communityAddr == "" {
 		t.Error("Expected non-empty community fund address")
-	}
-
-	// Verify integrity reward contract
-	integrityAddr, err := deployer.GetIntegrityRewardAddress()
-	if err != nil {
-		t.Fatalf("Failed to get integrity reward address: %v", err)
-	}
-
-	if integrityAddr == "" {
-		t.Error("Expected non-empty integrity reward address")
-	}
-
-	// Addresses should be different
-	if communityAddr == integrityAddr {
-		t.Error("Expected different addresses for different contracts")
 	}
 }
 
@@ -134,29 +109,21 @@ func TestContractDeployer_GetAllDeployments(t *testing.T) {
 
 	deployments := deployer.GetAllDeployments()
 
-	if len(deployments) != 2 {
-		t.Errorf("Expected 2 deployments, got %d", len(deployments))
+	if len(deployments) != 1 {
+		t.Errorf("Expected 1 deployment, got %d", len(deployments))
 	}
 
-	// Verify both contract types are present
+	// Verify community fund type is present
 	foundCommunity := false
-	foundIntegrity := false
 
 	for _, deployment := range deployments {
 		if deployment.Type == ContractCommunityFund {
 			foundCommunity = true
 		}
-		if deployment.Type == ContractIntegrityReward {
-			foundIntegrity = true
-		}
 	}
 
 	if !foundCommunity {
 		t.Error("Expected to find community fund contract")
-	}
-
-	if !foundIntegrity {
-		t.Error("Expected to find integrity reward contract")
 	}
 }
 
@@ -172,9 +139,9 @@ func TestContractDeployer_ActiveCount(t *testing.T) {
 	// Deploy contracts
 	deployer.DeployContracts(0)
 
-	// Should be 2
-	if deployer.GetActiveContractCount() != 2 {
-		t.Errorf("Expected 2 active contracts after deployment, got %d", deployer.GetActiveContractCount())
+	// Should be 1
+	if deployer.GetActiveContractCount() != 1 {
+		t.Errorf("Expected 1 active contract after deployment, got %d", deployer.GetActiveContractCount())
 	}
 }
 
@@ -195,12 +162,6 @@ func TestContractDeployer_Validation(t *testing.T) {
 	if deployer.ValidateContractAddress(ContractCommunityFund, "invalid_address") {
 		t.Error("Expected invalid address to fail validation")
 	}
-
-	// Validate wrong contract type
-	integrityAddr, _ := deployer.GetIntegrityRewardAddress()
-	if deployer.ValidateContractAddress(ContractCommunityFund, integrityAddr) {
-		t.Error("Expected integrity address to fail community fund validation")
-	}
 }
 
 // TestContractDeployer_DeployTxHash tests deployment transaction hash retrieval
@@ -216,21 +177,6 @@ func TestContractDeployer_DeployTxHash(t *testing.T) {
 
 	if txHash == "" {
 		t.Error("Expected non-empty deploy tx hash")
-	}
-
-	// Get integrity reward tx hash
-	txHash2, err := deployer.GetDeployTxHash(ContractIntegrityReward)
-	if err != nil {
-		t.Fatalf("Failed to get deploy tx hash: %v", err)
-	}
-
-	if txHash2 == "" {
-		t.Error("Expected non-empty deploy tx hash")
-	}
-
-	// Hashes should be different
-	if txHash == txHash2 {
-		t.Error("Expected different tx hashes for different contracts")
 	}
 }
 
@@ -279,16 +225,6 @@ func TestContractRegistry_ContractAccess(t *testing.T) {
 	if communityContract == nil {
 		t.Fatal("Expected non-nil community fund contract")
 	}
-
-	// Get integrity reward contract
-	integrityContract, err := registry.GetIntegrityRewardContract()
-	if err != nil {
-		t.Fatalf("Failed to get integrity reward contract: %v", err)
-	}
-
-	if integrityContract == nil {
-		t.Fatal("Expected non-nil integrity reward contract")
-	}
 }
 
 // TestContractRegistry_DeploymentCheck tests deployment status check
@@ -321,20 +257,12 @@ func TestContractDeployer_IsDeployed(t *testing.T) {
 		t.Error("Expected community fund to not be deployed initially")
 	}
 
-	if deployer.IsDeployed(ContractIntegrityReward) {
-		t.Error("Expected integrity reward to not be deployed initially")
-	}
-
 	// Deploy contracts
 	deployer.DeployContracts(0)
 
 	// Now should be deployed
 	if !deployer.IsDeployed(ContractCommunityFund) {
 		t.Error("Expected community fund to be deployed")
-	}
-
-	if !deployer.IsDeployed(ContractIntegrityReward) {
-		t.Error("Expected integrity reward to be deployed")
 	}
 }
 
@@ -349,7 +277,6 @@ func TestContractDeployer_ConcurrentAccess(t *testing.T) {
 	go func() {
 		for i := 0; i < 50; i++ {
 			_, _ = deployer.GetCommunityFundAddress()
-			_, _ = deployer.GetIntegrityRewardAddress()
 			_ = deployer.AreAllDeployed()
 			_ = deployer.GetActiveContractCount()
 		}
@@ -360,7 +287,6 @@ func TestContractDeployer_ConcurrentAccess(t *testing.T) {
 	go func() {
 		for i := 0; i < 50; i++ {
 			_, _ = deployer.GetDeploymentInfo(ContractCommunityFund)
-			_, _ = deployer.GetDeploymentInfo(ContractIntegrityReward)
 			_ = deployer.GetAllDeployments()
 		}
 		done <- true

@@ -32,12 +32,8 @@ type ContractManager struct {
 	mu sync.RWMutex
 	// CommunityFundContract is the community fund governance contract
 	communityFundContract *contracts.CommunityFundGovernanceContract
-	// IntegrityRewardContract is the integrity reward contract
-	integrityRewardContract *contracts.IntegrityRewardContract
 	// CommunityFundAddress is the contract address for community fund
 	communityFundAddress string
-	// IntegrityPoolAddress is the contract address for integrity pool
-	integrityPoolAddress string
 	// DataDir is the directory for contract data persistence
 	dataDir string
 }
@@ -45,33 +41,22 @@ type ContractManager struct {
 // NewContractManager creates a new contract manager
 func NewContractManager() *ContractManager {
 	return &ContractManager{
-		communityFundContract:   nil,
-		integrityRewardContract: nil,
-		communityFundAddress:    "",
-		integrityPoolAddress:    "",
+		communityFundContract: nil,
+		communityFundAddress:  "",
 	}
 }
 
 // InitializeContracts initializes contracts at genesis
 // Called once during blockchain initialization
-func (cm *ContractManager) InitializeContracts(communityFundAddr, integrityPoolAddr string) error {
+func (cm *ContractManager) InitializeContracts(communityFundAddr string) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
 	// Store contract addresses
 	cm.communityFundAddress = communityFundAddr
-	cm.integrityPoolAddress = integrityPoolAddr
 
 	// Create contract instances
-	// Note: In production, contracts would be deployed with specific initialization
-	// For now, we create instances that will manage funds at these addresses
 	cm.communityFundContract = contracts.NewCommunityFundGovernanceContract()
-	cm.integrityRewardContract = contracts.NewIntegrityRewardContract()
-
-	// Set contract addresses to match genesis addresses
-	// This ensures contracts manage the correct addresses
-	// Note: In a real deployment, addresses would be set during contract creation
-	// For now, we use the genesis-generated addresses
 
 	return nil
 }
@@ -83,25 +68,11 @@ func (cm *ContractManager) GetCommunityFundContract() *contracts.CommunityFundGo
 	return cm.communityFundContract
 }
 
-// GetIntegrityRewardContract returns the integrity reward contract
-func (cm *ContractManager) GetIntegrityRewardContract() *contracts.IntegrityRewardContract {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	return cm.integrityRewardContract
-}
-
 // GetCommunityFundAddress returns the community fund contract address
 func (cm *ContractManager) GetCommunityFundAddress() string {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 	return cm.communityFundAddress
-}
-
-// GetIntegrityPoolAddress returns the integrity pool contract address
-func (cm *ContractManager) GetIntegrityPoolAddress() string {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	return cm.integrityPoolAddress
 }
 
 // AddCommunityFundReward adds community fund reward to the contract
@@ -118,22 +89,6 @@ func (cm *ContractManager) AddCommunityFundReward(blockReward uint64) error {
 	// In production, this would be a blockchain transfer
 	// For now, we track it in the contract's internal state
 	cm.communityFundContract.AddFunds(blockReward * 2 / 100) // 2%
-
-	return nil
-}
-
-// AddIntegrityPoolReward adds integrity pool reward to the contract
-// Called for each block - adds 1% of block reward
-func (cm *ContractManager) AddIntegrityPoolReward(blockReward uint64) error {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
-	if cm.integrityRewardContract == nil {
-		return nil // Contract not initialized yet
-	}
-
-	// Add reward to contract's reward pool
-	cm.integrityRewardContract.AddToRewardPool(blockReward)
 
 	return nil
 }

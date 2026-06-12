@@ -268,6 +268,9 @@ func runCLI(args []string) error {
 		return err
 	}
 
+	// Resolve API URL from flags or default
+	apiURL := getAPIURL(args)
+
 	if len(args) > 0 && args[0] == "init" {
 		return cli.InitConfig()
 	}
@@ -286,5 +289,55 @@ func runCLI(args []string) error {
 		return nil
 	}
 
+	// Commands that require a running node API
+	if len(args) > 0 {
+		client := NewHTTPClient(apiURL)
+		switch args[0] {
+		case "wallet":
+			if len(args) > 1 && args[1] == "create" {
+				return client.CreateWallet()
+			}
+			if len(args) > 1 && args[1] == "sign" && len(args) > 2 {
+				return client.SignTransaction(args[2])
+			}
+			fmt.Fprintf(os.Stderr, "Usage: nogo wallet create|sign <tx_json>\n")
+			return fmt.Errorf("invalid wallet subcommand")
+
+		case "tx":
+			if len(args) > 1 && args[1] == "submit" && len(args) > 2 {
+				return client.SubmitTransaction(args[2])
+			}
+			fmt.Fprintf(os.Stderr, "Usage: nogo tx submit <signed_tx_json>\n")
+			return fmt.Errorf("invalid tx subcommand")
+
+		case "block":
+			if len(args) > 1 && args[1] == "get" && len(args) > 2 {
+				return client.GetBlock(args[2])
+			}
+			fmt.Fprintf(os.Stderr, "Usage: nogo block get <height|hash>\n")
+			return fmt.Errorf("invalid block subcommand")
+
+		case "balance":
+			if len(args) > 1 {
+				return client.GetBalance(args[1])
+			}
+			fmt.Fprintf(os.Stderr, "Usage: nogo balance <address>\n")
+			return fmt.Errorf("address required")
+		}
+	}
+
 	return nil
+}
+
+// getAPIURL extracts the API URL from flags or returns the default.
+func getAPIURL(args []string) string {
+	for i := 0; i < len(args); i++ {
+		if strings.HasPrefix(args[i], "-api-url=") {
+			return strings.TrimPrefix(args[i], "-api-url=")
+		}
+		if args[i] == "-api-url" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return "http://localhost:8080"
 }
