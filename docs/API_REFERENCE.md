@@ -78,6 +78,7 @@ All endpoints support CORS with `Access-Control-Allow-Origin: *`. Preflight OPTI
 | GET | `/blocks/hash/{hash}` | No | Get block by hash (legacy) |
 | GET | `/headers/from/{height}` | No | Get block headers from height |
 | GET | `/balance/{address}` | No | Get account balance |
+| POST | `/balance/batch` | No | Batch balance query (up to 100 addresses) |
 | GET | `/address/{address}` | No | Get address balance with tx count |
 | GET | `/address/{address}/txs` | No | Get address transactions (paginated) |
 | POST | `/tx` | No | Submit transaction |
@@ -88,7 +89,7 @@ All endpoints support CORS with `Access-Control-Allow-Origin: *`. Preflight OPTI
 | GET | `/tx/proof/{txid}` | No | Get Merkle proof for transaction |
 | GET | `/tx/estimate_fee` | No | Estimate transaction fee |
 | GET | `/tx/fee/recommend` | No | Fee recommendations |
-| GET | `/mempool` | No | View mempool transactions |
+| GET | `/mempool` | No | View mempool transactions (optional `?address=` filter) |
 | POST | `/wallet/create` | No | Create new wallet |
 | POST | `/wallet/create_persistent` | No | Create wallet (password protected) |
 | POST | `/wallet/import` | No | Import wallet from private key |
@@ -102,6 +103,9 @@ All endpoints support CORS with `Access-Control-Allow-Origin: *`. Preflight OPTI
 | GET | `/block/template` | No | Get mining block template |
 | POST | `/mining/submit` | No | Submit mining work |
 | GET | `/mining/info` | No | Get mining info |
+| POST | `/webhook/register` | No | Register webhook endpoint |
+| POST | `/webhook/unregister` | No | Unregister webhook endpoint |
+| GET | `/webhook/list` | No | List webhook subscriptions |
 | GET | `/p2p/getaddr` | No | Get P2P peer addresses |
 | POST | `/p2p/addr` | No | Add P2P peer addresses |
 | GET | `/api/proposals` | No | List governance proposals |
@@ -1223,6 +1227,48 @@ curl http://localhost:8080/balance/NOGOabcd...
 
 ---
 
+### POST /balance/batch
+
+Query up to 100 addresses in a single request. Designed for exchange reconciliation and address sweeping.
+
+**Method:** POST
+**Authentication:** None
+**Body Limit:** 1 MB
+
+**Request Body:**
+```json
+{
+  "addresses": [
+    "NOGOaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000000",
+    "NOGObbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0000000000"
+  ]
+}
+```
+
+**Limits:** Maximum 100 addresses per request. Duplicate addresses are deduplicated (warning returned). Invalid format addresses are skipped (warning returned). Not-found addresses return `balance:0, nonce:0`.
+
+**Response 200:**
+```json
+{
+  "balances": [
+    {"address": "NOGOaaaa...0000", "balance": 100000, "nonce": 42},
+    {"address": "NOGObbbb...0000", "balance": 500000, "nonce": 15}
+  ],
+  "count": 2
+}
+```
+
+**Rate limit:** 60 requests/minute per IP.
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/balance/batch \
+  -H "Content-Type: application/json" \
+  -d '{"addresses": ["NOGOaaaa...0000","NOGObbbb...0000"]}'
+```
+
+---
+
 ### GET /address/{address}
 
 Get address balance with transaction count.
@@ -1450,12 +1496,34 @@ curl http://localhost:8080/mining/info
 
 ### GET /mempool
 
-View current mempool transactions sorted by fee (highest first).
+View current mempool transactions sorted by fee (highest first). Supports optional address filtering.
 
-**Method:** GET  
-**Authentication:** None  
+**Method:** GET
+**Authentication:** None
 
-**Response 200:**
+**Query Parameters:**
+| Name | Type | Description |
+|------|------|-------------|
+| address | string | Filter by sender or receiver address (NOGO format). Uses bidirectional address index. |
+
+**Response 200 (with address filter):**
+```json
+{
+  "size": 5,
+  "txs": [
+    {
+      "txId": "hexstring",
+      "fee": 500000,
+      "amount": 1000000000,
+      "nonce": 5,
+      "fromAddr": "NOGO...",
+      "toAddress": "NOGO..."
+    }
+  ]
+}
+```
+
+**Response 200 (without filter):**
 ```json
 {
   "size": 15,
@@ -1474,7 +1542,11 @@ View current mempool transactions sorted by fee (highest first).
 
 **Example:**
 ```bash
+# All pending transactions
 curl http://localhost:8080/mempool
+
+# Filtered by address
+curl "http://localhost:8080/mempool?address=NOGOaaaa..."
 ```
 
 ---
@@ -1540,6 +1612,136 @@ Add P2P peer addresses.
 curl -X POST http://localhost:8080/p2p/addr \
   -H "Content-Type: application/json" \
   -d '{"addresses": [{"ip": "192.168.1.1", "port": 30303}]}'
+```
+
+---
+
+## Webhook Endpoints
+
+### POST /webhook/register
+
+Register a webhook endpoint to receive real-time blockchain event notifications via HTTP POST callbacks. Enables exchange integration with automated event processing.
+
+**Method:** POST
+**Authentication:** None
+
+**Request Body:**
+```json
+{
+  "url": "https://your-exchange.com/api/nogo-webhooks",
+  "secret": "your-hmac-secret",
+  "events": ["new_block", "tx_confirmed", "tx_rollback", "chain_reorg"]
+}
+```
+
+**Available Event Types:**
+
+| Event | Description |
+|-------|-------------|
+| `new_transaction` | New tx in mempool |
+| `new_block` | New block mined |
+| `tx_confirmed` | Transaction included in block |
+| `tx_rollback` | Transaction removed by reorg |
+| `chain_reorg` | Chain reorganization |
+
+**Limits:** Max 50 subscriptions per node.
+
+**Response 200:**
+```json
+{
+  "id": "wh_abc123...",
+  "url": "https://your-exchange.com/api/nogo-webhooks",
+  "events": ["new_block", "tx_confirmed"],
+  "active": true,
+  "created_at": 1773135000
+}
+```
+
+**Delivery Guarantees:**
+- At-least-once delivery (handler must be idempotent)
+- Each delivery includes `X-Webhook-ID` for deduplication
+- Exponential retry: 2s → 4s → 8s → 16s → 32s with jitter
+- Max 5 delivery attempts, then discarded
+- HTTP 2xx response marks delivery as successful
+
+**Security Headers:**
+```
+X-Webhook-Signature: sha256=<hmac-sha256-of-body>
+X-Webhook-ID: whev_<event-id>
+X-Webhook-Event: new_block
+X-Webhook-Attempt: 1
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/webhook/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://exchange.com/api/hooks",
+    "secret": "s3cret",
+    "events": ["new_block", "tx_confirmed"]
+  }'
+```
+
+---
+
+### POST /webhook/unregister
+
+Remove a registered webhook subscription by ID.
+
+**Method:** POST
+**Authentication:** None
+
+**Request Body:**
+```json
+{
+  "id": "wh_abc123..."
+}
+```
+
+**Response 200:**
+```json
+{
+  "status": "unregistered"
+}
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/webhook/unregister \
+  -H "Content-Type: application/json" \
+  -d '{"id": "wh_abc123..."}'
+```
+
+---
+
+### GET /webhook/list
+
+List all registered webhook subscriptions with their active state and event filters.
+
+**Method:** GET
+**Authentication:** None
+
+**Response 200:**
+```json
+{
+  "webhooks": [
+    {
+      "id": "wh_abc123...",
+      "url": "https://exchange.example/hooks",
+      "events": ["new_block", "tx_confirmed"],
+      "active": true,
+      "created_at": 1773135000
+    }
+  ]
+}
+```
+
+**Note:** Secrets are never exposed in API responses (redacted via `json:"-"` tag).
+
+**Example:**
+```bash
+curl http://localhost:8080/webhook/list
 ```
 
 ---
@@ -1731,13 +1933,42 @@ curl -X POST http://localhost:8080/api/proposals/deposit \
 
 ### Connection
 
-Connect to the WebSocket endpoint for real-time events.
+NogoChain provides two WebSocket endpoints for real-time event streaming.
 
-**Endpoint:** `ws://localhost:8080/ws`  
-**Protocol:** WebSocket (RFC 6455)  
-**Max Connections:** 100 (configurable)  
-**Ping Interval:** 25 seconds  
-**Read Timeout:** 60 seconds  
+| Endpoint | Library | Use Case |
+|----------|---------|----------|
+| `ws://localhost:8080/ws` | Native | General use |
+| `ws://localhost:8080/ws/std` | gorilla/websocket | Exchange integration, wider WS library compatibility |
+
+**Protocol:** WebSocket (RFC 6455)
+**Max Connections:** 100 (configurable)
+**Ping Interval:** 30 seconds (`/ws/std`), 25 seconds (`/ws`)
+**Read Timeout:** 60 seconds
+
+### Standard WebSocket (`/ws/std`)
+
+Uses gorilla/websocket for maximum compatibility. Recommended for exchange integration.
+
+**Connection:**
+```javascript
+const ws = new WebSocket('ws://localhost:8080/ws/std');
+```
+
+**Subscription Protocol:**
+```json
+{"type":"subscribe","topic":"all"}
+{"type":"subscribe","topic":"address","address":"NOGO..."}
+{"type":"subscribe","topic":"type","event":"new_block"}
+{"type":"unsubscribe","topic":"all"}
+```
+
+**Events:**
+- `new_block` — new block added to canonical chain
+- `chain_reorg` — chain reorganization occurred
+- `mempool_added` — transaction added to mempool
+- `mempool_removed` — transaction removed from mempool (mined/replaced)
+
+### Native WebSocket (`/ws`)
 
 ### Event Format
 
@@ -2190,6 +2421,7 @@ Authorization: Bearer <ADMIN_TOKEN>
 | GET | `/blocks/hash/{hash}` | 否 | 按哈希获取区块（旧版） |
 | GET | `/headers/from/{height}` | 否 | 从指定高度获取区块头 |
 | GET | `/balance/{address}` | 否 | 获取账户余额 |
+| POST | `/balance/batch` | 否 | 批量余额查询（最多100个地址） |
 | GET | `/address/{address}` | 否 | 获取地址余额及交易计数 |
 | GET | `/address/{address}/txs` | 否 | 获取地址交易（分页） |
 | POST | `/tx` | 否 | 提交交易 |
@@ -2200,7 +2432,7 @@ Authorization: Bearer <ADMIN_TOKEN>
 | GET | `/tx/proof/{txid}` | 否 | 获取交易Merkle证明 |
 | GET | `/tx/estimate_fee` | 否 | 估算交易费用 |
 | GET | `/tx/fee/recommend` | 否 | 费用建议 |
-| GET | `/mempool` | 否 | 查看内存池交易 |
+| GET | `/mempool` | 否 | 查看内存池交易（支持 `?address=` 过滤） |
 | POST | `/wallet/create` | 否 | 创建新钱包 |
 | POST | `/wallet/create_persistent` | 否 | 创建钱包（密码保护） |
 | POST | `/wallet/import` | 否 | 从私钥导入钱包 |
@@ -2214,6 +2446,9 @@ Authorization: Bearer <ADMIN_TOKEN>
 | GET/POST | `/block/template` | 否 | 获取挖矿区块模板 |
 | POST | `/mining/submit` | 否 | 提交挖矿结果 |
 | GET | `/mining/info` | 否 | 获取挖矿信息 |
+| POST | `/webhook/register` | 否 | 注册Webhook端点 |
+| POST | `/webhook/unregister` | 否 | 注销Webhook端点 |
+| GET | `/webhook/list` | 否 | 列出Webhook订阅 |
 | GET | `/p2p/getaddr` | 否 | 获取P2P节点地址 |
 | POST | `/p2p/addr` | 否 | 添加P2P节点地址 |
 | GET | `/api/proposals` | 否 | 列出治理提案 |

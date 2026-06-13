@@ -17,6 +17,7 @@
 package api
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"math"
@@ -25,6 +26,18 @@ import (
 	"testing"
 	"time"
 )
+
+// validTestAddress generates a valid NOGO address with correct checksum for use in test URLs.
+// Address format: NOGO(4) + hex(33-byte payload) + hex(4-byte SHA256 checksum) = 78 chars.
+func validTestAddress() string {
+	payload := make([]byte, 33)
+	for i := range payload {
+		payload[i] = byte(i + 1)
+	}
+	h := sha256.Sum256(payload)
+	checksum := h[:4]
+	return "NOGO" + hex.EncodeToString(payload) + hex.EncodeToString(checksum)
+}
 
 func TestAddressTxsPagination_RequestParsing(t *testing.T) {
 	tests := []struct {
@@ -38,7 +51,7 @@ func TestAddressTxsPagination_RequestParsing(t *testing.T) {
 	}{
 		{
 			name:        "default parameters",
-			url:         "/address/NOGO000000000000000000000000000000000000000000000000000000000000000000/txs",
+			url:         "/address/" + validTestAddress() + "/txs",
 			expectError: false,
 			expectPage:  1,
 			expectLimit: DefaultPageSize,
@@ -46,7 +59,7 @@ func TestAddressTxsPagination_RequestParsing(t *testing.T) {
 		},
 		{
 			name:        "custom page and limit",
-			url:         "/address/NOGO000000000000000000000000000000000000000000000000000000000000000000/txs?page=2&limit=25",
+			url:         "/address/" + validTestAddress() + "/txs?page=2&limit=25",
 			expectError: false,
 			expectPage:  2,
 			expectLimit: 25,
@@ -54,7 +67,7 @@ func TestAddressTxsPagination_RequestParsing(t *testing.T) {
 		},
 		{
 			name:        "sort ascending",
-			url:         "/address/NOGO000000000000000000000000000000000000000000000000000000000000000000/txs?sort=asc",
+			url:         "/address/" + validTestAddress() + "/txs?sort=asc",
 			expectError: false,
 			expectPage:  1,
 			expectLimit: DefaultPageSize,
@@ -62,31 +75,31 @@ func TestAddressTxsPagination_RequestParsing(t *testing.T) {
 		},
 		{
 			name:        "invalid page",
-			url:         "/address/NOGO000000000000000000000000000000000000000000000000000000000000000000/txs?page=abc",
+			url:         "/address/" + validTestAddress() + "/txs?page=abc",
 			expectError: true,
 			errorMsg:    "invalid page parameter",
 		},
 		{
 			name:        "page less than 1",
-			url:         "/address/NOGO000000000000000000000000000000000000000000000000000000000000000000/txs?page=0",
+			url:         "/address/" + validTestAddress() + "/txs?page=0",
 			expectError: true,
 			errorMsg:    "page must be >= 1",
 		},
 		{
 			name:        "limit exceeds maximum",
-			url:         "/address/NOGO000000000000000000000000000000000000000000000000000000000000000000/txs?limit=150",
+			url:         "/address/" + validTestAddress() + "/txs?limit=150",
 			expectError: true,
 			errorMsg:    "limit must be <=",
 		},
 		{
 			name:        "invalid sort value",
-			url:         "/address/NOGO000000000000000000000000000000000000000000000000000000000000000000/txs?sort=invalid",
+			url:         "/address/" + validTestAddress() + "/txs?sort=invalid",
 			expectError: true,
 			errorMsg:    "sort must be 'asc' or 'desc'",
 		},
 		{
 			name:        "time range filter",
-			url:         "/address/NOGO000000000000000000000000000000000000000000000000000000000000000000/txs?start_time=1000000000&end_time=2000000000",
+			url:         "/address/" + validTestAddress() + "/txs?start_time=1000000000&end_time=2000000000",
 			expectError: false,
 			expectPage:  1,
 			expectLimit: DefaultPageSize,
@@ -94,7 +107,7 @@ func TestAddressTxsPagination_RequestParsing(t *testing.T) {
 		},
 		{
 			name:        "start_time after end_time",
-			url:         "/address/NOGO000000000000000000000000000000000000000000000000000000000000000000/txs?start_time=2000000000&end_time=1000000000",
+			url:         "/address/" + validTestAddress() + "/txs?start_time=2000000000&end_time=1000000000",
 			expectError: true,
 			errorMsg:    "start_time must be <= end_time",
 		},
@@ -206,7 +219,7 @@ func generateTestTxID(seed int) string {
 }
 
 func TestAddressTxsPagination_MaxPageSize(t *testing.T) {
-	address := "NOGO000000000000000000000000000000000000000000000000000000000000000000"
+	address := validTestAddress()
 
 	url := fmt.Sprintf("/address/%s/txs?limit=150", address)
 	req := httptest.NewRequest(http.MethodGet, url, nil)
@@ -257,7 +270,7 @@ func TestAddressTxsPagination_QueryOptions(t *testing.T) {
 	}{
 		{
 			name:        "default options",
-			url:         "/address/NOGO000000000000000000000000000000000000000000000000000000000000000000/txs",
+			url:         "/address/" + validTestAddress() + "/txs",
 			expectPage:  1,
 			expectLimit: 50,
 			expectSort:  "desc",
@@ -266,7 +279,7 @@ func TestAddressTxsPagination_QueryOptions(t *testing.T) {
 		},
 		{
 			name:        "all parameters",
-			url:         "/address/NOGO000000000000000000000000000000000000000000000000000000000000000000/txs?page=3&limit=30&sort=asc&start_time=1000000000&end_time=2000000000",
+			url:         "/address/" + validTestAddress() + "/txs?page=3&limit=30&sort=asc&start_time=1000000000&end_time=2000000000",
 			expectPage:  3,
 			expectLimit: 30,
 			expectSort:  "asc",
@@ -306,9 +319,10 @@ func TestAddressTxsPagination_QueryOptions(t *testing.T) {
 }
 
 func TestAddressTxsPagination_EdgeCases(t *testing.T) {
+	addr := validTestAddress()
+
 	t.Run("limit equals max", func(t *testing.T) {
-		address := "NOGO000000000000000000000000000000000000000000000000000000000000000000"
-		url := fmt.Sprintf("/address/%s/txs?limit=100", address)
+		url := fmt.Sprintf("/address/%s/txs?limit=100", addr)
 		req := httptest.NewRequest(http.MethodGet, url, nil)
 		w := httptest.NewRecorder()
 
@@ -321,8 +335,7 @@ func TestAddressTxsPagination_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("page 1", func(t *testing.T) {
-		address := "NOGO000000000000000000000000000000000000000000000000000000000000000000"
-		url := fmt.Sprintf("/address/%s/txs?page=1", address)
+		url := fmt.Sprintf("/address/%s/txs?page=1", addr)
 		req := httptest.NewRequest(http.MethodGet, url, nil)
 		w := httptest.NewRecorder()
 
@@ -335,8 +348,7 @@ func TestAddressTxsPagination_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("zero limit", func(t *testing.T) {
-		address := "NOGO000000000000000000000000000000000000000000000000000000000000000000"
-		url := fmt.Sprintf("/address/%s/txs?limit=0", address)
+		url := fmt.Sprintf("/address/%s/txs?limit=0", addr)
 		req := httptest.NewRequest(http.MethodGet, url, nil)
 		w := httptest.NewRecorder()
 
@@ -351,7 +363,7 @@ func TestAddressTxsPagination_EdgeCases(t *testing.T) {
 
 func TestAddressTxsPagination_ResponseStructure(t *testing.T) {
 	t.Run("empty result structure", func(t *testing.T) {
-		address := "NOGO000000000000000000000000000000000000000000000000000000000000000000"
+		address := validTestAddress()
 		url := fmt.Sprintf("/address/%s/txs", address)
 		req := httptest.NewRequest(http.MethodGet, url, nil)
 		w := httptest.NewRecorder()
@@ -396,7 +408,7 @@ func TestAddressTxsPagination_SortValidation(t *testing.T) {
 
 	for _, sort := range validSorts {
 		t.Run(fmt.Sprintf("valid_%s", sort), func(t *testing.T) {
-			address := "NOGO000000000000000000000000000000000000000000000000000000000000000000"
+			address := validTestAddress()
 			url := fmt.Sprintf("/address/%s/txs?sort=%s", address, sort)
 			req := httptest.NewRequest(http.MethodGet, url, nil)
 			w := httptest.NewRecorder()
@@ -412,7 +424,7 @@ func TestAddressTxsPagination_SortValidation(t *testing.T) {
 
 	for _, sort := range invalidSorts {
 		t.Run(fmt.Sprintf("invalid_%s", sort), func(t *testing.T) {
-			address := "NOGO000000000000000000000000000000000000000000000000000000000000000000"
+			address := validTestAddress()
 			url := fmt.Sprintf("/address/%s/txs?sort=%s", address, sort)
 			req := httptest.NewRequest(http.MethodGet, url, nil)
 			w := httptest.NewRecorder()
@@ -466,7 +478,7 @@ func TestAddressTxsPagination_TimestampValidation(t *testing.T) {
 		},
 	}
 
-	address := "NOGO000000000000000000000000000000000000000000000000000000000000000000"
+	address := validTestAddress()
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -523,7 +535,7 @@ func TestAddressTxsPagination_PaginationMeta(t *testing.T) {
 }
 
 func TestAddressTxsPagination_LimitBoundaries(t *testing.T) {
-	address := "NOGO000000000000000000000000000000000000000000000000000000000000000000"
+	address := validTestAddress()
 
 	tests := []struct {
 		limit      int
@@ -556,7 +568,7 @@ func TestAddressTxsPagination_LimitBoundaries(t *testing.T) {
 }
 
 func TestAddressTxsPagination_PageBoundaries(t *testing.T) {
-	address := "NOGO000000000000000000000000000000000000000000000000000000000000000000"
+	address := validTestAddress()
 
 	tests := []struct {
 		page       int

@@ -17,6 +17,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -84,6 +86,12 @@ func setupIntegrationTest(t *testing.T) (func(), *index.AddressIndex, string) {
 
 func populateTestData(t *testing.T, idx *index.AddressIndex, address string, count int) {
 	for i := 0; i < count; i++ {
+		// Generate unique hex txID and blockHash per entry.
+		h := sha256.Sum256([]byte(fmt.Sprintf("tx_hash_%d", i)))
+		txID := hex.EncodeToString(h[:])
+		bh := sha256.Sum256([]byte(fmt.Sprintf("block_hash_%d", i)))
+		blockHash := hex.EncodeToString(bh[:])
+
 		tx := &testTransaction{
 			txType:    index.TxTransfer,
 			fromAddr:  address,
@@ -91,10 +99,9 @@ func populateTestData(t *testing.T, idx *index.AddressIndex, address string, cou
 			amount:    uint64(1000 + i),
 			fee:       100,
 			nonce:     uint64(i),
-			txID:      fmt.Sprintf("tx_%06d", i),
+			txID:      txID,
 		}
 
-		blockHash := fmt.Sprintf("block_hash_%06d", i)
 		height := uint64(i + 1)
 		timestamp := time.Now().Unix() - int64(count-i)*60
 
@@ -271,6 +278,12 @@ func TestAddressTxsPagination_Integration_LargeDataset(t *testing.T) {
 	startTime := time.Now()
 
 	for i := 0; i < txCount; i++ {
+		// Generate valid hex txID and blockHash.
+		h := sha256.Sum256([]byte(fmt.Sprintf("tx_hash_%d", i)))
+		txID := hex.EncodeToString(h[:])
+		bh := sha256.Sum256([]byte(fmt.Sprintf("block_hash_%d", i)))
+		blockHash := hex.EncodeToString(bh[:])
+
 		tx := &testTransaction{
 			txType:    index.TxTransfer,
 			fromAddr:  address,
@@ -278,10 +291,9 @@ func TestAddressTxsPagination_Integration_LargeDataset(t *testing.T) {
 			amount:    uint64(1000 + i),
 			fee:       100,
 			nonce:     uint64(i),
-			txID:      fmt.Sprintf("tx_%06d", i),
+			txID:      txID,
 		}
 
-		blockHash := fmt.Sprintf("block_hash_%06d", i)
 		height := uint64(i + 1)
 		timestamp := time.Now().Unix() - int64(txCount-i)*60
 
@@ -340,6 +352,12 @@ func TestAddressTxsPagination_Integration_Performance1000(t *testing.T) {
 	txCount := 1000
 
 	for i := 0; i < txCount; i++ {
+		// Generate valid hex txID and blockHash.
+		h := sha256.Sum256([]byte(fmt.Sprintf("perf_tx_hash_%d", i)))
+		txID := hex.EncodeToString(h[:])
+		bh := sha256.Sum256([]byte(fmt.Sprintf("perf_block_hash_%d", i)))
+		blockHash := hex.EncodeToString(bh[:])
+
 		tx := &testTransaction{
 			txType:    index.TxTransfer,
 			fromAddr:  address,
@@ -347,10 +365,9 @@ func TestAddressTxsPagination_Integration_Performance1000(t *testing.T) {
 			amount:    uint64(1000 + i),
 			fee:       100,
 			nonce:     uint64(i),
-			txID:      fmt.Sprintf("tx_%06d", i),
+			txID:      txID,
 		}
 
-		blockHash := fmt.Sprintf("block_hash_%06d", i)
 		height := uint64(i + 1)
 		timestamp := time.Now().Unix() - int64(txCount-i)*60
 

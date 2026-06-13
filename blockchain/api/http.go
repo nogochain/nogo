@@ -73,6 +73,9 @@ type Server struct {
 
 	peerManager network.PeerAPI
 
+	// Webhook manager for exchange integration event subscriptions.
+	webhookMgr *WebhookManager
+
 	// Template cache for mining pool block submissions
 	// Ensures PoW verification consistency: miner's merkleRoot matches submission
 	templateCache     map[string]*cachedTemplate
@@ -203,6 +206,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/mining/submit", mw.Wrap("mining_submit", false, 0, s.handleSubmitWork))
 	mux.HandleFunc("/mining/info", mw.Wrap("mining_info", false, 0, s.handleGetMiningInfo))
 
+	mux.HandleFunc("/balance/batch", mw.Wrap("balance_batch", false, 1<<14, s.handleBatchBalance))
 	mux.HandleFunc("/balance/", mw.Wrap("balance", false, 0, s.handleBalance))
 	mux.HandleFunc("/address/", mw.Wrap("address_txs", false, 0, s.handleAddressTxs))
 	mux.HandleFunc("/chain/info", mw.Wrap("chain_info", false, 0, s.handleChainInfo))
@@ -210,6 +214,17 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/headers/from/", mw.Wrap("headers_from", false, 0, s.handleHeadersFrom))
 	mux.HandleFunc("/blocks/from/", mw.Wrap("blocks_from", false, 0, s.handleBlocksFrom))
 	mux.HandleFunc("/blocks/hash/", mw.Wrap("blocks_hash", false, 0, s.handleBlockByHash))
+	mux.HandleFunc("/block/latest", mw.Wrap("block_latest", false, 0, s.handleLatestBlock))
+
+	// WebSocket standard compatibility layer for external clients.
+	if s.wsEnable && s.wsHub != nil {
+		mux.HandleFunc("/ws/std", mw.Wrap("ws_std", false, 0, s.wsHub.ServeWSStd))
+	}
+
+	// Webhook management endpoints for exchange integration.
+	mux.HandleFunc("/webhook/register", mw.Wrap("webhook_register", false, 0, s.handleRegisterWebhook))
+	mux.HandleFunc("/webhook/unregister", mw.Wrap("webhook_unregister", false, 0, s.handleUnregisterWebhook))
+	mux.HandleFunc("/webhook/list", mw.Wrap("webhook_list", false, 0, s.handleListWebhooks))
 
 	mux.HandleFunc("/p2p/getaddr", mw.Wrap("p2p_getaddr", false, 0, s.handleP2PGetAddr))
 	mux.HandleFunc("/p2p/addr", mw.Wrap("p2p_addr", false, 1<<10, s.handleP2PAddr))
@@ -1290,6 +1305,22 @@ func (s *Server) handleBalance(w http.ResponseWriter, r *http.Request) {
 	_ = writeJSON(w, http.StatusOK, map[string]any{"address": addr, "balance": acct.Balance, "nonce": acct.Nonce})
 }
 
+// handleLatestBlock handles GET /block/latest requests.
+// Returns the most recent block in the chain. Used by exchanges for polling-based
+// deposit monitoring loops.
+func (s *Server) handleLatestBlock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	latest := s.bc.LatestBlock()
+	if latest == nil {
+		http.Error(w, "no blocks yet", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, latest)
+}
+
 func (s *Server) handleAddressTxs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1659,6 +1690,18 @@ func (s *Server) handleMempool(w http.ResponseWriter, r *http.Request) {
 			To:       e.Tx().ToAddress,
 		})
 	}
+	// Filter by address if query parameter provided (zero-breaking change: no param = full list)
+	filterAddr := r.URL.Query().Get("address")
+	if filterAddr != "" {
+		filtered := make([]view, 0, len(out))
+		for _, tx := range out {
+			if tx.FromAddr == filterAddr || tx.To == filterAddr {
+				filtered = append(filtered, tx)
+			}
+		}
+		out = filtered
+	}
+
 	_ = writeJSON(w, http.StatusOK, map[string]any{"size": len(out), "txs": out})
 }
 

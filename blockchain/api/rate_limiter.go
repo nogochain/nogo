@@ -658,8 +658,8 @@ func RateLimitMiddleware(rl *EnhancedRateLimiter, getClientIP func(r *http.Reque
 
 // normalizeEndpoint normalizes an endpoint path for rate limiting
 func normalizeEndpoint(path string) string {
-	// Remove trailing slash
-	path = strings.TrimSuffix(path, "/")
+	// Remove all trailing slashes for consistent endpoint normalization.
+	path = strings.TrimRight(path, "/")
 
 	// Remove query parameters (already handled by URL.Path)
 	return path

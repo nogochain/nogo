@@ -194,11 +194,18 @@ func calculatePercentiles(sortedFees []uint64) FeePercentiles {
 		return FeePercentiles{}
 	}
 
+	// Nearest-rank percentile method: 0-based index = ceil(n*P/100) - 1.
+	// Integer arithmetic equivalent: (n*P + 99) / 100 - 1.
+	idxP25 := (n*25+99)/100 - 1
+	idxP50 := (n*50+99)/100 - 1
+	idxP75 := (n*75+99)/100 - 1
+	idxP90 := (n*90+99)/100 - 1
+
 	return FeePercentiles{
-		P25: sortedFees[n*25/100],
-		P50: sortedFees[n*50/100],
-		P75: sortedFees[n*75/100],
-		P90: sortedFees[n*90/100],
+		P25: sortedFees[idxP25],
+		P50: sortedFees[idxP50],
+		P75: sortedFees[idxP75],
+		P90: sortedFees[idxP90],
 	}
 }
 

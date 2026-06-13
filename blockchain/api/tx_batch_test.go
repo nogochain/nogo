@@ -39,11 +39,15 @@ func createTestWallet() (*ed25519.PrivateKey, ed25519.PublicKey, string) {
 }
 
 func createSignedTestTransaction(priv *ed25519.PrivateKey, pub ed25519.PublicKey, addr string, nonce uint64, amount uint64, fee uint64) core.Transaction {
+	// Generate a valid recipient address with correct checksum.
+	_, toPub, _ := ed25519.GenerateKey(nil)
+	toAddr := crypto.GetAddressFromPubKey(toPub)
+
 	tx := core.Transaction{
 		Type:       core.TxTransfer,
 		ChainID:    1,
 		FromPubKey: pub,
-		ToAddress:  "NOGO" + hex.EncodeToString(make([]byte, 36)),
+		ToAddress:  toAddr,
 		Amount:     amount,
 		Fee:        fee,
 		Nonce:      nonce,
@@ -345,20 +349,30 @@ func TestBatchSubmitTxPartialSuccess(t *testing.T) {
     )
     server := createTestServerWithMempool(bc, mp)
 
-	priv, pub, addr := createTestWallet()
-	bc.SetAccount(addr, core.Account{
+	// Use two separate wallets to avoid nonce conflict during parallel batch processing.
+	priv1, pub1, addr1 := createTestWallet()
+	bc.SetAccount(addr1, core.Account{
 		Balance: 1000000,
 		Nonce:   0,
 	})
 
-	validTx := createSignedTestTransaction(priv, pub, addr, 1, 100, core.MinFee)
-	validTxHex := encodeTransactionToHex(validTx)
+	priv2, pub2, addr2 := createTestWallet()
+	bc.SetAccount(addr2, core.Account{
+		Balance: 1000000,
+		Nonce:   0,
+	})
+
+	txFee := uint64(50000)
+	validTx1 := createSignedTestTransaction(priv1, pub1, addr1, 1, 100, txFee)
+	validTx2 := createSignedTestTransaction(priv2, pub2, addr2, 1, 100, txFee)
+	validTxHex1 := encodeTransactionToHex(validTx1)
+	validTxHex2 := encodeTransactionToHex(validTx2)
 
 	reqBody, _ := json.Marshal(BatchSubmitRequest{
 		Transactions: []string{
-			validTxHex,
+			validTxHex1,
 			"invalid_hex",
-			validTxHex,
+			validTxHex2,
 		},
 	})
 

@@ -337,11 +337,13 @@ body {
       <li><a href="#blocks">Blocks</a></li>
       <li><a href="#transactions">Transactions</a></li>
       <li><a href="#addresses">Addresses</a></li>
+      <li><a href="#exchange">Exchange Integration</a></li>
       <li><a href="#mempool">Mempool</a></li>
       <li><a href="#mining">Mining</a></li>
       <li><a href="#wallet">Wallet</a></li>
       <li><a href="#network">Network</a></li>
       <li><a href="#websocket">WebSocket</a></li>
+      <li><a href="#webhook">Webhook</a></li>
       <li><a href="#proposals">Proposals</a></li>
       <li><a href="#utils">Utilities</a></li>
     </ul>
@@ -733,6 +735,51 @@ body {
       </div>
     </div>
 
+    <!-- Exchange Integration -->
+    <div id="exchange" class="api-section">
+      <h2>Exchange Integration</h2>
+      
+      <div class="info-box success">
+        <h4>✅ Exchange-Ready</h4>
+        <p>Production-grade endpoints for cryptocurrency exchange integration. Supports batch queries, address-filtered mempool, webhooks, and standard WebSocket.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/balance/batch</span>
+        </div>
+        <p class="endpoint-description">Query up to 100 addresses in a single request. Deduplicates addresses and returns balance+nonce per address.</p>
+        <div class="endpoint-details">
+          <h4>Request Body</h4>
+          <div class="code-block">{
+  "addresses": [
+    "NOGOaaaaa...0000",
+    "NOGObbbbb...0000"
+  ]
+}</div>
+          <h4>Response Example</h4>
+          <div class="code-block">{
+  "balances": [
+    {"address":"NOGOaaaa...0000","balance":100000,"nonce":42},
+    {"address":"NOGObbbb...0000","balance":500000,"nonce":15}
+  ],
+  "count": 2
+}</div>
+          <h4>Limits</h4>
+          <p>Max 100 addresses per request. Rate limited: 60 req/min per IP. Duplicate addresses deduplicated. Invalid format addresses skipped. Not-found addresses return balance:0, nonce:0.</p>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/balance/batch?address=X&address=Y</span>
+        </div>
+        <p class="endpoint-description">Query batch balances via query parameters (alternative to POST body). Supports up to 100 addresses.</p>
+      </div>
+    </div>
+
     <!-- Mempool -->
     <div id="mempool" class="api-section">
       <h2>Mempool</h2>
@@ -742,18 +789,32 @@ body {
           <span class="http-method get">GET</span>
           <span class="endpoint-path">/mempool</span>
         </div>
-        <p class="endpoint-description">Get current mempool status and pending transactions.</p>
+        <p class="endpoint-description">Get current mempool status and pending transactions with optional address filtering.</p>
         <div class="endpoint-details">
-          <h4>Response Example</h4>
+          <h4>Query Parameters</h4>
+          <table class="parameter-table">
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+            <tr>
+              <td>address</td>
+              <td>string</td>
+              <td>Filter by sender or receiver address (NOGO format)</td>
+            </tr>
+          </table>
+          <h4>Response Example (with address filter)</h4>
           <div class="code-block">{
-  "size": 150,
+  "size": 5,
   "txs": [
     {
       "txId": "abc123...",
-      "type": "transfer",
+      "fee": 100000,
       "amount": 1000000000,
-      "fee": 1000000,
-      "timestamp": 1234567890
+      "nonce": 5,
+      "fromAddr": "NOGO00...",
+      "toAddress": "NOGO00..."
     }
   ]
 }</div>
@@ -1108,6 +1169,110 @@ Chain Reorganization Events → subscribe channel: "chain"
 Address Subscriptions → subscribe channel: "address:{addr}"</div>
           <h4>Subscribe Example</h4>
           <div class="code-block">{"action": "subscribe", "channel": "blocks"}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">WS</span>
+          <span class="endpoint-path">/ws/std</span>
+        </div>
+        <p class="endpoint-description">Standard WebSocket endpoint using gorilla/websocket. Compatible with all WebSocket libraries. Recommended for exchange integration.</p>
+        <div class="endpoint-details">
+          <h4>Subscribe Protocol</h4>
+          <div class="code-block">{"type":"subscribe","topic":"all"}
+{"type":"subscribe","topic":"address","address":"NOGO..."}
+{"type":"subscribe","topic":"type","event":"new_block"}
+{"type":"unsubscribe","topic":"all"}</div>
+          <h4>Events</h4>
+          <div class="code-block">new_block  →  {"type":"new_block","data":{"height":N,"hash":"..."}}
+chain_reorg → {"type":"chain_reorg","data":{"depth":N,...}}
+mempool_added → {"type":"mempool_added","data":{"txId":"...",...}}
+mempool_removed → {"type":"mempool_removed","data":{"txIds":[...],...}}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Webhook -->
+    <div id="webhook" class="api-section">
+      <h2>Webhook System</h2>
+
+      <div class="info-box success">
+        <h4>✅ Real-time Callbacks</h4>
+        <p>Register webhook endpoints to receive real-time blockchain events via HTTP POST with HMAC-SHA256 signing. Max 50 subscriptions per node. Exponential retry with jitter (2s → 4s → 8s → 16s → 32s, max 5 attempts).</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/webhook/register</span>
+        </div>
+        <p class="endpoint-description">Register a webhook endpoint to receive blockchain event notifications via HTTP POST callback.</p>
+        <div class="endpoint-details">
+          <h4>Request Body</h4>
+          <div class="code-block">{
+  "url": "https://your-exchange.com/api/nogo-webhooks",
+  "secret": "your-hmac-secret",
+  "events": ["new_block","tx_confirmed","tx_rollback","chain_reorg"]
+}</div>
+          <h4>Response</h4>
+          <div class="code-block">{
+  "id": "wh_abc123...",
+  "url": "https://...",
+  "events": ["new_block","tx_confirmed"],
+  "active": true,
+  "created_at": 1773135000
+}</div>
+          <h4>Available Events</h4>
+          <table class="parameter-table">
+            <tr><th>Event</th><th>Description</th></tr>
+            <tr><td>new_transaction</td><td>New tx in mempool</td></tr>
+            <tr><td>new_block</td><td>New block mined</td></tr>
+            <tr><td>tx_confirmed</td><td>Transaction included in block</td></tr>
+            <tr><td>tx_rollback</td><td>Transaction removed by reorg</td></tr>
+            <tr><td>chain_reorg</td><td>Chain reorganization</td></tr>
+          </table>
+          <h4>Security Headers</h4>
+          <div class="code-block">X-Webhook-Signature: sha256=&lt;hmac-sha256-of-body&gt;
+X-Webhook-ID: whev_&lt;event-id&gt;
+X-Webhook-Event: new_block
+X-Webhook-Attempt: 1</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/webhook/unregister</span>
+        </div>
+        <p class="endpoint-description">Remove a registered webhook subscription by ID.</p>
+        <div class="endpoint-details">
+          <h4>Request Body</h4>
+          <div class="code-block">{"id": "wh_abc123..."}</div>
+          <h4>Response</h4>
+          <div class="code-block">{"status": "unregistered"}</div>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/webhook/list</span>
+        </div>
+        <p class="endpoint-description">List all registered webhook subscriptions with their active state and event filters.</p>
+        <div class="endpoint-details">
+          <h4>Response Example</h4>
+          <div class="code-block">{
+  "webhooks": [
+    {
+      "id": "wh_abc123...",
+      "url": "https://exchange.example/hooks",
+      "events": ["new_block","tx_confirmed"],
+      "active": true,
+      "created_at": 1773135000
+    }
+  ]
+}</div>
         </div>
       </div>
     </div>

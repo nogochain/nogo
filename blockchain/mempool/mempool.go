@@ -45,6 +45,7 @@ type Mempool struct {
 
 	entries       map[string]*mempoolEntry     // txid -> entry
 	bySenderNonce map[string]map[uint64]string // fromAddr -> nonce -> txid
+	addrInfo      map[string]map[string]struct{} // toAddress -> set{txid} for reverse lookup
 	byFee         feeHeap                      // transactions ordered by fee
 	totalSize     uint64                       // total size in bytes
 	maxTotalSize  uint64                       // maximum total size in bytes
@@ -132,6 +133,7 @@ func NewMempool(
 		currentHeight: currentHeight,
 		entries:       make(map[string]*mempoolEntry),
 		bySenderNonce: make(map[string]map[uint64]string),
+		addrInfo:      make(map[string]map[string]struct{}),
 		byFee:         make(feeHeap, 0),
 		maxTotalSize:  maxTotalSize,
 		ctx:           ctx,
@@ -226,6 +228,7 @@ func (m *Mempool) AddWithTxID(
 
 	m.entries[txid] = entry
 	m.indexEntry(fromAddr, tx.Nonce, txid)
+	m.indexAddrInfo(tx.ToAddress, txid)
 	m.byFee.push(entry)
 	m.totalSize += txSize
 
@@ -490,6 +493,7 @@ func (m *Mempool) ReplaceByFeeWithTxID(
 
 	m.entries[txid] = entry
 	m.indexEntry(fromAddr, tx.Nonce, txid)
+	m.indexAddrInfo(tx.ToAddress, txid)
 	m.byFee.push(entry)
 	m.totalSize += txSize
 
@@ -507,6 +511,7 @@ func (m *Mempool) Clear() {
 
 	m.entries = make(map[string]*mempoolEntry)
 	m.bySenderNonce = make(map[string]map[uint64]string)
+	m.addrInfo = make(map[string]map[string]struct{})
 	m.byFee = make(feeHeap, 0)
 	m.totalSize = 0
 
@@ -634,6 +639,7 @@ func (m *Mempool) AddWithoutSignatureValidation(tx core.Transaction) (string, er
 
 	m.entries[txid] = entry
 	m.indexEntry(fromAddr, tx.Nonce, txid)
+	m.indexAddrInfo(tx.ToAddress, txid)
 	m.byFee.push(entry)
 	m.totalSize += txSize
 
@@ -705,12 +711,57 @@ func (m *Mempool) evictBySenderNonce(fromAddr string, nonce uint64) []string {
 	return evicted
 }
 
-// indexEntry indexes a mempool entry
+// indexEntry indexes a mempool entry by sender nonce and receiver address.
 func (m *Mempool) indexEntry(fromAddr string, nonce uint64, txid string) {
 	if m.bySenderNonce[fromAddr] == nil {
 		m.bySenderNonce[fromAddr] = make(map[uint64]string)
 	}
 	m.bySenderNonce[fromAddr][nonce] = txid
+}
+
+// indexAddrInfo indexes the reverse lookup by to-address for efficient address filtering.
+func (m *Mempool) indexAddrInfo(toAddr string, txid string) {
+	if toAddr == "" {
+		return
+	}
+	if m.addrInfo[toAddr] == nil {
+		m.addrInfo[toAddr] = make(map[string]struct{})
+	}
+	m.addrInfo[toAddr][txid] = struct{}{}
+}
+
+// GetByAddress returns all mempool transaction IDs involving the given address.
+// Matches both from-address (sender) and to-address (receiver).
+// Returns nil if no matching transactions found.
+func (m *Mempool) GetByAddress(addr string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	txidSet := make(map[string]struct{})
+
+	// Check sender index.
+	if senderMap, ok := m.bySenderNonce[addr]; ok {
+		for _, txid := range senderMap {
+			txidSet[txid] = struct{}{}
+		}
+	}
+
+	// Check receiver index.
+	if addrMap, ok := m.addrInfo[addr]; ok {
+		for txid := range addrMap {
+			txidSet[txid] = struct{}{}
+		}
+	}
+
+	if len(txidSet) == 0 {
+		return nil
+	}
+
+	result := make([]string, 0, len(txidSet))
+	for txid := range txidSet {
+		result = append(result, txid)
+	}
+	return result
 }
 
 // removeLocked removes a transaction (must hold lock)

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/hex"
 	"math/big"
+	"sync"
 
 	"github.com/nogochain/nogo/blockchain/config"
 	"github.com/nogochain/nogo/blockchain/core"
@@ -27,8 +28,10 @@ import (
 	"github.com/nogochain/nogo/blockchain/network"
 )
 
-// mockBlockchain provides mock implementation for testing
+// mockBlockchain provides mock implementation for testing.
+// Thread-safe: uses RWMutex to protect concurrent access in parallel test scenarios.
 type mockBlockchain struct {
+	mu     sync.RWMutex
 	blocks      []*core.Block
 	txIndex     map[string]*core.TxLocation
 	state       map[string]core.Account
@@ -37,8 +40,10 @@ type mockBlockchain struct {
 	latestBlock *core.Block
 }
 
-// SetAccount sets the account state for testing
+// SetAccount sets the account state for testing.
 func (m *mockBlockchain) SetAccount(addr string, account core.Account) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.state[addr] = account
 }
 
@@ -53,6 +58,8 @@ func newMockBlockchain() *mockBlockchain {
 }
 
 func (m *mockBlockchain) LatestBlock() *core.Block {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if m.latestBlock != nil {
 		return m.latestBlock
 	}
@@ -63,6 +70,8 @@ func (m *mockBlockchain) LatestBlock() *core.Block {
 }
 
 func (m *mockBlockchain) BlockByHeight(height uint64) (*core.Block, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if height >= uint64(len(m.blocks)) {
 		return nil, false
 	}
@@ -122,11 +131,15 @@ func (m *mockBlockchain) TotalSupply() uint64 {
 }
 
 func (m *mockBlockchain) AddBlock(block *core.Block) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.blocks = append(m.blocks, block)
 	return true, nil
 }
 
 func (m *mockBlockchain) RollbackToHeight(height uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if height >= uint64(len(m.blocks)) {
 		return nil
 	}
@@ -147,6 +160,8 @@ func (m *mockBlockchain) AuditChain() error {
 }
 
 func (m *mockBlockchain) TxByID(txid string) (*core.Transaction, *core.TxLocation, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	loc, exists := m.txIndex[txid]
 	if !exists {
 		return nil, nil, false
@@ -164,6 +179,8 @@ func (m *mockBlockchain) AddressTxs(addr string, limit, cursor int, sortDesc boo
 }
 
 func (m *mockBlockchain) Balance(addr string) (core.Account, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	acct, exists := m.state[addr]
 	return acct, exists
 }

@@ -260,7 +260,8 @@ func TestHandleTxReceipt_ConfirmationCount(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	expectedConfirmations := uint64(10)
+	// confirmations = latestHeight(9) - blockHeight(1) + 1 = 9
+	expectedConfirmations := uint64(9)
 	if resp.Confirmations != expectedConfirmations {
 		t.Errorf("expected %d confirmations, got %d", expectedConfirmations, resp.Confirmations)
 	}

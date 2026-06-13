@@ -186,6 +186,7 @@ func (m *locatorMockBC) Balance(addr string) (core.Account, bool) { return core.
 func (m *locatorMockBC) HasTransaction(hash []byte) bool           { return false }
 func (m *locatorMockBC) GetContractManager() *core.ContractManager { return nil }
 func (m *locatorMockBC) SyncLoop() SyncLoopInterface               { return nil }
+func (m *locatorMockBC) GetCurrentStateRoot() ([]byte, error)      { return make([]byte, 32), nil }
 
 func newSyncLoopForLocatorTest(bc BlockchainInterface) *SyncLoop {
 	return &SyncLoop{bc: bc}

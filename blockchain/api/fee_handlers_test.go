@@ -249,10 +249,15 @@ func TestCalculatePercentiles(t *testing.T) {
 				return fees
 			}(),
 			expected: FeePercentiles{
-				P25: 26,
-				P50: 51,
-				P75: 76,
-				P90: 91,
+				// Nearest-rank: ceil(n*P/100)
+				// P25: ceil(100*25/100)=25 → index 24 → value 25
+				// P50: ceil(100*50/100)=50 → index 49 → value 50
+				// P75: ceil(100*75/100)=75 → index 74 → value 75
+				// P90: ceil(100*90/100)=90 → index 89 → value 90
+				P25: 25,
+				P50: 50,
+				P75: 75,
+				P90: 90,
 			},
 		},
 	}
