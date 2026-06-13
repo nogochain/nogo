@@ -341,6 +341,7 @@ body {
       <li><a href="#mining">Mining</a></li>
       <li><a href="#wallet">Wallet</a></li>
       <li><a href="#network">Network</a></li>
+      <li><a href="#websocket">WebSocket</a></li>
       <li><a href="#proposals">Proposals</a></li>
       <li><a href="#utils">Utilities</a></li>
     </ul>
@@ -507,6 +508,14 @@ body {
 
       <div class="api-endpoint">
         <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/blocks/hash/{hash}</span>
+        </div>
+        <p class="endpoint-description">Get block by hash (alternative path).</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
           <span class="http-method post">POST</span>
           <span class="endpoint-path">/block</span>
         </div>
@@ -630,6 +639,30 @@ body {
           <span class="endpoint-path">/tx/status/{txid}</span>
         </div>
         <p class="endpoint-description">Get transaction status (pending/confirmed).</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/tx/proof/{txid}</span>
+        </div>
+        <p class="endpoint-description">Get Merkle proof for transaction inclusion.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/tx/estimate_fee</span>
+        </div>
+        <p class="endpoint-description">Estimate transaction fee based on size and mempool conditions.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/tx/fee/recommend</span>
+        </div>
+        <p class="endpoint-description">Get recommended transaction fees (slow/standard/fast).</p>
       </div>
     </div>
 
@@ -814,6 +847,38 @@ body {
       
       <div class="api-endpoint">
         <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/wallet/create</span>
+        </div>
+        <p class="endpoint-description">Create a new wallet with random private key.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/wallet/create_persistent</span>
+        </div>
+        <p class="endpoint-description">Create and persist a wallet to disk.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method post">POST</span>
+          <span class="endpoint-path">/wallet/import</span>
+        </div>
+        <p class="endpoint-description">Import an existing wallet from private key.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">GET</span>
+          <span class="endpoint-path">/wallet/list</span>
+        </div>
+        <p class="endpoint-description">List all persisted wallets.</p>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="endpoint-header">
           <span class="http-method get">GET</span>
           <span class="endpoint-path">/wallet/balance/{address}</span>
         </div>
@@ -846,7 +911,7 @@ body {
 
       <div class="api-endpoint">
         <div class="endpoint-header">
-          <span class="http-method get">GET</span>
+          <span class="http-method post">POST</span>
           <span class="endpoint-path">/wallet/verify</span>
         </div>
         <p class="endpoint-description">Verify an address format.</p>
@@ -854,7 +919,7 @@ body {
 
       <div class="api-endpoint">
         <div class="endpoint-header">
-          <span class="http-method get">GET</span>
+          <span class="http-method post">POST</span>
           <span class="endpoint-path">/wallet/derive</span>
         </div>
         <p class="endpoint-description">Derive address from seed and index.</p>
@@ -882,7 +947,7 @@ body {
 
       <div class="api-endpoint">
         <div class="endpoint-header">
-          <span class="http-method get">GET</span>
+          <span class="http-method post">POST</span>
           <span class="endpoint-path">/wallet/addresses</span>
         </div>
         <p class="endpoint-description">Derive multiple addresses from seed.</p>
@@ -949,7 +1014,12 @@ body {
 
     <!-- Proposals -->
     <div id="proposals" class="api-section">
-      <h2>Community Proposals</h2>
+      <h2>Community Proposals 🏗️ Coming Soon</h2>
+      
+      <div class="info-box">
+        <h4>🏗️ Under Development</h4>
+        <p>The Community Proposals API is currently under active development. The endpoints below reflect the planned design and will be available in a future release.</p>
+      </div>
       
       <div class="api-endpoint">
         <div class="endpoint-header">
@@ -1020,6 +1090,28 @@ body {
       </div>
     </div>
 
+    <!-- WebSocket -->
+    <div id="websocket" class="api-section">
+      <h2>WebSocket API</h2>
+      
+      <div class="api-endpoint">
+        <div class="endpoint-header">
+          <span class="http-method get">WS</span>
+          <span class="endpoint-path">/ws</span>
+        </div>
+        <p class="endpoint-description">Real-time event subscription via WebSocket connection. Subscribe to block, transaction, and chain events.</p>
+        <div class="endpoint-details">
+          <h4>Supported Events</h4>
+          <div class="code-block">New Block Events → subscribe channel: "blocks"
+New Transaction Events → subscribe channel: "transactions"
+Chain Reorganization Events → subscribe channel: "chain"
+Address Subscriptions → subscribe channel: "address:{addr}"</div>
+          <h4>Subscribe Example</h4>
+          <div class="code-block">{"action": "subscribe", "channel": "blocks"}</div>
+        </div>
+      </div>
+    </div>
+
     <!-- Utilities -->
     <div id="utils" class="api-section">
       <h2>Utilities</h2>
@@ -1040,7 +1132,7 @@ body {
 
       <div class="api-endpoint">
         <div class="endpoint-header">
-          <span class="http-method get">GET</span>
+          <span class="http-method post">POST</span>
           <span class="endpoint-path">/audit/chain</span>
         </div>
         <p class="endpoint-description">Audit entire blockchain integrity (admin only).</p>
