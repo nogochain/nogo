@@ -54,7 +54,7 @@ func DefaultSimConfig() SimConfig {
 	return SimConfig{
 		NodeCount:     3,
 		BlockTime:     100 * time.Millisecond,
-		MaxTxPerBlock: 100,
+		MaxTxPerBlock: 1000,
 		ChainID:       0,
 		LogOutput:     false,
 	}

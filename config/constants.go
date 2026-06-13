@@ -90,7 +90,7 @@ const (
 
 	// DefaultMaxTransactionsPerBlock is the maximum tx count per block
 	// Operational limit for network efficiency
-	DefaultMaxTransactionsPerBlock = 100
+	DefaultMaxTransactionsPerBlock = 1000
 )
 
 // =============================================================================

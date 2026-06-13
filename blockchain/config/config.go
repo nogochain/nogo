@@ -35,7 +35,7 @@ const (
 // Mining constants
 const (
 	// DefaultMaxTransactionsPerBlock is the maximum transactions per block
-	DefaultMaxTransactionsPerBlock = 100
+	DefaultMaxTransactionsPerBlock = 1000
 	// DefaultVerificationTimeoutMs is the verification timeout in milliseconds
 	DefaultVerificationTimeoutMs = 5000
 	// DefaultMinerPollIntervalSec is the miner polling interval in seconds.

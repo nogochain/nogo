@@ -38,7 +38,7 @@ func testConsensusParams() ConsensusParams {
 		MedianTimePastWindow:          11,
 		GenesisDifficultyBits:         10,
 		MaxBlockSize:                  1048576,
-		MaxTransactionsPerBlock:       100,
+		MaxTransactionsPerBlock:       1000,
 		BinaryEncodingEnable:          false,
 		MerkleEnable:                  false,
 		MonetaryPolicy: config.MonetaryPolicy{

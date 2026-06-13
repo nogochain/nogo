@@ -127,7 +127,7 @@ const (
 	// DefaultMempoolMax is the default maximum number of transactions in mempool
 	DefaultMempoolMax = 10000
 	// DefaultMaxTxPerBlock is the default maximum transactions per block
-	DefaultMaxTxPerBlock = 100
+	DefaultMaxTxPerBlock = 1000
 	// DefaultHTTPTimeout is the default HTTP request timeout in seconds
 	DefaultHTTPTimeout = 10
 	// DefaultWSPort is the default WebSocket port
