@@ -887,7 +887,7 @@ var MainnetGenesisConfig = GenesisConfiguration{
 		DifficultyWindow:               10,
 		DifficultyMaxStep:              4, // Allow faster adjustment
 		MinDifficultyBits:              1,
-		MaxDifficultyBits:              255,
+		MaxDifficultyBits:              4294967295, // MaxUint32 - no enforced upper bound in active block paths
 		GenesisDifficultyBits:          10, // Lowered from 100 for easier CPU mining
 		MedianTimePastWindow:           11,
 		MaxTimeDrift:                   7200,
@@ -924,7 +924,7 @@ var TestnetGenesisConfig = GenesisConfiguration{
 		DifficultyWindow:               10,               // PI controller window (aligned with mainnet)
 		DifficultyMaxStep:              4,                // Allow faster adjustment
 		MinDifficultyBits:              1,
-		MaxDifficultyBits:              255,
+		MaxDifficultyBits:              4294967295, // MaxUint32 - no enforced upper bound in active block paths
 		GenesisDifficultyBits:          10, // Lowered from 100 for easier CPU mining
 		MedianTimePastWindow:           11,
 		MaxTimeDrift:                   7200,

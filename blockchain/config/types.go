@@ -86,7 +86,12 @@ type ConsensusParams struct {
 	// MaxDifficultyBits is the maximum difficulty bits
 	MaxDifficultyBits uint32 `json:"maxDifficultyBits"`
 
-	// MaxDifficultyChangePercent is the maximum difficulty change per adjustment
+	// MaxDifficultyChangePercent is a governance-reserved parameter for maximum
+	// difficulty change per adjustment window. This field is NOT read by the PI
+	// controller (difficulty_adjustment.go), which uses hardcoded per-block bounds:
+	// max 2x increase and min 50% decrease, governed by the PI weighted formula
+	// 1.0 + 0.7*piOutput + 0.3*smoothedOutput with Kp=0.15, Ki=0.03, decay=0.97.
+	// Future governance may wire this field into the PI controller.
 	MaxDifficultyChangePercent uint8 `json:"maxDifficultyChangePercent"`
 
 	// MedianTimePastWindow is the window size for MTP calculation

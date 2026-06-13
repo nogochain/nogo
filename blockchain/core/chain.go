@@ -2127,7 +2127,7 @@ func (c *Chain) validateBlockPoWLocked(block, parent *Block) error {
 	copy(parentHash[:], parent.Hash)
 
 	engine := c.getPowEngine()
-	_ = getCached(parentHash) // cache only, not used directly
+	_ = c.getCached(parentHash) // cache only, not used directly
 	return verifyBlockPoWSeal(c.consensus, block, parent, engine)
 }
 
@@ -3162,9 +3162,9 @@ func (c *Chain) initCanonicalIndexesLocked() {
 	}
 }
 
-// getCached retrieves cached POW data for a seed
-// Concurrency safety: uses RWMutex and atomic counters
-func getCached(seed nogopow.Hash) []uint32 {
+// getCached retrieves cached POW data for a seed using chain consensus parameters.
+// Concurrency safety: uses RWMutex and atomic counters.
+func (c *Chain) getCached(seed nogopow.Hash) []uint32 {
 	// Try read lock first for cache hit
 	powCache.mu.RLock()
 	cacheData, exists := powCache.cache[seed]
@@ -3186,9 +3186,11 @@ func getCached(seed nogopow.Hash) []uint32 {
 		return cacheData
 	}
 
-	// Compute cache data
+	// Compute cache data with chain consensus parameters
 	atomic.AddUint64(&powCache.stats.misses, 1)
-	engine := nogopow.New(nogopow.DefaultConfig())
+	powCfg := nogopow.DefaultConfig()
+	powCfg.ConsensusParams = &c.consensus
+	engine := nogopow.New(powCfg)
 	defer engine.Close()
 
 	cacheData = nogopow.CalcSeedCache(seed.Bytes())

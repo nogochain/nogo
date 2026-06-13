@@ -40,29 +40,15 @@ type Config struct {
 	ReuseObjects    bool
 }
 
+// DefaultConfig returns a Config with safe defaults.
+// ConsensusParams is intentionally nil - callers MUST set it before use.
+// All production callers already override it with Chain.c.consensus.
+// NewDifficultyAdjuster() has internal nil-check fallback for standalone mode.
 func DefaultConfig() *Config {
 	return &Config{
-		PowMode:  ModeNormal,
-		CacheDir: "",
-		Log:      &defaultLogger{},
-		ConsensusParams: &config.ConsensusParams{
-			ChainID:                      1,
-			DifficultyEnable:             true,
-			BlockTimeTargetSeconds:       30,
-			DifficultyAdjustmentInterval: 1,
-			MaxBlockTimeDriftSeconds:     900,
-			MinDifficulty:                10,  // Increased from 1 to prevent difficulty from dropping too low
-			MaxDifficulty:                4294967295,
-			MinDifficultyBits:            10,  // Increased from 1 to match MinDifficulty
-			MaxDifficultyBits:            255,
-			MaxDifficultyChangePercent:   100, // Increased for faster convergence when network hashrate changes
-			MedianTimePastWindow:         11,
-		// GenesisDifficultyBits: 10 = target 2^256/10
-		// This allows genesis block to be mined quickly on CPU
-		// PI controller will adjust upward based on actual hashrate
-		// NOTE: Mainnet/testnet use hardcoded config in config/constants.go
-		GenesisDifficultyBits: 10,
-		},
+		PowMode:      ModeNormal,
+		CacheDir:     "",
+		Log:          &defaultLogger{},
 		UseSIMD:      false,
 		UseBitShift:  false,
 		ReuseObjects: true,

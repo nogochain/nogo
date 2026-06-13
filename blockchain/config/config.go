@@ -130,23 +130,20 @@ func DefaultConfig() *Config {
 			ChainID:                        1,
 			DifficultyEnable:               true,
 			BlockTimeTargetSeconds:         30,
-			DifficultyAdjustmentInterval:   100,
+			DifficultyAdjustmentInterval:   10,
 			MaxBlockTimeDriftSeconds:       7200,
-			MinDifficulty:                  10,  // Increased from 1 to prevent difficulty from dropping too low
+			MinDifficulty:                  1,
 			MaxDifficulty:                  4294967295,
-			MinDifficultyBits:              10,  // Increased from 1 to match MinDifficulty
-			MaxDifficultyBits:              255,
-			MaxDifficultyChangePercent:     20,  // Reduced from 100 to 20 for PI controller stability (Kp=0.2)
+			MinDifficultyBits:              1,
+			MaxDifficultyBits:              4294967295,
+			MaxDifficultyChangePercent:     4,
 			MedianTimePastWindow:           11,
 			MerkleEnable:                   true,
 			MerkleActivationHeight:         0,
 			BinaryEncodingEnable:           false,
 			BinaryEncodingActivationHeight: 0,
-		// GenesisDifficultyBits: 10 for easier CPU mining of genesis block
-		// PI controller will auto-adjust based on network hashrate
-		// NOTE: Mainnet/testnet use hardcoded config in config/constants.go
-		// This value only applies to custom chains using DefaultConfig()
-		GenesisDifficultyBits: 10,
+			GenesisDifficultyBits:          10,
+			MaxBlockSize:                   4000000,
 			MonetaryPolicy: MonetaryPolicy{
 				InitialBlockReward:     800000000,
 				AnnualReductionPercent: 10,
@@ -387,33 +384,38 @@ func GetTargetBlockTime() int64 {
 	return DefaultTargetBlockTime
 }
 
-// GetConsensusParams returns the default consensus parameters
-// Production-grade: provides access to consensus configuration
-// IMPORTANT: Must match nogopow.DefaultConfig() for consistency
+// GetConsensusParams returns default consensus parameters for standalone use.
+//
+// DEPRECATED: Use Chain.GetConsensus() for runtime consensus parameters instead.
+// This function returns hardcoded defaults aligned with MainnetGenesisConfig that
+// may not match the running chain state. Kept for backward compatibility with tests
+// and standalone initialization mode.
 func GetConsensusParams() ConsensusParams {
 	return ConsensusParams{
 		ChainID:                        1,
 		DifficultyEnable:               true,
 		BlockTimeTargetSeconds:         30,
-		DifficultyAdjustmentInterval:   1,
-		MaxBlockTimeDriftSeconds:       900,
+		DifficultyAdjustmentInterval:   10,
+		MaxBlockTimeDriftSeconds:       7200,
 		MinDifficultyBits:              1,
-		MaxDifficultyBits:              255,
-		MaxDifficultyChangePercent:     20,  // Reduced for PI controller stability
+			MaxDifficultyBits:              4294967295,
+			MaxDifficultyChangePercent:     10,
 		MedianTimePastWindow:           11,
 		MinDifficulty:                  1,
-		MaxDifficulty:                  4294967295,
-		GenesisDifficultyBits:          100,
+		MaxDifficulty:                  255,
+		GenesisDifficultyBits:          10,
 		MerkleEnable:                   true,
 		MerkleActivationHeight:         0,
 		BinaryEncodingEnable:           false,
 		BinaryEncodingActivationHeight: 0,
-		MaxBlockSize:                   1024 * 1024,
+		MaxBlockSize:                   4000000,
 		MaxTransactionsPerBlock:        1000,
 		MonetaryPolicy: MonetaryPolicy{
 			InitialBlockReward:     800000000,
 			AnnualReductionPercent: 10,
 			MinimumBlockReward:     10000000,
+			UncleRewardEnabled:     false,
+			MaxUncleDepth:          0,
 			MinerRewardShare:       99,
 			CommunityFundShare:     0,
 			GenesisShare:           1,
