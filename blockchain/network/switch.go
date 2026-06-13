@@ -4956,7 +4956,7 @@ func (sw *Switch) BroadcastSyncMsg(msg []byte) {
 	sw.Broadcast(mconnection.ChannelSync, msg)
 }
 
-func (sw *Switch) GetPeerChainInfo(peerID string) (height uint64, work *big.Int, tipHash string, err error) {
+func (sw *Switch) GetPeerChainInfo(peerID string) (height uint64, work *big.Int, tipHash string, genesisHash string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -4964,7 +4964,7 @@ func (sw *Switch) GetPeerChainInfo(peerID string) (height uint64, work *big.Int,
 	cancel()
 	if fetchErr != nil {
 		log.Printf("[Switch] GetPeerChainInfo: query failed for %s: %v (returning error to prevent incorrect sync decisions)", peerID, fetchErr)
-		return 0, nil, "", fmt.Errorf("GetPeerChainInfo: %w [CRITICAL: no reliable data, caller must handle this error properly]", fetchErr)
+		return 0, nil, "", "", fmt.Errorf("GetPeerChainInfo: %w [CRITICAL: no reliable data, caller must handle this error properly]", fetchErr)
 	}
 
 	// Update height cache with fresh live data so that subsequent peer.Height()
@@ -4976,7 +4976,7 @@ func (sw *Switch) GetPeerChainInfo(peerID string) (height uint64, work *big.Int,
 	}
 	sw.peerHeightCacheMu.Unlock()
 
-	return chainInfo.Height, chainInfo.Work, chainInfo.LatestHash, nil
+	return chainInfo.Height, chainInfo.Work, chainInfo.LatestHash, chainInfo.GenesisHash, nil
 }
 
 func (sw *Switch) PeerByID(peerID string) PeerInterface {

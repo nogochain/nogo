@@ -447,6 +447,7 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	var bestByWork *big.Int
 	var bestByWorkPeerID string
 	var bestByWorkLatestHash string
+	var bestByWorkGenesisHash string
 	var bestByWorkHeight uint64
 	var maxPeerHeight uint64
 
@@ -494,6 +495,7 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 				bestByWork = info.Work
 				bestByWorkPeerID = peer
 				bestByWorkLatestHash = info.LatestHash
+				bestByWorkGenesisHash = info.GenesisHash
 				bestByWorkHeight = info.Height
 			}
 		}
@@ -559,7 +561,7 @@ func (s *SyncLoop) updateSyncProgressFromPeers(ctx context.Context) {
 	s.mu.Unlock()
 
 	if s.blockKeeper != nil && bestByWorkPeerID != "" {
-		s.blockKeeper.setPeerSyncInfo(bestByWorkPeerID, bestByWorkHeight, bestByWork, bestByWorkLatestHash)
+		s.blockKeeper.setPeerSyncInfo(bestByWorkPeerID, bestByWorkHeight, bestByWork, bestByWorkLatestHash, bestByWorkGenesisHash)
 	}
 
 	event := SyncStatusEvent{Timestamp: time.Now()}

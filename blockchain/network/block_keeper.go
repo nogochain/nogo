@@ -116,11 +116,12 @@ func (rl *rateLimitedLogger) shouldLog(key string) bool {
 // peerSyncInfo caches the best peer's chain info from updateSyncProgressFromPeers.
 // Eliminates duplicate peer queries between sync reactor and blockKeeper.
 type peerSyncInfo struct {
-	peerID    string
-	height    uint64
-	work      *big.Int
-	tipHash   string
-	updatedAt time.Time
+	peerID      string
+	height      uint64
+	work        *big.Int
+	tipHash     string
+	genesisHash string
+	updatedAt   time.Time
 }
 
 type blockKeeper struct {
@@ -190,25 +191,26 @@ func (bk *blockKeeper) setSyncPeer(peer PeerInterface) {
 
 // setPeerSyncInfo is called by updateSyncProgressFromPeers to populate the shared cache.
 // This eliminates duplicate peer queries between the sync reactor and blockKeeper.
-func (bk *blockKeeper) setPeerSyncInfo(peerID string, height uint64, work *big.Int, tipHash string) {
+func (bk *blockKeeper) setPeerSyncInfo(peerID string, height uint64, work *big.Int, tipHash, genesisHash string) {
 	bk.peerSyncInfoMu.Lock()
 	defer bk.peerSyncInfoMu.Unlock()
 	bk.peerSyncInfo.peerID = peerID
 	bk.peerSyncInfo.height = height
 	bk.peerSyncInfo.work = new(big.Int).Set(work)
 	bk.peerSyncInfo.tipHash = tipHash
+	bk.peerSyncInfo.genesisHash = genesisHash
 	bk.peerSyncInfo.updatedAt = time.Now()
 }
 
 // getPeerSyncInfo returns cached peer chain info if fresh enough.
 // This is the single source of truth shared between updateSyncProgressFromPeers and checkSyncType.
-func (bk *blockKeeper) getPeerSyncInfo(maxAge time.Duration) (peerID string, height uint64, work *big.Int, tipHash string, ok bool) {
+func (bk *blockKeeper) getPeerSyncInfo(maxAge time.Duration) (peerID string, height uint64, work *big.Int, tipHash, genesisHash string, ok bool) {
 	bk.peerSyncInfoMu.RLock()
 	defer bk.peerSyncInfoMu.RUnlock()
 	if bk.peerSyncInfo.work == nil || time.Since(bk.peerSyncInfo.updatedAt) > maxAge {
-		return "", 0, nil, "", false
+		return "", 0, nil, "", "", false
 	}
-	return bk.peerSyncInfo.peerID, bk.peerSyncInfo.height, new(big.Int).Set(bk.peerSyncInfo.work), bk.peerSyncInfo.tipHash, true
+	return bk.peerSyncInfo.peerID, bk.peerSyncInfo.height, new(big.Int).Set(bk.peerSyncInfo.work), bk.peerSyncInfo.tipHash, bk.peerSyncInfo.genesisHash, true
 }
 
 // OnPeerDisconnected is called by Switch when a peer is removed.
@@ -785,17 +787,19 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 	var peerHeight uint64
 	var bestByWork PeerInterface
 	var bestTipHash string
+	var peerGenesisHash string
 
 	// PRIMARY: use shared cache populated by updateSyncProgressFromPeers.
 	// Eliminates duplicate peer queries and ensures hash comparison consistency.
 	const maxCacheAge = 10 * time.Second
-	cachedPID, cachedH, cachedW, cachedHash, cacheOK := bk.getPeerSyncInfo(maxCacheAge)
+	cachedPID, cachedH, cachedW, cachedHash, cachedGenesisHash, cacheOK := bk.getPeerSyncInfo(maxCacheAge)
 
 	if cacheOK {
 		peerHeight = cachedH
 		peerWork = cachedW
 		bestByWork = bk.wrapPeer(cachedPID, cachedH)
 		bestTipHash = cachedHash
+		peerGenesisHash = cachedGenesisHash
 
 		if bk.logLimiter.shouldLog("checkSyncType") {
 			log.Printf("[BlockKeeper] checkSyncType: local(H=%d,W=%s) vs cachedPeer(H=%d,W=%s,ID=%s)",
@@ -809,10 +813,11 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 		}
 
 		type peerResult struct {
-			peerID  string
-			height  uint64
-			work    *big.Int
-			tipHash string
+			peerID      string
+			height      uint64
+			work        *big.Int
+			tipHash     string
+			genesisHash string
 		}
 
 		resultCh := make(chan peerResult, len(peerIDs))
@@ -834,12 +839,12 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 			wg.Add(1)
 			go func(peerID string) {
 				defer wg.Done()
-				ph, pw, tipHash, err := bk.peers.GetPeerChainInfo(peerID)
+				ph, pw, tipHash, pGenesisHash, err := bk.peers.GetPeerChainInfo(peerID)
 				if err != nil || pw == nil {
 					return
 				}
 				select {
-				case resultCh <- peerResult{peerID: peerID, height: ph, work: pw, tipHash: tipHash}:
+				case resultCh <- peerResult{peerID: peerID, height: ph, work: pw, tipHash: tipHash, genesisHash: pGenesisHash}:
 				case <-peerCtx.Done():
 				}
 			}(pid)
@@ -857,6 +862,7 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 				peerHeight = r.height
 				bestByWork = bk.wrapPeer(r.peerID, r.height)
 				bestTipHash = r.tipHash
+				peerGenesisHash = r.genesisHash
 			}
 		}
 
@@ -883,7 +889,7 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 					var cpWork *big.Int
 					var cpHeight uint64
 					for _, peerID := range peerIDs {
-						ph, pw, _, err := bk.peers.GetPeerChainInfo(peerID)
+						ph, pw, _, _, err := bk.peers.GetPeerChainInfo(peerID)
 						if err != nil || pw == nil {
 							continue
 						}
@@ -904,6 +910,24 @@ func (bk *blockKeeper) checkSyncType() (int, PeerInterface) {
 						peerHeight = cpHeight
 					}
 				}
+			}
+		}
+	}
+
+	// GenesisHash validation: reject peers on different chains immediately.
+	// A mismatched genesis hash means the peer is on an entirely different
+	// blockchain. Syncing from it would waste bandwidth and eventually fail
+	// at PrevHash validation. Early rejection prevents futile sync cycles.
+	if peerGenesisHash != "" {
+		genesisBlock, ok := bk.chain.BlockByHeight(0)
+		if ok && genesisBlock != nil {
+			localGenesisHash := hex.EncodeToString(genesisBlock.Hash)
+			if peerGenesisHash != localGenesisHash {
+				log.Printf("[BlockKeeper] checkSyncType: genesis mismatch — local=%s... peer=%s... (peer=%s), rejecting sync",
+					localGenesisHash[:min(16, len(localGenesisHash))],
+					peerGenesisHash[:min(16, len(peerGenesisHash))],
+					bestByWork.ID()[:min(12, len(bestByWork.ID()))])
+				return syncTypeNone, nil
 			}
 		}
 	}
@@ -1134,7 +1158,7 @@ func (bk *blockKeeper) dispatchRegularSync(peer PeerInterface, localHeight uint6
 	log.Printf("[BlockKeeper] dispatchRegularSync: syncPeer=%s height=%d sessionSeq=%d localH=%d",
 		peer.ID()[:min(12, len(peer.ID()))], peerHeight, bk.syncSessionSeq, localHeight)
 
-	freshHeight, _, _, fetchErr := bk.peers.GetPeerChainInfo(peer.ID())
+	freshHeight, _, _, _, fetchErr := bk.peers.GetPeerChainInfo(peer.ID())
 	if fetchErr == nil && freshHeight > 0 {
 		if freshHeight > peerHeight {
 			if bk.logLimiter.shouldLog("fresh_height_" + peer.ID()) {
@@ -1273,7 +1297,7 @@ func (bk *blockKeeper) getPeerWork(peer PeerInterface) *big.Int {
 		return nil
 	}
 
-	_, work, _, err := bk.peers.GetPeerChainInfo(peer.ID())
+	_, work, _, _, err := bk.peers.GetPeerChainInfo(peer.ID())
 	if err != nil || work == nil {
 		return nil
 	}
@@ -1483,7 +1507,7 @@ func (bk *blockKeeper) syncLaggingPeers(localHeight uint64) {
 	}
 
 	for _, peerID := range peerIDs {
-		peerHeight, _, _, err := bk.peers.GetPeerChainInfo(peerID)
+		peerHeight, _, _, _, err := bk.peers.GetPeerChainInfo(peerID)
 		if err != nil {
 			continue
 		}
@@ -1593,7 +1617,7 @@ type PeerSetInterface interface {
 	ProcessIllegal(peerID string, level byte, reason string)
 	broadcastMinedBlock(block *core.Block) error
 	broadcastNewStatus(bestBlock, genesisBlock *core.Block) error
-	GetPeerChainInfo(peerID string) (height uint64, work *big.Int, tipHash string, err error)
+	GetPeerChainInfo(peerID string) (height uint64, work *big.Int, tipHash string, genesisHash string, err error)
 	PushBlocksToPeer(peerID string, blocks []*core.Block) (int, error)
 	GetAllPeerIDs() []string
 	SendInvToPeer(peerID string, invMsg []byte) bool
