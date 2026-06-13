@@ -86,7 +86,7 @@ const (
 
 	// DefaultMaxBlockSize is the maximum block size in bytes
 	// Configurable via genesis.json: consensusParams.maxBlockSize
-	DefaultMaxBlockSize = 2000000
+	DefaultMaxBlockSize = 4000000
 
 	// DefaultMaxTransactionsPerBlock is the maximum tx count per block
 	// Operational limit for network efficiency
